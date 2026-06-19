@@ -1,24 +1,182 @@
 # ScarletUI
 
-ScarletUI is a cross-platform UI framework for writing declarative interfaces in Rust.
+ScarletUI is a cross-platform declarative UI framework for Rust applications.
 
-Applications compose views, declare scenes, and call `app.run()` without depending
-on a specific windowing backend. SWS, winit, and other platform-specific backends
-stay separated from the UI core.
+It lets you write UI in a SwiftUI-like style while staying in ordinary Rust:
+views are composed with macros and modifiers, state updates are synchronized with
+the rendered UI, and view structure is represented by Rust types. That means the
+compiler checks your UI code, and editors can still provide Rust-native
+completion, navigation, and refactoring.
 
-Platform selection is a crate feature decision, not an app runtime decision.
-Internally the selected backend is passed to the runner as a
-`Box<dyn PlatformBackend>`, so backend selection can later move to runtime
-without changing the UI core.
+```rust
+fn content(&self) -> impl View {
+    vstack! {
+        Text::new("Counter").font_size(24.0),
+        Text::new(format!("Count: {}", self.count.get())),
+        hstack! {
+            Button::new("-").on_click({
+                let count = self.count.clone();
+                move || count.set(count.get() - 1)
+            }),
+            Button::new("+").on_click({
+                let count = self.count.clone();
+                move || count.set(count.get() + 1)
+            }),
+        },
+    }
+    .spacing(12.0)
+    .padding(EdgeInsets::all(16.0))
+}
+```
 
-## Features
+Application code declares scenes and calls `app.run()`. The same declarative UI
+model can run on SWS, native desktop preview windows, and other platform
+backends.
 
-- **Declarative views**: compose UI with `View` values and container macros.
-- **State management**: `State<T>` drives rebuild, layout, paint, and composite.
-- **Scene model**: `Application::scenes()` declares top-level windows.
-- **Multi-window runtime**: each opened window owns its own rendering pipeline.
-- **Platform abstraction**: SWS and native desktop platforms share the same runner.
-- **Text input**: keyboard, character input, IME preedit/commit, and focus sync.
+## Why ScarletUI
+
+- **Declarative Rust UI**: build interfaces by composing `View` values instead of
+  manually updating widgets.
+- **State-driven rendering**: `State<T>` drives rebuild, layout, paint, and
+  composite, so UI updates follow state changes.
+- **Type-safe view structure**: view composition happens in Rust, so invalid UI
+  code is caught by the compiler.
+- **IDE-friendly API**: because UI is written as Rust code, normal completion,
+  go-to-definition, rename, and diagnostics continue to work.
+- **Scene-based applications**: `Application::scenes()` declares top-level
+  windows in the same declarative style as views.
+- **Cross-platform backend model**: application code does not directly depend on
+  SWS, winit, or another windowing backend.
+
+## Basic Application
+
+```rust
+use scarlet_ui::prelude::*;
+use scarlet_ui::{hstack, vstack};
+use scarlet_ui_macros::View;
+
+#[derive(View, Clone, Default)]
+struct CounterApp {
+    count: State<i32>,
+}
+
+impl CounterApp {
+    fn content(&self) -> impl View {
+        vstack! {
+            Text::new("Counter").font_size(24.0),
+            Text::new(format!("Count: {}", self.count.get())),
+            hstack! {
+                Button::new("-").on_click({
+                    let count = self.count.clone();
+                    move || count.set(count.get() - 1)
+                }),
+                Button::new("+").on_click({
+                    let count = self.count.clone();
+                    move || count.set(count.get() + 1)
+                }),
+            },
+        }
+        .spacing(12.0)
+        .padding(EdgeInsets::all(16.0))
+    }
+}
+
+impl Application for CounterApp {
+    fn scenes(&self) -> impl Scene {
+        WindowGroup::new(
+            "main",
+            Window::new("Counter", self.content())
+                .app_id("org.scarlet-os.counter")
+                .size(Size::new(400.0, 300.0)),
+        )
+    }
+}
+
+fn main() -> scarlet_ui::Result<()> {
+    let mut app = CounterApp::default();
+    app.run()
+}
+```
+
+## Application Model
+
+`Application::scenes()` is the application UI entry point. `body()` is still used
+by `#[derive(View)]` for reusable view components, but it is not the top-level
+application entry point.
+
+Each scene declaration produces a top-level `Window`. At runtime, ScarletUI
+creates one `WindowSlot` per opened window:
+
+```text
+Application::scenes()
+  -> Scene declarations
+  -> ApplicationRunner
+  -> Box<dyn PlatformBackend>
+  -> WindowSlot { WindowId, PipelineId, RenderingPipeline, PlatformWindow }
+```
+
+Application code should not choose or name a platform implementation. It imports
+the normal ScarletUI prelude, declares views and scenes, and calls `app.run()`.
+
+## Live Preview
+
+ScarletUI preview is a native desktop development tool. It is separate from the
+normal application runtime: application binaries still call `app.run()`, and
+platform selection remains a build feature.
+
+A preview crate marks one or more view functions with `#[scarlet_ui::preview]`.
+The function can return a view fragment directly; a `Window` wrapper is only
+needed when the preview wants to exercise window-specific behavior. Stateful
+previews should return the state-owning view itself so its `listenables()` stay
+mounted; do not return an already-expanded fragment that has read `State::get()`.
+
+For binary crates, a simple `[lib] path = "src/main.rs"` target keeps preview
+setup minimal.
+
+```rust
+use scarlet_ui::prelude::*;
+
+#[scarlet_ui::preview(width = 420.0, height = 260.0)]
+fn counter_preview() -> impl View + Clone {
+    CounterPreview::default()
+}
+
+#[scarlet_ui::preview]
+fn button_preview() -> impl View + Clone {
+    Button::new("OK")
+}
+```
+
+Preview names are generated from function names, such as `counter_preview` to
+`Counter Preview`. `#[scarlet_ui::preview(name = "...")]` is available only when
+an explicit display name is useful.
+
+Run the native preview host against that crate:
+
+```bash
+cargo run --manifest-path tools/preview/Cargo.toml -- \
+  --manifest-path examples/preview-demo/Cargo.toml
+```
+
+Select a specific preview by generated name or stable ID:
+
+```bash
+cargo run --manifest-path tools/preview/Cargo.toml -- \
+  --manifest-path examples/preview-demo/Cargo.toml \
+  --preview "Button Preview"
+```
+
+Use `--build-only` to verify the preview dylib without opening a window:
+
+```bash
+cargo run --manifest-path tools/preview/Cargo.toml -- \
+  --manifest-path examples/preview-demo/Cargo.toml \
+  --build-only
+```
+
+The host rebuilds and reloads the preview dylib when Rust source or Cargo files
+change. Preview dylibs use Rust ABI and must be built by the same toolchain as
+the host.
 
 ## Platform Features
 
@@ -99,135 +257,6 @@ scarlet-ui-platform-winit ---'
 `scarlet-ui-core` owns the UI implementation and backend traits. Platform crates
 only implement those traits. The `scarlet-ui` facade preserves the app-facing
 `scarlet_ui` crate name and selects the backend crate from features.
-
-## Live Preview
-
-ScarletUI preview is a native desktop development tool. It is separate from the
-normal application runtime: application binaries still call `app.run()`, and
-platform selection remains a build feature.
-
-A preview crate marks one or more view functions with `#[scarlet_ui::preview]`.
-The function can return a view fragment directly; a `Window` wrapper is only
-needed when the preview wants to exercise window-specific behavior. Stateful
-previews should return the state-owning view itself so its `listenables()` stay
-mounted; do not return an already-expanded fragment that has read `State::get()`.
-For binary crates, a simple `[lib] path = "src/main.rs"` target keeps preview
-setup minimal.
-
-```rust
-use scarlet_ui::prelude::*;
-
-#[scarlet_ui::preview(width = 420.0, height = 260.0)]
-fn counter_preview() -> impl View + Clone {
-    CounterPreview::default()
-}
-
-#[scarlet_ui::preview]
-fn button_preview() -> impl View + Clone {
-    Button::new("OK")
-}
-```
-
-Preview names are generated from function names, such as `counter_preview` to
-`Counter Preview`. `#[scarlet_ui::preview(name = "...")]` is available only when
-an explicit display name is useful.
-
-Run the native preview host against that crate:
-
-```bash
-cargo run --manifest-path tools/preview/Cargo.toml -- \
-  --manifest-path examples/preview-demo/Cargo.toml
-```
-
-Select a specific preview by generated name or stable ID:
-
-```bash
-cargo run --manifest-path tools/preview/Cargo.toml -- \
-  --manifest-path examples/preview-demo/Cargo.toml \
-  --preview "Button Preview"
-```
-
-The host rebuilds and reloads the preview dylib when Rust source or Cargo files
-change. Preview dylibs use Rust ABI and must be built by the same toolchain as
-the host.
-
-Use `--build-only` to verify the preview dylib without opening a window.
-
-```bash
-cargo run --manifest-path tools/preview/Cargo.toml -- \
-  --manifest-path examples/preview-demo/Cargo.toml \
-  --build-only
-```
-
-## Basic Application
-
-```rust
-use scarlet_ui::prelude::*;
-use scarlet_ui::{hstack, vstack};
-use scarlet_ui_macros::View;
-
-#[derive(View, Clone, Default)]
-struct CounterApp {
-    count: State<i32>,
-}
-
-impl CounterApp {
-    fn content(&self) -> impl View {
-        vstack! {
-            Text::new("Counter").font_size(24.0),
-            Text::new(format!("Count: {}", self.count.get())),
-            hstack! {
-                Button::new("-").on_click({
-                    let count = self.count.clone();
-                    move || count.set(count.get() - 1)
-                }),
-                Button::new("+").on_click({
-                    let count = self.count.clone();
-                    move || count.set(count.get() + 1)
-                }),
-            },
-        }
-        .spacing(12.0)
-        .padding(EdgeInsets::all(16.0))
-    }
-}
-
-impl Application for CounterApp {
-    fn scenes(&self) -> impl Scene {
-        WindowGroup::new(
-            "main",
-            Window::new("Counter", self.content())
-                .app_id("org.scarlet-os.counter")
-                .size(Size::new(400.0, 300.0)),
-        )
-    }
-}
-
-fn main() -> scarlet_ui::Result<()> {
-    let mut app = CounterApp::default();
-    app.run()
-}
-```
-
-## Application Model
-
-`Application::scenes()` is the application UI entry point. `body()` is still used
-by `#[derive(View)]` for reusable view components, but it is not the top-level
-application entry point.
-
-Each scene declaration produces a top-level `Window`. At runtime, ScarletUI
-creates one `WindowSlot` per opened window:
-
-```text
-Application::scenes()
-  -> Scene declarations
-  -> ApplicationRunner
-  -> Box<dyn PlatformBackend>
-  -> WindowSlot { WindowId, PipelineId, RenderingPipeline, PlatformWindow }
-```
-
-Application code should not choose or name a platform implementation. It imports the
-normal ScarletUI prelude and calls `app.run()`.
 
 ## Platform Integration
 
