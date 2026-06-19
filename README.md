@@ -9,48 +9,6 @@ compiler checks your UI code, and editors can still provide Rust-native
 completion, navigation, and refactoring.
 
 ```rust
-fn content(&self) -> impl View {
-    vstack! {
-        Text::new("Counter").font_size(24.0),
-        Text::new(format!("Count: {}", self.count.get())),
-        hstack! {
-            Button::new("-").on_click({
-                let count = self.count.clone();
-                move || count.set(count.get() - 1)
-            }),
-            Button::new("+").on_click({
-                let count = self.count.clone();
-                move || count.set(count.get() + 1)
-            }),
-        },
-    }
-    .spacing(12.0)
-    .padding(EdgeInsets::all(16.0))
-}
-```
-
-Application code declares scenes and calls `app.run()`. The same declarative UI
-model can run on SWS, native desktop preview windows, and other platform
-backends.
-
-## Why ScarletUI
-
-- **Declarative Rust UI**: build interfaces by composing `View` values instead of
-  manually updating widgets.
-- **State-driven rendering**: `State<T>` drives rebuild, layout, paint, and
-  composite, so UI updates follow state changes.
-- **Type-safe view structure**: view composition happens in Rust, so invalid UI
-  code is caught by the compiler.
-- **IDE-friendly API**: because UI is written as Rust code, normal completion,
-  go-to-definition, rename, and diagnostics continue to work.
-- **Scene-based applications**: `Application::scenes()` declares top-level
-  windows in the same declarative style as views.
-- **Cross-platform backend model**: application code does not directly depend on
-  SWS, winit, or another windowing backend.
-
-## Basic Application
-
-```rust
 use scarlet_ui::prelude::*;
 use scarlet_ui::{hstack, vstack};
 use scarlet_ui_macros::View;
@@ -83,12 +41,7 @@ impl CounterApp {
 
 impl Application for CounterApp {
     fn scenes(&self) -> impl Scene {
-        WindowGroup::new(
-            "main",
-            Window::new("Counter", self.content())
-                .app_id("org.scarlet-os.counter")
-                .size(Size::new(400.0, 300.0)),
-        )
+        WindowGroup::new("main", Window::new("Counter", self.content()))
     }
 }
 
@@ -97,6 +50,25 @@ fn main() -> scarlet_ui::Result<()> {
     app.run()
 }
 ```
+
+Application code declares state, views, and scenes as Rust types. ScarletUI uses
+that structure to rebuild, lay out, paint, and present the UI through the
+selected platform backend.
+
+## Why ScarletUI
+
+- **Declarative Rust UI**: build interfaces by composing `View` values instead of
+  manually updating widgets.
+- **State-driven rendering**: `State<T>` drives rebuild, layout, paint, and
+  composite, so UI updates follow state changes.
+- **Type-safe view structure**: view composition happens in Rust, so invalid UI
+  code is caught by the compiler.
+- **IDE-friendly API**: because UI is written as Rust code, normal completion,
+  go-to-definition, rename, and diagnostics continue to work.
+- **Scene-based applications**: `Application::scenes()` declares top-level
+  windows in the same declarative style as views.
+- **Cross-platform backend model**: application code does not directly depend on
+  SWS, winit, or another windowing backend.
 
 ## Application Model
 
