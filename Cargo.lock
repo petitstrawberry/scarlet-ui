@@ -1208,10 +1208,12 @@ dependencies = [
 [[package]]
 name = "scarlet-abi"
 version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2953c8620c55ba448ec8804a801558bf7085b150"
 
 [[package]]
 name = "scarlet-os"
 version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2953c8620c55ba448ec8804a801558bf7085b150"
 dependencies = [
  "scarlet-abi",
  "scarlet-rt",
@@ -1221,6 +1223,7 @@ dependencies = [
 [[package]]
 name = "scarlet-rt"
 version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2953c8620c55ba448ec8804a801558bf7085b150"
 dependencies = [
  "lock_api",
  "scarlet-sys",
@@ -1231,6 +1234,7 @@ dependencies = [
 [[package]]
 name = "scarlet-std"
 version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2953c8620c55ba448ec8804a801558bf7085b150"
 dependencies = [
  "hashbrown 0.15.5",
  "scarlet-abi",
@@ -1243,6 +1247,7 @@ dependencies = [
 [[package]]
 name = "scarlet-sys"
 version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2953c8620c55ba448ec8804a801558bf7085b150"
 dependencies = [
  "scarlet-abi",
 ]
@@ -1497,6 +1502,7 @@ checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
 [[package]]
 name = "sws-client"
 version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2953c8620c55ba448ec8804a801558bf7085b150"
 dependencies = [
  "scarlet-os",
  "scarlet-std",
@@ -1506,6 +1512,7 @@ dependencies = [
 [[package]]
 name = "sws-protocol"
 version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2953c8620c55ba448ec8804a801558bf7085b150"
 dependencies = [
  "scarlet-std",
 ]

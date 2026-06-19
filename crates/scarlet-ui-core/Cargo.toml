@@ -10,7 +10,7 @@ std = []
 preview = ["std", "dep:inventory", "dep:libloading"]
 
 [dependencies]
-scarlet-std = { path = "../../../Scarlet/user/lib/std", optional = true }
+scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "scarlet-std", optional = true }
 libm = { version = "0.2", default-features = false }
 scarlet-ui-macros = { path = "../scarlet-ui-macros" }
 bitflags = { version = "2.6", default-features = false }
