@@ -1,9 +1,9 @@
 # ScarletUI
 
-ScarletUI is a cross-platform declarative UI framework for Rust applications. The public
-application crate is `scarlet-ui`; implementation and platform backends are
-split into local crates so the UI core does not depend on SWS or desktop window
-libraries.
+ScarletUI is a cross-platform declarative UI framework for Rust applications.
+
+It lets applications share the same declarative UI code across platforms, while
+keeping SWS, winit, and other platform-specific backends separated from the UI core.
 
 The application API is platform-agnostic: application code declares scenes and
 calls `app.run()`. Platform selection is a crate feature decision, not an app
