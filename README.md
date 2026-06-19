@@ -10,32 +10,38 @@ completion, navigation, and refactoring.
 
 ```rust
 use scarlet_ui::prelude::*;
-use scarlet_ui::{hstack, vstack};
+use scarlet_ui::{generate_state_id, hstack, vstack};
 use scarlet_ui_macros::View;
 
-#[derive(View, Clone, Default)]
+#[derive(View, Clone)]
 struct CounterApp {
     count: State<i32>,
 }
 
 impl CounterApp {
-    fn content(&self) -> impl View {
+    fn new() -> Self {
+        Self {
+            count: State::initial(generate_state_id()),
+        }
+    }
+
+    fn content(&self) -> impl View + Clone + 'static {
         vstack! {
             Text::new("Counter").font_size(24.0),
             Text::new(format!("Count: {}", self.count.get())),
             hstack! {
                 Button::new("-").on_click({
                     let count = self.count.clone();
-                    move || count.set(count.get() - 1)
+                    move || count.update(|value| *value -= 1)
                 }),
                 Button::new("+").on_click({
                     let count = self.count.clone();
-                    move || count.set(count.get() + 1)
+                    move || count.update(|value| *value += 1)
                 }),
             },
         }
         .spacing(12.0)
-        .padding(EdgeInsets::all(16.0))
+        .padding(16.0)
     }
 }
 
@@ -46,7 +52,7 @@ impl Application for CounterApp {
 }
 
 fn main() -> scarlet_ui::Result<()> {
-    let mut app = CounterApp::default();
+    let mut app = CounterApp::new();
     app.run()
 }
 ```
@@ -61,8 +67,8 @@ selected platform backend.
   manually updating widgets.
 - **State-driven rendering**: `State<T>` drives rebuild, layout, paint, and
   composite, so UI updates follow state changes.
-- **Type-safe view structure**: view composition happens in Rust, so invalid UI
-  code is caught by the compiler.
+- **Type-safe view structure**: the concrete view tree is built from Rust types,
+  so composition errors surface at compile time.
 - **IDE-friendly API**: because UI is written as Rust code, normal completion,
   go-to-definition, rename, and diagnostics continue to work.
 - **Scene-based applications**: `Application::scenes()` declares top-level
@@ -109,12 +115,12 @@ setup minimal.
 use scarlet_ui::prelude::*;
 
 #[scarlet_ui::preview(width = 420.0, height = 260.0)]
-fn counter_preview() -> impl View + Clone {
-    CounterPreview::default()
+fn counter_preview() -> impl View + Clone + 'static {
+    CounterApp::new().content()
 }
 
 #[scarlet_ui::preview]
-fn button_preview() -> impl View + Clone {
+fn button_preview() -> impl View + Clone + 'static {
     Button::new("OK")
 }
 ```
