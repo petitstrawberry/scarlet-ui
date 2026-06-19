@@ -478,6 +478,29 @@ impl PreviewHost {
         Ok(())
     }
 
+    /// Switch to another preview exported by the currently loaded library.
+    pub fn switch_preview(&mut self, preview: &str) -> core::result::Result<(), String> {
+        let loaded = self
+            .loaded
+            .as_mut()
+            .ok_or_else(|| String::from("preview host has no loaded library"))?;
+        let descriptor = select_preview(loaded.previews(), Some(preview))?;
+        let size = self.window.size();
+        let scale_milli = self.window.output_scale_milli();
+        let context = PreviewCreateContext { size, scale_milli };
+        let session = loaded
+            .create(&descriptor.id, context)
+            .ok_or_else(|| String::from("failed to create switched preview session"))?;
+
+        self.session = None;
+        self.window.set_title(session.title());
+        self.preview_id = descriptor.id;
+        self.session = Some(session);
+        self.sync_after_reload = true;
+        self.full_present_frames = 2;
+        Ok(())
+    }
+
     /// Run one event/render tick. Returns `false` when the preview should exit.
     pub fn tick(&mut self, timeout: Duration) -> core::result::Result<bool, String> {
         let Some(session) = self.session.as_mut() else {
@@ -573,6 +596,288 @@ fn select_preview(
         .find(|descriptor| descriptor.id.as_str() == preview || descriptor.name == preview)
         .cloned()
         .ok_or_else(|| format!("preview not found: {preview}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::Point;
+
+    struct TestLibrary {
+        descriptors: Vec<PreviewDescriptor>,
+    }
+
+    impl TestLibrary {
+        fn new() -> Self {
+            Self {
+                descriptors: alloc::vec![
+                    PreviewDescriptor::new("button_preview", "Button Preview"),
+                    PreviewDescriptor::new("counter_preview", "Counter Preview"),
+                ],
+            }
+        }
+    }
+
+    impl PreviewLibrary for TestLibrary {
+        fn previews(&self) -> Vec<PreviewDescriptor> {
+            self.descriptors.clone()
+        }
+
+        fn create(
+            &mut self,
+            id: &PreviewId,
+            _context: PreviewCreateContext,
+        ) -> Option<Box<dyn PreviewSession>> {
+            self.descriptors
+                .iter()
+                .find(|descriptor| &descriptor.id == id)
+                .map(|descriptor| {
+                    Box::new(TestSession {
+                        title: descriptor.name.clone(),
+                    }) as Box<dyn PreviewSession>
+                })
+        }
+    }
+
+    struct TestSession {
+        title: String,
+    }
+
+    impl PreviewSession for TestSession {
+        fn title(&self) -> &str {
+            &self.title
+        }
+
+        fn size(&self) -> Size {
+            Size::new(320.0, 240.0)
+        }
+
+        fn resize(&mut self, _size: Size, _scale_milli: u32) {}
+
+        fn handle_event(&mut self, _event: &Event) -> bool {
+            true
+        }
+
+        fn take_emitted_events(&mut self) -> Vec<Event> {
+            Vec::new()
+        }
+
+        fn focused_text_input_state(&self) -> Option<TextInputElementState> {
+            None
+        }
+
+        fn render(&mut self) -> Option<PreviewFrame<'_>> {
+            None
+        }
+    }
+
+    struct TestWindow {
+        title: String,
+        size: Size,
+        scale_milli: u32,
+    }
+
+    impl TestWindow {
+        fn new_for_host() -> Self {
+            Self {
+                title: String::from("Initial Preview"),
+                size: Size::new(640.0, 480.0),
+                scale_milli: 2000,
+            }
+        }
+    }
+
+    impl PlatformWindow for TestWindow {
+        fn new(_app_id: &str, title: &str, size: Size) -> crate::Result<Self> {
+            Ok(Self {
+                title: title.to_string(),
+                size,
+                scale_milli: 1000,
+            })
+        }
+
+        fn poll_event(&mut self) -> Option<Event> {
+            None
+        }
+
+        fn output_scale_milli(&self) -> u32 {
+            self.scale_milli
+        }
+
+        fn present(&mut self, _buffer: &Buffer) {}
+
+        fn set_title(&mut self, title: &str) {
+            self.title = title.to_string();
+        }
+
+        fn size(&self) -> Size {
+            self.size
+        }
+
+        fn resize(&mut self, width: u32, height: u32) -> crate::Result<()> {
+            self.size = Size::new(width as f32, height as f32);
+            Ok(())
+        }
+
+        fn close(&mut self) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn minimize(&mut self) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn maximize(&mut self) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn restore(&mut self) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn request_move(&mut self) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn create_popup(&mut self, _position: Point, _size: Size) -> crate::Result<u32> {
+            Ok(0)
+        }
+
+        fn destroy_popup(&mut self, _surface_id: u32) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn set_workarea(
+            &mut self,
+            _x: i32,
+            _y: i32,
+            _width: u32,
+            _height: u32,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn create_window_with_type(
+            &mut self,
+            _app_id: &str,
+            title: &str,
+            size: Size,
+            _window_type: u32,
+        ) -> crate::Result<Self> {
+            Ok(Self {
+                title: title.to_string(),
+                size,
+                scale_milli: 1000,
+            })
+        }
+
+        fn move_window(&mut self, _x: i32, _y: i32) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn set_window_type(&mut self, _surface_id: u32, _window_type: u32) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn get_screen_size(&mut self) -> crate::Result<(u32, u32)> {
+            Ok((1024, 768))
+        }
+
+        fn surface_id(&self) -> u32 {
+            1
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+            self
+        }
+
+        fn set_resizable(&mut self, _resizable: bool) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn set_opaque(&mut self, _opaque: bool) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn set_menu_titles(&mut self, _menu_titles: &str) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn loaded_test_library() -> LoadedPreviewLibrary {
+        LoadedPreviewLibrary {
+            api: Box::new(TestLibrary::new()),
+            _library: libloading::os::unix::Library::this().into(),
+        }
+    }
+
+    fn host_with_loaded_library() -> PreviewHost {
+        PreviewHost {
+            session: Some(Box::new(TestSession {
+                title: String::from("Initial Preview"),
+            })),
+            loaded: Some(loaded_test_library()),
+            window: Box::new(TestWindow::new_for_host()),
+            preview_id: PreviewId::new("button_preview"),
+            sync_after_reload: false,
+            full_present_frames: 0,
+        }
+    }
+
+    fn host_without_loaded_library() -> PreviewHost {
+        PreviewHost {
+            session: Some(Box::new(TestSession {
+                title: String::from("Initial Preview"),
+            })),
+            loaded: None,
+            window: Box::new(TestWindow::new_for_host()),
+            preview_id: PreviewId::new("button_preview"),
+            sync_after_reload: false,
+            full_present_frames: 0,
+        }
+    }
+
+    #[test]
+    fn switch_preview_by_exact_id_succeeds_and_updates_preview_id() {
+        let mut host = host_with_loaded_library();
+
+        host.switch_preview("counter_preview").unwrap();
+
+        assert_eq!(host.preview_id.as_str(), "counter_preview");
+        assert!(host.sync_after_reload);
+        assert_eq!(host.full_present_frames, 2);
+    }
+
+    #[test]
+    fn switch_preview_by_exact_name_succeeds_and_updates_preview_id() {
+        let mut host = host_with_loaded_library();
+
+        host.switch_preview("Counter Preview").unwrap();
+
+        assert_eq!(host.preview_id.as_str(), "counter_preview");
+        assert!(host.sync_after_reload);
+        assert_eq!(host.full_present_frames, 2);
+    }
+
+    #[test]
+    fn switch_preview_unknown_substring_returns_err() {
+        let mut host = host_with_loaded_library();
+
+        let error = host.switch_preview("Counter").unwrap_err();
+
+        assert_eq!(error, "preview not found: Counter");
+        assert_eq!(host.preview_id.as_str(), "button_preview");
+    }
+
+    #[test]
+    fn switch_preview_without_loaded_library_returns_err() {
+        let mut host = host_without_loaded_library();
+
+        let error = host.switch_preview("counter_preview").unwrap_err();
+
+        assert_eq!(error, "preview host has no loaded library");
+        assert_eq!(host.preview_id.as_str(), "button_preview");
+    }
 }
 
 impl Drop for PreviewHost {
