@@ -283,12 +283,6 @@ cargo check -p scarlet-ui-platform-winit
 cargo check -p scarlet-ui-preview
 ```
 
-Check the Scarlet OS / SWS backend against the sibling Scarlet checkout:
-
-```bash
-cargo check -p scarlet-ui-platform-sws --no-default-features --features legacy-scarlet-std
-```
-
 Run the preview demo:
 
 ```bash
@@ -296,36 +290,3 @@ cargo run -p scarlet-ui-preview -- \
   --manifest-path examples/preview-demo/Cargo.toml \
   --preview "Counter Preview"
 ```
-
-Check a Scarlet consumer after this repo is wired into Scarlet:
-
-```bash
-cd ../Scarlet/user/bin
-cargo check --bin terminal --target ../targets/aarch64-unknown-scarlet-elf.json
-```
-
-## Design Documents
-
-- `docs/graphics/scarletui/design.md`
-- `docs/graphics/scarletui/api.md`
-
-## Local Scarlet Dependencies
-
-The SWS backend currently depends on sibling Scarlet checkout crates by path:
-
-```text
-../Scarlet/user/lib/std
-../Scarlet/user/lib/sws-client
-../Scarlet/user/lib/sws-protocol
-```
-
-Keep this repository next to `Scarlet` for local development:
-
-```text
-Development/Rust/
-  Scarlet/
-  scarlet-ui/
-```
-
-When Scarlet gets a root Cargo workspace that exposes those packages, these path
-references can be replaced with git dependencies on `petitstrawberry/Scarlet`.
