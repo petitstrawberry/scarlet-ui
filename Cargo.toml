@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/scarlet-ui",
+    "crates/scarlet-ui-core",
+    "crates/scarlet-ui-macros",
+    "crates/scarlet-ui-platform-sws",
+    "crates/scarlet-ui-platform-winit",
+    "tools/preview",
+    "examples/preview-demo",
+]
