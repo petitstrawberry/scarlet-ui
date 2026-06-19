@@ -10,7 +10,7 @@ completion, navigation, and refactoring.
 
 ```rust
 use scarlet_ui::prelude::*;
-use scarlet_ui::{generate_state_id, hstack, vstack};
+use scarlet_ui::{hstack, vstack};
 use scarlet_ui_macros::View;
 
 #[derive(View, Clone)]
@@ -19,12 +19,6 @@ struct CounterApp {
 }
 
 impl CounterApp {
-    fn new() -> Self {
-        Self {
-            count: State::initial(generate_state_id()),
-        }
-    }
-
     fn content(&self) -> impl View + Clone + 'static {
         vstack! {
             Text::new("Counter").font_size(24.0),
@@ -52,7 +46,7 @@ impl Application for CounterApp {
 }
 
 fn main() -> scarlet_ui::Result<()> {
-    let mut app = CounterApp::new();
+    let mut app = CounterApp::default();
     app.run()
 }
 ```
@@ -116,7 +110,7 @@ use scarlet_ui::prelude::*;
 
 #[scarlet_ui::preview(width = 420.0, height = 260.0)]
 fn counter_preview() -> impl View + Clone + 'static {
-    CounterApp::new().content()
+    CounterApp::default().content()
 }
 
 #[scarlet_ui::preview]
