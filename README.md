@@ -1,6 +1,6 @@
 # ScarletUI
 
-ScarletUI is a declarative UI framework for Scarlet applications. The public
+ScarletUI is a cross-platform declarative UI framework for Rust applications. The public
 application crate is `scarlet-ui`; implementation and platform backends are
 split into local crates so the UI core does not depend on SWS or desktop window
 libraries.
