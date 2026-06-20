@@ -59,6 +59,7 @@ pub mod platform;
 #[cfg(feature = "preview")]
 pub mod preview;
 pub mod render;
+pub mod renderer;
 pub mod scene;
 pub mod state;
 pub mod view;
