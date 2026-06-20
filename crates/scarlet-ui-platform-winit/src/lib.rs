@@ -198,6 +198,7 @@ impl ApplicationHandler for WinitPumpHandler {
 
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => {
+                window.set_visible(false);
                 state.push(Event::Quit);
             }
             WindowEvent::Resized(size) => {
@@ -536,6 +537,14 @@ impl PlatformWindow for WinitPlatformWindow {
 
     fn close(&mut self) -> Result<()> {
         self.window.set_visible(false);
+        let mut handler = WinitPumpHandler {
+            shared: self.shared.clone(),
+        };
+        let _ = self
+            .shared
+            .event_loop
+            .borrow_mut()
+            .pump_app_events(Some(Duration::ZERO), &mut handler);
         Ok(())
     }
 
