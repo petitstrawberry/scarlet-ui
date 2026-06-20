@@ -1,0 +1,7 @@
+{
+    "scarlet-ui.serverCommand": [
+        "scarlet-ui-preview",
+        "serve"
+    ],
+    "scarlet-ui.rebuildOnSave": false
+}
