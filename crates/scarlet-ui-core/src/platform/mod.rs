@@ -83,6 +83,16 @@ pub trait PlatformWindow: Any {
     /// Get the window size
     fn size(&self) -> Size;
 
+    /// Get the window backing-store size in physical pixels.
+    fn physical_size(&self) -> (u32, u32) {
+        let size = self.size();
+        let scale_milli = self.output_scale_milli().max(1) as f32;
+        (
+            (size.width * scale_milli / 1000.0).round().max(1.0) as u32,
+            (size.height * scale_milli / 1000.0).round().max(1.0) as u32,
+        )
+    }
+
     /// Resize the window
     fn resize(&mut self, width: u32, height: u32) -> Result<()>;
 
@@ -158,4 +168,12 @@ pub trait PlatformWindow: Any {
 
     /// Synchronize focused text-input state with the backend.
     fn sync_text_input(&mut self, _state: Option<&TextInputElementState>) {}
+
+    fn raw_window_handle(&self) -> Option<raw_window_handle::RawWindowHandle> {
+        None
+    }
+
+    fn raw_display_handle(&self) -> Option<raw_window_handle::RawDisplayHandle> {
+        None
+    }
 }

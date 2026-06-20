@@ -413,6 +413,7 @@ pub struct PreviewHost {
     preview_id: PreviewId,
     sync_after_reload: bool,
     full_present_frames: u8,
+    gpu_present: Option<Box<dyn FnMut(&Buffer, Option<&[DamageRect]>)>>,
 }
 
 impl PreviewHost {
@@ -452,7 +453,16 @@ impl PreviewHost {
             preview_id: descriptor.id,
             sync_after_reload: true,
             full_present_frames: 2,
+            gpu_present: None,
         })
+    }
+
+    pub fn set_gpu_present(&mut self, f: Box<dyn FnMut(&Buffer, Option<&[DamageRect]>)>) {
+        self.gpu_present = Some(f);
+    }
+
+    pub fn window(&self) -> &dyn PlatformWindow {
+        self.window.as_ref()
     }
 
     /// Replace the loaded preview library after a successful rebuild.
@@ -539,7 +549,11 @@ impl PreviewHost {
             } else {
                 frame.damage
             };
-            self.window.present_with_damage(frame.buffer, damage);
+            if let Some(gpu) = self.gpu_present.as_mut() {
+                gpu(frame.buffer, damage);
+            } else {
+                self.window.present_with_damage(frame.buffer, damage);
+            }
         }
 
         if !had_event {
@@ -828,6 +842,7 @@ mod tests {
             preview_id: PreviewId::new("button_preview"),
             sync_after_reload: false,
             full_present_frames: 0,
+            gpu_present: None,
         }
     }
 
@@ -841,6 +856,7 @@ mod tests {
             preview_id: PreviewId::new("button_preview"),
             sync_after_reload: false,
             full_present_frames: 0,
+            gpu_present: None,
         }
     }
 

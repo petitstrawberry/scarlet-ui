@@ -43,6 +43,13 @@ pub fn run(args: RunArgs) -> Result<(), String> {
         }
     }
 
+    #[cfg(feature = "gpu")]
+    if args.gpu {
+        if let Some(ref mut host) = host {
+            crate::gpu::setup_gpu_present(host);
+        }
+    }
+
     loop {
         let current_mtime = latest_source_mtime(&project.crate_dir)?;
         if current_mtime > last_seen {

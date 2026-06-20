@@ -527,6 +527,11 @@ impl PlatformWindow for WinitPlatformWindow {
         self.observed_logical_size()
     }
 
+    fn physical_size(&self) -> (u32, u32) {
+        let size = self.window.inner_size();
+        (size.width.max(1), size.height.max(1))
+    }
+
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         let _ = self
             .window
@@ -681,6 +686,16 @@ impl PlatformWindow for WinitPlatformWindow {
             LogicalPosition::new(state.cursor_rect.origin.x, state.cursor_rect.origin.y),
             LogicalSize::new(state.cursor_rect.size.width, state.cursor_rect.size.height),
         );
+    }
+
+    fn raw_window_handle(&self) -> Option<raw_window_handle::RawWindowHandle> {
+        use raw_window_handle::HasWindowHandle;
+        self.window.window_handle().ok().map(|h| h.as_raw())
+    }
+
+    fn raw_display_handle(&self) -> Option<raw_window_handle::RawDisplayHandle> {
+        use raw_window_handle::HasDisplayHandle;
+        self.window.display_handle().ok().map(|h| h.as_raw())
     }
 }
 

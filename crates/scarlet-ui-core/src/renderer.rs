@@ -1,4 +1,3 @@
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::buffer::Buffer;

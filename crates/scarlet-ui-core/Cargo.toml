@@ -18,6 +18,7 @@ ab_glyph = { version = "0.2", default-features = false, features = ["libm"] }
 zune-jpeg = { version = "0.5.8", default-features = false }
 libloading = { version = "0.8.9", optional = true }
 inventory = { version = "0.3", optional = true }
+raw-window-handle = "0.6"
 
 [dev-dependencies]
 proc-macro2 = { version = "1.0", default-features = false }

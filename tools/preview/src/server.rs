@@ -323,14 +323,18 @@ impl PreviewServer {
             let backend = self
                 .backend
                 .get_or_insert_with(|| Box::new(WinitBackend::new()));
-            self.host = Some(
-                PreviewHost::new_with_backend(
-                    library,
-                    self.current_preview.as_deref(),
-                    backend.as_mut(),
-                )
-                .map_err(|error| ErrorObject::preview_host_window_error(&error))?,
-            );
+            #[allow(unused_mut)]
+            let mut host = PreviewHost::new_with_backend(
+                library,
+                self.current_preview.as_deref(),
+                backend.as_mut(),
+            )
+            .map_err(|error| ErrorObject::preview_host_window_error(&error))?;
+            #[cfg(feature = "gpu")]
+            if self.args.gpu {
+                crate::gpu::setup_gpu_present(&mut host);
+            }
+            self.host = Some(host);
             self.loaded = None;
         }
 
@@ -814,6 +818,8 @@ mod tests {
                 features: None,
                 preview: None,
                 poll_ms: 250,
+                #[cfg(feature = "gpu")]
+                gpu: false,
             };
             let project = PreviewProject {
                 manifest_path: manifest_path.clone(),

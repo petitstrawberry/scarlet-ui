@@ -1,18 +1,15 @@
 [package]
-name = "scarlet-ui-platform-winit"
+name = "scarlet-ui-renderer-wgpu"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-default = ["std"]
-std = ["scarlet-ui-core/std"]
-
 [dependencies]
 scarlet-ui-core = { path = "../scarlet-ui-core", default-features = false, features = ["std"] }
-softbuffer = "0.4.8"
-winit = "0.30.13"
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
 raw-window-handle = "0.6"
 
 [lib]
-name = "scarlet_ui_platform_winit"
+name = "scarlet_ui_renderer_wgpu"
 path = "src/lib.rs"

@@ -21,6 +21,9 @@ pub struct RunArgs {
     pub poll_ms: u64,
     #[arg(long)]
     pub build_only: bool,
+    #[cfg(feature = "gpu")]
+    #[arg(long)]
+    pub gpu: bool,
 }
 
 /// IPC server mode (invoked as `scarlet-ui-preview serve ...`).
@@ -39,6 +42,9 @@ pub struct ServeArgs {
     pub preview: Option<String>,
     #[arg(long, default_value_t = 250, value_name = "MILLIS")]
     pub poll_ms: u64,
+    #[cfg(feature = "gpu")]
+    #[arg(long)]
+    pub gpu: bool,
 }
 
 impl RunArgs {

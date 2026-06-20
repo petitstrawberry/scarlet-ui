@@ -1,5 +1,7 @@
 mod build;
 mod cli;
+#[cfg(feature = "gpu")]
+mod gpu;
 mod native;
 mod rpc;
 mod server;

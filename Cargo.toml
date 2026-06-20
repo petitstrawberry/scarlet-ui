@@ -6,6 +6,7 @@ members = [
     "crates/scarlet-ui-macros",
     "crates/scarlet-ui-platform-sws",
     "crates/scarlet-ui-platform-winit",
+    "crates/scarlet-ui-renderer-wgpu",
     "tools/preview",
     "examples/preview-demo",
 ]
