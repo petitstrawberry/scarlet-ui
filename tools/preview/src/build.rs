@@ -213,6 +213,15 @@ fn run_cargo_preview_build(
         command.arg("--target").arg(target);
     }
 
+    if let Some(libdir) = rust_target_libdir() {
+        let flag = format!("-C link-arg=-Wl,-rpath,{libdir}");
+        let rustflags = match std::env::var("RUSTFLAGS") {
+            Ok(existing) if !existing.is_empty() => format!("{existing} {flag}"),
+            _ => flag,
+        };
+        command.env("RUSTFLAGS", rustflags);
+    }
+
     let status = command
         .status()
         .map_err(|error| format!("failed to run cargo build: {error}"))?;
@@ -220,6 +229,21 @@ fn run_cargo_preview_build(
         Ok(())
     } else {
         Err(format!("cargo build failed with status {status}"))
+    }
+}
+
+fn rust_target_libdir() -> Option<String> {
+    let output = Command::new("rustc")
+        .arg("--print")
+        .arg("target-libdir")
+        .output()
+        .ok()?;
+    let libdir = String::from_utf8(output.stdout).ok()?;
+    let trimmed = libdir.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 

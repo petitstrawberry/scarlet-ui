@@ -26,6 +26,7 @@ pub fn run(args: RunArgs) -> Result<(), String> {
     let mut last_seen = latest_source_mtime(&project.crate_dir)?;
     let mut build_index = 0u64;
     let mut host: Option<PreviewHost> = None;
+    let mut backend = scarlet_ui::WinitBackend::new();
 
     match build_and_load(&args, &project, build_index, CargoStdout::Inherit) {
         Ok(library) => {
@@ -34,7 +35,7 @@ pub fn run(args: RunArgs) -> Result<(), String> {
             host = Some(PreviewHost::new_with_backend(
                 library,
                 args.preview.as_deref(),
-                Box::new(scarlet_ui::WinitBackend::new()),
+                &mut backend,
             )?);
         }
         Err(error) => {
@@ -58,7 +59,7 @@ pub fn run(args: RunArgs) -> Result<(), String> {
                         host = Some(PreviewHost::new_with_backend(
                             library,
                             args.preview.as_deref(),
-                            Box::new(scarlet_ui::WinitBackend::new()),
+                            &mut backend,
                         )?);
                         println!("[preview] loaded");
                     }

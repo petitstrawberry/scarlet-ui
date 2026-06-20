@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use scarlet_ui::WinitBackend;
+use scarlet_ui::platform::PlatformBackend;
 use scarlet_ui::preview::{LoadedPreviewLibrary, PreviewHost};
 use serde_json::{Value, json};
 
@@ -41,16 +42,15 @@ enum RebuildReason {
 pub struct PreviewServer {
     args: ServeArgs,
     project: PreviewProject,
-    /// Absolute path to the Cargo.toml (already canonicalized by prepare_project).
     manifest_path: PathBuf,
     crate_dir: PathBuf,
-    /// Currently active source file (only Some when args.source or switchSource set it).
     current_source: Option<PathBuf>,
-    /// Currently selected preview id-or-name (None = first available).
     current_preview: Option<String>,
     descriptors: Vec<PreviewDescriptorJson>,
     loaded: Option<LoadedPreviewLibrary>,
+    backend: Option<Box<dyn PlatformBackend>>,
     host: Option<PreviewHost>,
+    retired_host: Option<PreviewHost>,
     build_index: u64,
     last_seen_mtime: SystemTime,
     build_in_progress: bool,
@@ -77,7 +77,9 @@ impl PreviewServer {
             current_preview,
             descriptors: Vec::new(),
             loaded: None,
+            backend: None,
             host: None,
+            retired_host: None,
             build_index: 0,
             last_seen_mtime: SystemTime::UNIX_EPOCH,
             build_in_progress: false,
@@ -163,19 +165,27 @@ impl PreviewServer {
                 }
             }
 
+            let mut window_closed = false;
             if let Some(host) = self.host.as_mut() {
                 match host.tick(Duration::from_millis(16)) {
                     Ok(true) => {}
                     Ok(false) => {
-                        self.host = None;
-                        self.emit_notification(&mut stdout, "preview/windowClosed", json!({}))?;
+                        host.close();
+                        window_closed = true;
                     }
                     Err(error) => {
                         eprintln!("[serve] host tick failed: {error}");
-                        self.host = None;
-                        self.emit_notification(&mut stdout, "preview/windowClosed", json!({}))?;
+                        host.close();
+                        window_closed = true;
                     }
                 }
+            }
+            if window_closed {
+                if let Some(mut host) = self.host.take() {
+                    host.close();
+                    self.retired_host = Some(host);
+                }
+                self.emit_notification(&mut stdout, "preview/windowClosed", json!({}))?;
             }
         }
 
@@ -309,11 +319,15 @@ impl PreviewServer {
             )
             .map_err(|error| ErrorObject::preview_host_window_error(&error))?;
         } else {
+            self.retired_host = None;
+            let backend = self
+                .backend
+                .get_or_insert_with(|| Box::new(WinitBackend::new()));
             self.host = Some(
                 PreviewHost::new_with_backend(
                     library,
                     self.current_preview.as_deref(),
-                    Box::new(WinitBackend::new()),
+                    backend.as_mut(),
                 )
                 .map_err(|error| ErrorObject::preview_host_window_error(&error))?,
             );
@@ -394,7 +408,9 @@ impl PreviewServer {
     }
 
     fn handle_close_window(&mut self, stdout: &mut impl Write) -> Result<Value, ErrorObject> {
-        if self.host.take().is_some() {
+        if let Some(mut host) = self.host.take() {
+            host.close();
+            self.retired_host = Some(host);
             self.emit_notification(stdout, "preview/windowClosed", json!({}))
                 .map_err(|error| ErrorObject::preview_host_window_error(&error))?;
         }
@@ -815,7 +831,9 @@ mod tests {
                 current_preview: None,
                 descriptors: Vec::new(),
                 loaded: None,
+                backend: None,
                 host: None,
+                retired_host: None,
                 build_index: 0,
                 last_seen_mtime: SystemTime::UNIX_EPOCH,
                 build_in_progress: false,
