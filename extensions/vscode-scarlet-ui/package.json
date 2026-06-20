@@ -1,0 +1,55 @@
+{
+  "name": "scarlet-ui",
+  "displayName": "ScarletUI Preview",
+  "description": "Live native preview for ScarletUI crates via the scarlet-ui-preview IPC server.",
+  "version": "0.1.0",
+  "publisher": "petitstrawberry",
+  "license": "MIT",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "main": "./dist/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "commands": [
+      { "command": "scarlet-ui.startServer", "title": "ScarletUI: Start Preview Server", "category": "ScarletUI" },
+      { "command": "scarlet-ui.previewCurrentFile", "title": "ScarletUI: Preview Current File", "category": "ScarletUI" },
+      { "command": "scarlet-ui.selectPreview", "title": "ScarletUI: Select Preview", "category": "ScarletUI" },
+      { "command": "scarlet-ui.rebuild", "title": "ScarletUI: Rebuild Preview", "category": "ScarletUI" },
+      { "command": "scarlet-ui.closeWindow", "title": "ScarletUI: Close Preview Window", "category": "ScarletUI" },
+      { "command": "scarlet-ui.stopServer", "title": "ScarletUI: Stop Preview Server", "category": "ScarletUI" }
+    ],
+    "configuration": {
+      "title": "ScarletUI",
+      "properties": {
+        "scarlet-ui.serverCommand": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["scarlet-ui-preview", "serve"],
+          "markdownDescription": "Command array to start the ScarletUI preview server. The extension appends `--manifest-path <targetManifest>` to this command. Default is an installed binary: `scarlet-ui-preview serve`. Install it with `cargo install --path tools/preview` (run from the scarlet-ui repo). Important: even with the installed binary, preview builds still shell out to `cargo`/`rustc`, so those must also be available on PATH; on macOS, the extension also uses `rustc --print target-libdir` to mirror Cargo's dynamic library lookup for installed `scarlet-ui-preview` launches. For Nix users, launch VS Code from `nix develop` or set a wrapper command. For dev without installing, use `[\"cargo\", \"run\", \"--manifest-path\", \"tools/preview/Cargo.toml\", \"--\", \"serve\"]`."
+        },
+        "scarlet-ui.targetManifest": {
+          "type": ["string", "null"],
+          "default": null,
+          "markdownDescription": "Path to the `Cargo.toml` of the crate to preview. If `null`, the workspace root `Cargo.toml` is used (must be a package, not a virtual workspace)."
+        },
+        "scarlet-ui.autoFollowActiveEditor": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When enabled, switching the active Rust editor auto-switches the preview source via `preview/switchSource` for files that define `#[scarlet_ui::preview]` functions."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.config.mjs",
+    "watch": "node esbuild.config.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0",
+    "esbuild": "^0.21.0"
+  }
+}
