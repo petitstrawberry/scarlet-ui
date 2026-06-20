@@ -4,11 +4,12 @@
 //! It orchestrates all phases of the rendering pipeline.
 
 use crate::buffer::Buffer;
-use crate::compositor::{Compositor, DamageRect};
+use crate::compositor::DamageRect;
 use crate::element::{Element, ElementTree, LayoutConstraints};
 use crate::event::EventDispatcher;
 use crate::geometry::Size;
 use crate::pipeline::{PipelineId, PipelineOwner};
+use crate::renderer::{CpuRenderer, FrameSize, Renderer};
 use crate::views::WindowInfo;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -18,14 +19,14 @@ use alloc::vec::Vec;
 /// This is the main orchestrator that combines:
 /// - ElementTree: Manages the element hierarchy
 /// - PipelineOwner: Manages dirty flags and flush phases
-/// - Compositor: Composites buffers into the window buffer
+/// - Renderer: Composites element buffers into the window buffer
 pub struct RenderingPipeline {
     /// Element tree
     element_tree: ElementTree,
     /// Pipeline owner for dirty flag management
     pipeline_owner: PipelineOwner,
-    /// Compositor for rendering (created after initial layout)
-    compositor: Option<Compositor>,
+    /// Renderer for compositing (created after initial layout)
+    renderer: Option<Box<dyn Renderer>>,
     /// Current window size
     window_size: Size,
     /// Current output scale in milli-units.
@@ -45,7 +46,7 @@ impl RenderingPipeline {
         Self {
             element_tree: ElementTree::with_pipeline_id(pipeline_id),
             pipeline_owner: PipelineOwner::with_pipeline_id(pipeline_id),
-            compositor: None,
+            renderer: None,
             window_size: Size::new(800.0, 600.0),
             scale_milli: 1000,
             event_dispatcher: EventDispatcher::new(),
@@ -61,15 +62,19 @@ impl RenderingPipeline {
     pub fn teardown(&mut self) {
         self.element_tree.clear_root();
         crate::pipeline::clear_global_dirty(self.pipeline_id());
-        self.compositor = None;
+        self.renderer = None;
     }
 
     /// Set the output scale in milli-units.
     pub fn set_scale_milli(&mut self, scale_milli: u32) {
         self.scale_milli = scale_milli.max(1);
         crate::graphics::set_current_scale_milli(self.scale_milli);
-        if let Some(ref mut compositor) = self.compositor {
-            compositor.set_scale_milli(self.scale_milli, self.window_size);
+        if let Some(ref mut renderer) = self.renderer {
+            renderer.resize(FrameSize {
+                width: self.window_size.width,
+                height: self.window_size.height,
+                scale_milli: self.scale_milli,
+            });
         }
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
@@ -191,13 +196,13 @@ impl RenderingPipeline {
         let constraints = LayoutConstraints::tight(window_size.width, window_size.height);
         let _layout_size = self.element_tree.layout(constraints);
 
-        // Create compositor with the window size (not layout size)
+        // Create renderer with the window size
         crate::graphics::set_current_scale_milli(self.scale_milli);
-        self.compositor = Some(Compositor::new(
+        self.renderer = Some(Box::new(CpuRenderer::new(
             window_size,
             self.scale_milli,
             window_info.background_color,
-        ));
+        )));
         self.window_size = window_size;
 
         // Mark root as dirty for initial paint
@@ -212,8 +217,12 @@ impl RenderingPipeline {
     pub fn resize(&mut self, new_size: Size) {
         self.window_size = new_size;
         crate::graphics::set_current_scale_milli(self.scale_milli);
-        if let Some(ref mut compositor) = self.compositor {
-            compositor.resize(new_size);
+        if let Some(ref mut renderer) = self.renderer {
+            renderer.resize(FrameSize {
+                width: new_size.width,
+                height: new_size.height,
+                scale_milli: self.scale_milli,
+            });
         }
 
         if let Some(root) = self.element_tree.root_mut() {
@@ -245,24 +254,14 @@ impl RenderingPipeline {
         let background_color = self.extract_window_info().background_color;
 
         // Composite all elements into the window buffer
-        if let Some(ref mut compositor) = self.compositor {
-            compositor.set_background_color(background_color);
+        if let Some(ref mut renderer) = self.renderer {
+            renderer.set_background_color(background_color);
             if let Some(root) = self.element_tree.root() {
-                if crate::debug::is_enabled() {
-                    crate::logln!("[RenderingPipeline] building RenderTree...");
-                }
-                if crate::debug::is_enabled() {
-                    crate::logln!("[RenderingPipeline] compositing element tree...");
-                }
                 let dirty_ids = self.pipeline_owner.last_paint_ids();
-                compositor.composite_elements_with_dirty(root, dirty_ids);
-            } else {
-                if crate::debug::is_enabled() {
-                    crate::logln!("[RenderingPipeline] No root element to render");
-                }
+                renderer.composite(root, dirty_ids);
             }
 
-            Some(compositor.window_buffer())
+            Some(renderer.buffer())
         } else {
             if crate::debug::is_enabled() {
                 crate::logln!("[RenderingPipeline] No compositor!");
@@ -276,18 +275,16 @@ impl RenderingPipeline {
     /// The damage is `None` when the whole window should be presented.
     pub fn render_with_damage(&mut self) -> Option<(&Buffer, Option<&[DamageRect]>)> {
         self.render()?;
-        let compositor = self.compositor.as_ref()?;
-        Some((compositor.window_buffer(), compositor.last_damage_rects()))
+        let renderer = self.renderer.as_ref()?;
+        Some((renderer.buffer(), renderer.damage()))
     }
 
-    /// Get the window buffer (if available)
     pub fn window_buffer(&self) -> Option<&Buffer> {
-        self.compositor.as_ref().map(|c| c.window_buffer())
+        self.renderer.as_ref().map(|r| r.buffer())
     }
 
-    /// Get mutable access to the window buffer
     pub fn window_buffer_mut(&mut self) -> Option<&mut Buffer> {
-        self.compositor.as_mut().map(|c| c.window_buffer_mut())
+        self.renderer.as_mut().map(|r| r.buffer_mut())
     }
 
     /// Get the current window size
