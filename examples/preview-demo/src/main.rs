@@ -59,7 +59,7 @@ fn counter_preview() -> impl View + Clone {
 
 #[scarlet_ui::preview(width = 320.0, height = 180.0)]
 fn button_preview() -> impl View + Clone {
-    Button::new("Standalone Button").padding(20.0)
+    Button::new("Standalone Button reloads").padding(20.0)
 }
 
 fn main() -> scarlet_ui::Result<()> {

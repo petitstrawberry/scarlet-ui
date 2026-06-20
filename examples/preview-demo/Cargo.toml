@@ -1,15 +1,15 @@
 [package]
-name = "scarlet-ui-preview-demo"
+name = "scarlet-ui-preview-source"
 version = "0.1.0"
 edition = "2024"
-autobins = false
 
 [lib]
+crate-type = ["dylib"]
 path = "src/main.rs"
 
 [features]
 preview = []
 
 [dependencies]
-scarlet-ui = { path = "../../crates/scarlet-ui", default-features = false, features = ["std", "platform-winit", "preview"] }
-scarlet-ui-macros = { path = "../../crates/scarlet-ui-macros" }
+scarlet-ui = { path = "/Users/petitstrawberry/Development/Rust/scarlet-ui/crates/scarlet-ui", default-features = false, features = ["std", "platform-winit", "preview"] }
+scarlet-ui-macros = { path = "/Users/petitstrawberry/Development/Rust/scarlet-ui/crates/scarlet-ui-macros" }
