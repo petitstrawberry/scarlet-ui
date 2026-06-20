@@ -420,7 +420,7 @@ impl PreviewHost {
     pub fn new_with_backend(
         mut loaded: LoadedPreviewLibrary,
         preview: Option<&str>,
-        mut backend: Box<dyn PlatformBackend>,
+        backend: &mut dyn PlatformBackend,
     ) -> core::result::Result<Self, String> {
         let descriptor = select_preview(loaded.previews(), preview)?;
         let scale_milli = backend.output_scale_milli();
@@ -499,6 +499,13 @@ impl PreviewHost {
         self.sync_after_reload = true;
         self.full_present_frames = 2;
         Ok(())
+    }
+
+    /// Close the platform window and release the session and library.
+    pub fn close(&mut self) {
+        let _ = self.window.close();
+        self.session = None;
+        self.loaded = None;
     }
 
     /// Run one event/render tick. Returns `false` when the preview should exit.
