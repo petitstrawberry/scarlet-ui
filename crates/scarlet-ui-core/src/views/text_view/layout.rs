@@ -464,8 +464,8 @@ fn visible_range(
     if line_count == 0 {
         return 0..0;
     }
-    let first = (scroll_y / line_height).floor().max(0.0) as usize;
-    let visible_count = (viewport_height / line_height).ceil().max(1.0) as usize;
+    let first = libm::floorf(scroll_y / line_height).max(0.0) as usize;
+    let visible_count = libm::ceilf(viewport_height / line_height).max(1.0) as usize;
     first.saturating_sub(1)..(first + visible_count + 2).min(line_count)
 }
 

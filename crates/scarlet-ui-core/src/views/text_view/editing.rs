@@ -1,7 +1,7 @@
 //! Keyboard, IME, and focus editing support for [`TextView`].
 
 use alloc::borrow::Cow;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use core::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -642,9 +642,9 @@ fn vertical_position(render_object: &mut TextViewRenderObject, delta_lines: isiz
 }
 
 fn page_position(render_object: &mut TextViewRenderObject, direction: isize) -> usize {
-    let visible_count = ((render_object.layout.viewport_height / render_object.layout.line_height)
-        .ceil()
-        .max(1.0)) as isize;
+    let visible_count =
+        (libm::ceilf(render_object.layout.viewport_height / render_object.layout.line_height)
+            .max(1.0)) as isize;
     vertical_position(render_object, direction.saturating_mul(visible_count))
 }
 
