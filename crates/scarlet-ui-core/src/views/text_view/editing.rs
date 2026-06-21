@@ -6,7 +6,7 @@ use core::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{TabMode, TextPosition, TextSelection, TextView, TextViewRenderObject};
+use super::{BORDER_WIDTH, TabMode, TextPosition, TextSelection, TextView, TextViewRenderObject};
 use crate::event::{Event, FocusEvent, KeyCode, KeyEvent, MouseButton, MouseEvent};
 use crate::geometry::Point;
 
@@ -110,7 +110,7 @@ pub(crate) fn handle_text_view_keyboard(
             modifiers,
         } => {
             move_caret(render_object, CaretMove::Left, modifiers.shift);
-            view.selection_state().set(render_object.selection);
+            finish_caret_change(view, render_object);
             true
         }
         KeyEvent::Pressed {
@@ -118,7 +118,7 @@ pub(crate) fn handle_text_view_keyboard(
             modifiers,
         } => {
             move_caret(render_object, CaretMove::Right, modifiers.shift);
-            view.selection_state().set(render_object.selection);
+            finish_caret_change(view, render_object);
             true
         }
         KeyEvent::Pressed {
@@ -126,7 +126,7 @@ pub(crate) fn handle_text_view_keyboard(
             modifiers,
         } => {
             move_caret(render_object, CaretMove::Up, modifiers.shift);
-            view.selection_state().set(render_object.selection);
+            finish_caret_change(view, render_object);
             true
         }
         KeyEvent::Pressed {
@@ -134,7 +134,7 @@ pub(crate) fn handle_text_view_keyboard(
             modifiers,
         } => {
             move_caret(render_object, CaretMove::Down, modifiers.shift);
-            view.selection_state().set(render_object.selection);
+            finish_caret_change(view, render_object);
             true
         }
         KeyEvent::Pressed {
@@ -147,7 +147,7 @@ pub(crate) fn handle_text_view_keyboard(
                 CaretMove::LineStart
             };
             move_caret(render_object, movement, modifiers.shift);
-            view.selection_state().set(render_object.selection);
+            finish_caret_change(view, render_object);
             true
         }
         KeyEvent::Pressed {
@@ -160,7 +160,7 @@ pub(crate) fn handle_text_view_keyboard(
                 CaretMove::LineEnd
             };
             move_caret(render_object, movement, modifiers.shift);
-            view.selection_state().set(render_object.selection);
+            finish_caret_change(view, render_object);
             true
         }
         KeyEvent::Pressed {
@@ -168,7 +168,7 @@ pub(crate) fn handle_text_view_keyboard(
             modifiers,
         } => {
             move_caret(render_object, CaretMove::PageUp, modifiers.shift);
-            view.selection_state().set(render_object.selection);
+            finish_caret_change(view, render_object);
             true
         }
         KeyEvent::Pressed {
@@ -176,7 +176,7 @@ pub(crate) fn handle_text_view_keyboard(
             modifiers,
         } => {
             move_caret(render_object, CaretMove::PageDown, modifiers.shift);
-            view.selection_state().set(render_object.selection);
+            finish_caret_change(view, render_object);
             true
         }
         _ => false,
@@ -392,16 +392,61 @@ fn scroll_view(
         x: render_object.scroll.x + delta_x as f32,
         y: render_object.scroll.y + delta_y as f32,
     };
+    set_scroll(view, render_object, requested);
+    true
+}
+
+fn finish_caret_change(view: &TextView, render_object: &mut TextViewRenderObject) {
+    ensure_caret_visible(view, render_object);
+    view.selection_state().set(render_object.selection);
+}
+
+fn ensure_caret_visible(view: &TextView, render_object: &mut TextViewRenderObject) {
+    let caret = render_object.cursor_rect();
+    let clip_left = BORDER_WIDTH;
+    let clip_top = BORDER_WIDTH;
+    let clip_right = (render_object.size.width - BORDER_WIDTH).max(clip_left);
+    let clip_bottom = (render_object.size.height - BORDER_WIDTH).max(clip_top);
+    let reveal_left = render_object
+        .layout
+        .text_origin_x
+        .clamp(clip_left, clip_right);
+    let reveal_top = render_object.padding.clamp(clip_top, clip_bottom);
+    let reveal_right =
+        (render_object.size.width - render_object.padding).clamp(reveal_left, clip_right);
+    let reveal_bottom =
+        (render_object.size.height - render_object.padding).clamp(reveal_top, clip_bottom);
+    let mut requested = render_object.scroll;
+
+    if caret.origin.x < reveal_left {
+        requested.x -= reveal_left - caret.origin.x;
+    } else if caret.origin.x + caret.size.width > reveal_right {
+        requested.x += caret.origin.x + caret.size.width - reveal_right;
+    }
+
+    if caret.origin.y < reveal_top {
+        requested.y -= reveal_top - caret.origin.y;
+    } else if caret.origin.y + caret.size.height > reveal_bottom {
+        requested.y += caret.origin.y + caret.size.height - reveal_bottom;
+    }
+
+    set_scroll(view, render_object, requested);
+}
+
+fn set_scroll(
+    view: &TextView,
+    render_object: &mut TextViewRenderObject,
+    requested: super::TextViewScroll,
+) {
     let clamped = render_object.layout.clamp_scroll(requested);
     if clamped == render_object.scroll {
-        return true;
+        return;
     }
     render_object.scroll = clamped;
     render_object.compute_layout();
     if let Some(scroll) = view.scroll.as_ref() {
         scroll.set(clamped);
     }
-    true
 }
 
 fn hit_test_mouse(render_object: &TextViewRenderObject, x: i32, y: i32) -> Option<TextPosition> {
@@ -561,6 +606,7 @@ fn apply_replace(
     render_object.selection = TextSelection::collapsed(caret);
     render_object.desired_x = None;
     render_object.compute_layout();
+    ensure_caret_visible(view, render_object);
 
     if let Some(text_state) = view.text_state() {
         text_state.set(new_document.as_str().into_owned());

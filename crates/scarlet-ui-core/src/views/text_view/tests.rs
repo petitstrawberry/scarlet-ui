@@ -1227,6 +1227,85 @@ fn mouse_wheel_scrolls_horizontally_without_wrapping() {
 }
 
 #[test]
+fn down_arrow_scrolls_when_caret_reaches_clip_bottom() {
+    let text = State::new(
+        StateId::new(1242),
+        String::from("0\n1\n2\n3\n4\n5\n6\n7\n8\n9"),
+    );
+    let selection = State::new(StateId::new(1243), TextSelection::collapsed(0));
+    let scroll = State::new(StateId::new(1244), TextViewScroll::default());
+    let view = TextView::new(text, selection).scroll_state(scroll.clone());
+    let mut render_object = render_object_with_size(&view, 120.0, 56.0);
+    render_object.set_focused(true);
+
+    for _ in 0..7 {
+        assert!(handle_text_view_keyboard(
+            &view,
+            &mut render_object,
+            key(KeyCode::Down)
+        ));
+    }
+
+    let caret = render_object.cursor_rect();
+    assert!(render_object.scroll.y > 0.0);
+    assert_eq!(scroll.get(), render_object.scroll);
+    assert!(caret.origin.y + caret.size.height <= render_object.size.height - BORDER_WIDTH);
+}
+
+#[test]
+fn end_key_scrolls_when_caret_reaches_clip_right_edge() {
+    let text = State::new(
+        StateId::new(1245),
+        String::from("a very long line that should require horizontal scrolling"),
+    );
+    let selection = State::new(StateId::new(1246), TextSelection::collapsed(0));
+    let scroll = State::new(StateId::new(1247), TextViewScroll::default());
+    let view = TextView::new(text, selection)
+        .scroll_state(scroll.clone())
+        .wrap_mode(WrapMode::None);
+    let mut render_object = render_object_with_size(&view, 90.0, 80.0);
+    render_object.set_focused(true);
+
+    assert!(handle_text_view_keyboard(
+        &view,
+        &mut render_object,
+        key(KeyCode::End)
+    ));
+
+    let caret = render_object.cursor_rect();
+    assert!(render_object.scroll.x > 0.0);
+    assert_eq!(scroll.get(), render_object.scroll);
+    assert!(caret.origin.x + caret.size.width <= render_object.size.width - BORDER_WIDTH);
+}
+
+#[test]
+fn update_without_scroll_state_preserves_internal_scroll() {
+    let text = State::new(
+        StateId::new(1240),
+        String::from("zero\none\ntwo\nthree\nfour\nfive\nsix"),
+    );
+    let selection = State::new(StateId::new(1241), TextSelection::collapsed(0));
+    let view = TextView::new(text.clone(), selection.clone());
+    let mut render_object = render_object_with_size(&view, 120.0, 56.0);
+    render_object.scroll = render_object.layout.clamp_scroll(TextViewScroll {
+        x: 0.0,
+        y: render_object.layout.line_height * 2.0,
+    });
+    render_object.compute_layout();
+    let scroll = render_object.scroll;
+
+    text.set(String::from(
+        "zero\none\ntwo\nthree\nfour\nfive\nsix\nseven",
+    ));
+    assert!(matches!(
+        render_object.update(&TextView::new(text, selection)),
+        crate::element::UpdateResult::Updated
+    ));
+
+    assert_eq!(render_object.scroll, scroll);
+}
+
+#[test]
 fn clipboard_copy_paste_and_cut_callbacks_work() {
     let text = State::new(StateId::new(246), String::from("hello world"));
     let selection = State::new(

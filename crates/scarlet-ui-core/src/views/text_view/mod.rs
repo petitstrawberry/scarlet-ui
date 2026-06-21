@@ -765,8 +765,12 @@ impl ElementRenderObject for TextViewRenderObject {
         let preedit_anchor_byte = self.preedit_anchor_byte;
         let preedit_spans = self.preedit_spans.clone();
         let desired_x = self.desired_x;
+        let scroll = self.scroll;
         let size = self.size;
         *self = TextViewRenderObject::from_view(view);
+        if view.scroll.is_none() {
+            self.scroll = scroll;
+        }
         self.focused = focused;
         self.dragging = dragging;
         self.preedit = preedit;
