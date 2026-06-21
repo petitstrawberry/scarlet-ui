@@ -9,8 +9,9 @@ use crate::color::Color;
 use crate::element::{
     Element, ElementRenderObject, LayoutConstraints, RenderElement, UpdateResult,
 };
-use crate::geometry::{Point, Size};
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics::{self, FontStack};
+use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::view::View;
 
@@ -755,6 +756,148 @@ impl TextGridRenderObject {
             self.cursor_color,
         );
     }
+
+    fn paint_cell(&self, ctx: &mut PaintContext, origin: Point, index: usize) {
+        let columns = self.grid.columns();
+        if columns == 0 {
+            return;
+        }
+
+        let column = index % columns;
+        let row = index / columns;
+        let x = libm::floorf(column as f32 * self.cell_width) as i32;
+        let y = libm::floorf(row as f32 * self.cell_height) as i32;
+        if x as f32 >= self.size.width || y as f32 >= self.size.height {
+            return;
+        }
+
+        let Some(cell) = self.grid.cells().get(index).copied() else {
+            return;
+        };
+        if cell.ch == '\0' {
+            return;
+        }
+
+        let cell_span =
+            text_grid_cell_width(cell.ch).min(self.grid.columns().saturating_sub(column).max(1));
+        let w = libm::ceilf(self.cell_width * cell_span as f32) as u32;
+        let h = libm::ceilf(self.cell_height) as u32;
+        let (mut foreground, background) = if cell.inverse {
+            (cell.background, cell.foreground)
+        } else {
+            (cell.foreground, cell.background)
+        };
+        if cell.faint {
+            foreground = dim_color(foreground);
+        }
+
+        ctx.fill_rect(
+            Rect::new(
+                Point::new(origin.x + x as f32, origin.y + y as f32),
+                Size::new(w as f32, h as f32),
+            ),
+            background,
+        );
+
+        if cell.ch != ' ' && cell.ch != '\0' {
+            let drew_box = super::text_grid_boxdraw::paint_box_drawing_char(
+                ctx, origin, x, y, w, h, cell.ch, foreground,
+            );
+            if !drew_box {
+                let mut encoded = [0u8; 4];
+                let text = cell.ch.encode_utf8(&mut encoded);
+                let text = String::from(text);
+                let baseline_adjust = ((self.cell_height - self.font_size) / 2.0).max(0.0);
+                let text_origin = Point::new(
+                    origin.x + x as f32,
+                    origin.y + y as f32 + libm::floorf(baseline_adjust),
+                );
+                ctx.draw_text(text_origin, text.clone(), foreground, self.font_size);
+                if cell.bold {
+                    ctx.draw_text(
+                        Point::new(text_origin.x + 1.0, text_origin.y),
+                        text,
+                        foreground,
+                        self.font_size,
+                    );
+                }
+            }
+        }
+
+        let line_thickness = (libm::ceilf(self.font_size / 12.0) as u32).max(1);
+        if cell.underline {
+            let underline_thickness = line_thickness.max(cell.underline_thickness as u32);
+            let line_y = y + h.saturating_sub(underline_thickness).saturating_sub(1) as i32;
+            ctx.fill_rect(
+                Rect::new(
+                    Point::new(origin.x + x as f32, origin.y + line_y.max(y) as f32),
+                    Size::new(w as f32, underline_thickness as f32),
+                ),
+                cell.underline_color.unwrap_or(foreground),
+            );
+        }
+        if cell.strikethrough {
+            let line_y = y + (h / 2) as i32;
+            ctx.fill_rect(
+                Rect::new(
+                    Point::new(origin.x + x as f32, origin.y + line_y as f32),
+                    Size::new(w as f32, line_thickness as f32),
+                ),
+                foreground,
+            );
+        }
+    }
+
+    fn paint_remainder(&self, ctx: &mut PaintContext, origin: Point, width: u32, height: u32) {
+        let background = self.background_color;
+        let grid_width = self.grid_pixel_width().min(width);
+        let grid_height = self.grid_pixel_height().min(height);
+        if grid_width < width {
+            ctx.fill_rect(
+                Rect::new(
+                    Point::new(origin.x + grid_width as f32, origin.y),
+                    Size::new((width - grid_width) as f32, height as f32),
+                ),
+                background,
+            );
+        }
+        if grid_height < height {
+            ctx.fill_rect(
+                Rect::new(
+                    Point::new(origin.x, origin.y + grid_height as f32),
+                    Size::new(grid_width as f32, (height - grid_height) as f32),
+                ),
+                background,
+            );
+        }
+    }
+
+    fn paint_cursor(&self, ctx: &mut PaintContext, origin: Point) {
+        let Some(cursor) = self.cursor else {
+            return;
+        };
+        if !cursor.visible || self.grid.index(cursor.column, cursor.row).is_none() {
+            return;
+        }
+        let x = libm::floorf(cursor.column as f32 * self.cell_width);
+        let y = libm::floorf(cursor.row as f32 * self.cell_height);
+        if x >= self.size.width || y >= self.size.height {
+            return;
+        }
+        let w = libm::ceilf(self.cell_width).max(1.0);
+        let h = libm::ceilf(self.cell_height).max(1.0) as u32;
+        let cursor_height = (h / 5).max(2);
+        ctx.fill_rect(
+            Rect::new(
+                Point::new(
+                    origin.x + x,
+                    origin.y + y + h.saturating_sub(cursor_height) as f32,
+                ),
+                Size::new(w, cursor_height as f32),
+            ),
+            self.cursor_color,
+        );
+    }
 }
 
 impl ElementRenderObject for TextGridRenderObject {
@@ -853,6 +996,24 @@ impl ElementRenderObject for TextGridRenderObject {
     fn clear_buffer(&mut self) {
         self.buffer = None;
         self.full_repaint = true;
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let width = libm::ceilf(self.size.width).max(1.0) as u32;
+        let height = libm::ceilf(self.size.height).max(1.0) as u32;
+        ctx.fill_rect(Rect::new(origin, self.size), self.background_color);
+        let visible_columns = self.visible_columns(width);
+        let visible_rows = self.visible_rows(height);
+        let columns = self.grid.columns();
+        for row in 0..visible_rows {
+            let row_start = row.saturating_mul(columns);
+            for column in 0..visible_columns {
+                self.paint_cell(ctx, origin, row_start + column);
+            }
+        }
+        self.paint_remainder(ctx, origin, width, height);
+        self.paint_cursor(ctx, origin);
+        true
     }
 
     fn as_any(&self) -> &dyn Any {

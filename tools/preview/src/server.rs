@@ -328,6 +328,7 @@ impl PreviewServer {
                 library,
                 self.current_preview.as_deref(),
                 backend.as_mut(),
+                self.args.force_scale_milli(),
             )
             .map_err(|error| ErrorObject::preview_host_window_error(&error))?;
             #[cfg(feature = "gpu")]
@@ -818,6 +819,7 @@ mod tests {
                 features: None,
                 preview: None,
                 poll_ms: 250,
+                force_scale: None,
                 #[cfg(feature = "gpu")]
                 gpu: false,
                 #[cfg(feature = "gpu")]

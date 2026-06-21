@@ -36,6 +36,7 @@ pub fn run(args: RunArgs) -> Result<(), String> {
                 library,
                 args.preview.as_deref(),
                 &mut backend,
+                args.force_scale_milli(),
             )?);
         }
         Err(error) => {
@@ -48,6 +49,10 @@ pub fn run(args: RunArgs) -> Result<(), String> {
         if let Some(ref mut host) = host {
             crate::gpu::setup_gpu_present(host);
         }
+    }
+
+    if args.paint {
+        println!("[preview] --paint is deprecated; paint command path is enabled by default");
     }
 
     loop {
@@ -67,6 +72,7 @@ pub fn run(args: RunArgs) -> Result<(), String> {
                             library,
                             args.preview.as_deref(),
                             &mut backend,
+                            args.force_scale_milli(),
                         )?);
                         println!("[preview] loaded");
                     }

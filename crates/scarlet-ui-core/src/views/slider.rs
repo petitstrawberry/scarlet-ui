@@ -5,9 +5,10 @@
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::Size;
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 use crate::os::Mutex;
+use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::view::View;
 use alloc::boxed::Box;
@@ -328,6 +329,52 @@ impl ElementRenderObject for SliderRenderObject {
 
     fn clear_buffer(&mut self) {
         self.buffer = None;
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let height = libm::ceilf(self.size.height) as u32;
+        let (track_start, track_width) = self.track_metrics();
+        let center_y = height as f32 / 2.0;
+        let track_thickness = 4.0;
+        let track_y = center_y - track_thickness / 2.0;
+        let range = self.max - self.min;
+        let normalized_value = if range > 0.0 {
+            (self.value - self.min) / range
+        } else {
+            0.0
+        };
+        let fill_width = normalized_value * track_width;
+        let palette = ColorPalette::default();
+        let track_color = palette.surface_variant();
+        let fill_color = palette.primary();
+        let thumb_color = palette.surface();
+        let thumb_border = palette.border();
+        let thumb_radius = self.thumb_diameter().max(1.0) / 2.0;
+        let thumb_center = Point::new(origin.x + track_start + fill_width, origin.y + center_y);
+
+        ctx.fill_rect(
+            Rect::from_xywh(
+                origin.x + track_start,
+                origin.y + track_y,
+                track_width,
+                track_thickness,
+            ),
+            track_color,
+        );
+        if fill_width > 0.0 {
+            ctx.fill_rect(
+                Rect::from_xywh(
+                    origin.x + track_start,
+                    origin.y + track_y,
+                    fill_width,
+                    track_thickness,
+                ),
+                fill_color,
+            );
+        }
+        ctx.fill_circle(thumb_center, thumb_radius, thumb_border);
+        ctx.fill_circle(thumb_center, (thumb_radius - 1.0).max(0.0), thumb_color);
+        true
     }
 
     fn update(&mut self, new_view: &dyn crate::view::View) -> crate::element::UpdateResult {

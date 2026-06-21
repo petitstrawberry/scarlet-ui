@@ -8,6 +8,7 @@ use crate::element::LayoutConstraints;
 use crate::element::{Element, ElementRenderObject, RenderElement};
 use crate::geometry::{Point, Size};
 use crate::graphics;
+use crate::renderer::PaintContext;
 use crate::view::View;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -230,5 +231,10 @@ impl ElementRenderObject for TextRenderObject {
 
     fn clear_buffer(&mut self) {
         self.buffer = None;
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        ctx.draw_text(origin, self.content.clone(), self.color, self.font_size);
+        true
     }
 }

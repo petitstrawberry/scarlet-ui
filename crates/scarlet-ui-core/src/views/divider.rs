@@ -5,8 +5,9 @@
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::Size;
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::renderer::PaintContext;
 use crate::view::View;
 use alloc::boxed::Box;
 use core::any::Any;
@@ -220,5 +221,10 @@ impl ElementRenderObject for DividerRenderObject {
 
     fn clear_buffer(&mut self) {
         self.buffer = None;
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        ctx.fill_rect(Rect::new(origin, self.size), self.color);
+        true
     }
 }

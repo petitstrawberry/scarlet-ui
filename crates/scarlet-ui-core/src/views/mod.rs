@@ -19,6 +19,7 @@ mod spacer;
 mod text;
 pub(crate) mod text_field;
 mod text_grid;
+pub(crate) mod text_grid_boxdraw;
 mod toggle;
 mod window;
 

@@ -98,26 +98,17 @@ pub struct PreviewFrame<'a> {
 
 /// A running preview instance.
 pub trait PreviewSession {
-    /// Current preview title.
     fn title(&self) -> &str;
-
-    /// Current logical size.
     fn size(&self) -> Size;
-
-    /// Resize the preview.
     fn resize(&mut self, size: Size, scale_milli: u32);
-
-    /// Dispatch an input event.
     fn handle_event(&mut self, event: &Event) -> bool;
-
-    /// Take platform-neutral window events emitted by the view tree.
     fn take_emitted_events(&mut self) -> Vec<Event>;
-
-    /// Return focused text input state, if any.
     fn focused_text_input_state(&self) -> Option<TextInputElementState>;
-
-    /// Render the current frame.
+    fn has_dirty(&self) -> bool {
+        true
+    }
     fn render(&mut self) -> Option<PreviewFrame<'_>>;
+    fn set_paint_enabled(&mut self, _enabled: bool) {}
 }
 
 /// Preview library loaded from a Rust dylib.
@@ -348,9 +339,17 @@ impl PreviewSession for ViewPreviewSession {
         self.pipeline.focused_text_input_state()
     }
 
+    fn has_dirty(&self) -> bool {
+        self.pipeline.has_dirty()
+    }
+
     fn render(&mut self) -> Option<PreviewFrame<'_>> {
         let (buffer, damage) = self.pipeline.render_with_damage()?;
         Some(PreviewFrame { buffer, damage })
+    }
+
+    fn set_paint_enabled(&mut self, enabled: bool) {
+        self.pipeline.set_paint_enabled(enabled);
     }
 }
 
@@ -411,6 +410,7 @@ pub struct PreviewHost {
     loaded: Option<LoadedPreviewLibrary>,
     window: Box<dyn PlatformWindow>,
     preview_id: PreviewId,
+    scale_override_milli: Option<u32>,
     sync_after_reload: bool,
     full_present_frames: u8,
     gpu_present: Option<Box<dyn FnMut(&Buffer, Option<&[DamageRect]>)>>,
@@ -422,9 +422,10 @@ impl PreviewHost {
         mut loaded: LoadedPreviewLibrary,
         preview: Option<&str>,
         backend: &mut dyn PlatformBackend,
+        scale_override_milli: Option<u32>,
     ) -> core::result::Result<Self, String> {
         let descriptor = select_preview(loaded.previews(), preview)?;
-        let scale_milli = backend.output_scale_milli();
+        let scale_milli = scale_override_milli.unwrap_or_else(|| backend.output_scale_milli());
         let context = PreviewCreateContext {
             scale_milli,
             ..PreviewCreateContext::default()
@@ -451,6 +452,7 @@ impl PreviewHost {
             loaded: Some(loaded),
             window,
             preview_id: descriptor.id,
+            scale_override_milli,
             sync_after_reload: true,
             full_present_frames: 2,
             gpu_present: None,
@@ -465,10 +467,21 @@ impl PreviewHost {
         self.window.as_ref()
     }
 
+    fn effective_scale_milli(&self) -> u32 {
+        self.scale_override_milli
+            .unwrap_or_else(|| self.window.output_scale_milli())
+    }
+
+    pub fn set_paint_enabled(&mut self, enabled: bool) {
+        if let Some(session) = self.session.as_mut() {
+            session.set_paint_enabled(enabled);
+        }
+    }
+
     /// Replace the loaded preview library after a successful rebuild.
     pub fn reload(&mut self, mut loaded: LoadedPreviewLibrary) -> core::result::Result<(), String> {
         let size = self.window.size();
-        let scale_milli = self.window.output_scale_milli();
+        let scale_milli = self.effective_scale_milli();
         let session = loaded
             .create(&self.preview_id, PreviewCreateContext { size, scale_milli })
             .or_else(|| {
@@ -490,13 +503,14 @@ impl PreviewHost {
 
     /// Switch to another preview exported by the currently loaded library.
     pub fn switch_preview(&mut self, preview: &str) -> core::result::Result<(), String> {
+        let scale_override_milli = self.scale_override_milli;
         let loaded = self
             .loaded
             .as_mut()
             .ok_or_else(|| String::from("preview host has no loaded library"))?;
         let descriptor = select_preview(loaded.previews(), Some(preview))?;
         let size = self.window.size();
-        let scale_milli = self.window.output_scale_milli();
+        let scale_milli = scale_override_milli.unwrap_or_else(|| self.window.output_scale_milli());
         let context = PreviewCreateContext { size, scale_milli };
         let session = loaded
             .create(&descriptor.id, context)
@@ -520,6 +534,7 @@ impl PreviewHost {
 
     /// Run one event/render tick. Returns `false` when the preview should exit.
     pub fn tick(&mut self, timeout: Duration) -> core::result::Result<bool, String> {
+        let scale_override_milli = self.scale_override_milli;
         let Some(session) = self.session.as_mut() else {
             return Err(String::from("preview host has no active session"));
         };
@@ -527,7 +542,12 @@ impl PreviewHost {
         let mut had_event = false;
         while let Some(event) = self.window.poll_event() {
             had_event = true;
-            if !Self::handle_event(self.window.as_mut(), session.as_mut(), event)? {
+            if !Self::handle_event(
+                self.window.as_mut(),
+                session.as_mut(),
+                event,
+                self.scale_override_milli,
+            )? {
                 return Ok(false);
             }
         }
@@ -535,24 +555,27 @@ impl PreviewHost {
         self.window
             .sync_text_input(session.focused_text_input_state().as_ref());
 
-        if self.sync_after_reload {
-            let size = self.window.size();
-            let scale_milli = self.window.output_scale_milli();
+        let size = self.window.size();
+        let scale_milli = scale_override_milli.unwrap_or_else(|| self.window.output_scale_milli());
+
+        if self.sync_after_reload || session.size() != size {
             session.resize(size, scale_milli);
             self.sync_after_reload = false;
         }
 
-        if let Some(frame) = session.render() {
-            let damage = if self.full_present_frames > 0 {
-                self.full_present_frames -= 1;
-                None
-            } else {
-                frame.damage
-            };
-            if let Some(gpu) = self.gpu_present.as_mut() {
-                gpu(frame.buffer, damage);
-            } else {
-                self.window.present_with_damage(frame.buffer, damage);
+        if session.has_dirty() || self.full_present_frames > 0 {
+            if let Some(frame) = session.render() {
+                let damage = if self.full_present_frames > 0 {
+                    self.full_present_frames -= 1;
+                    None
+                } else {
+                    frame.damage
+                };
+                if let Some(gpu) = self.gpu_present.as_mut() {
+                    gpu(frame.buffer, damage);
+                } else {
+                    self.window.present_with_damage(frame.buffer, damage);
+                }
             }
         }
 
@@ -567,12 +590,16 @@ impl PreviewHost {
         window: &mut dyn PlatformWindow,
         session: &mut dyn PreviewSession,
         event: Event,
+        scale_override_milli: Option<u32>,
     ) -> core::result::Result<bool, String> {
         match event {
             Event::Quit => return Ok(false),
             Event::Resize { width, height } => {
                 let size = Size::new(width as f32, height as f32);
-                session.resize(size, window.output_scale_milli());
+                session.resize(
+                    size,
+                    scale_override_milli.unwrap_or_else(|| window.output_scale_milli()),
+                );
             }
             event => {
                 let _ = session.handle_event(&event);
@@ -840,6 +867,7 @@ mod tests {
             loaded: Some(loaded_test_library()),
             window: Box::new(TestWindow::new_for_host()),
             preview_id: PreviewId::new("button_preview"),
+            scale_override_milli: None,
             sync_after_reload: false,
             full_present_frames: 0,
             gpu_present: None,
@@ -854,6 +882,7 @@ mod tests {
             loaded: None,
             window: Box::new(TestWindow::new_for_host()),
             preview_id: PreviewId::new("button_preview"),
+            scale_override_milli: None,
             sync_after_reload: false,
             full_present_frames: 0,
             gpu_present: None,

@@ -14,8 +14,9 @@ use core::any::Any;
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::Size;
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::view::View;
 
@@ -522,6 +523,112 @@ impl ElementRenderObject for SelectRenderObject {
 
     fn clear_buffer(&mut self) {
         self.buffer = None;
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let w = self.size.width;
+        let row_h = self.row_height.max(24.0);
+        let h = self.popup_height();
+        let selected_index = self.clamped_selected_index();
+        let selected_label = self.options.get(selected_index);
+        let visible = self.options.len().min(self.max_visible_rows);
+        let scroll_start = self
+            .scroll_offset
+            .min(self.options.len().saturating_sub(visible));
+        let scroll_end = (scroll_start + visible).min(self.options.len());
+        let palette = ColorPalette::default();
+        let background = palette.button_background();
+        let popup_background = palette.surface();
+        let border = palette.border();
+        let text = palette.text_primary();
+        let subtle = palette.text_secondary();
+
+        ctx.fill_rect(Rect::new(origin, Size::new(w, h)), Color::TRANSPARENT);
+        ctx.fill_rect(Rect::from_xywh(origin.x, origin.y, w, row_h), background);
+        ctx.stroke_rect(Rect::from_xywh(origin.x, origin.y, w, row_h), 1.0, border);
+
+        let label = selected_label.map_or(self.placeholder.as_str(), String::as_str);
+        let label_color = if selected_label.is_some() {
+            text
+        } else {
+            subtle
+        };
+        let max_chars = (((w as u32).saturating_sub(44) / 8) as usize).max(1);
+        let display_label = if label.chars().count() > max_chars {
+            label.chars().take(max_chars).collect::<String>()
+        } else {
+            String::from(label)
+        };
+        let text_y = origin.y + ((row_h - 15.0) / 2.0).max(0.0);
+        ctx.draw_text(
+            Point::new(origin.x + 12.0, text_y),
+            display_label,
+            label_color,
+            13.0,
+        );
+
+        let chevron_x = origin.x + (w - 24.0).max(0.0);
+        let chevron_y = origin.y + ((row_h - 6.0) / 2.0).max(0.0);
+        ctx.draw_line(
+            Point::new(chevron_x, chevron_y),
+            Point::new(chevron_x + 5.0, chevron_y + 5.0),
+            1.0,
+            subtle,
+        );
+        ctx.draw_line(
+            Point::new(chevron_x + 5.0, chevron_y + 5.0),
+            Point::new(chevron_x + 10.0, chevron_y),
+            1.0,
+            subtle,
+        );
+
+        if self.expanded {
+            let active = self.hovered_index.or(Some(selected_index));
+            let active_background = palette
+                .primary()
+                .with_opacity(0.2)
+                .blend_over(popup_background);
+            let mut y = origin.y + row_h;
+            for index in scroll_start..scroll_end {
+                let row_background = if active == Some(index) {
+                    active_background
+                } else {
+                    popup_background
+                };
+                ctx.fill_rect(Rect::from_xywh(origin.x, y, w, row_h), row_background);
+                ctx.draw_line(
+                    Point::new(origin.x, y),
+                    Point::new(origin.x + w, y),
+                    1.0,
+                    border.with_opacity(0.55),
+                );
+                ctx.draw_text(
+                    Point::new(origin.x + 12.0, y + ((row_h - 15.0) / 2.0).max(0.0)),
+                    self.options[index].clone(),
+                    text,
+                    13.0,
+                );
+                if index == selected_index {
+                    let cx = origin.x + (w - 22.0).max(0.0);
+                    let cy = y + ((row_h - 8.0) / 2.0).max(0.0) + 2.0;
+                    ctx.draw_line(
+                        Point::new(cx, cy),
+                        Point::new(cx + 3.0, cy + 3.0),
+                        1.0,
+                        subtle,
+                    );
+                    ctx.draw_line(
+                        Point::new(cx + 3.0, cy + 3.0),
+                        Point::new(cx + 8.0, cy - 3.0),
+                        1.0,
+                        subtle,
+                    );
+                }
+                y += row_h;
+            }
+            ctx.stroke_rect(Rect::from_xywh(origin.x, origin.y, w, h), 1.0, border);
+        }
+        true
     }
 
     fn update(&mut self, new_view: &dyn crate::view::View) -> crate::element::UpdateResult {

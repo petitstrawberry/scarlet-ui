@@ -5,8 +5,9 @@
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::{Element, RenderElement};
-use crate::geometry::Size;
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::renderer::PaintContext;
 use crate::view::View;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -361,5 +362,78 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
 
     fn clear_buffer(&mut self) {
         self.buffer = None;
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let palette = ColorPalette::default();
+        let bg_color = Color::rgb(1.0, 1.0, 1.0);
+        let border_color = palette.border();
+        let text_color = palette.text_primary();
+        let hover_color = palette.menu_hover();
+        let separator_color = Color::rgb(0.784, 0.784, 0.784);
+
+        let rect = Rect::new(origin, self.size);
+        ctx.fill_rect(rect, bg_color);
+        ctx.stroke_rect(rect, 1.0, border_color);
+
+        let mut current_y = 2.0;
+        let font_size = 13.0;
+        let width = self.size.width.max(0.0);
+
+        for (i, item) in self.items.iter().enumerate() {
+            if matches!(item.action, MenuAction::Separator) {
+                ctx.fill_rect(
+                    Rect::from_xywh(
+                        origin.x + 2.0,
+                        origin.y + current_y,
+                        (width - 4.0).max(0.0),
+                        1.0,
+                    ),
+                    separator_color,
+                );
+                current_y += 1.0;
+                continue;
+            }
+
+            if self.hovered_index == Some(i) {
+                ctx.fill_rect(
+                    Rect::from_xywh(
+                        origin.x + 2.0,
+                        origin.y + current_y,
+                        (width - 4.0).max(0.0),
+                        self.item_height,
+                    ),
+                    hover_color,
+                );
+            }
+
+            let item_text_color = if item.enabled {
+                text_color
+            } else {
+                Color::rgb(0.471, 0.471, 0.471)
+            };
+            let text_y = origin.y + current_y + ((self.item_height - 16.0) / 2.0).max(0.0);
+            ctx.draw_text(
+                Point::new(origin.x + 8.0, text_y),
+                item.label.clone(),
+                item_text_color,
+                font_size,
+            );
+
+            if let Some(ref shortcut) = item.shortcut {
+                let (shortcut_w, _) = graphics::measure_text_sized(shortcut, font_size);
+                let shortcut_x = origin.x + width - shortcut_w as f32 - 8.0;
+                ctx.draw_text(
+                    Point::new(shortcut_x, text_y),
+                    shortcut.clone(),
+                    item_text_color,
+                    font_size,
+                );
+            }
+
+            current_y += self.item_height;
+        }
+
+        true
     }
 }

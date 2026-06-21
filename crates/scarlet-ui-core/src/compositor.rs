@@ -3,6 +3,8 @@
 //! The Compositor traverses the RenderTree (derived from the Element tree)
 //! and composites all buffers into a single window buffer.
 
+#![allow(deprecated)]
+
 use crate::buffer::Buffer;
 use crate::color::Color;
 use crate::element::{Element, ElementId};

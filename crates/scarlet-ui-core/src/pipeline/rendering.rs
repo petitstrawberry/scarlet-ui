@@ -3,36 +3,29 @@
 //! RenderingPipeline is the main entry point for the rendering system.
 //! It orchestrates all phases of the rendering pipeline.
 
+#![allow(deprecated)]
+
 use crate::buffer::Buffer;
 use crate::compositor::DamageRect;
 use crate::element::{Element, ElementTree, LayoutConstraints};
 use crate::event::EventDispatcher;
-use crate::geometry::Size;
+use crate::geometry::{Point, Size};
 use crate::pipeline::{PipelineId, PipelineOwner};
-use crate::renderer::{CpuRenderer, FrameSize, Renderer};
+use crate::renderer::{CpuPaintRenderer, CpuRenderer, FrameSize, PaintContext};
 use crate::views::WindowInfo;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 /// RenderingPipeline integrates all components of the rendering system
-///
-/// This is the main orchestrator that combines:
-/// - ElementTree: Manages the element hierarchy
-/// - PipelineOwner: Manages dirty flags and flush phases
-/// - Renderer: Composites element buffers into the window buffer
 pub struct RenderingPipeline {
-    /// Element tree
     element_tree: ElementTree,
-    /// Pipeline owner for dirty flag management
     pipeline_owner: PipelineOwner,
-    /// Renderer for compositing (created after initial layout)
-    renderer: Option<Box<dyn Renderer>>,
-    /// Current window size
+    renderer: Option<Box<dyn crate::renderer::Renderer>>,
     window_size: Size,
-    /// Current output scale in milli-units.
     scale_milli: u32,
-    /// Event dispatcher
     event_dispatcher: EventDispatcher,
+    paint_renderer: Option<CpuPaintRenderer>,
+    paint_enabled: bool,
 }
 
 impl RenderingPipeline {
@@ -50,7 +43,13 @@ impl RenderingPipeline {
             window_size: Size::new(800.0, 600.0),
             scale_milli: 1000,
             event_dispatcher: EventDispatcher::new(),
+            paint_renderer: None,
+            paint_enabled: true,
         }
+    }
+
+    pub fn set_paint_enabled(&mut self, enabled: bool) {
+        self.paint_enabled = enabled;
     }
 
     /// Return this pipeline's owner ID.
@@ -63,6 +62,7 @@ impl RenderingPipeline {
         self.element_tree.clear_root();
         crate::pipeline::clear_global_dirty(self.pipeline_id());
         self.renderer = None;
+        self.paint_renderer = None;
     }
 
     /// Set the output scale in milli-units.
@@ -75,6 +75,9 @@ impl RenderingPipeline {
                 height: self.window_size.height,
                 scale_milli: self.scale_milli,
             });
+        }
+        if let Some(ref mut paint_renderer) = self.paint_renderer {
+            paint_renderer.resize(self.window_size, self.scale_milli);
         }
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
@@ -224,6 +227,9 @@ impl RenderingPipeline {
                 scale_milli: self.scale_milli,
             });
         }
+        if let Some(ref mut paint_renderer) = self.paint_renderer {
+            paint_renderer.resize(new_size, self.scale_milli);
+        }
 
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
@@ -253,7 +259,10 @@ impl RenderingPipeline {
 
         let background_color = self.extract_window_info().background_color;
 
-        // Composite all elements into the window buffer
+        if self.paint_enabled {
+            return self.render_paint_path(background_color);
+        }
+
         if let Some(ref mut renderer) = self.renderer {
             renderer.set_background_color(background_color);
             if let Some(root) = self.element_tree.root() {
@@ -263,17 +272,118 @@ impl RenderingPipeline {
 
             Some(renderer.buffer())
         } else {
-            if crate::debug::is_enabled() {
-                crate::logln!("[RenderingPipeline] No compositor!");
-            }
             None
         }
+    }
+
+    fn render_paint_path(&mut self, background_color: crate::color::Color) -> Option<&Buffer> {
+        let size = self.window_size;
+        let scale = self.scale_milli;
+
+        if self.paint_renderer.is_none() {
+            self.paint_renderer = Some(CpuPaintRenderer::new(size, scale, background_color));
+        }
+
+        let pr = self.paint_renderer.as_mut().unwrap();
+        pr.set_background_color(background_color);
+
+        let mut ctx = PaintContext::new();
+        let any_painted = if let Some(root) = self.element_tree.root() {
+            let base_painted = Self::walk_and_paint(&mut ctx, root, Point::ZERO);
+            let overlay_painted = Self::paint_select_overlays(&mut ctx, root, Point::ZERO);
+            base_painted || overlay_painted
+        } else {
+            false
+        };
+
+        if any_painted {
+            pr.execute(&ctx);
+        }
+
+        Some(pr.buffer())
+    }
+
+    fn walk_and_paint(ctx: &mut PaintContext, element: &dyn Element, origin: Point) -> bool {
+        let abs = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+        let mut painted = Self::paint_element_self(ctx, element, abs);
+
+        for child in element.children() {
+            if Self::walk_and_paint(ctx, child.as_ref(), abs) {
+                painted = true;
+            }
+        }
+
+        painted
+    }
+
+    fn paint_select_overlays(ctx: &mut PaintContext, element: &dyn Element, origin: Point) -> bool {
+        let abs = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+        let mut painted = false;
+
+        for child in element.children() {
+            if Self::paint_select_overlays(ctx, child.as_ref(), abs) {
+                painted = true;
+            }
+        }
+
+        if Self::is_expanded_select(element) && Self::paint_element_self(ctx, element, abs) {
+            painted = true;
+        }
+
+        painted
+    }
+
+    fn is_expanded_select(element: &dyn Element) -> bool {
+        element
+            .render_object()
+            .and_then(|render_object| {
+                render_object
+                    .as_any()
+                    .downcast_ref::<crate::views::SelectRenderObject>()
+            })
+            .is_some_and(|select| select.is_expanded())
+    }
+
+    fn paint_element_self(ctx: &mut PaintContext, element: &dyn Element, abs: Point) -> bool {
+        let Some(ro) = element.render_object() else {
+            return false;
+        };
+
+        let before = ctx.commands().len();
+        if ro.paint(ctx, abs) || ctx.commands().len() > before {
+            return true;
+        }
+
+        if let Some(buf) = element.get_buffer() {
+            let rect = crate::geometry::Rect::new(
+                abs,
+                Size::new(buf.logical_width() as f32, buf.logical_height() as f32),
+            );
+            ctx.draw_buffer(rect, buf.clone());
+            return true;
+        }
+
+        false
     }
 
     /// Handle a render frame and return the buffer with physical damage rectangles.
     ///
     /// The damage is `None` when the whole window should be presented.
     pub fn render_with_damage(&mut self) -> Option<(&Buffer, Option<&[DamageRect]>)> {
+        if self.paint_enabled {
+            crate::graphics::set_current_scale_milli(self.scale_milli);
+            self.pipeline_owner
+                .flush(&mut self.element_tree, self.window_size);
+            self.render_paint_path(self.extract_window_info().background_color)?;
+            let pr = self.paint_renderer.as_ref().unwrap();
+            return Some((pr.buffer(), None));
+        }
         self.render()?;
         let renderer = self.renderer.as_ref()?;
         Some((renderer.buffer(), renderer.damage()))

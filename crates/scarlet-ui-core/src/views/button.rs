@@ -5,8 +5,9 @@
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::Size;
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::renderer::PaintContext;
 use crate::view::View;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -353,5 +354,37 @@ impl ElementRenderObject for ButtonRenderObject {
 
     fn clear_buffer(&mut self) {
         self.buffer = None;
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let rect = Rect::new(origin, self.size);
+        let background = self.current_background();
+        let border = self.current_border();
+        let highlight = self.highlight_color(background);
+
+        ctx.fill_rounded_rect(rect, 6.0, background);
+        if !self.pressed && self.size.height > 2.0 && self.size.width > 2.0 {
+            ctx.fill_rect(
+                Rect::from_xywh(
+                    origin.x + 1.0,
+                    origin.y + 1.0,
+                    (self.size.width - 2.0).max(0.0),
+                    1.0,
+                ),
+                highlight,
+            );
+        }
+        ctx.stroke_rounded_rect(rect, 6.0, 1.0, border);
+
+        let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
+        let x = origin.x + ((self.size.width - text_w as f32) / 2.0).max(0.0);
+        let y = origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0);
+        ctx.draw_text(
+            Point::new(x, y),
+            self.label.clone(),
+            self.text_color,
+            self.font_size,
+        );
+        true
     }
 }

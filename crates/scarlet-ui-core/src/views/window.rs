@@ -6,6 +6,8 @@
 //! - Proper event handling for window controls
 //! - Content area for child views
 
+#![allow(deprecated)]
+
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -19,6 +21,7 @@ use crate::element::{
 use crate::geometry::{Point, Rect, Size};
 use crate::menu_model::MenuBarModel;
 use crate::pipeline::{MountContext, PipelineId};
+use crate::renderer::PaintContext;
 use crate::state::Listenable;
 use crate::view::View;
 
@@ -618,6 +621,152 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let width_px = libm::ceilf(self.size.width.max(0.0)) as u32;
+        let width = width_px as f32;
+        let titlebar_rect = Rect::from_xywh(origin.x, origin.y, width, TITLEBAR_HEIGHT as f32);
+        let base_color = Color::rgb(235u8, 235u8, 238u8);
+        ctx.fill_rect(titlebar_rect, base_color);
+
+        let close_rect = WindowRenderObject::control_button_rect_static(width_px, 0);
+        let maximize_rect = WindowRenderObject::control_button_rect_static(width_px, 1);
+        let minimize_rect = WindowRenderObject::control_button_rect_static(width_px, 2);
+        let close_color = WindowRenderObject::get_button_color(self.close_button_state);
+        let maximize_color = WindowRenderObject::get_button_color(self.maximize_button_state);
+        let minimize_color = WindowRenderObject::get_button_color(self.minimize_button_state);
+
+        for (rect, color) in [
+            (close_rect, close_color),
+            (maximize_rect, maximize_color),
+            (minimize_rect, minimize_color),
+        ] {
+            ctx.fill_rect(
+                Rect::from_xywh(
+                    origin.x + rect.origin.x,
+                    origin.y + rect.origin.y,
+                    rect.size.width,
+                    rect.size.height,
+                ),
+                color,
+            );
+        }
+
+        let title_x = 10.0;
+        let title_y = 7.0;
+        let title_font_size = 18.0;
+        let title_color = Color::rgb(20u8, 20u8, 24u8);
+        let available_width = if minimize_rect.origin.x > title_x {
+            (minimize_rect.origin.x - title_x - 4.0).max(0.0) as u32
+        } else {
+            0
+        };
+        let display_title = if available_width == 0 {
+            String::new()
+        } else {
+            let full_width = crate::graphics::measure_text_sized(&self.title, title_font_size).0;
+            if full_width <= available_width {
+                self.title.clone()
+            } else {
+                let ellipsis = "...";
+                let ellipsis_width =
+                    crate::graphics::measure_text_sized(ellipsis, title_font_size).0;
+                let max_text_width = available_width.saturating_sub(ellipsis_width);
+                let chars: Vec<char> = self.title.chars().collect();
+                let mut lo = 0usize;
+                let mut hi = chars.len();
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    let prefix: String = chars[..mid].iter().collect();
+                    let pw = crate::graphics::measure_text_sized(&prefix, title_font_size).0;
+                    if pw <= max_text_width {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let cut = lo.min(chars.len());
+                let mut result: String = chars[..cut].iter().collect();
+                result.push_str(ellipsis);
+                result
+            }
+        };
+        ctx.draw_text(
+            Point::new(origin.x + title_x, origin.y + title_y),
+            display_title,
+            title_color,
+            title_font_size,
+        );
+
+        let icon_color = Color::rgb(30u8, 30u8, 34u8);
+        let cx = origin.x + close_rect.origin.x + close_rect.size.width / 2.0;
+        let cy = origin.y + close_rect.origin.y + close_rect.size.height / 2.0;
+        ctx.draw_line(
+            Point::new(cx - 5.0, cy - 5.0),
+            Point::new(cx + 4.0, cy + 4.0),
+            1.0,
+            icon_color,
+        );
+        ctx.draw_line(
+            Point::new(cx + 4.0, cy - 5.0),
+            Point::new(cx - 5.0, cy + 4.0),
+            1.0,
+            icon_color,
+        );
+
+        let mx = origin.x + maximize_rect.origin.x + maximize_rect.size.width / 2.0;
+        let my = origin.y + maximize_rect.origin.y + maximize_rect.size.height / 2.0;
+        ctx.stroke_rect(
+            Rect::from_xywh(mx - 5.0, my - 5.0, 10.0, 10.0),
+            1.0,
+            icon_color,
+        );
+
+        let nx = origin.x + minimize_rect.origin.x + minimize_rect.size.width / 2.0;
+        let ny = origin.y + minimize_rect.origin.y + minimize_rect.size.height / 2.0 + 3.0;
+        ctx.draw_line(
+            Point::new(nx - 6.0, ny),
+            Point::new(nx + 6.0, ny),
+            1.0,
+            icon_color,
+        );
+
+        let titlebar_border = Color::rgb(180u8, 180u8, 185u8);
+        ctx.draw_line(
+            Point::new(origin.x, origin.y + TITLEBAR_HEIGHT as f32 - 1.0),
+            Point::new(
+                origin.x + width - 1.0,
+                origin.y + TITLEBAR_HEIGHT as f32 - 1.0,
+            ),
+            1.0,
+            titlebar_border,
+        );
+        if width > 0.0 {
+            let outer_border_color = Color::rgb(100u8, 100u8, 105u8);
+            ctx.draw_line(
+                Point::new(origin.x, origin.y),
+                Point::new(origin.x + width - 1.0, origin.y),
+                1.0,
+                outer_border_color,
+            );
+            ctx.draw_line(
+                Point::new(origin.x, origin.y),
+                Point::new(origin.x, origin.y + TITLEBAR_HEIGHT as f32 - 1.0),
+                1.0,
+                outer_border_color,
+            );
+            ctx.draw_line(
+                Point::new(origin.x + width - 1.0, origin.y),
+                Point::new(
+                    origin.x + width - 1.0,
+                    origin.y + TITLEBAR_HEIGHT as f32 - 1.0,
+                ),
+                1.0,
+                outer_border_color,
+            );
+        }
+        true
     }
 
     fn update(&mut self, new_view: &dyn View) -> UpdateResult {
@@ -1579,6 +1728,41 @@ impl ElementRenderObject for WindowRenderObject {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let width = libm::ceilf(self.size.width.max(0.0));
+        let height = libm::ceilf(self.size.height.max(0.0));
+        let rect = Rect::from_xywh(origin.x, origin.y, width, height);
+        ctx.fill_rect(rect, self.background_color);
+        if self.decorated && width > 0.0 && height > 0.0 {
+            let border_color = Color::rgb(100u8, 100u8, 105u8);
+            ctx.draw_line(
+                Point::new(origin.x, origin.y),
+                Point::new(origin.x + width - 1.0, origin.y),
+                1.0,
+                border_color,
+            );
+            ctx.draw_line(
+                Point::new(origin.x, origin.y + height - 1.0),
+                Point::new(origin.x + width - 1.0, origin.y + height - 1.0),
+                1.0,
+                border_color,
+            );
+            ctx.draw_line(
+                Point::new(origin.x, origin.y),
+                Point::new(origin.x, origin.y + height - 1.0),
+                1.0,
+                border_color,
+            );
+            ctx.draw_line(
+                Point::new(origin.x + width - 1.0, origin.y),
+                Point::new(origin.x + width - 1.0, origin.y + height - 1.0),
+                1.0,
+                border_color,
+            );
+        }
+        true
     }
 
     fn update(&mut self, _new_view: &dyn View) -> UpdateResult {

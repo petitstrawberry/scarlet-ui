@@ -2,6 +2,8 @@
 //!
 //! Arranges children in a vertical column with spacing and alignment.
 
+#![allow(deprecated)]
+
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::any::Any;

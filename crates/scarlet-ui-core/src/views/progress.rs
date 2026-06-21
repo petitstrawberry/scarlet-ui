@@ -3,10 +3,11 @@
 //! ProgressView displays the progress of a long-running task.
 
 use crate::buffer::Buffer;
-use crate::color::{Color, ColorPalette};
+use crate::color::ColorPalette;
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::Size;
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::renderer::PaintContext;
 use crate::view::View;
 use alloc::boxed::Box;
 use core::any::Any;
@@ -174,6 +175,23 @@ impl ElementRenderObject for ProgressViewRenderObject {
 
     fn clear_buffer(&mut self) {
         self.buffer = None;
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let palette = ColorPalette::default();
+        let bg_color = palette.surface_variant();
+        let fill_color = palette.primary();
+        let radius = self.size.height / 2.0;
+        ctx.fill_rounded_rect(Rect::new(origin, self.size), radius, bg_color);
+        let fill_width = self.size.width * self.value;
+        if fill_width > 0.0 {
+            ctx.fill_rounded_rect(
+                Rect::from_xywh(origin.x, origin.y, fill_width, self.size.height),
+                radius,
+                fill_color,
+            );
+        }
+        true
     }
 
     fn update(&mut self, new_view: &dyn crate::view::View) -> crate::element::UpdateResult {
