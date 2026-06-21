@@ -9,7 +9,7 @@ use crate::buffer::Buffer;
 use crate::compositor::DamageRect;
 use crate::element::{Element, ElementTree, LayoutConstraints};
 use crate::event::EventDispatcher;
-use crate::geometry::{Point, Size};
+use crate::geometry::{Point, Rect, Size};
 use crate::pipeline::{PipelineId, PipelineOwner};
 use crate::renderer::{CpuPaintRenderer, CpuRenderer, FrameSize, PaintContext};
 use crate::views::WindowInfo;
@@ -309,11 +309,20 @@ impl RenderingPipeline {
             origin.y + element.position().y,
         );
         let mut painted = Self::paint_element_self(ctx, element, abs);
+        let clip = Self::clip_for_element(element, abs);
+
+        if let Some((rect, radius)) = clip {
+            ctx.push_rounded_clip(rect, radius);
+        }
 
         for child in element.children() {
             if Self::walk_and_paint(ctx, child.as_ref(), abs) {
                 painted = true;
             }
+        }
+
+        if clip.is_some() {
+            ctx.pop_clip();
         }
 
         painted
@@ -325,6 +334,11 @@ impl RenderingPipeline {
             origin.y + element.position().y,
         );
         let mut painted = false;
+        let clip = Self::clip_for_element(element, abs);
+
+        if let Some((rect, radius)) = clip {
+            ctx.push_rounded_clip(rect, radius);
+        }
 
         for child in element.children() {
             if Self::paint_select_overlays(ctx, child.as_ref(), abs) {
@@ -336,7 +350,20 @@ impl RenderingPipeline {
             painted = true;
         }
 
+        if clip.is_some() {
+            ctx.pop_clip();
+        }
+
         painted
+    }
+
+    fn clip_for_element(element: &dyn Element, abs: Point) -> Option<(Rect, f32)> {
+        element.render_object().and_then(|render_object| {
+            render_object
+                .as_any()
+                .downcast_ref::<crate::views::modifiers::ClipRenderObject>()
+                .map(|clip| (Rect::new(abs, render_object.size()), clip.radius()))
+        })
     }
 
     fn is_expanded_select(element: &dyn Element) -> bool {

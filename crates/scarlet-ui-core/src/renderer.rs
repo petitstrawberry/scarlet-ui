@@ -16,6 +16,12 @@ pub struct FrameSize {
 
 pub type Path = Vec<Point>;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipRegion {
+    pub rect: Rect,
+    pub corner_radius: f32,
+}
+
 pub fn path_rect(rect: Rect) -> Path {
     alloc::vec![
         Point::new(rect.origin.x, rect.origin.y),
@@ -111,6 +117,7 @@ pub enum PaintCommand {
     },
     PushClip {
         rect: Rect,
+        corner_radius: f32,
     },
     PopClip,
     SetOpacity {
@@ -242,7 +249,14 @@ impl PaintContext {
     }
 
     pub fn push_clip(&mut self, rect: Rect) {
-        self.commands.push(PaintCommand::PushClip { rect });
+        self.push_rounded_clip(rect, 0.0);
+    }
+
+    pub fn push_rounded_clip(&mut self, rect: Rect, corner_radius: f32) {
+        self.commands.push(PaintCommand::PushClip {
+            rect,
+            corner_radius,
+        });
     }
 
     pub fn pop_clip(&mut self) {
@@ -330,7 +344,7 @@ pub struct CpuPaintRenderer {
     buffer: Buffer,
     background_color: Color,
     scale_milli: u32,
-    clip_stack: Vec<Rect>,
+    clip_stack: Vec<ClipRegion>,
 }
 
 impl CpuPaintRenderer {
@@ -384,9 +398,9 @@ impl CpuPaintRenderer {
                 PaintCommand::FillPath { path, color } => {
                     let scaled: Vec<Point> =
                         path.iter().copied().map(|p| self.scale_point(p)).collect();
-                    let clip_i = clip.map(|c| {
-                        let r = self.scale_rect(c);
-                        (r.origin.x, r.origin.y, r.size.width, r.size.height)
+                    let clip_i = clip.map(|c| ClipRegion {
+                        rect: self.scale_rect(c.rect),
+                        corner_radius: self.scale_f32(c.corner_radius),
                     });
                     fill_polygon(&mut self.buffer, &scaled, *color, clip_i);
                 }
@@ -397,7 +411,10 @@ impl CpuPaintRenderer {
                 } => {
                     let rect = self.scale_rect(*rect);
                     let stroke_width = self.scale_f32(stroke_width.max(1.0));
-                    let clip = clip.map(|c| self.scale_rect(c));
+                    let clip = clip.map(|c| ClipRegion {
+                        rect: self.scale_rect(c.rect),
+                        corner_radius: self.scale_f32(c.corner_radius),
+                    });
                     stroke_rounded_rect(&mut self.buffer, rect, 0.0, stroke_width, *color, clip);
                 }
                 PaintCommand::StrokeRoundedRect {
@@ -409,7 +426,10 @@ impl CpuPaintRenderer {
                     let rect = self.scale_rect(*rect);
                     let radius = self.scale_f32(*corner_radius);
                     let stroke_width = self.scale_f32(stroke_width.max(1.0));
-                    let clip = clip.map(|c| self.scale_rect(c));
+                    let clip = clip.map(|c| ClipRegion {
+                        rect: self.scale_rect(c.rect),
+                        corner_radius: self.scale_f32(c.corner_radius),
+                    });
                     stroke_rounded_rect(&mut self.buffer, rect, radius, stroke_width, *color, clip);
                 }
                 PaintCommand::StrokePath {
@@ -462,17 +482,34 @@ impl CpuPaintRenderer {
                         let dst_x = dst.origin.x as i32;
                         let dst_y = dst.origin.y as i32;
                         if let Some(c) = clip {
-                            let c = self.scale_rect(c);
-                            self.buffer.composite_clipped(
-                                src,
-                                dst_x,
-                                dst_y,
-                                1.0,
-                                c.origin.x as i32,
-                                c.origin.y as i32,
-                                c.size.width as i32,
-                                c.size.height as i32,
-                            );
+                            let c = ClipRegion {
+                                rect: self.scale_rect(c.rect),
+                                corner_radius: self.scale_f32(c.corner_radius),
+                            };
+                            if c.corner_radius > 0.0 {
+                                self.buffer.composite_clipped_rounded(
+                                    src,
+                                    dst_x,
+                                    dst_y,
+                                    1.0,
+                                    c.rect.origin.x as i32,
+                                    c.rect.origin.y as i32,
+                                    c.rect.size.width as i32,
+                                    c.rect.size.height as i32,
+                                    c.corner_radius,
+                                );
+                            } else {
+                                self.buffer.composite_clipped(
+                                    src,
+                                    dst_x,
+                                    dst_y,
+                                    1.0,
+                                    c.rect.origin.x as i32,
+                                    c.rect.origin.y as i32,
+                                    c.rect.size.width as i32,
+                                    c.rect.size.height as i32,
+                                );
+                            }
                         } else {
                             self.buffer.composite(src, dst_x, dst_y, 1.0);
                         }
@@ -488,11 +525,48 @@ impl CpuPaintRenderer {
                         let dst = self.scale_rect(*dst);
                         let dst_x = dst.origin.x as i32;
                         let dst_y = dst.origin.y as i32;
-                        self.buffer.composite(buf, dst_x, dst_y, *opacity);
+                        if let Some(c) = clip {
+                            let c = ClipRegion {
+                                rect: self.scale_rect(c.rect),
+                                corner_radius: self.scale_f32(c.corner_radius),
+                            };
+                            if c.corner_radius > 0.0 {
+                                self.buffer.composite_clipped_rounded(
+                                    buf,
+                                    dst_x,
+                                    dst_y,
+                                    *opacity,
+                                    c.rect.origin.x as i32,
+                                    c.rect.origin.y as i32,
+                                    c.rect.size.width as i32,
+                                    c.rect.size.height as i32,
+                                    c.corner_radius,
+                                );
+                            } else {
+                                self.buffer.composite_clipped(
+                                    buf,
+                                    dst_x,
+                                    dst_y,
+                                    *opacity,
+                                    c.rect.origin.x as i32,
+                                    c.rect.origin.y as i32,
+                                    c.rect.size.width as i32,
+                                    c.rect.size.height as i32,
+                                );
+                            }
+                        } else {
+                            self.buffer.composite(buf, dst_x, dst_y, *opacity);
+                        }
                     }
                 }
-                PaintCommand::PushClip { rect } => {
-                    self.clip_stack.push(*rect);
+                PaintCommand::PushClip {
+                    rect,
+                    corner_radius,
+                } => {
+                    self.clip_stack.push(ClipRegion {
+                        rect: *rect,
+                        corner_radius: *corner_radius,
+                    });
                 }
                 PaintCommand::PopClip => {
                     self.clip_stack.pop();
@@ -511,12 +585,7 @@ impl CpuPaintRenderer {
     }
 }
 
-fn fill_polygon(
-    buffer: &mut Buffer,
-    path: &[Point],
-    color: Color,
-    clip: Option<(f32, f32, f32, f32)>,
-) {
+fn fill_polygon(buffer: &mut Buffer, path: &[Point], color: Color, clip: Option<ClipRegion>) {
     if path.len() < 3 || color.a <= 0.0 {
         return;
     }
@@ -526,9 +595,9 @@ fn fill_polygon(
         min_y = min_y.min(p.y);
         max_y = max_y.max(p.y);
     }
-    if let Some((_, cy, _, ch)) = clip {
-        min_y = min_y.max(cy);
-        max_y = max_y.min(cy + ch);
+    if let Some(clip) = clip {
+        min_y = min_y.max(clip.rect.origin.y);
+        max_y = max_y.min(clip.rect.origin.y + clip.rect.size.height);
     }
     let min_y = libm::floorf(min_y) as i32;
     let max_y = libm::ceilf(max_y) as i32;
@@ -562,15 +631,36 @@ fn fill_polygon(
         crossings.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
         let mut chunks = crossings.chunks_exact(2);
         for pair in chunks.by_ref() {
-            let x_start = (libm::ceilf(pair[0] - 0.5) as i32).max(0);
-            let x_end = (libm::ceilf(pair[1] - 0.5) as i32).min(bw);
+            let mut x_start = (libm::ceilf(pair[0] - 0.5) as i32).max(0);
+            let mut x_end = (libm::ceilf(pair[1] - 0.5) as i32).min(bw);
+            if let Some(clip) = clip {
+                x_start = x_start.max(libm::floorf(clip.rect.origin.x) as i32);
+                x_end = x_end.min(libm::ceilf(clip.rect.origin.x + clip.rect.size.width) as i32);
+            }
             if x_start >= x_end || x_start >= bw {
                 continue;
             }
             let start = (y as usize * bw as usize) + x_start as usize;
             let count = (x_end - x_start) as usize;
             let row = &mut data[start..start + count];
-            if is_opaque {
+            if let Some(clip) = clip.filter(|clip| clip.corner_radius > 0.0) {
+                for (offset, dst) in row.iter_mut().enumerate() {
+                    let x = x_start + offset as i32;
+                    if !contains_rounded_rect(
+                        clip.rect,
+                        clip.corner_radius,
+                        x as f32 + 0.5,
+                        y as f32 + 0.5,
+                    ) {
+                        continue;
+                    }
+                    if is_opaque {
+                        *dst = bgra;
+                    } else {
+                        *dst = Buffer::blend_pixels(*dst, bgra, 1.0);
+                    }
+                }
+            } else if is_opaque {
                 row.fill(bgra);
             } else {
                 for dst in row {
@@ -587,7 +677,7 @@ fn stroke_rounded_rect(
     corner_radius: f32,
     stroke_width: f32,
     color: Color,
-    clip: Option<Rect>,
+    clip: Option<ClipRegion>,
 ) {
     if rect.size.width <= 0.0 || rect.size.height <= 0.0 || stroke_width <= 0.0 || color.a <= 0.0 {
         return;
@@ -595,7 +685,7 @@ fn stroke_rounded_rect(
 
     let inner = inset_rect(rect, stroke_width);
     let inner_radius = (corner_radius - stroke_width).max(0.0);
-    let (left, top, right, bottom) = raster_bounds(buffer, rect, clip);
+    let (left, top, right, bottom) = raster_bounds(buffer, rect, clip.map(|c| c.rect));
     if right <= left || bottom <= top {
         return;
     }
@@ -609,6 +699,11 @@ fn stroke_rounded_rect(
         let py = y as f32 + 0.5;
         for x in left..right {
             let px = x as f32 + 0.5;
+            if let Some(clip) = clip {
+                if !contains_rounded_rect(clip.rect, clip.corner_radius, px, py) {
+                    continue;
+                }
+            }
             if contains_rounded_rect(rect, corner_radius, px, py)
                 && !contains_rounded_rect(inner, inner_radius, px, py)
             {
@@ -806,6 +901,22 @@ mod tests {
         let bg_pixel = r.buffer().get_pixel(0, 0).unwrap();
         let outside_pixel = r.buffer().get_pixel(5, 5).unwrap();
         assert_eq!(outside_pixel, bg_pixel);
+    }
+
+    #[test]
+    fn rounded_clip_skips_corners() {
+        let bg = Color::rgb(0, 0, 0);
+        let fill = Color::rgb(255, 0, 0);
+        let mut ctx = PaintContext::new();
+        ctx.push_rounded_clip(Rect::from_xywh(0.0, 0.0, 20.0, 20.0), 10.0);
+        ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 20.0, 20.0), fill);
+        ctx.pop_clip();
+
+        let mut r = CpuPaintRenderer::new(Size::new(30.0, 30.0), 1000, bg);
+        r.execute(&ctx);
+
+        assert_eq!(r.buffer().get_pixel(0, 0).unwrap(), bg.to_bgra());
+        assert_eq!(r.buffer().get_pixel(10, 10).unwrap(), fill.to_bgra());
     }
 
     #[test]

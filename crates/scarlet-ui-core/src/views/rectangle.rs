@@ -7,7 +7,7 @@ use crate::color::Color;
 use crate::element::{Element, ElementRenderObject, RenderElement};
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
-use crate::renderer::{PaintContext, path_rect, path_rounded_rect};
+use crate::renderer::{PaintContext, path_rounded_rect};
 use crate::view::View;
 use alloc::boxed::Box;
 use core::any::Any;
@@ -360,24 +360,41 @@ impl ElementRenderObject for RectangleRenderObject {
 
         if self.border_width > 0.0 {
             if let Some(border_color) = self.border_color {
-                let bw = self.border_width;
-                let inner = Rect::new(
-                    Point::new(origin.x + bw, origin.y + bw),
-                    Size::new(
-                        (self.size.width - 2.0 * bw).max(0.0),
-                        (self.size.height - 2.0 * bw).max(0.0),
-                    ),
-                );
-                let inner_radius = (self.corner_radius - bw).max(0.0);
-                if inner_radius > 0.0 {
-                    let path = path_rounded_rect(inner, inner_radius);
-                    ctx.fill_path(path, self.color);
+                if self.corner_radius > 0.0 {
+                    ctx.stroke_rounded_rect(
+                        rect,
+                        self.corner_radius,
+                        self.border_width,
+                        border_color,
+                    );
                 } else {
-                    ctx.fill_rect(inner, self.color);
+                    ctx.stroke_rect(rect, self.border_width, border_color);
                 }
             }
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::element::{ElementRenderObject, LayoutConstraints};
+    use crate::renderer::PaintCommand;
+
+    #[test]
+    fn paint_border_emits_stroke_command() {
+        let mut rect = RectangleRenderObject::new(Color::TRANSPARENT, 0.0, 2.0, Some(Color::RED));
+        rect.layout(LayoutConstraints::tight(10.0, 10.0));
+
+        let mut ctx = PaintContext::new();
+        rect.paint(&mut ctx, Point::ZERO);
+
+        assert!(
+            ctx.commands()
+                .iter()
+                .any(|cmd| matches!(cmd, PaintCommand::StrokeRect { .. }))
+        );
     }
 }
