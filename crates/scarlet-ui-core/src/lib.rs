@@ -26,6 +26,7 @@
 //! traits exposed by this core crate.
 
 #![cfg_attr(not(feature = "std"), no_std)]
+#![feature(portable_simd)]
 
 #[cfg(all(feature = "std", feature = "legacy-scarlet-std"))]
 compile_error!("scarlet-ui features `std` and `legacy-scarlet-std` are mutually exclusive");
