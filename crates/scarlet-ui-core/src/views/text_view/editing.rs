@@ -652,15 +652,18 @@ fn byte_at_visual_line_x(render_object: &mut TextViewRenderObject, target_index:
     let current_rect = render_object.cursor_rect();
     let desired_x = render_object.desired_x.unwrap_or(current_rect.origin.x);
     render_object.desired_x = Some(desired_x);
-    let Some(line) = render_object.layout.visual_lines.get(target_index) else {
-        return render_object.selection.caret.byte;
-    };
-    let point = Point::new(desired_x.max(render_object.layout.text_origin_x), line.y);
+    let x = desired_x.max(render_object.layout.text_origin_x);
     render_object
         .layout
-        .hit_test(point)
-        .map(|position| position.byte)
-        .unwrap_or(line.text_range.end)
+        .byte_at_line_x(target_index, x)
+        .unwrap_or_else(|| {
+            render_object
+                .layout
+                .visual_lines
+                .get(target_index)
+                .map(|line| line.text_range.end)
+                .unwrap_or(render_object.selection.caret.byte)
+        })
 }
 
 fn line_boundary(

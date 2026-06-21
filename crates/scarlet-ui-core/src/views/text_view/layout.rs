@@ -236,6 +236,27 @@ impl TextViewLayout {
             })
     }
 
+    /// Resolve a byte offset on a specific visual line at a given x position.
+    ///
+    /// Unlike [`hit_test`](Self::hit_test), this bypasses y-to-index
+    /// conversion entirely, avoiding floating-point precision errors at line
+    /// boundaries.
+    ///
+    /// # Arguments
+    ///
+    /// * `line_index` - Visual line index.
+    /// * `x` - Widget-local x coordinate.
+    ///
+    /// # Returns
+    ///
+    /// The closest document byte offset, or `None` if the index is out of
+    /// bounds.
+    pub(crate) fn byte_at_line_x(&self, line_index: usize, x: f32) -> Option<usize> {
+        let line = self.visual_lines.get(line_index)?;
+        let local_x = (x - line.x).max(0.0);
+        Some(byte_for_x(line, local_x, self.font_size))
+    }
+
     /// Clamp a scroll offset to the measured content bounds.
     ///
     /// # Arguments
