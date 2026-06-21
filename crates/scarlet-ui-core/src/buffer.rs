@@ -6,7 +6,6 @@ use crate::color::Color;
 use crate::geometry::Size;
 use alloc::vec;
 use alloc::vec::Vec;
-use std::simd::u32x8;
 
 /// Pixel buffer in BGRA format
 ///
@@ -132,14 +131,7 @@ impl Buffer {
 
     /// Clear the buffer with a color
     pub fn clear(&mut self, color: Color) {
-        let pixel = color.to_bgra();
-        let packed = u32x8::splat(pixel);
-        let (head, body, tail) = self.data.as_simd_mut::<8>();
-        for px in head { *px = pixel; }
-        for chunk in body {
-            *chunk = packed;
-        }
-        for px in tail { *px = pixel; }
+        self.data.fill(color.to_bgra());
     }
 
     /// Clear a rectangle with a color
@@ -150,15 +142,10 @@ impl Buffer {
         let pixel = color.to_bgra();
         let x_end = (x + width).min(self.width);
         let y_end = (y + height).min(self.height);
-        let packed = u32x8::splat(pixel);
         for yy in y..y_end {
             let row_start = (yy * self.width + x) as usize;
             let row_end = (yy * self.width + x_end) as usize;
-            let slice = &mut self.data[row_start..row_end];
-            let (head, body, tail) = slice.as_simd_mut::<8>();
-            for px in head { *px = pixel; }
-            for chunk in body { *chunk = packed; }
-            for px in tail { *px = pixel; }
+            self.data[row_start..row_end].fill(pixel);
         }
     }
 
