@@ -38,8 +38,8 @@ pub fn path_circle(center: Point, radius: f32) -> Path {
         .map(|i| {
             let angle = 2.0 * core::f32::consts::PI * (i as f32) / (SEGMENTS as f32);
             Point::new(
-                center.x + radius * angle.cos(),
-                center.y + radius * angle.sin(),
+                center.x + radius * libm::cosf(angle),
+                center.y + radius * libm::sinf(angle),
             )
         })
         .collect()
@@ -49,7 +49,7 @@ pub fn path_rounded_rect(rect: Rect, corner_radius: f32) -> Path {
     let r = corner_radius
         .min(rect.size.width / 2.0)
         .min(rect.size.height / 2.0);
-    let corner_segments = ((r * 0.75).ceil() as usize).clamp(8, 32);
+    let corner_segments = (libm::ceilf(r * 0.75) as usize).clamp(8, 32);
     let x0 = rect.origin.x;
     let y0 = rect.origin.y;
     let x1 = rect.origin.x + rect.size.width;
@@ -65,7 +65,7 @@ pub fn path_rounded_rect(rect: Rect, corner_radius: f32) -> Path {
         for i in 0..corner_segments {
             let t =
                 start_angle + core::f32::consts::FRAC_PI_2 * (i as f32) / (corner_segments as f32);
-            pts.push(Point::new(cx + r * t.cos(), cy + r * t.sin()));
+            pts.push(Point::new(cx + r * libm::cosf(t), cy + r * libm::sinf(t)));
         }
     }
     pts
@@ -530,8 +530,8 @@ fn fill_polygon(
         min_y = min_y.max(cy);
         max_y = max_y.min(cy + ch);
     }
-    let min_y = min_y.floor() as i32;
-    let max_y = max_y.ceil() as i32;
+    let min_y = libm::floorf(min_y) as i32;
+    let max_y = libm::ceilf(max_y) as i32;
     let bw = buffer.width() as i32;
     let bh = buffer.height() as i32;
     let bgra = color.to_bgra();
@@ -561,8 +561,8 @@ fn fill_polygon(
         crossings.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
         let mut chunks = crossings.chunks_exact(2);
         for pair in chunks.by_ref() {
-            let x_start = ((pair[0] - 0.5).ceil() as i32).max(0);
-            let x_end = ((pair[1] - 0.5).ceil() as i32).min(bw);
+            let x_start = (libm::ceilf(pair[0] - 0.5) as i32).max(0);
+            let x_end = (libm::ceilf(pair[1] - 0.5) as i32).min(bw);
             if x_start >= x_end || x_start >= bw {
                 continue;
             }
@@ -611,16 +611,16 @@ fn stroke_rounded_rect(
 }
 
 fn raster_bounds(buffer: &Buffer, rect: Rect, clip: Option<Rect>) -> (i32, i32, i32, i32) {
-    let mut left = rect.origin.x.floor() as i32;
-    let mut top = rect.origin.y.floor() as i32;
-    let mut right = (rect.origin.x + rect.size.width).ceil() as i32;
-    let mut bottom = (rect.origin.y + rect.size.height).ceil() as i32;
+    let mut left = libm::floorf(rect.origin.x) as i32;
+    let mut top = libm::floorf(rect.origin.y) as i32;
+    let mut right = libm::ceilf(rect.origin.x + rect.size.width) as i32;
+    let mut bottom = libm::ceilf(rect.origin.y + rect.size.height) as i32;
 
     if let Some(clip) = clip {
-        left = left.max(clip.origin.x.floor() as i32);
-        top = top.max(clip.origin.y.floor() as i32);
-        right = right.min((clip.origin.x + clip.size.width).ceil() as i32);
-        bottom = bottom.min((clip.origin.y + clip.size.height).ceil() as i32);
+        left = left.max(libm::floorf(clip.origin.x) as i32);
+        top = top.max(libm::floorf(clip.origin.y) as i32);
+        right = right.min(libm::ceilf(clip.origin.x + clip.size.width) as i32);
+        bottom = bottom.min(libm::ceilf(clip.origin.y + clip.size.height) as i32);
     }
 
     (

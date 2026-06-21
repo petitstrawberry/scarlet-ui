@@ -88,8 +88,8 @@ pub trait PlatformWindow: Any {
         let size = self.size();
         let scale_milli = self.output_scale_milli().max(1) as f32;
         (
-            (size.width * scale_milli / 1000.0).round().max(1.0) as u32,
-            (size.height * scale_milli / 1000.0).round().max(1.0) as u32,
+            libm::roundf(size.width * scale_milli / 1000.0).max(1.0) as u32,
+            libm::roundf(size.height * scale_milli / 1000.0).max(1.0) as u32,
         )
     }
 
@@ -169,10 +169,12 @@ pub trait PlatformWindow: Any {
     /// Synchronize focused text-input state with the backend.
     fn sync_text_input(&mut self, _state: Option<&TextInputElementState>) {}
 
+    #[cfg(feature = "std")]
     fn raw_window_handle(&self) -> Option<raw_window_handle::RawWindowHandle> {
         None
     }
 
+    #[cfg(feature = "std")]
     fn raw_display_handle(&self) -> Option<raw_window_handle::RawDisplayHandle> {
         None
     }

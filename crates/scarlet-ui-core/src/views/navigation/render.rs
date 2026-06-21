@@ -13,6 +13,7 @@ use crate::state::State;
 use crate::views::navigation::link::Icon;
 /// - Layout of sidebar and content areas
 /// - Mouse event handling for item selection and hover
+use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;

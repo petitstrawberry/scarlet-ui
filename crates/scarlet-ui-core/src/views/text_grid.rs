@@ -1,6 +1,7 @@
 //! TextGrid View - fixed-cell text rendering for terminal-like surfaces.
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::Any;
 
