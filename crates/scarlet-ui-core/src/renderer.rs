@@ -517,7 +517,7 @@ fn fill_polygon(
     color: Color,
     clip: Option<(f32, f32, f32, f32)>,
 ) {
-    if path.len() < 3 {
+    if path.len() < 3 || color.a <= 0.0 {
         return;
     }
     let mut min_y = f32::MAX;
@@ -535,6 +535,7 @@ fn fill_polygon(
     let bw = buffer.width() as i32;
     let bh = buffer.height() as i32;
     let bgra = color.to_bgra();
+    let is_opaque = color.a >= 1.0;
     let data = buffer.as_mut_slice();
     let n = path.len();
 
@@ -569,7 +570,13 @@ fn fill_polygon(
             let start = (y as usize * bw as usize) + x_start as usize;
             let count = (x_end - x_start) as usize;
             let row = &mut data[start..start + count];
-            row.fill(bgra);
+            if is_opaque {
+                row.fill(bgra);
+            } else {
+                for dst in row {
+                    *dst = Buffer::blend_pixels(*dst, bgra, 1.0);
+                }
+            }
         }
     }
 }
@@ -582,7 +589,7 @@ fn stroke_rounded_rect(
     color: Color,
     clip: Option<Rect>,
 ) {
-    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || stroke_width <= 0.0 {
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || stroke_width <= 0.0 || color.a <= 0.0 {
         return;
     }
 
@@ -594,6 +601,7 @@ fn stroke_rounded_rect(
     }
 
     let pixel = color.to_bgra();
+    let is_opaque = color.a >= 1.0;
     let width = buffer.width() as usize;
     let data = buffer.as_mut_slice();
 
@@ -604,7 +612,12 @@ fn stroke_rounded_rect(
             if contains_rounded_rect(rect, corner_radius, px, py)
                 && !contains_rounded_rect(inner, inner_radius, px, py)
             {
-                data[y as usize * width + x as usize] = pixel;
+                let idx = y as usize * width + x as usize;
+                if is_opaque {
+                    data[idx] = pixel;
+                } else {
+                    data[idx] = Buffer::blend_pixels(data[idx], pixel, 1.0);
+                }
             }
         }
     }
@@ -694,6 +707,52 @@ mod tests {
         let mut r = CpuPaintRenderer::new(Size::new(100.0, 100.0), 1000, Color::rgb(0, 0, 0));
         r.execute(&ctx);
         assert!(r.buffer().get_pixel(5, 5).unwrap() > 0);
+    }
+
+    #[test]
+    fn transparent_fill_preserves_existing_pixels() {
+        let bg = Color::rgb(255, 0, 0);
+        let mut ctx = PaintContext::new();
+        ctx.fill_rect(
+            Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0)),
+            Color::TRANSPARENT,
+        );
+        let mut r = CpuPaintRenderer::new(Size::new(20.0, 20.0), 1000, bg);
+        r.execute(&ctx);
+        assert_eq!(r.buffer().get_pixel(5, 5).unwrap(), bg.to_bgra());
+    }
+
+    #[test]
+    fn transparent_stroke_preserves_existing_pixels() {
+        let bg = Color::rgb(255, 0, 0);
+        let mut ctx = PaintContext::new();
+        ctx.stroke_rounded_rect(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0),
+            2.0,
+            2.0,
+            Color::TRANSPARENT,
+        );
+        let mut r = CpuPaintRenderer::new(Size::new(20.0, 20.0), 1000, bg);
+        r.execute(&ctx);
+        assert_eq!(r.buffer().get_pixel(1, 1).unwrap(), bg.to_bgra());
+    }
+
+    #[test]
+    fn translucent_fill_blends_with_existing_pixels() {
+        let bg = Color::rgb(255, 255, 255);
+        let mut ctx = PaintContext::new();
+        ctx.fill_rect(
+            Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0)),
+            Color::rgba(0, 0, 0, 128),
+        );
+        let mut r = CpuPaintRenderer::new(Size::new(20.0, 20.0), 1000, bg);
+        r.execute(&ctx);
+
+        let bytes = r.buffer().get_pixel(5, 5).unwrap().to_le_bytes();
+        assert!((126..=127).contains(&bytes[0]));
+        assert!((126..=127).contains(&bytes[1]));
+        assert!((126..=127).contains(&bytes[2]));
+        assert_eq!(bytes[3], 255);
     }
 
     #[test]

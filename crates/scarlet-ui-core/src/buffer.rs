@@ -325,7 +325,7 @@ impl Buffer {
                             continue;
                         }
                         let src_x = target_x - dst_x;
-                        let src_pixel = src.data[(src_row + src_x as usize)];
+                        let src_pixel = src.data[src_row + src_x as usize];
                         let dst_idx = dst_row + target_x as usize;
                         self.data[dst_idx] =
                             Self::blend_pixels(self.data[dst_idx], src_pixel, opacity * coverage);
@@ -334,7 +334,7 @@ impl Buffer {
                 }
 
                 let src_x = target_x - dst_x;
-                let src_pixel = src.data[(src_row + src_x as usize)];
+                let src_pixel = src.data[src_row + src_x as usize];
                 let dst_idx = dst_row + target_x as usize;
                 self.data[dst_idx] = Self::blend_pixels(self.data[dst_idx], src_pixel, opacity);
             }
@@ -344,7 +344,7 @@ impl Buffer {
     /// Blend two pixels with alpha
     ///
     /// Pixel format: 0xAARRGGBB in memory, becomes BGRA in little-endian
-    fn blend_pixels(dst: u32, src: u32, opacity: f32) -> u32 {
+    pub(crate) fn blend_pixels(dst: u32, src: u32, opacity: f32) -> u32 {
         let dst_bytes = dst.to_le_bytes();
         let src_bytes = src.to_le_bytes();
 
