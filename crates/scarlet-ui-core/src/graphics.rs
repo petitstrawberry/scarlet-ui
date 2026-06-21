@@ -646,11 +646,52 @@ pub fn measure_text_sized_with_font_stack(
         })
 }
 
+/// Return the line advance used by text drawing for the default vector font.
+///
+/// # Arguments
+///
+/// * `font_size_px` - Font size in pixels.
+///
+/// # Returns
+///
+/// Distance in pixels between two text line origins.
+pub fn line_height_sized(font_size_px: f32) -> u32 {
+    if let Some(font_stack) = default_font_stack() {
+        line_height_sized_with_font_stack(font_size_px, &font_stack)
+    } else {
+        fallback_line_height(font_size_px)
+    }
+}
+
+/// Return the line advance used by text drawing for an explicit font stack.
+///
+/// # Arguments
+///
+/// * `font_size_px` - Font size in pixels.
+/// * `font_stack` - Font stack to use.
+///
+/// # Returns
+///
+/// Distance in pixels between two text line origins.
+pub fn line_height_sized_with_font_stack(font_size_px: f32, font_stack: &FontStack) -> u32 {
+    ceil_i32(line_advance(font_size_px, font_stack)).max(1) as u32
+}
+
+fn fallback_line_height(font_size_px: f32) -> u32 {
+    ceil_i32(font_size_px.max(1.0)).max(1) as u32
+}
+
+fn line_advance(font_size_px: f32, font_stack: &FontStack) -> f32 {
+    let scale = PxScale::from(font_size_px);
+    let scaled = font_stack.primary.as_scaled(scale);
+    scaled.height() + scaled.line_gap()
+}
+
 fn fallback_text_metrics(text: &str, font_size_px: f32) -> (u32, u32) {
     let fs = font_size_px.max(1.0);
     let char_w = ceil_i32(fs * 0.60).max(1) as u32;
     let w = (text.chars().count() as u32).saturating_mul(char_w);
-    let h = ceil_i32(fs).max(1) as u32;
+    let h = fallback_line_height(font_size_px);
     (w, h)
 }
 
@@ -681,7 +722,7 @@ fn measure_text_uncached(text: &str, font_size_px: f32, font_stack: &FontStack) 
         max_line_w = line_w;
     }
 
-    let line_h = scaled.height() + scaled.line_gap();
+    let line_h = line_advance(font_size_px, font_stack);
     let total_h = if lines <= 1 {
         scaled.height()
     } else {

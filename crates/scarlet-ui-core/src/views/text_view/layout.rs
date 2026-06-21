@@ -84,7 +84,7 @@ impl TextViewLayout {
         scroll: TextViewScroll,
         show_line_numbers: bool,
     ) -> Self {
-        let line_height = font_size * 1.2;
+        let line_height = graphics::line_height_sized(font_size) as f32;
         let gutter_width = if show_line_numbers {
             let digits = document.line_count().max(1).to_string();
             graphics::measure_text_sized(&digits, font_size).0 as f32 + GUTTER_PADDING
@@ -494,8 +494,9 @@ fn visible_range(
         return 0..0;
     }
     let first = libm::floorf(scroll_y / line_height).max(0.0) as usize;
-    let visible_count = libm::ceilf(viewport_height / line_height).max(1.0) as usize;
-    first.saturating_sub(1)..(first + visible_count + 2).min(line_count)
+    let end = libm::ceilf((scroll_y + viewport_height) / line_height)
+        .max(first.saturating_add(1) as f32) as usize;
+    first..end.min(line_count)
 }
 
 fn strip_line_ending(text: &str) -> &str {

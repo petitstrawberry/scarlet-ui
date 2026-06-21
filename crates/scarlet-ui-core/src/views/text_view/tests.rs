@@ -294,6 +294,22 @@ fn text_view_layout_with_text_tracks_logical_lines() {
 }
 
 #[test]
+fn text_view_line_height_uses_graphics_line_advance() {
+    let document = TextDocument::from_str("one\ntwo");
+    let layout = TextViewLayout::compute(
+        &document,
+        14.0,
+        8.0,
+        WrapMode::None,
+        Size::new(200.0, 120.0),
+        TextViewScroll::default(),
+        false,
+    );
+
+    assert_eq!(layout.line_height, graphics::line_height_sized(14.0) as f32);
+}
+
+#[test]
 fn wrap_none_keeps_one_visual_line_per_logical_line() {
     let document = TextDocument::from_str("short\na much longer line");
     let layout = TextViewLayout::compute(
@@ -402,6 +418,49 @@ fn visible_range_tracks_viewport_scroll() {
     );
     assert!(base.visible_lines.start < scrolled.visible_lines.start);
     assert!(scrolled.visible_lines.end < scrolled.visual_lines.len() + 1);
+}
+
+#[test]
+fn visible_range_contains_only_rows_intersecting_viewport() {
+    let document = TextDocument::from_str("0\n1\n2\n3\n4\n5\n6\n7\n8\n9");
+    let base = TextViewLayout::compute(
+        &document,
+        10.0,
+        0.0,
+        WrapMode::None,
+        Size::new(100.0, 100.0),
+        TextViewScroll::default(),
+        false,
+    );
+    let line_height = base.line_height;
+    let viewport_height = line_height * 3.0;
+    let layout = TextViewLayout::compute(
+        &document,
+        10.0,
+        0.0,
+        WrapMode::None,
+        Size::new(100.0, viewport_height),
+        TextViewScroll {
+            x: 0.0,
+            y: line_height * 4.0,
+        },
+        false,
+    );
+
+    assert_eq!(layout.visible_lines, 4..7);
+    for (index, line) in layout.visual_lines.iter().enumerate() {
+        let intersects_viewport = line.y < layout.padding + layout.viewport_height
+            && line.y + layout.line_height > layout.padding;
+        assert_eq!(
+            layout.visible_lines.contains(&index),
+            intersects_viewport,
+            "line {index}: y={} line_height={} viewport={}..{}",
+            line.y,
+            layout.line_height,
+            layout.padding,
+            layout.padding + layout.viewport_height
+        );
+    }
 }
 
 #[test]

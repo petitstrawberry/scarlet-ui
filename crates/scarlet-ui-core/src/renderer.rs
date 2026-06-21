@@ -1115,6 +1115,44 @@ mod tests {
     }
 
     #[test]
+    fn draw_text_respects_clip() {
+        if crate::graphics::default_font_stack().is_none() {
+            return;
+        }
+
+        let bg = Color::rgb(255, 255, 255);
+        let fg = Color::rgb(0, 0, 0);
+        let mut ctx = PaintContext::new();
+        ctx.push_clip(Rect::from_xywh(0.0, 0.0, 120.0, 12.0));
+        ctx.draw_text(Point::new(4.0, 0.0), "Hg", fg, 20.0);
+        ctx.pop_clip();
+
+        let mut r = CpuPaintRenderer::new(Size::new(120.0, 40.0), 1000, bg);
+        r.execute(&ctx);
+
+        let bg_pixel = bg.to_bgra();
+        let mut touched_inside = false;
+        for y in 0..12u32 {
+            for x in 0..120u32 {
+                if r.buffer().get_pixel(x, y).unwrap() != bg_pixel {
+                    touched_inside = true;
+                    break;
+                }
+            }
+            if touched_inside {
+                break;
+            }
+        }
+        assert!(touched_inside);
+
+        for y in 12..40u32 {
+            for x in 0..120u32 {
+                assert_eq!(r.buffer().get_pixel(x, y).unwrap(), bg_pixel);
+            }
+        }
+    }
+
+    #[test]
     fn clear_removes_all() {
         let mut ctx = PaintContext::new();
         ctx.fill_rect(Rect::zero(), Color::rgb(0, 0, 0));
