@@ -545,13 +545,25 @@ impl CpuPaintRenderer {
                     font_size_px,
                 } => {
                     let mut canvas = crate::graphics::Canvas::for_buffer(&mut self.buffer);
-                    canvas.draw_text_sized(
-                        position.x as i32,
-                        position.y as i32,
-                        text,
-                        *color,
-                        *font_size_px,
-                    );
+                    if let Some(c) = clip {
+                        canvas.draw_text_sized_clipped(
+                            position.x as i32,
+                            position.y as i32,
+                            text,
+                            *color,
+                            *font_size_px,
+                            c.rect,
+                            c.corner_radius,
+                        );
+                    } else {
+                        canvas.draw_text_sized(
+                            position.x as i32,
+                            position.y as i32,
+                            text,
+                            *color,
+                            *font_size_px,
+                        );
+                    }
                 }
                 PaintCommand::DrawBuffer { dst, buffer_idx } => {
                     if let Some(src) = ctx.buffer(BufferHandle(*buffer_idx)) {

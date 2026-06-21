@@ -10,6 +10,7 @@ use ab_glyph::{Font, FontRef, Glyph, InvalidFont, PxScale, PxScaleFont, ScaleFon
 
 use crate::buffer::Buffer;
 use crate::color::Color;
+use crate::geometry::Rect;
 use crate::logln as println;
 #[cfg(feature = "std")]
 use crate::os::Read;
@@ -702,6 +703,12 @@ pub struct Canvas<'a> {
     scale_milli: u32,
 }
 
+#[derive(Clone, Copy)]
+struct PhysicalClip {
+    rect: Rect,
+    corner_radius: f32,
+}
+
 impl<'a> Canvas<'a> {
     /// Create a new canvas from a BGRA buffer
     pub fn new(buffer: &'a mut [u8], width: u32, height: u32) -> Self {
@@ -884,7 +891,50 @@ impl<'a> Canvas<'a> {
         let Some(font_stack) = default_font_stack() else {
             return;
         };
-        self.draw_text_sized_with_font_stack(x, y, text, color, font_size_px, &font_stack);
+        self.draw_text_sized_with_font_stack_internal(
+            x,
+            y,
+            text,
+            color,
+            font_size_px,
+            &font_stack,
+            None,
+        );
+    }
+
+    /// Draw text with explicit font size clipped to a logical rectangle.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - Left position in pixels.
+    /// * `y` - Top position in pixels.
+    /// * `text` - Text to draw.
+    /// * `color` - Text color.
+    /// * `font_size_px` - Font size in pixels.
+    /// * `clip_rect` - Logical clip rectangle.
+    /// * `corner_radius` - Logical rounded clip radius.
+    pub fn draw_text_sized_clipped(
+        &mut self,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: Color,
+        font_size_px: f32,
+        clip_rect: Rect,
+        corner_radius: f32,
+    ) {
+        let Some(font_stack) = default_font_stack() else {
+            return;
+        };
+        self.draw_text_sized_with_font_stack_internal(
+            x,
+            y,
+            text,
+            color,
+            font_size_px,
+            &font_stack,
+            Some(self.scale_clip(clip_rect, corner_radius)),
+        );
     }
 
     /// Draw text with explicit font size and font stack.
@@ -911,6 +961,27 @@ impl<'a> Canvas<'a> {
         color: Color,
         font_size_px: f32,
         font_stack: &FontStack,
+    ) {
+        self.draw_text_sized_with_font_stack_internal(
+            x,
+            y,
+            text,
+            color,
+            font_size_px,
+            font_stack,
+            None,
+        );
+    }
+
+    fn draw_text_sized_with_font_stack_internal(
+        &mut self,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: Color,
+        font_size_px: f32,
+        font_stack: &FontStack,
+        clip: Option<PhysicalClip>,
     ) {
         let ui_scale = (self.scale_milli as f32) / 1000.0;
         let scale = PxScale::from(font_size_px * ui_scale);
@@ -946,12 +1017,34 @@ impl<'a> Canvas<'a> {
                         let alpha = (a as f32) / 255.0;
                         let px = base_x + ox + gx as i32;
                         let py = base_y + oy + gy as i32;
+                        if let Some(clip) = clip
+                            && !contains_rounded_rect(
+                                clip.rect,
+                                clip.corner_radius,
+                                px as f32 + 0.5,
+                                py as f32 + 0.5,
+                            )
+                        {
+                            continue;
+                        }
                         self.put_pixel_physical_alpha(px, py, color, alpha);
                     }
                 }
             }
 
             caret_x += scaled.h_advance(glyph_id);
+        }
+    }
+
+    fn scale_clip(&self, rect: Rect, corner_radius: f32) -> PhysicalClip {
+        let scale = self.scale_milli as f32 / 1000.0;
+        let x0 = libm::floorf(rect.origin.x * scale);
+        let y0 = libm::floorf(rect.origin.y * scale);
+        let x1 = libm::ceilf((rect.origin.x + rect.size.width) * scale);
+        let y1 = libm::ceilf((rect.origin.y + rect.size.height) * scale);
+        PhysicalClip {
+            rect: Rect::from_xywh(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)),
+            corner_radius: (corner_radius.max(0.0) * scale).max(0.0),
         }
     }
 
@@ -991,4 +1084,28 @@ impl<'a> Canvas<'a> {
             }
         }
     }
+}
+
+fn contains_rounded_rect(rect: Rect, corner_radius: f32, px: f32, py: f32) -> bool {
+    let left = rect.origin.x;
+    let top = rect.origin.y;
+    let right = rect.origin.x + rect.size.width;
+    let bottom = rect.origin.y + rect.size.height;
+    if px < left || px >= right || py < top || py >= bottom {
+        return false;
+    }
+
+    let radius = corner_radius
+        .max(0.0)
+        .min(rect.size.width * 0.5)
+        .min(rect.size.height * 0.5);
+    if radius <= 0.0 {
+        return true;
+    }
+
+    let cx = px.clamp(left + radius, right - radius);
+    let cy = py.clamp(top + radius, bottom - radius);
+    let dx = px - cx;
+    let dy = py - cy;
+    dx * dx + dy * dy <= radius * radius
 }
