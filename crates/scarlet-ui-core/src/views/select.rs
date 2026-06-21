@@ -544,11 +544,7 @@ impl ElementRenderObject for SelectRenderObject {
         let subtle = palette.text_secondary();
 
         ctx.fill_rect(Rect::new(origin, Size::new(w, h)), Color::TRANSPARENT);
-        ctx.fill_rounded_rect(
-            Rect::from_xywh(origin.x, origin.y, w, row_h),
-            6.0,
-            background,
-        );
+        ctx.fill_rect(Rect::from_xywh(origin.x, origin.y, w, row_h), background);
         ctx.stroke_rect(Rect::from_xywh(origin.x, origin.y, w, row_h), 1.0, border);
 
         let label = selected_label.map_or(self.placeholder.as_str(), String::as_str);

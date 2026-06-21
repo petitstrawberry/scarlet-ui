@@ -104,6 +104,9 @@ pub trait PreviewSession {
     fn handle_event(&mut self, event: &Event) -> bool;
     fn take_emitted_events(&mut self) -> Vec<Event>;
     fn focused_text_input_state(&self) -> Option<TextInputElementState>;
+    fn has_dirty(&self) -> bool {
+        true
+    }
     fn render(&mut self) -> Option<PreviewFrame<'_>>;
     fn set_paint_enabled(&mut self, _enabled: bool) {}
 }
@@ -336,6 +339,10 @@ impl PreviewSession for ViewPreviewSession {
         self.pipeline.focused_text_input_state()
     }
 
+    fn has_dirty(&self) -> bool {
+        self.pipeline.has_dirty()
+    }
+
     fn render(&mut self) -> Option<PreviewFrame<'_>> {
         let (buffer, damage) = self.pipeline.render_with_damage()?;
         Some(PreviewFrame { buffer, damage })
@@ -556,17 +563,19 @@ impl PreviewHost {
             self.sync_after_reload = false;
         }
 
-        if let Some(frame) = session.render() {
-            let damage = if self.full_present_frames > 0 {
-                self.full_present_frames -= 1;
-                None
-            } else {
-                frame.damage
-            };
-            if let Some(gpu) = self.gpu_present.as_mut() {
-                gpu(frame.buffer, damage);
-            } else {
-                self.window.present_with_damage(frame.buffer, damage);
+        if session.has_dirty() || self.full_present_frames > 0 {
+            if let Some(frame) = session.render() {
+                let damage = if self.full_present_frames > 0 {
+                    self.full_present_frames -= 1;
+                    None
+                } else {
+                    frame.damage
+                };
+                if let Some(gpu) = self.gpu_present.as_mut() {
+                    gpu(frame.buffer, damage);
+                } else {
+                    self.window.present_with_damage(frame.buffer, damage);
+                }
             }
         }
 

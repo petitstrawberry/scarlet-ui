@@ -6,8 +6,9 @@ use crate::buffer::Buffer;
 use crate::color::Color;
 use crate::color::ColorPalette;
 use crate::element::{Element, ElementRenderObject, LayoutConstraints};
-use crate::geometry::{Point, Size};
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::views::navigation::link::Icon;
 /// - Layout of sidebar and content areas
@@ -378,6 +379,64 @@ impl ElementRenderObject for NavigationViewRenderObject {
 
     fn clear_buffer(&mut self) {
         self.buffer = None;
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let palette = ColorPalette::default();
+        let sidebar_height = self.size.height.max(0.0);
+        let sidebar_width = self.sidebar_width.max(0.0);
+
+        ctx.fill_rect(
+            Rect::from_xywh(origin.x, origin.y, sidebar_width, sidebar_height),
+            palette.background_secondary(),
+        );
+
+        let selected = self.selected_index.get();
+        for i in 0..self.link_count {
+            let y = i as f32 * self.item_height;
+            let is_selected = selected == i;
+            let is_hovered = self.hovered_index == Some(i);
+            let label = self.labels.get(i).map(|s| s.as_str()).unwrap_or("Item");
+
+            if is_hovered {
+                ctx.fill_rect(
+                    Rect::from_xywh(origin.x, origin.y + y, sidebar_width, self.item_height),
+                    palette.menu_hover(),
+                );
+            }
+
+            if is_selected {
+                ctx.fill_rect(
+                    Rect::from_xywh(origin.x, origin.y + y, 3.0, self.item_height),
+                    palette.primary(),
+                );
+            }
+
+            let text_color = if is_selected {
+                palette.primary()
+            } else {
+                palette.text()
+            };
+            let text_x = origin.x + self.item_padding + 8.0;
+            let text_y = origin.y + y + (self.item_height - self.font_size * 1.2) / 2.0;
+            ctx.draw_text(
+                Point::new(text_x, text_y),
+                label.to_owned(),
+                text_color,
+                self.font_size,
+            );
+        }
+
+        ctx.fill_rect(
+            Rect::from_xywh(
+                origin.x + sidebar_width - 1.0,
+                origin.y,
+                1.0,
+                sidebar_height,
+            ),
+            palette.border(),
+        );
+        true
     }
 
     fn hit_test(&self, point: Point) -> bool {

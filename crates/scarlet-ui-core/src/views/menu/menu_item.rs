@@ -6,8 +6,9 @@
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::Size;
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::renderer::PaintContext;
 use crate::view::View;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -319,5 +320,26 @@ impl ElementRenderObject for MenuItemRenderObject {
 
     fn clear_buffer(&mut self) {
         self.buffer = None;
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let background = self.current_background();
+        let palette = ColorPalette::default();
+        let text_color = palette.text_primary();
+
+        if self.hovered || self.pressed || self.selected {
+            ctx.fill_rect(Rect::new(origin, self.size), background);
+        }
+
+        let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
+        let x = origin.x + ((self.size.width - text_w as f32) / 2.0).max(0.0);
+        let y = origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0);
+        ctx.draw_text(
+            Point::new(x, y),
+            self.label.clone(),
+            text_color,
+            self.font_size,
+        );
+        true
     }
 }

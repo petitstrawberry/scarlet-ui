@@ -193,6 +193,7 @@ fn run_cargo_preview_build(
     let mut command = Command::new("cargo");
     command
         .arg("build")
+        .arg("--release")
         .arg("--manifest-path")
         .arg(manifest_path)
         .arg("--target-dir")
@@ -731,7 +732,7 @@ fn built_dylib_path(args: &impl ProjectArgs, target_dir: &Path, crate_name: &str
     if let Some(target) = args.target() {
         path = path.join(target);
     }
-    path.join("debug")
+    path.join("release")
         .join(format!("lib{}.{}", crate_name, dylib_extension()))
 }
 

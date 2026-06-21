@@ -1,3 +1,4 @@
+use scarlet_ui::hstack;
 use scarlet_ui::prelude::*;
 use scarlet_ui::vstack;
 
@@ -52,6 +53,78 @@ impl Application for PreviewApp {
     }
 }
 
+#[derive(Clone)]
+struct WidgetFactory {
+    slider_value: State<f32>,
+    toggle_on: State<bool>,
+    text_value: State<String>,
+    selected: State<usize>,
+}
+
+impl Default for WidgetFactory {
+    fn default() -> Self {
+        Self {
+            slider_value: State::new(StateId::new(20), 0.42),
+            toggle_on: State::new(StateId::new(21), true),
+            text_value: State::new(StateId::new(22), String::from("Factory text field")),
+            selected: State::new(StateId::new(23), 1usize),
+        }
+    }
+}
+
+impl WidgetFactory {
+    fn row<V: View + Clone>(&self, name: &str, control: V) -> impl View + Clone + use<V> {
+        hstack! {
+            Text::new(name.to_owned()).font_size(14.0).frame(150.0, 32.0),
+            control,
+        }
+        .spacing(18.0)
+    }
+
+    fn button(&self) -> impl View + Clone + use<> {
+        Button::new("Factory Button").padding(12.0)
+    }
+
+    fn text_field(&self) -> impl View + Clone + use<> {
+        TextField::new(self.text_value.clone()).placeholder("Enter value")
+    }
+
+    fn slider(&self) -> impl View + Clone + use<> {
+        Slider::new(self.slider_value.clone()).min(0.0).max(1.0)
+    }
+
+    fn toggle(&self) -> impl View + Clone + use<> {
+        Toggle::new(self.toggle_on.clone())
+    }
+
+    fn progress(&self) -> impl View + Clone + use<> {
+        ProgressView::new(0.68)
+    }
+
+    fn select(&self) -> impl View + Clone + use<> {
+        Select::new(
+            vec![
+                String::from("Compact"),
+                String::from("Regular"),
+                String::from("Expanded"),
+            ],
+            self.selected.clone(),
+        )
+    }
+
+    fn rectangle(&self) -> impl View + Clone + use<> {
+        Rectangle::new()
+            .fill(Color::rgb(235u8, 242u8, 255u8))
+            .corner_radius(8.0)
+            .border(1.0, Color::rgb(105u8, 135u8, 210u8))
+            .frame(220.0, 28.0)
+    }
+
+    fn divider(&self) -> impl View + Clone + use<> {
+        Divider::new().frame(220.0, 1.0)
+    }
+}
+
 #[scarlet_ui::preview(width = 420.0, height = 260.0)]
 fn counter_preview() -> impl View + Clone {
     PreviewApp::default()
@@ -83,6 +156,25 @@ fn showcase_preview() -> impl View + Clone {
     }
     .spacing(16.0)
     .padding(20.0)
+}
+
+#[scarlet_ui::preview(width = 760.0, height = 620.0)]
+fn widget_factory_preview() -> impl View + Clone {
+    let factory = WidgetFactory::default();
+
+    vstack! {
+        Text::new("Widget Factory").font_size(28.0),
+        factory.row("Button", factory.button()),
+        factory.row("TextField", factory.text_field()),
+        factory.row("Slider", factory.slider()),
+        factory.row("Toggle", factory.toggle()),
+        factory.row("ProgressView", factory.progress()),
+        factory.row("Select", factory.select()),
+        factory.row("Rectangle", factory.rectangle()),
+        factory.row("Divider", factory.divider()),
+    }
+    .spacing(14.0)
+    .padding(24.0)
 }
 
 fn main() -> scarlet_ui::Result<()> {

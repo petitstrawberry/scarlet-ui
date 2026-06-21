@@ -82,6 +82,17 @@ pub enum PaintCommand {
         stroke_width: f32,
         color: Color,
     },
+    StrokeRect {
+        rect: Rect,
+        stroke_width: f32,
+        color: Color,
+    },
+    StrokeRoundedRect {
+        rect: Rect,
+        corner_radius: f32,
+        stroke_width: f32,
+        color: Color,
+    },
     DrawText {
         position: Point,
         text: String,
@@ -161,7 +172,26 @@ impl PaintContext {
     }
 
     pub fn stroke_rect(&mut self, rect: Rect, stroke_width: f32, color: Color) {
-        self.stroke_path(path_rect(rect), stroke_width, color);
+        self.commands.push(PaintCommand::StrokeRect {
+            rect,
+            stroke_width,
+            color,
+        });
+    }
+
+    pub fn stroke_rounded_rect(
+        &mut self,
+        rect: Rect,
+        corner_radius: f32,
+        stroke_width: f32,
+        color: Color,
+    ) {
+        self.commands.push(PaintCommand::StrokeRoundedRect {
+            rect,
+            corner_radius,
+            stroke_width,
+            color,
+        });
     }
 
     pub fn draw_line(&mut self, from: Point, to: Point, stroke_width: f32, color: Color) {
@@ -360,6 +390,28 @@ impl CpuPaintRenderer {
                     });
                     fill_polygon(&mut self.buffer, &scaled, *color, clip_i);
                 }
+                PaintCommand::StrokeRect {
+                    rect,
+                    stroke_width,
+                    color,
+                } => {
+                    let rect = self.scale_rect(*rect);
+                    let stroke_width = self.scale_f32(stroke_width.max(1.0));
+                    let clip = clip.map(|c| self.scale_rect(c));
+                    stroke_rounded_rect(&mut self.buffer, rect, 0.0, stroke_width, *color, clip);
+                }
+                PaintCommand::StrokeRoundedRect {
+                    rect,
+                    corner_radius,
+                    stroke_width,
+                    color,
+                } => {
+                    let rect = self.scale_rect(*rect);
+                    let radius = self.scale_f32(*corner_radius);
+                    let stroke_width = self.scale_f32(stroke_width.max(1.0));
+                    let clip = clip.map(|c| self.scale_rect(c));
+                    stroke_rounded_rect(&mut self.buffer, rect, radius, stroke_width, *color, clip);
+                }
                 PaintCommand::StrokePath {
                     path,
                     stroke_width,
@@ -522,6 +574,97 @@ fn fill_polygon(
     }
 }
 
+fn stroke_rounded_rect(
+    buffer: &mut Buffer,
+    rect: Rect,
+    corner_radius: f32,
+    stroke_width: f32,
+    color: Color,
+    clip: Option<Rect>,
+) {
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || stroke_width <= 0.0 {
+        return;
+    }
+
+    let inner = inset_rect(rect, stroke_width);
+    let inner_radius = (corner_radius - stroke_width).max(0.0);
+    let (left, top, right, bottom) = raster_bounds(buffer, rect, clip);
+    if right <= left || bottom <= top {
+        return;
+    }
+
+    let pixel = color.to_bgra();
+    let width = buffer.width() as usize;
+    let data = buffer.as_mut_slice();
+
+    for y in top..bottom {
+        let py = y as f32 + 0.5;
+        for x in left..right {
+            let px = x as f32 + 0.5;
+            if contains_rounded_rect(rect, corner_radius, px, py)
+                && !contains_rounded_rect(inner, inner_radius, px, py)
+            {
+                data[y as usize * width + x as usize] = pixel;
+            }
+        }
+    }
+}
+
+fn raster_bounds(buffer: &Buffer, rect: Rect, clip: Option<Rect>) -> (i32, i32, i32, i32) {
+    let mut left = rect.origin.x.floor() as i32;
+    let mut top = rect.origin.y.floor() as i32;
+    let mut right = (rect.origin.x + rect.size.width).ceil() as i32;
+    let mut bottom = (rect.origin.y + rect.size.height).ceil() as i32;
+
+    if let Some(clip) = clip {
+        left = left.max(clip.origin.x.floor() as i32);
+        top = top.max(clip.origin.y.floor() as i32);
+        right = right.min((clip.origin.x + clip.size.width).ceil() as i32);
+        bottom = bottom.min((clip.origin.y + clip.size.height).ceil() as i32);
+    }
+
+    (
+        left.max(0),
+        top.max(0),
+        right.min(buffer.width() as i32),
+        bottom.min(buffer.height() as i32),
+    )
+}
+
+fn contains_rounded_rect(rect: Rect, corner_radius: f32, px: f32, py: f32) -> bool {
+    let left = rect.origin.x;
+    let top = rect.origin.y;
+    let right = rect.origin.x + rect.size.width;
+    let bottom = rect.origin.y + rect.size.height;
+    if px < left || px >= right || py < top || py >= bottom {
+        return false;
+    }
+
+    let radius = corner_radius
+        .max(0.0)
+        .min(rect.size.width * 0.5)
+        .min(rect.size.height * 0.5);
+    if radius <= 0.0 {
+        return true;
+    }
+
+    let cx = px.clamp(left + radius, right - radius);
+    let cy = py.clamp(top + radius, bottom - radius);
+    let dx = px - cx;
+    let dy = py - cy;
+    dx * dx + dy * dy <= radius * radius
+}
+
+fn inset_rect(rect: Rect, inset: f32) -> Rect {
+    Rect::new(
+        Point::new(rect.origin.x + inset, rect.origin.y + inset),
+        Size::new(
+            (rect.size.width - inset * 2.0).max(0.0),
+            (rect.size.height - inset * 2.0).max(0.0),
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,6 +758,34 @@ mod tests {
         let mut r = CpuPaintRenderer::new(Size::new(100.0, 100.0), 1000, Color::rgb(0, 0, 0));
         r.execute(&ctx);
         assert!(r.buffer().get_pixel(12, 12).unwrap() > 0);
+    }
+
+    #[test]
+    fn stroke_rect_stays_inside_rect_bounds() {
+        let bg = Color::rgb(0, 0, 0);
+        let stroke = Color::rgb(255, 0, 0);
+        let mut ctx = PaintContext::new();
+        ctx.stroke_rect(Rect::from_xywh(0.0, 0.0, 10.0, 10.0), 1.0, stroke);
+        let mut r = CpuPaintRenderer::new(Size::new(20.0, 20.0), 1000, bg);
+        r.execute(&ctx);
+
+        let bg_pixel = bg.to_bgra();
+        assert_eq!(r.buffer().get_pixel(10, 5).unwrap(), bg_pixel);
+        assert_eq!(r.buffer().get_pixel(5, 10).unwrap(), bg_pixel);
+    }
+
+    #[test]
+    fn stroke_rounded_rect_stays_inside_rect_bounds() {
+        let bg = Color::rgb(0, 0, 0);
+        let stroke = Color::rgb(255, 0, 0);
+        let mut ctx = PaintContext::new();
+        ctx.stroke_rounded_rect(Rect::from_xywh(0.0, 0.0, 10.0, 10.0), 2.0, 1.0, stroke);
+        let mut r = CpuPaintRenderer::new(Size::new(20.0, 20.0), 1000, bg);
+        r.execute(&ctx);
+
+        let bg_pixel = bg.to_bgra();
+        assert_eq!(r.buffer().get_pixel(10, 5).unwrap(), bg_pixel);
+        assert_eq!(r.buffer().get_pixel(5, 10).unwrap(), bg_pixel);
     }
 
     #[test]

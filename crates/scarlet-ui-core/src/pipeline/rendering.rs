@@ -287,7 +287,9 @@ impl RenderingPipeline {
 
         let mut ctx = PaintContext::new();
         let any_painted = if let Some(root) = self.element_tree.root() {
-            Self::walk_and_paint(&mut ctx, root, Point::ZERO)
+            let base_painted = Self::walk_and_paint(&mut ctx, root, Point::ZERO);
+            let overlay_painted = Self::paint_select_overlays(&mut ctx, root, Point::ZERO);
+            base_painted || overlay_painted
         } else {
             false
         };
@@ -304,24 +306,7 @@ impl RenderingPipeline {
             origin.x + element.position().x,
             origin.y + element.position().y,
         );
-        let mut painted = false;
-
-        if let Some(ro) = element.render_object() {
-            let before = ctx.commands().len();
-            if ro.paint(ctx, abs) {
-                painted = true;
-            } else if ctx.commands().len() > before {
-                painted = true;
-            } else if let Some(buf) = element.get_buffer() {
-                let rect = crate::geometry::Rect::new(
-                    abs,
-                    Size::new(buf.logical_width() as f32, buf.logical_height() as f32),
-                );
-                let cloned = buf.clone();
-                ctx.draw_buffer(rect, cloned);
-                painted = true;
-            }
-        }
+        let mut painted = Self::paint_element_self(ctx, element, abs);
 
         for child in element.children() {
             if Self::walk_and_paint(ctx, child.as_ref(), abs) {
@@ -330,6 +315,59 @@ impl RenderingPipeline {
         }
 
         painted
+    }
+
+    fn paint_select_overlays(ctx: &mut PaintContext, element: &dyn Element, origin: Point) -> bool {
+        let abs = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+        let mut painted = false;
+
+        for child in element.children() {
+            if Self::paint_select_overlays(ctx, child.as_ref(), abs) {
+                painted = true;
+            }
+        }
+
+        if Self::is_expanded_select(element) && Self::paint_element_self(ctx, element, abs) {
+            painted = true;
+        }
+
+        painted
+    }
+
+    fn is_expanded_select(element: &dyn Element) -> bool {
+        element
+            .render_object()
+            .and_then(|render_object| {
+                render_object
+                    .as_any()
+                    .downcast_ref::<crate::views::SelectRenderObject>()
+            })
+            .is_some_and(|select| select.is_expanded())
+    }
+
+    fn paint_element_self(ctx: &mut PaintContext, element: &dyn Element, abs: Point) -> bool {
+        let Some(ro) = element.render_object() else {
+            return false;
+        };
+
+        let before = ctx.commands().len();
+        if ro.paint(ctx, abs) || ctx.commands().len() > before {
+            return true;
+        }
+
+        if let Some(buf) = element.get_buffer() {
+            let rect = crate::geometry::Rect::new(
+                abs,
+                Size::new(buf.logical_width() as f32, buf.logical_height() as f32),
+            );
+            ctx.draw_buffer(rect, buf.clone());
+            return true;
+        }
+
+        false
     }
 
     /// Handle a render frame and return the buffer with physical damage rectangles.
