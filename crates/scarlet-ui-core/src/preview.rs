@@ -463,6 +463,10 @@ impl PreviewHost {
         self.gpu_present = Some(f);
     }
 
+    fn clear_gpu_present(&mut self) {
+        self.gpu_present = None;
+    }
+
     pub fn window(&self) -> &dyn PlatformWindow {
         self.window.as_ref()
     }
@@ -527,6 +531,7 @@ impl PreviewHost {
 
     /// Close the platform window and release the session and library.
     pub fn close(&mut self) {
+        self.clear_gpu_present();
         let _ = self.window.close();
         self.session = None;
         self.loaded = None;
@@ -649,6 +654,9 @@ fn select_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::rc::Rc;
+    use core::cell::Cell;
+
     use crate::geometry::Point;
 
     struct TestLibrary {
@@ -723,6 +731,7 @@ mod tests {
         title: String,
         size: Size,
         scale_milli: u32,
+        dropped: Option<Rc<Cell<bool>>>,
     }
 
     impl TestWindow {
@@ -731,6 +740,24 @@ mod tests {
                 title: String::from("Initial Preview"),
                 size: Size::new(640.0, 480.0),
                 scale_milli: 2000,
+                dropped: None,
+            }
+        }
+
+        fn new_for_host_with_drop_flag(dropped: Rc<Cell<bool>>) -> Self {
+            Self {
+                title: String::from("Initial Preview"),
+                size: Size::new(640.0, 480.0),
+                scale_milli: 2000,
+                dropped: Some(dropped),
+            }
+        }
+    }
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            if let Some(dropped) = &self.dropped {
+                dropped.set(true);
             }
         }
     }
@@ -741,6 +768,7 @@ mod tests {
                 title: title.to_string(),
                 size,
                 scale_milli: 1000,
+                dropped: None,
             })
         }
 
@@ -816,6 +844,7 @@ mod tests {
                 title: title.to_string(),
                 size,
                 scale_milli: 1000,
+                dropped: None,
             })
         }
 
@@ -889,6 +918,69 @@ mod tests {
         }
     }
 
+    struct GpuPresenterDropGuard {
+        dropped: Rc<Cell<bool>>,
+        window_dropped: Option<Rc<Cell<bool>>>,
+    }
+
+    impl Drop for GpuPresenterDropGuard {
+        fn drop(&mut self) {
+            if let Some(window_dropped) = &self.window_dropped {
+                assert!(!window_dropped.get());
+            }
+            self.dropped.set(true);
+        }
+    }
+
+    #[test]
+    fn close_releases_gpu_presenter() {
+        let dropped = Rc::new(Cell::new(false));
+        let guard = GpuPresenterDropGuard {
+            dropped: Rc::clone(&dropped),
+            window_dropped: None,
+        };
+        let mut host = host_with_loaded_library();
+        host.set_gpu_present(Box::new(move |_, _| {
+            let _ = &guard;
+        }));
+
+        host.close();
+
+        assert!(dropped.get());
+    }
+
+    #[test]
+    fn drop_releases_gpu_presenter_before_window() {
+        let presenter_dropped = Rc::new(Cell::new(false));
+        let window_dropped = Rc::new(Cell::new(false));
+        let guard = GpuPresenterDropGuard {
+            dropped: Rc::clone(&presenter_dropped),
+            window_dropped: Some(Rc::clone(&window_dropped)),
+        };
+        let mut host = PreviewHost {
+            session: Some(Box::new(TestSession {
+                title: String::from("Initial Preview"),
+            })),
+            loaded: Some(loaded_test_library()),
+            window: Box::new(TestWindow::new_for_host_with_drop_flag(Rc::clone(
+                &window_dropped,
+            ))),
+            preview_id: PreviewId::new("button_preview"),
+            scale_override_milli: None,
+            sync_after_reload: false,
+            full_present_frames: 0,
+            gpu_present: None,
+        };
+        host.set_gpu_present(Box::new(move |_, _| {
+            let _ = &guard;
+        }));
+
+        drop(host);
+
+        assert!(presenter_dropped.get());
+        assert!(window_dropped.get());
+    }
+
     #[test]
     fn switch_preview_by_exact_id_succeeds_and_updates_preview_id() {
         let mut host = host_with_loaded_library();
@@ -934,6 +1026,7 @@ mod tests {
 
 impl Drop for PreviewHost {
     fn drop(&mut self) {
+        self.clear_gpu_present();
         self.session = None;
         self.loaded = None;
     }

@@ -23,8 +23,16 @@ pub fn setup_gpu_present(host: &mut PreviewHost) {
     );
     renderer.create_surface_from_raw(wh, dh, phys_w, phys_h);
 
-    host.set_gpu_present(Box::new(move |buffer, _damage| {
-        renderer.composite_manual(buffer.as_slice(), buffer.width(), buffer.height());
+    host.set_gpu_present(Box::new(move |buffer, damage| {
+        if damage.is_some_and(|damage| damage.is_empty()) {
+            return;
+        }
+        renderer.composite_manual_with_damage(
+            buffer.as_slice(),
+            buffer.width(),
+            buffer.height(),
+            damage,
+        );
         renderer.present();
     }));
 

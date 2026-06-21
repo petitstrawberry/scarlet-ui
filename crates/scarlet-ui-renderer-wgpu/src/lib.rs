@@ -83,6 +83,16 @@ impl WgpuRenderer {
         self.upload_buffer(data, width, height);
     }
 
+    pub fn composite_manual_with_damage(
+        &mut self,
+        data: &[u32],
+        width: u32,
+        height: u32,
+        damage: Option<&[DamageRect]>,
+    ) {
+        self.upload_buffer_with_damage(data, width, height, damage);
+    }
+
     pub fn create_surface_from_raw(
         &mut self,
         wh: raw_window_handle::RawWindowHandle,
@@ -127,6 +137,7 @@ impl WgpuRenderer {
         self.surface = Some(surface);
         self.config = Some(config);
         self.pipeline = Some(self.create_pipeline(format));
+        self.bind_group = None;
     }
 
     pub fn resize_surface(&mut self, width: u32, height: u32) {
@@ -183,6 +194,16 @@ impl WgpuRenderer {
     }
 
     pub fn upload_buffer(&mut self, data: &[u32], width: u32, height: u32) {
+        self.upload_buffer_with_damage(data, width, height, None);
+    }
+
+    pub fn upload_buffer_with_damage(
+        &mut self,
+        data: &[u32],
+        width: u32,
+        height: u32,
+        damage: Option<&[DamageRect]>,
+    ) {
         let width = width.max(1);
         let height = height.max(1);
         self.resize_surface(width, height);
@@ -199,6 +220,7 @@ impl WgpuRenderer {
             data,
             width,
             height,
+            damage,
         );
     }
 }
@@ -216,9 +238,16 @@ fn upload_frame_texture(
     data: &[u32],
     width: u32,
     height: u32,
+    damage: Option<&[DamageRect]>,
 ) {
     let width = width.max(1);
     let height = height.max(1);
+    let Some(required_len) = (width as usize).checked_mul(height as usize) else {
+        return;
+    };
+    if data.len() < required_len {
+        return;
+    }
 
     let needs_texture = texture.is_none() || *texture_width != width || *texture_height != height;
     if needs_texture {
@@ -292,19 +321,59 @@ fn upload_frame_texture(
         return;
     };
 
-    let bytes_per_row = width * 4;
+    if needs_texture || damage.is_none() {
+        write_texture_region(queue, texture, data, width, height, 0, 0, width, height);
+        return;
+    }
+
+    let Some(damage) = damage else {
+        return;
+    };
+    for &(x, y, w, h) in damage {
+        let x = x.min(width);
+        let y = y.min(height);
+        let w = w.min(width.saturating_sub(x));
+        let h = h.min(height.saturating_sub(y));
+        if w == 0 || h == 0 {
+            continue;
+        }
+        write_texture_region(queue, texture, data, width, height, x, y, w, h);
+    }
+}
+
+fn write_texture_region(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    data: &[u32],
+    frame_width: u32,
+    frame_height: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) {
+    if width == 0 || height == 0 || x >= frame_width || y >= frame_height {
+        return;
+    }
+    let width = width.min(frame_width - x);
+    let height = height.min(frame_height - y);
+    let start = y as usize * frame_width as usize + x as usize;
+    if start >= data.len() {
+        return;
+    }
+    let bytes_per_row = frame_width * 4;
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture,
             mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
+            origin: wgpu::Origin3d { x, y, z: 0 },
             aspect: wgpu::TextureAspect::All,
         },
-        bytemuck::cast_slice(data),
+        bytemuck::cast_slice(&data[start..]),
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(bytes_per_row),
-            rows_per_image: Some(height),
+            rows_per_image: Some(frame_height),
         },
         wgpu::Extent3d {
             width,
@@ -404,6 +473,7 @@ impl Renderer for WgpuRenderer {
             buf.as_slice(),
             buf.width(),
             buf.height(),
+            None,
         );
     }
 
