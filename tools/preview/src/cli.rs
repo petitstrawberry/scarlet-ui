@@ -23,7 +23,11 @@ pub struct RunArgs {
     pub force_scale: Option<f32>,
     #[arg(long)]
     pub build_only: bool,
-    #[arg(long)]
+    #[arg(
+        long,
+        hide = true,
+        help = "Deprecated no-op; PaintCommand rendering is enabled by default"
+    )]
     pub paint: bool,
     #[cfg(feature = "gpu")]
     #[arg(long, default_value_t = true)]

@@ -1,6 +1,7 @@
 use scarlet_ui::hstack;
 use scarlet_ui::prelude::*;
 use scarlet_ui::vstack;
+use scarlet_ui::{Icon, NavigationLink};
 
 #[derive(Clone)]
 struct PreviewApp {
@@ -123,6 +124,53 @@ impl WidgetFactory {
     fn divider(&self) -> impl View + Clone + use<> {
         Divider::new().frame(220.0, 1.0)
     }
+
+    fn overview_page(&self) -> impl View + Clone + use<> {
+        vstack! {
+            Text::new("Widget Factory").font_size(28.0),
+            Text::new("PaintCommand default rendering").font_size(15.0),
+            self.row("ProgressView", self.progress()),
+            self.row("Rectangle", self.rectangle()),
+            self.row("Divider", self.divider()),
+        }
+        .spacing(16.0)
+        .padding(24.0)
+    }
+
+    fn controls_page(&self) -> impl View + Clone + use<> {
+        vstack! {
+            Text::new("Controls").font_size(24.0),
+            self.row("Button", self.button()),
+            self.row("Toggle", self.toggle()),
+            self.row("Slider", self.slider()),
+            self.row("ProgressView", self.progress()),
+        }
+        .spacing(16.0)
+        .padding(24.0)
+    }
+
+    fn inputs_page(&self) -> impl View + Clone + use<> {
+        vstack! {
+            Text::new("Inputs").font_size(24.0),
+            self.row("TextField", self.text_field()),
+            self.row("Select", self.select()),
+            self.row("Slider", self.slider()),
+        }
+        .spacing(16.0)
+        .padding(24.0)
+    }
+
+    fn display_page(&self) -> impl View + Clone + use<> {
+        vstack! {
+            Text::new("Display").font_size(24.0),
+            self.row("Text", Text::new("Factory text sample").font_size(16.0)),
+            self.row("Rectangle", self.rectangle()),
+            self.row("Divider", self.divider()),
+            self.row("ProgressView", self.progress()),
+        }
+        .spacing(16.0)
+        .padding(24.0)
+    }
 }
 
 #[scarlet_ui::preview(width = 420.0, height = 260.0)]
@@ -158,23 +206,21 @@ fn showcase_preview() -> impl View + Clone {
     .padding(20.0)
 }
 
-#[scarlet_ui::preview(width = 760.0, height = 620.0)]
+#[scarlet_ui::preview(width = 860.0, height = 560.0)]
 fn widget_factory_preview() -> impl View + Clone {
     let factory = WidgetFactory::default();
+    let overview = factory.clone();
+    let controls = factory.clone();
+    let inputs = factory.clone();
+    let display = factory.clone();
 
-    vstack! {
-        Text::new("Widget Factory").font_size(28.0),
-        factory.row("Button", factory.button()),
-        factory.row("TextField", factory.text_field()),
-        factory.row("Slider", factory.slider()),
-        factory.row("Toggle", factory.toggle()),
-        factory.row("ProgressView", factory.progress()),
-        factory.row("Select", factory.select()),
-        factory.row("Rectangle", factory.rectangle()),
-        factory.row("Divider", factory.divider()),
+    scarlet_ui::navigation! {
+        NavigationLink::new("Overview", Icon::Home, move || overview.overview_page()),
+        NavigationLink::new("Controls", Icon::Settings, move || controls.controls_page()),
+        NavigationLink::new("Inputs", Icon::Search, move || inputs.inputs_page()),
+        NavigationLink::new("Display", Icon::Info, move || display.display_page()),
     }
-    .spacing(14.0)
-    .padding(24.0)
+    .sidebar_width(190.0)
 }
 
 fn main() -> scarlet_ui::Result<()> {

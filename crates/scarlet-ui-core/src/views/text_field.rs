@@ -287,13 +287,21 @@ impl ElementRenderObject for TextFieldRenderObject {
         let preedit_cursor_byte = self.preedit_cursor_byte;
         let preedit_anchor_byte = self.preedit_anchor_byte;
         let preedit_spans = self.preedit_spans.clone();
+        let size = self.size;
+        let buffer = self.buffer.take();
         *self = TextFieldRenderObject::from_view(view);
         self.focused = focused;
         self.preedit = preedit;
         self.preedit_cursor_byte = preedit_cursor_byte;
         self.preedit_anchor_byte = preedit_anchor_byte;
         self.preedit_spans = preedit_spans;
+        self.size = size;
+        self.buffer = buffer;
         crate::element::UpdateResult::Updated
+    }
+
+    fn update_needs_layout(&self) -> bool {
+        true
     }
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {

@@ -44,7 +44,7 @@ impl RenderingPipeline {
             scale_milli: 1000,
             event_dispatcher: EventDispatcher::new(),
             paint_renderer: None,
-            paint_enabled: false,
+            paint_enabled: true,
         }
     }
 

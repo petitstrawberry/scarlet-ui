@@ -6,6 +6,7 @@
 #![allow(deprecated)]
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 
@@ -13,6 +14,7 @@ use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
 use crate::geometry::{Point, Rect, Size};
 use crate::pipeline::{MountContext, PipelineId};
 use crate::renderer::PaintContext;
+use crate::state::{InvalidationKind, SubscriptionId};
 use crate::view::View;
 
 /// RenderObject trait for leaf rendering nodes
@@ -102,6 +104,11 @@ pub trait RenderObject: Any {
         UpdateResult::Replaced
     }
 
+    /// Return true when a self-rebuild update can change this object's layout size.
+    fn update_needs_layout(&self) -> bool {
+        false
+    }
+
     /// Layout this RenderObject and its children
     ///
     /// Container render objects can override this to implement custom layout
@@ -143,6 +150,8 @@ pub struct RenderElement<V: View + Clone, R: RenderObject> {
     position: Point,
     last_constraints: Option<LayoutConstraints>,
     pipeline_id: PipelineId,
+    subscriptions: Vec<SubscriptionId>,
+    mounted: bool,
 }
 
 impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
@@ -156,6 +165,8 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             position: Point::ZERO,
             last_constraints: None,
             pipeline_id: PipelineId::default(),
+            subscriptions: Vec::new(),
+            mounted: false,
         }
     }
 
@@ -169,7 +180,47 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             position: Point::ZERO,
             last_constraints: None,
             pipeline_id: PipelineId::default(),
+            subscriptions: Vec::new(),
+            mounted: false,
         }
+    }
+
+    fn should_subscribe_view_listenables(&self) -> bool {
+        self.children.is_empty()
+    }
+
+    fn subscribe_view_listenables(&mut self) {
+        if !self.should_subscribe_view_listenables() {
+            return;
+        }
+
+        let listenables = self.view.listenables();
+        for listenable in listenables {
+            let element_id = self.id;
+            let pipeline_id = self.pipeline_id;
+            let invalidation_kind = listenable.invalidation_kind();
+            let callback = Arc::new(move || match invalidation_kind {
+                InvalidationKind::Build => {
+                    crate::pipeline::mark_element_dirty(pipeline_id, element_id)
+                }
+                InvalidationKind::Paint => {
+                    crate::pipeline::mark_element_needs_paint(pipeline_id, element_id)
+                }
+            });
+            self.subscriptions.push(listenable.subscribe_any(callback));
+        }
+    }
+
+    fn unsubscribe_view_listenables(&mut self) {
+        if self.subscriptions.is_empty() {
+            return;
+        }
+
+        let listenables = self.view.listenables();
+        for (listenable, subscription_id) in listenables.iter().zip(self.subscriptions.iter()) {
+            listenable.unsubscribe(*subscription_id);
+        }
+        self.subscriptions.clear();
     }
 
     /// Get the View
@@ -234,10 +285,17 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     fn update(&mut self, new_view: &dyn View) -> UpdateResult {
         // Try to downcast the new_view to the same type as our stored view
         if let Some(typed_view) = new_view.as_any().downcast_ref::<V>() {
+            if self.mounted {
+                self.unsubscribe_view_listenables();
+            }
             // Update the stored view (clone from the reference)
             self.view = typed_view.clone();
             // Delegate to the RenderObject's update method
-            self.render_object.update(new_view)
+            let result = self.render_object.update(new_view);
+            if self.mounted {
+                self.subscribe_view_listenables();
+            }
+            result
         } else {
             // Type mismatch - need to replace
             UpdateResult::Replaced
@@ -245,15 +303,23 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn rebuild(&mut self) -> UpdateResult {
-        // RenderElement doesn't need to rebuild since properties are
-        // updated directly through the update() method.
-        // The stored view remains the same, and changes happen through
-        // State updates triggering update() calls.
-        UpdateResult::NoChange
+        // State owned by render views can change without a parent rebuilding.
+        // Keep the render object in sync with the stored view before layout/paint.
+        let update_needs_layout = self.render_object.update_needs_layout();
+        match self.render_object.update(&self.view) {
+            UpdateResult::Updated if update_needs_layout => UpdateResult::Updated,
+            UpdateResult::Updated => {
+                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                UpdateResult::NoChange
+            }
+            other => other,
+        }
     }
 
     fn mount(&mut self, ctx: &MountContext) {
         self.pipeline_id = ctx.pipeline_id();
+        self.mounted = true;
+        self.subscribe_view_listenables();
         for child in &mut self.children {
             child.mount(ctx);
         }
@@ -263,6 +329,8 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         for child in &mut self.children {
             child.unmount();
         }
+        self.unsubscribe_view_listenables();
+        self.mounted = false;
     }
 
     fn flex_factor(&self) -> u32 {
@@ -1016,6 +1084,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                             render_object.set_hovered_index(None);
                             crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         }
+                        return false;
                     }
                     return true;
                 }
@@ -1049,8 +1118,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                                 }
                             }
                         }
+                        return true;
                     }
-                    return true;
+                    return false;
                 }
                 _ => {}
             }

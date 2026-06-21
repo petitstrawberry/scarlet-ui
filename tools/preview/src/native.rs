@@ -52,10 +52,7 @@ pub fn run(args: RunArgs) -> Result<(), String> {
     }
 
     if args.paint {
-        if let Some(ref mut host) = host {
-            host.set_paint_enabled(true);
-            println!("[preview] paint command path enabled");
-        }
+        println!("[preview] --paint is deprecated; paint command path is enabled by default");
     }
 
     loop {
