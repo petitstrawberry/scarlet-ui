@@ -3,7 +3,7 @@
 use alloc::string::ToString;
 
 use super::layout::{TextViewLayout, VisualLine};
-use super::{TextDocument, TextPosition, TextSelection};
+use super::{BORDER_WIDTH, TextDocument, TextPosition, TextSelection};
 use crate::color::Color;
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
@@ -66,13 +66,13 @@ pub fn paint_text_view(
     let bounds = Rect::new(origin, size);
     ctx.fill_rect(bounds, background_color);
 
-    let content_rect = Rect::from_xywh(
-        origin.x + padding,
-        origin.y + padding,
-        (size.width - padding * 2.0).max(0.0),
-        (size.height - padding * 2.0).max(0.0),
+    let clip_rect = Rect::from_xywh(
+        origin.x + BORDER_WIDTH,
+        origin.y + BORDER_WIDTH,
+        (size.width - BORDER_WIDTH * 2.0).max(0.0),
+        (size.height - BORDER_WIDTH * 2.0).max(0.0),
     );
-    ctx.push_clip(content_rect);
+    ctx.push_clip(clip_rect);
 
     if highlight_current_line && focused {
         paint_current_line(ctx, origin, size, layout, selection, current_line_color);
@@ -132,7 +132,7 @@ pub fn paint_text_view(
     } else {
         border_color
     };
-    ctx.stroke_rect(bounds, 1.0, border);
+    ctx.stroke_rect(bounds, BORDER_WIDTH, border);
 }
 
 fn paint_current_line(

@@ -7,7 +7,7 @@ use core::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{TextDocument, TextPosition, TextViewScroll, WrapMode};
+use super::{BORDER_WIDTH, TextDocument, TextPosition, TextViewScroll, WrapMode};
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 
@@ -150,8 +150,10 @@ impl TextViewLayout {
             WrapMode::Soft => viewport_width,
         };
         let content_height = visual_lines.len() as f32 * line_height;
+        let clip_scroll_y = scroll.y - padding + BORDER_WIDTH;
+        let clip_height = (size.height - BORDER_WIDTH * 2.0).max(1.0);
         let visible_lines =
-            visible_range(scroll.y, viewport_height, line_height, visual_lines.len());
+            visible_range(clip_scroll_y, clip_height, line_height, visual_lines.len());
 
         Self {
             line_height,

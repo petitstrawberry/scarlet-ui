@@ -33,6 +33,8 @@ use crate::renderer::PaintContext;
 use crate::state::{Listenable, State};
 use crate::view::View;
 
+const BORDER_WIDTH: f32 = 1.0;
+
 #[derive(Clone)]
 enum TextBinding {
     String(State<String>),

@@ -449,16 +449,59 @@ fn visible_range_contains_only_rows_intersecting_viewport() {
 
     assert_eq!(layout.visible_lines, 4..7);
     for (index, line) in layout.visual_lines.iter().enumerate() {
-        let intersects_viewport = line.y < layout.padding + layout.viewport_height
-            && line.y + layout.line_height > layout.padding;
+        let intersects_viewport =
+            line.y < 24.0 - BORDER_WIDTH && line.y + layout.line_height > BORDER_WIDTH;
         assert_eq!(
             layout.visible_lines.contains(&index),
             intersects_viewport,
             "line {index}: y={} line_height={} viewport={}..{}",
             line.y,
             layout.line_height,
-            layout.padding,
-            layout.padding + layout.viewport_height
+            BORDER_WIDTH,
+            24.0 - BORDER_WIDTH
+        );
+    }
+}
+
+#[test]
+fn visible_range_uses_border_clip_not_padding_clip() {
+    let document = TextDocument::from_str("0\n1\n2\n3\n4\n5\n6\n7\n8\n9");
+    let base = TextViewLayout::compute(
+        &document,
+        10.0,
+        16.0,
+        WrapMode::None,
+        Size::new(100.0, 100.0),
+        TextViewScroll::default(),
+        false,
+    );
+    let line_height = base.line_height;
+    let height = 16.0 * 2.0 + line_height * 3.0;
+    let layout = TextViewLayout::compute(
+        &document,
+        10.0,
+        16.0,
+        WrapMode::None,
+        Size::new(100.0, height),
+        TextViewScroll {
+            x: 0.0,
+            y: line_height * 4.0,
+        },
+        false,
+    );
+
+    assert_eq!(layout.visible_lines, 3..8);
+    for (index, line) in layout.visual_lines.iter().enumerate() {
+        let intersects_border_clip =
+            line.y < height - BORDER_WIDTH && line.y + layout.line_height > BORDER_WIDTH;
+        assert_eq!(
+            layout.visible_lines.contains(&index),
+            intersects_border_clip,
+            "line {index}: y={} line_height={} border_clip={}..{}",
+            line.y,
+            layout.line_height,
+            BORDER_WIDTH,
+            height - BORDER_WIDTH
         );
     }
 }
