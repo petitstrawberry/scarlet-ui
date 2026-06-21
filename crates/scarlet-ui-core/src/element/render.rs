@@ -47,7 +47,7 @@ pub trait RenderObject: Any {
     /// `origin` is this element's absolute position in the window.
     /// Return `true` if commands were emitted (skips the legacy render/buffer path).
     /// Default `false` keeps the old path.
-    fn paint(&self, _ctx: &mut PaintContext, _origin: Point) -> bool {
+    fn paint<'a>(&'a self, _ctx: &mut PaintContext<'a>, _origin: Point) -> bool {
         false
     }
 
@@ -58,7 +58,7 @@ pub trait RenderObject: Any {
     ///
     /// Legacy buffer compositing is kept during the PaintCommand migration.
     /// Pixel-producing views such as Canvas should emit `PaintCommand::DrawBuffer`
-    /// from [`RenderObject::paint`] instead.
+    /// from [`RenderObject::paint`] with `PaintContext::draw_buffer_ref` instead.
     #[deprecated(
         since = "0.1.0",
         note = "legacy buffer compositing path; emit PaintCommand from RenderObject::paint() instead"

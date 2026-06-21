@@ -254,7 +254,7 @@ pub trait Element {
     ///
     /// Legacy buffer compositing is kept during the PaintCommand migration.
     /// Pixel-producing views should use `PaintCommand::DrawBuffer` from
-    /// `RenderObject::paint()`.
+    /// `RenderObject::paint()` with `PaintContext::draw_buffer_ref`.
     #[deprecated(
         since = "0.1.0",
         note = "legacy buffer compositing path; emit PaintCommand from RenderObject::paint() instead"

@@ -208,10 +208,10 @@ impl ElementRenderObject for CanvasRenderObject {
         self
     }
 
-    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+    fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
         let rect = Rect::new(origin, self.size);
         if let Some(buffer) = self.buffer.as_ref() {
-            ctx.draw_buffer(rect, buffer.clone());
+            ctx.draw_buffer_ref(rect, buffer);
         } else {
             ctx.fill_rect(rect, Color::TRANSPARENT);
         }

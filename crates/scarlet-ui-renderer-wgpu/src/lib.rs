@@ -318,7 +318,7 @@ impl Renderer for WgpuRenderer {
         self.upload_buffer(&data, width, height);
     }
 
-    fn render_paint(&mut self, _ctx: &PaintContext) {}
+    fn render_paint(&mut self, _ctx: &PaintContext<'_>) {}
 
     fn buffer(&self) -> &Buffer {
         self.cpu.buffer()

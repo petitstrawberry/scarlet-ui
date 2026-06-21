@@ -351,21 +351,18 @@ impl ElementRenderObject for ImageRenderObject {
         self.buffer = None;
     }
 
-    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
-        let width = libm::ceilf(self.size.width.max(1.0)) as u32;
-        let height = libm::ceilf(self.size.height.max(1.0)) as u32;
-        let mut buffer = Buffer::from_logical_dimensions(width, height);
-        match &self.source {
-            ImageSource::Bitmap(image) => render_raw_image(
-                &mut buffer,
-                image.pixels(),
-                image.width(),
-                image.height(),
-                self.fit_mode,
-            ),
-            ImageSource::Placeholder { .. } => buffer.clear(Color::rgb(226u8, 229u8, 235u8)),
+    fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
+        if let Some(buffer) = self.buffer.as_ref() {
+            ctx.draw_buffer_ref(Rect::new(origin, self.size), buffer);
+        } else {
+            let rect = Rect::new(origin, self.size);
+            match &self.source {
+                ImageSource::Placeholder { .. } => {
+                    ctx.fill_rect(rect, Color::rgb(226u8, 229u8, 235u8))
+                }
+                ImageSource::Bitmap(_) => ctx.fill_rect(rect, Color::TRANSPARENT),
+            }
         }
-        ctx.draw_buffer(Rect::new(origin, self.size), buffer);
         true
     }
 }

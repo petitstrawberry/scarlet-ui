@@ -128,12 +128,36 @@ pub enum PaintCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferHandle(pub usize);
 
-pub struct PaintContext {
-    commands: Vec<PaintCommand>,
-    buffers: Vec<Buffer>,
+/// A buffer referenced by the current paint list.
+///
+/// Borrowed buffers are owned by render objects and are valid only for the
+/// synchronous paint pass that created this context. Temporary buffers are an
+/// explicit compatibility path for legacy callers that still have to produce a
+/// one-frame buffer value.
+pub enum PaintBuffer<'a> {
+    Borrowed(&'a Buffer),
+    Temporary(Buffer),
 }
 
-impl Default for PaintContext {
+impl<'a> PaintBuffer<'a> {
+    pub fn as_buffer(&self) -> &Buffer {
+        match self {
+            Self::Borrowed(buffer) => buffer,
+            Self::Temporary(buffer) => buffer,
+        }
+    }
+
+    pub fn is_temporary(&self) -> bool {
+        matches!(self, Self::Temporary(_))
+    }
+}
+
+pub struct PaintContext<'a> {
+    commands: Vec<PaintCommand>,
+    buffers: Vec<PaintBuffer<'a>>,
+}
+
+impl Default for PaintContext<'_> {
     fn default() -> Self {
         Self {
             commands: Vec::new(),
@@ -142,7 +166,7 @@ impl Default for PaintContext {
     }
 }
 
-impl PaintContext {
+impl<'a> PaintContext<'a> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -220,9 +244,9 @@ impl PaintContext {
         });
     }
 
-    pub fn draw_buffer(&mut self, dst: Rect, buffer: Buffer) -> BufferHandle {
+    pub fn draw_buffer_ref(&mut self, dst: Rect, buffer: &'a Buffer) -> BufferHandle {
         let idx = self.buffers.len();
-        self.buffers.push(buffer);
+        self.buffers.push(PaintBuffer::Borrowed(buffer));
         self.commands.push(PaintCommand::DrawBuffer {
             dst,
             buffer_idx: idx,
@@ -230,15 +254,33 @@ impl PaintContext {
         BufferHandle(idx)
     }
 
-    pub fn draw_buffer_rect(
+    pub fn draw_temporary_buffer(&mut self, dst: Rect, buffer: Buffer) -> BufferHandle {
+        let idx = self.buffers.len();
+        self.buffers.push(PaintBuffer::Temporary(buffer));
+        self.commands.push(PaintCommand::DrawBuffer {
+            dst,
+            buffer_idx: idx,
+        });
+        BufferHandle(idx)
+    }
+
+    #[deprecated(
+        since = "0.1.0",
+        note = "use draw_buffer_ref for retained buffers or draw_temporary_buffer for one-frame compatibility buffers"
+    )]
+    pub fn draw_buffer(&mut self, dst: Rect, buffer: Buffer) -> BufferHandle {
+        self.draw_temporary_buffer(dst, buffer)
+    }
+
+    pub fn draw_buffer_rect_ref(
         &mut self,
         dst: Rect,
         src: Rect,
-        buffer: Buffer,
+        buffer: &'a Buffer,
         opacity: f32,
     ) -> BufferHandle {
         let idx = self.buffers.len();
-        self.buffers.push(buffer);
+        self.buffers.push(PaintBuffer::Borrowed(buffer));
         self.commands.push(PaintCommand::DrawBufferRect {
             dst,
             src,
@@ -246,6 +288,38 @@ impl PaintContext {
             opacity,
         });
         BufferHandle(idx)
+    }
+
+    pub fn draw_temporary_buffer_rect(
+        &mut self,
+        dst: Rect,
+        src: Rect,
+        buffer: Buffer,
+        opacity: f32,
+    ) -> BufferHandle {
+        let idx = self.buffers.len();
+        self.buffers.push(PaintBuffer::Temporary(buffer));
+        self.commands.push(PaintCommand::DrawBufferRect {
+            dst,
+            src,
+            buffer_idx: idx,
+            opacity,
+        });
+        BufferHandle(idx)
+    }
+
+    #[deprecated(
+        since = "0.1.0",
+        note = "use draw_buffer_rect_ref for retained buffers or draw_temporary_buffer_rect for one-frame compatibility buffers"
+    )]
+    pub fn draw_buffer_rect(
+        &mut self,
+        dst: Rect,
+        src: Rect,
+        buffer: Buffer,
+        opacity: f32,
+    ) -> BufferHandle {
+        self.draw_temporary_buffer_rect(dst, src, buffer, opacity)
     }
 
     pub fn push_clip(&mut self, rect: Rect) {
@@ -270,8 +344,11 @@ impl PaintContext {
     pub fn commands(&self) -> &[PaintCommand] {
         &self.commands
     }
-    pub fn buffers(&self) -> &[Buffer] {
+    pub fn buffers(&self) -> &[PaintBuffer<'a>] {
         &self.buffers
+    }
+    pub fn buffer(&self, handle: BufferHandle) -> Option<&Buffer> {
+        self.buffers.get(handle.0).map(PaintBuffer::as_buffer)
     }
     pub fn clear(&mut self) {
         self.commands.clear();
@@ -291,7 +368,7 @@ pub trait Renderer {
     fn resize(&mut self, size: FrameSize);
     fn set_background_color(&mut self, color: Color);
     fn composite(&mut self, root: &dyn Element, dirty_ids: &[ElementId]);
-    fn render_paint(&mut self, ctx: &PaintContext);
+    fn render_paint(&mut self, ctx: &PaintContext<'_>);
     fn buffer(&self) -> &Buffer;
     fn buffer_mut(&mut self) -> &mut Buffer;
     fn damage(&self) -> Option<&[DamageRect]>;
@@ -328,7 +405,7 @@ impl Renderer for CpuRenderer {
         self.compositor
             .composite_elements_with_dirty(root, dirty_ids);
     }
-    fn render_paint(&mut self, _ctx: &PaintContext) {}
+    fn render_paint(&mut self, _ctx: &PaintContext<'_>) {}
     fn buffer(&self) -> &Buffer {
         self.compositor.window_buffer()
     }
@@ -388,7 +465,7 @@ impl CpuPaintRenderer {
         )
     }
 
-    pub fn execute(&mut self, ctx: &PaintContext) {
+    pub fn execute(&mut self, ctx: &PaintContext<'_>) {
         self.buffer.clear(self.background_color);
         self.clip_stack.clear();
 
@@ -477,7 +554,7 @@ impl CpuPaintRenderer {
                     );
                 }
                 PaintCommand::DrawBuffer { dst, buffer_idx } => {
-                    if let Some(src) = ctx.buffers().get(*buffer_idx) {
+                    if let Some(src) = ctx.buffer(BufferHandle(*buffer_idx)) {
                         let dst = self.scale_rect(*dst);
                         let dst_x = dst.origin.x as i32;
                         let dst_y = dst.origin.y as i32;
@@ -521,7 +598,7 @@ impl CpuPaintRenderer {
                     buffer_idx,
                     opacity,
                 } => {
-                    if let Some(buf) = ctx.buffers().get(*buffer_idx) {
+                    if let Some(buf) = ctx.buffer(BufferHandle(*buffer_idx)) {
                         let dst = self.scale_rect(*dst);
                         let dst_x = dst.origin.x as i32;
                         let dst_y = dst.origin.y as i32;
@@ -924,7 +1001,22 @@ mod tests {
         let mut src = Buffer::new(Size::new(5.0, 5.0));
         src.fill_rect(0, 0, 5, 5, Color::rgb(0, 255, 0));
         let mut ctx = PaintContext::new();
-        ctx.draw_buffer(Rect::new(Point::new(10.0, 10.0), Size::new(5.0, 5.0)), src);
+        ctx.draw_temporary_buffer(Rect::new(Point::new(10.0, 10.0), Size::new(5.0, 5.0)), src);
+        let mut r = CpuPaintRenderer::new(Size::new(100.0, 100.0), 1000, Color::rgb(0, 0, 0));
+        r.execute(&ctx);
+        assert!(r.buffer().get_pixel(12, 12).unwrap() > 0);
+    }
+
+    #[test]
+    fn draw_buffer_ref_composites_without_temporary_storage() {
+        let mut src = Buffer::new(Size::new(5.0, 5.0));
+        src.fill_rect(0, 0, 5, 5, Color::rgb(0, 255, 0));
+        let mut ctx = PaintContext::new();
+        let handle =
+            ctx.draw_buffer_ref(Rect::new(Point::new(10.0, 10.0), Size::new(5.0, 5.0)), &src);
+
+        assert!(!ctx.buffers()[handle.0].is_temporary());
+
         let mut r = CpuPaintRenderer::new(Size::new(100.0, 100.0), 1000, Color::rgb(0, 0, 0));
         r.execute(&ctx);
         assert!(r.buffer().get_pixel(12, 12).unwrap() > 0);

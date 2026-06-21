@@ -303,7 +303,11 @@ impl RenderingPipeline {
         Some(pr.buffer())
     }
 
-    fn walk_and_paint(ctx: &mut PaintContext, element: &dyn Element, origin: Point) -> bool {
+    fn walk_and_paint<'a>(
+        ctx: &mut PaintContext<'a>,
+        element: &'a dyn Element,
+        origin: Point,
+    ) -> bool {
         let abs = Point::new(
             origin.x + element.position().x,
             origin.y + element.position().y,
@@ -328,7 +332,11 @@ impl RenderingPipeline {
         painted
     }
 
-    fn paint_select_overlays(ctx: &mut PaintContext, element: &dyn Element, origin: Point) -> bool {
+    fn paint_select_overlays<'a>(
+        ctx: &mut PaintContext<'a>,
+        element: &'a dyn Element,
+        origin: Point,
+    ) -> bool {
         let abs = Point::new(
             origin.x + element.position().x,
             origin.y + element.position().y,
@@ -377,7 +385,11 @@ impl RenderingPipeline {
             .is_some_and(|select| select.is_expanded())
     }
 
-    fn paint_element_self(ctx: &mut PaintContext, element: &dyn Element, abs: Point) -> bool {
+    fn paint_element_self<'a>(
+        ctx: &mut PaintContext<'a>,
+        element: &'a dyn Element,
+        abs: Point,
+    ) -> bool {
         let Some(ro) = element.render_object() else {
             return false;
         };
@@ -392,7 +404,7 @@ impl RenderingPipeline {
                 abs,
                 Size::new(buf.logical_width() as f32, buf.logical_height() as f32),
             );
-            ctx.draw_buffer(rect, buf.clone());
+            ctx.draw_buffer_ref(rect, buf);
             return true;
         }
 
