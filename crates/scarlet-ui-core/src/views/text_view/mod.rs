@@ -601,7 +601,7 @@ impl TextViewRenderObject {
     fn text_input_cursor_rect(&self) -> Rect {
         let mut cursor_rect = self.cursor_rect();
         if !self.preedit.is_empty() {
-            let prefix = preedit_prefix(&self.preedit, self.preedit_cursor_byte);
+            let prefix = preedit_prefix(&self.preedit, self.preedit_anchor_byte);
             cursor_rect.origin.x +=
                 crate::graphics::measure_text_sized(prefix, self.font_size).0 as f32;
         }

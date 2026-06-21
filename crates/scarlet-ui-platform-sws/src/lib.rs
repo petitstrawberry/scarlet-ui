@@ -471,9 +471,15 @@ impl SWSPlatformWindow {
             sws_protocol::text_input_content_hints::NONE,
             sws_protocol::text_input_content_purpose::NORMAL,
         );
-        let _ = self
+        if self
             .conn
-            .commit_text_input_state(context_id, context.serial);
+            .commit_text_input_state(context_id, context.serial)
+            .is_ok()
+        {
+            if let Some(context) = self.text_input.as_mut() {
+                context.serial = context.serial.saturating_add(1);
+            }
+        }
 
         if !context.enabled && self.conn.enable_text_input(context_id).is_ok() {
             if let Some(context) = self.text_input.as_mut() {
