@@ -598,6 +598,16 @@ impl TextViewRenderObject {
             .cursor_rect(self.selection.caret, &self.text_document)
     }
 
+    fn text_input_cursor_rect(&self) -> Rect {
+        let mut cursor_rect = self.cursor_rect();
+        if !self.preedit.is_empty() {
+            let prefix = preedit_prefix(&self.preedit, self.preedit_cursor_byte);
+            cursor_rect.origin.x +=
+                crate::graphics::measure_text_sized(prefix, self.font_size).0 as f32;
+        }
+        cursor_rect
+    }
+
     /// Return whether this text view currently has keyboard focus.
     ///
     /// # Returns
@@ -675,7 +685,7 @@ impl TextViewRenderObject {
     /// Cursor rectangle, surrounding text, and selection byte offsets.
     pub(crate) fn text_input_state(&self) -> TextInputElementState {
         TextInputElementState {
-            cursor_rect: self.cursor_rect(),
+            cursor_rect: self.text_input_cursor_rect(),
             surrounding_text: self.text_document.as_str().into_owned(),
             cursor_byte: self.selection.caret.byte as u32,
             anchor_byte: self.selection.anchor.byte as u32,
@@ -794,4 +804,9 @@ fn clamp_byte_boundary(text: &str, byte: u32) -> u32 {
         byte -= 1;
     }
     byte as u32
+}
+
+fn preedit_prefix(preedit: &str, byte: u32) -> &str {
+    let byte = clamp_byte_boundary(preedit, byte) as usize;
+    &preedit[..byte]
 }

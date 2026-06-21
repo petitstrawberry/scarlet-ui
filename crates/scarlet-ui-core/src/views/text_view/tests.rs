@@ -1060,9 +1060,31 @@ fn text_input_state_reports_cursor_and_anchor_bytes() {
 }
 
 #[test]
+fn text_input_state_cursor_rect_tracks_preedit_cursor() {
+    let text = State::new(StateId::new(232), String::from("hello"));
+    let selection = State::new(StateId::new(233), TextSelection::collapsed(5));
+    let view = TextView::new(text, selection);
+    let mut render_object = focused_render_object(&view);
+    let base_rect = render_object.cursor_rect();
+
+    render_object.set_preedit_state("かな", "か".len() as u32, 0, &[]);
+    let state = render_object.text_input_state();
+    let prefix_width = graphics::measure_text_sized("か", render_object.font_size).0 as f32;
+
+    assert_eq!(state.cursor_byte, 5);
+    assert_eq!(state.anchor_byte, 5);
+    assert_eq!(state.cursor_rect.origin.y, base_rect.origin.y);
+    assert_eq!(state.cursor_rect.size, base_rect.size);
+    assert_eq!(
+        state.cursor_rect.origin.x,
+        base_rect.origin.x + prefix_width
+    );
+}
+
+#[test]
 fn mouse_single_click_positions_caret_and_collapses_selection() {
-    let text = State::new(StateId::new(232), String::from("abcd"));
-    let selection = State::new(StateId::new(233), TextSelection::collapsed(4));
+    let text = State::new(StateId::new(234), String::from("abcd"));
+    let selection = State::new(StateId::new(235), TextSelection::collapsed(4));
     let view = TextView::new(text, selection.clone());
     let mut render_object = render_object_with_size(&view, 240.0, 120.0);
 
