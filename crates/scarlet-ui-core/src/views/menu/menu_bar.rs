@@ -2,6 +2,8 @@
 //!
 //! MenuBar displays menu items horizontally, similar to macOS menu bar.
 
+#![allow(deprecated)]
+
 use crate::element::{Element, ElementId, LayoutConstraints};
 use crate::event::Event;
 use crate::geometry::{Point, Rect, Size};

@@ -6,6 +6,8 @@
 //! - Proper event handling for window controls
 //! - Content area for child views
 
+#![allow(deprecated)]
+
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;

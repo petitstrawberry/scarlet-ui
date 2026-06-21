@@ -232,18 +232,33 @@ pub trait Element {
         self.bounds().contains(point)
     }
 
-    /// Render the Element to its buffer
+    /// Render the Element to its buffer.
     ///
     /// This is called during the paint phase to update the Element's buffer.
     /// For RenderElement, this calls render_object.render().
     /// For other Elements, this does nothing by default.
+    ///
+    /// Legacy buffer rendering is kept during the PaintCommand migration. New
+    /// custom render objects should implement `RenderObject::paint()` instead.
+    #[deprecated(
+        since = "0.1.0",
+        note = "legacy buffer rendering path; implement RenderObject::paint() and emit PaintCommand instead"
+    )]
     fn render(&mut self) {}
 
-    /// Get the buffer for this Element (if any)
+    /// Get the buffer for this Element (if any).
     ///
     /// Returns the buffer if this Element has one to composite.
     /// For RenderElement, this delegates to render_object.get_buffer().
     /// For other Elements, returns None.
+    ///
+    /// Legacy buffer compositing is kept during the PaintCommand migration.
+    /// Pixel-producing views should use `PaintCommand::DrawBuffer` from
+    /// `RenderObject::paint()`.
+    #[deprecated(
+        since = "0.1.0",
+        note = "legacy buffer compositing path; emit PaintCommand from RenderObject::paint() instead"
+    )]
     fn get_buffer(&self) -> Option<&crate::buffer::Buffer> {
         None
     }

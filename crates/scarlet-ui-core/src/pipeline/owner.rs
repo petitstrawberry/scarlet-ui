@@ -6,6 +6,8 @@
 //! PipelineOwner also owns the StateRegistry, ensuring there is only one
 //! registry per application.
 
+#![allow(deprecated)]
+
 use crate::element::{ElementId, ElementTree, LayoutConstraints};
 use crate::geometry::Size;
 use crate::os::Mutex;

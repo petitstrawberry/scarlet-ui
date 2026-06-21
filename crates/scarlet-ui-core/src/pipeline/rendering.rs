@@ -3,6 +3,8 @@
 //! RenderingPipeline is the main entry point for the rendering system.
 //! It orchestrates all phases of the rendering pipeline.
 
+#![allow(deprecated)]
+
 use crate::buffer::Buffer;
 use crate::compositor::DamageRect;
 use crate::element::{Element, ElementTree, LayoutConstraints};

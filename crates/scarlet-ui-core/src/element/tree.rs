@@ -4,6 +4,8 @@
 //! StateRegistry is now managed by PipelineOwner to ensure there's only
 //! one registry per application.
 
+#![allow(deprecated)]
+
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};

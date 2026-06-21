@@ -3,6 +3,8 @@
 //! RenderElement represents leaf nodes in the element tree that directly
 //! render content (text, rectangles, images, etc.).
 
+#![allow(deprecated)]
+
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -26,9 +28,16 @@ pub trait RenderObject: Any {
     /// Get the current size
     fn size(&self) -> Size;
 
-    /// Render to buffer
+    /// Render to buffer.
     ///
     /// For leaf nodes, this renders content to the buffer.
+    ///
+    /// Legacy buffer rendering is kept during the PaintCommand migration. New
+    /// render objects should implement [`RenderObject::paint`] instead.
+    #[deprecated(
+        since = "0.1.0",
+        note = "legacy buffer rendering path; implement RenderObject::paint() and emit PaintCommand instead"
+    )]
     fn render(&mut self);
 
     /// Emit paint commands instead of rendering to a local buffer.
@@ -40,15 +49,27 @@ pub trait RenderObject: Any {
         false
     }
 
-    /// Get the buffer (for compositing)
+    /// Get the buffer (for compositing).
     ///
     /// Returns the buffer if this RenderObject has rendered content.
     /// Returns None for container nodes.
+    ///
+    /// Legacy buffer compositing is kept during the PaintCommand migration.
+    /// Pixel-producing views such as Canvas should emit `PaintCommand::DrawBuffer`
+    /// from [`RenderObject::paint`] instead.
+    #[deprecated(
+        since = "0.1.0",
+        note = "legacy buffer compositing path; emit PaintCommand from RenderObject::paint() instead"
+    )]
     fn get_buffer(&self) -> Option<&crate::buffer::Buffer> {
         None
     }
 
     /// Clear any cached buffers owned by this RenderObject.
+    #[deprecated(
+        since = "0.1.0",
+        note = "legacy buffer cache hook; prefer stateless PaintCommand emission from RenderObject::paint()"
+    )]
     fn clear_buffer(&mut self) {}
 
     /// Hit test - check if a point is within this RenderObject
