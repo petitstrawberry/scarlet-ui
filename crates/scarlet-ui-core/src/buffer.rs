@@ -6,6 +6,7 @@ use crate::color::Color;
 use crate::geometry::Size;
 use alloc::vec;
 use alloc::vec::Vec;
+use std::simd::u32x8;
 
 /// Pixel buffer in BGRA format
 ///
@@ -132,9 +133,13 @@ impl Buffer {
     /// Clear the buffer with a color
     pub fn clear(&mut self, color: Color) {
         let pixel = color.to_bgra();
-        for px in self.data.iter_mut() {
-            *px = pixel;
+        let packed = u32x8::splat(pixel);
+        let (head, body, tail) = self.data.as_simd_mut::<8>();
+        for px in head { *px = pixel; }
+        for chunk in body {
+            *chunk = packed;
         }
+        for px in tail { *px = pixel; }
     }
 
     /// Clear a rectangle with a color
@@ -145,12 +150,15 @@ impl Buffer {
         let pixel = color.to_bgra();
         let x_end = (x + width).min(self.width);
         let y_end = (y + height).min(self.height);
+        let packed = u32x8::splat(pixel);
         for yy in y..y_end {
             let row_start = (yy * self.width + x) as usize;
             let row_end = (yy * self.width + x_end) as usize;
-            for px in self.data[row_start..row_end].iter_mut() {
-                *px = pixel;
-            }
+            let slice = &mut self.data[row_start..row_end];
+            let (head, body, tail) = slice.as_simd_mut::<8>();
+            for px in head { *px = pixel; }
+            for chunk in body { *chunk = packed; }
+            for px in tail { *px = pixel; }
         }
     }
 
@@ -162,47 +170,45 @@ impl Buffer {
     /// * `dst_y` - Destination Y position
     /// * `opacity` - Opacity multiplier (0.0 - 1.0)
     pub fn composite(&mut self, src: &Buffer, dst_x: i32, dst_y: i32, opacity: f32) {
-        if crate::debug::is_enabled() {
-            crate::logln!(
-                "[Buffer] composite: src_size={}x{}, dst_pos=({},{}), opacity={}",
-                src.width,
-                src.height,
-                dst_x,
-                dst_y,
-                opacity
-            );
+        let src_w = src.width as i32;
+        let src_h = src.height as i32;
+        let dst_w = self.width as i32;
+        let dst_h = self.height as i32;
+
+        let dst_left = dst_x.max(0);
+        let dst_top = dst_y.max(0);
+        let dst_right = (dst_x + src_w).min(dst_w);
+        let dst_bottom = (dst_y + src_h).min(dst_h);
+
+        if dst_right <= dst_left || dst_bottom <= dst_top {
+            return;
         }
 
-        let mut pixels_composited = 0u32;
+        let fully_opaque = opacity >= 1.0;
 
-        for y in 0..src.height {
-            for x in 0..src.width {
-                let src_x = x as i32;
-                let src_y = y as i32;
-                let target_x = dst_x + src_x;
-                let target_y = dst_y + src_y;
+        for target_y in dst_top..dst_bottom {
+            let src_y = (target_y - dst_y) as usize;
+            let target_x = dst_left;
+            let width = (dst_right - dst_left) as usize;
+            let src_row_start = src_y * src.width as usize;
+            let dst_row_start = target_y as usize * self.width as usize;
+            let src_offset = (target_x - dst_x) as usize;
 
-                // Check bounds
-                if target_x >= 0
-                    && target_x < self.width as i32
-                    && target_y >= 0
-                    && target_y < self.height as i32
-                {
-                    let src_pixel = src.data[(y * src.width + x) as usize];
-                    let dst_idx = (target_y * self.width as i32 + target_x) as usize;
+            if fully_opaque {
+                let src_slice = &src.data[src_row_start + src_offset..src_row_start + src_offset + width];
+                let dst_slice = &mut self.data[dst_row_start + target_x as usize..dst_row_start + target_x as usize + width];
 
-                    // Alpha blending
-                    self.data[dst_idx] = Self::blend_pixels(self.data[dst_idx], src_pixel, opacity);
-                    pixels_composited += 1;
+                if src_slice.iter().all(|&p| (p >> 24) == 0xFF) {
+                    dst_slice.copy_from_slice(src_slice);
+                    continue;
                 }
             }
-        }
 
-        if crate::debug::is_enabled() {
-            crate::logln!(
-                "[Buffer] composite: {} pixels composited",
-                pixels_composited
-            );
+            for dx in 0..width {
+                let src_pixel = src.data[src_row_start + src_offset + dx];
+                let dst_idx = dst_row_start + target_x as usize + dx;
+                self.data[dst_idx] = Self::blend_pixels(self.data[dst_idx], src_pixel, opacity);
+            }
         }
     }
 
@@ -236,25 +242,30 @@ impl Buffer {
             return;
         }
 
-        let mut pixels_composited = 0u32;
-        for target_y in dst_top..dst_bottom {
-            let src_y = target_y - dst_y;
-            let src_row = (src_y * src.width as i32) as usize;
-            let dst_row = (target_y * self.width as i32) as usize;
-            for target_x in dst_left..dst_right {
-                let src_x = target_x - dst_x;
-                let src_pixel = src.data[(src_row + src_x as usize)];
-                let dst_idx = dst_row + target_x as usize;
-                self.data[dst_idx] = Self::blend_pixels(self.data[dst_idx], src_pixel, opacity);
-                pixels_composited += 1;
-            }
-        }
+        let fully_opaque = opacity >= 1.0;
 
-        if crate::debug::is_enabled() {
-            crate::logln!(
-                "[Buffer] composite_clipped: {} pixels composited",
-                pixels_composited
-            );
+        for target_y in dst_top..dst_bottom {
+            let src_y = (target_y - dst_y) as usize;
+            let target_x = dst_left;
+            let width = (dst_right - dst_left) as usize;
+            let src_row_start = src_y * src.width as usize;
+            let dst_row_start = target_y as usize * self.width as usize;
+            let src_offset = (target_x - dst_x) as usize;
+
+            if fully_opaque {
+                let src_slice = &src.data[src_row_start + src_offset..src_row_start + src_offset + width];
+                let dst_slice = &mut self.data[dst_row_start + target_x as usize..dst_row_start + target_x as usize + width];
+                if src_slice.iter().all(|&p| (p >> 24) == 0xFF) {
+                    dst_slice.copy_from_slice(src_slice);
+                    continue;
+                }
+            }
+
+            for dx in 0..width {
+                let src_pixel = src.data[src_row_start + src_offset + dx];
+                let dst_idx = dst_row_start + target_x as usize + dx;
+                self.data[dst_idx] = Self::blend_pixels(self.data[dst_idx], src_pixel, opacity);
+            }
         }
     }
 
@@ -342,44 +353,32 @@ impl Buffer {
     ///
     /// Pixel format: 0xAARRGGBB in memory, becomes BGRA in little-endian
     fn blend_pixels(dst: u32, src: u32, opacity: f32) -> u32 {
-        // Extract BGRA channels (format: 0xAARRGGBB)
-        let dst_b = (dst & 0xFF) as u32;
-        let dst_g = ((dst >> 8) & 0xFF) as u32;
-        let dst_r = ((dst >> 16) & 0xFF) as u32;
-        let dst_a = ((dst >> 24) & 0xFF) as u32;
+        let dst_bytes = dst.to_le_bytes();
+        let src_bytes = src.to_le_bytes();
 
-        let src_b = (src & 0xFF) as u32;
-        let src_g = ((src >> 8) & 0xFF) as u32;
-        let src_r = ((src >> 16) & 0xFF) as u32;
-        let src_a = ((src >> 24) & 0xFF) as u32;
-
-        // If source is fully opaque, just copy
-        if src_a == 255 && opacity >= 1.0 {
+        let src_a = src_bytes[3] as f32;
+        if src_a == 255.0 && opacity >= 1.0 {
             return src;
         }
-
-        // If source is fully transparent, keep destination
-        if src_a == 0 || opacity <= 0.0 {
+        if src_a == 0.0 || opacity <= 0.0 {
             return dst;
         }
 
-        // Apply opacity to source alpha
-        let src_alpha = (src_a as f32 * opacity).min(255.0);
+        let alpha = src_a * opacity;
+        let inv_a = 255.0 - alpha;
 
-        // Alpha blending: over operator
-        // result = src * src_alpha + dst * (1 - src_alpha) / 255
-        let inv_a = 255.0 - src_alpha;
+        let b = (src_bytes[0] as f32 * alpha + dst_bytes[0] as f32 * inv_a) / 255.0;
+        let g = (src_bytes[1] as f32 * alpha + dst_bytes[1] as f32 * inv_a) / 255.0;
+        let r = (src_bytes[2] as f32 * alpha + dst_bytes[2] as f32 * inv_a) / 255.0;
+        let a = dst_bytes[3] as f32 + (255.0 - dst_bytes[3] as f32) * alpha / 255.0;
 
-        let b = (src_b as f32 * src_alpha + dst_b as f32 * inv_a) / 255.0;
-        let g = (src_g as f32 * src_alpha + dst_g as f32 * inv_a) / 255.0;
-        let r = (src_r as f32 * src_alpha + dst_r as f32 * inv_a) / 255.0;
-        let a_final = (dst_a as f32 + (255.0 - dst_a as f32) * src_alpha / 255.0);
-
-        // Clamp and pack as 0xAARRGGBB
-        (b.min(255.0) as u32 & 0xFF)
-            | ((g.min(255.0) as u32 & 0xFF) << 8)
-            | ((r.min(255.0) as u32 & 0xFF) << 16)
-            | ((a_final.min(255.0) as u32 & 0xFF) << 24)
+        let bytes = [
+            b.clamp(0.0, 255.0) as u8,
+            g.clamp(0.0, 255.0) as u8,
+            r.clamp(0.0, 255.0) as u8,
+            a.clamp(0.0, 255.0) as u8,
+        ];
+        u32::from_le_bytes(bytes)
     }
 
     /// Set a pixel at the given position
