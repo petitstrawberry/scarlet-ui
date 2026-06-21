@@ -490,10 +490,32 @@ fn visible_range_uses_border_clip_not_padding_clip() {
         false,
     );
 
-    assert_eq!(layout.visible_lines, 3..8);
+    let expected_start = layout
+        .visual_lines
+        .iter()
+        .position(|line| {
+            line.y < height - BORDER_WIDTH && line.y + layout.line_height > BORDER_WIDTH
+        })
+        .unwrap();
+    let expected_end = layout
+        .visual_lines
+        .iter()
+        .rposition(|line| {
+            line.y < height - BORDER_WIDTH && line.y + layout.line_height > BORDER_WIDTH
+        })
+        .unwrap()
+        + 1;
+
+    assert_eq!(layout.visible_lines, expected_start..expected_end);
+    let mut includes_padding_only_row = false;
     for (index, line) in layout.visual_lines.iter().enumerate() {
         let intersects_border_clip =
             line.y < height - BORDER_WIDTH && line.y + layout.line_height > BORDER_WIDTH;
+        let intersects_padding_clip = line.y < layout.padding + layout.viewport_height
+            && line.y + layout.line_height > layout.padding;
+        includes_padding_only_row |= layout.visible_lines.contains(&index)
+            && intersects_border_clip
+            && !intersects_padding_clip;
         assert_eq!(
             layout.visible_lines.contains(&index),
             intersects_border_clip,
@@ -504,6 +526,7 @@ fn visible_range_uses_border_clip_not_padding_clip() {
             height - BORDER_WIDTH
         );
     }
+    assert!(includes_padding_only_row);
 }
 
 #[test]
