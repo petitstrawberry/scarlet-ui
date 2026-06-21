@@ -157,11 +157,10 @@ impl ApplicationRunner {
         app: &mut A,
         declarations: Vec<WindowDeclaration>,
     ) -> Result<Vec<WindowSlot<A>>> {
-        let scale_milli = self.backend.output_scale_milli();
         let mut slots = Vec::new();
 
         for (index, declaration) in declarations.into_iter().enumerate() {
-            slots.push(self.create_slot(app, declaration, scale_milli, index == 0)?);
+            slots.push(self.create_slot(app, declaration, index == 0)?);
         }
 
         Ok(slots)
@@ -171,13 +170,11 @@ impl ApplicationRunner {
         &mut self,
         app: &mut A,
         declaration: WindowDeclaration,
-        scale_milli: u32,
         is_primary: bool,
     ) -> Result<WindowSlot<A>> {
         let window_id = WindowId::generate();
         let pipeline_id = PipelineId::new(window_id.get());
         let mut pipeline = RenderingPipeline::with_pipeline_id(pipeline_id);
-        pipeline.set_scale_milli(scale_milli);
 
         let root = Box::new(SceneWindowRootElement::new(
             app.clone(),
@@ -305,13 +302,7 @@ impl ApplicationRunner {
                         .into_iter()
                         .find(|declaration| declaration.key == key)
                     {
-                        let scale_milli = self.backend.output_scale_milli();
-                        slots.push(self.create_slot(
-                            app,
-                            declaration,
-                            scale_milli,
-                            slots.is_empty(),
-                        )?);
+                        slots.push(self.create_slot(app, declaration, slots.is_empty())?);
                     }
                 }
                 ApplicationCommand::DismissWindow(key) => {
