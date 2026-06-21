@@ -50,6 +50,13 @@ pub fn run(args: RunArgs) -> Result<(), String> {
         }
     }
 
+    if args.paint {
+        if let Some(ref mut host) = host {
+            host.set_paint_enabled(true);
+            println!("[preview] paint command path enabled");
+        }
+    }
+
     loop {
         let current_mtime = latest_source_mtime(&project.crate_dir)?;
         if current_mtime > last_seen {

@@ -98,26 +98,14 @@ pub struct PreviewFrame<'a> {
 
 /// A running preview instance.
 pub trait PreviewSession {
-    /// Current preview title.
     fn title(&self) -> &str;
-
-    /// Current logical size.
     fn size(&self) -> Size;
-
-    /// Resize the preview.
     fn resize(&mut self, size: Size, scale_milli: u32);
-
-    /// Dispatch an input event.
     fn handle_event(&mut self, event: &Event) -> bool;
-
-    /// Take platform-neutral window events emitted by the view tree.
     fn take_emitted_events(&mut self) -> Vec<Event>;
-
-    /// Return focused text input state, if any.
     fn focused_text_input_state(&self) -> Option<TextInputElementState>;
-
-    /// Render the current frame.
     fn render(&mut self) -> Option<PreviewFrame<'_>>;
+    fn set_paint_enabled(&mut self, _enabled: bool) {}
 }
 
 /// Preview library loaded from a Rust dylib.
@@ -352,6 +340,10 @@ impl PreviewSession for ViewPreviewSession {
         let (buffer, damage) = self.pipeline.render_with_damage()?;
         Some(PreviewFrame { buffer, damage })
     }
+
+    fn set_paint_enabled(&mut self, enabled: bool) {
+        self.pipeline.set_paint_enabled(enabled);
+    }
 }
 
 /// Loaded preview dylib.
@@ -465,6 +457,12 @@ impl PreviewHost {
         self.window.as_ref()
     }
 
+    pub fn set_paint_enabled(&mut self, enabled: bool) {
+        if let Some(session) = self.session.as_mut() {
+            session.set_paint_enabled(enabled);
+        }
+    }
+
     /// Replace the loaded preview library after a successful rebuild.
     pub fn reload(&mut self, mut loaded: LoadedPreviewLibrary) -> core::result::Result<(), String> {
         let size = self.window.size();
@@ -535,9 +533,10 @@ impl PreviewHost {
         self.window
             .sync_text_input(session.focused_text_input_state().as_ref());
 
-        if self.sync_after_reload {
-            let size = self.window.size();
-            let scale_milli = self.window.output_scale_milli();
+        let size = self.window.size();
+        let scale_milli = self.window.output_scale_milli();
+
+        if self.sync_after_reload || session.size() != size {
             session.resize(size, scale_milli);
             self.sync_after_reload = false;
         }

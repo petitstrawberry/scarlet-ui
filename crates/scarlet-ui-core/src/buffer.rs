@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 /// - Byte 1: Green
 /// - Byte 2: Red
 /// - Byte 3: Alpha
+#[derive(Clone)]
 pub struct Buffer {
     width: u32,
     height: u32,
@@ -182,8 +183,10 @@ impl Buffer {
             let src_offset = (target_x - dst_x) as usize;
 
             if fully_opaque {
-                let src_slice = &src.data[src_row_start + src_offset..src_row_start + src_offset + width];
-                let dst_slice = &mut self.data[dst_row_start + target_x as usize..dst_row_start + target_x as usize + width];
+                let src_slice =
+                    &src.data[src_row_start + src_offset..src_row_start + src_offset + width];
+                let dst_slice = &mut self.data
+                    [dst_row_start + target_x as usize..dst_row_start + target_x as usize + width];
 
                 if src_slice.iter().all(|&p| (p >> 24) == 0xFF) {
                     dst_slice.copy_from_slice(src_slice);
@@ -240,8 +243,10 @@ impl Buffer {
             let src_offset = (target_x - dst_x) as usize;
 
             if fully_opaque {
-                let src_slice = &src.data[src_row_start + src_offset..src_row_start + src_offset + width];
-                let dst_slice = &mut self.data[dst_row_start + target_x as usize..dst_row_start + target_x as usize + width];
+                let src_slice =
+                    &src.data[src_row_start + src_offset..src_row_start + src_offset + width];
+                let dst_slice = &mut self.data
+                    [dst_row_start + target_x as usize..dst_row_start + target_x as usize + width];
                 if src_slice.iter().all(|&p| (p >> 24) == 0xFF) {
                     dst_slice.copy_from_slice(src_slice);
                     continue;

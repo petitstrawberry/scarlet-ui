@@ -5,8 +5,9 @@
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::Size;
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::view::View;
 use alloc::boxed::Box;
@@ -341,6 +342,48 @@ impl ElementRenderObject for ToggleRenderObject {
 
     fn clear_buffer(&mut self) {
         self.buffer = None;
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let palette = ColorPalette::default();
+        let bg_color = if self.is_on {
+            palette.green().base
+        } else {
+            palette.surface_variant().darken(0.06)
+        };
+        let border_color = palette.border().with_opacity(0.7);
+        let thumb_color = palette.surface();
+        let rect = Rect::new(origin, self.size);
+        let radius = self.size.height / 2.0;
+        let inset = 1.0;
+        ctx.fill_rounded_rect(rect, radius, border_color);
+        ctx.fill_rounded_rect(
+            Rect::from_xywh(
+                origin.x + inset,
+                origin.y + inset,
+                (self.size.width - inset * 2.0).max(0.0),
+                (self.size.height - inset * 2.0).max(0.0),
+            ),
+            (radius - inset).max(0.0),
+            bg_color,
+        );
+
+        let thumb_diameter = self.size.height - 4.0;
+        let thumb_offset = if self.is_on {
+            self.size.width - self.size.height
+        } else {
+            0.0
+        };
+        let thumb_radius = thumb_diameter / 2.0;
+        ctx.fill_circle(
+            Point::new(
+                origin.x + thumb_offset + 2.0 + thumb_radius,
+                origin.y + 2.0 + thumb_radius,
+            ),
+            thumb_radius,
+            thumb_color,
+        );
+        true
     }
 
     fn update(&mut self, new_view: &dyn crate::view::View) -> crate::element::UpdateResult {

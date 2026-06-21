@@ -21,6 +21,8 @@ pub struct RunArgs {
     pub poll_ms: u64,
     #[arg(long)]
     pub build_only: bool,
+    #[arg(long)]
+    pub paint: bool,
     #[cfg(feature = "gpu")]
     #[arg(long, default_value_t = true)]
     pub gpu: bool,

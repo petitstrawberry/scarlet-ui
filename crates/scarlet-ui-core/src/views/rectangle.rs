@@ -5,8 +5,9 @@
 use crate::buffer::Buffer;
 use crate::color::Color;
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::Size;
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::renderer::{PaintContext, path_rect, path_rounded_rect};
 use crate::view::View;
 use alloc::boxed::Box;
 use core::any::Any;
@@ -345,5 +346,38 @@ impl ElementRenderObject for RectangleRenderObject {
 
     fn clear_buffer(&mut self) {
         self.buffer = None;
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let rect = Rect::new(origin, self.size);
+
+        if self.corner_radius > 0.0 {
+            let path = path_rounded_rect(rect, self.corner_radius);
+            ctx.fill_path(path, self.color);
+        } else {
+            ctx.fill_rect(rect, self.color);
+        }
+
+        if self.border_width > 0.0 {
+            if let Some(border_color) = self.border_color {
+                let bw = self.border_width;
+                let inner = Rect::new(
+                    Point::new(origin.x + bw, origin.y + bw),
+                    Size::new(
+                        (self.size.width - 2.0 * bw).max(0.0),
+                        (self.size.height - 2.0 * bw).max(0.0),
+                    ),
+                );
+                let inner_radius = (self.corner_radius - bw).max(0.0);
+                if inner_radius > 0.0 {
+                    let path = path_rounded_rect(inner, inner_radius);
+                    ctx.fill_path(path, self.color);
+                } else {
+                    ctx.fill_rect(inner, self.color);
+                }
+            }
+        }
+
+        true
     }
 }

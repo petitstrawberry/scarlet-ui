@@ -1,7 +1,9 @@
 //! Built-in box-drawing and block-element rendering for text grids.
 
 use crate::color::Color;
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::renderer::PaintContext;
 
 #[derive(Clone, Copy)]
 enum Arm {
@@ -101,9 +103,23 @@ fn dash(
     for i in 0..count {
         let start = i * spacing;
         if horizontal {
-            rect(canvas, x + start as i32, cy - half, seg_len as i32, stroke_i, color);
+            rect(
+                canvas,
+                x + start as i32,
+                cy - half,
+                seg_len as i32,
+                stroke_i,
+                color,
+            );
         } else {
-            rect(canvas, cx - half, y + start as i32, stroke_i, seg_len as i32, color);
+            rect(
+                canvas,
+                cx - half,
+                y + start as i32,
+                stroke_i,
+                seg_len as i32,
+                color,
+            );
         }
     }
 }
@@ -236,7 +252,12 @@ fn quad(
 }
 
 fn dim(color: Color, factor: f32) -> Color {
-    Color::rgba_f32(color.r * factor, color.g * factor, color.b * factor, color.a)
+    Color::rgba_f32(
+        color.r * factor,
+        color.g * factor,
+        color.b * factor,
+        color.a,
+    )
 }
 
 fn shade(canvas: &mut graphics::Canvas, x: i32, y: i32, w: u32, h: u32, ch: char, color: Color) {
@@ -502,10 +523,38 @@ pub fn draw_box_drawing_char(
             let group = (code - 0x255E) / 3;
             let idx = (code - 0x255E) % 3;
             let (dirs, mask): (&[Arm], u8) = match group {
-                0 => (&[Arm::Right, Arm::Down, Arm::Up], match idx { 0 => 0b001, 1 => 0b110, _ => 0b111 }),
-                1 => (&[Arm::Left, Arm::Down, Arm::Up], match idx { 0 => 0b001, 1 => 0b110, _ => 0b111 }),
-                2 => (&[Arm::Left, Arm::Right, Arm::Down], match idx { 0 => 0b110, 1 => 0b001, _ => 0b111 }),
-                _ => (&[Arm::Left, Arm::Right, Arm::Up], match idx { 0 => 0b110, 1 => 0b001, _ => 0b111 }),
+                0 => (
+                    &[Arm::Right, Arm::Down, Arm::Up],
+                    match idx {
+                        0 => 0b001,
+                        1 => 0b110,
+                        _ => 0b111,
+                    },
+                ),
+                1 => (
+                    &[Arm::Left, Arm::Down, Arm::Up],
+                    match idx {
+                        0 => 0b001,
+                        1 => 0b110,
+                        _ => 0b111,
+                    },
+                ),
+                2 => (
+                    &[Arm::Left, Arm::Right, Arm::Down],
+                    match idx {
+                        0 => 0b110,
+                        1 => 0b001,
+                        _ => 0b111,
+                    },
+                ),
+                _ => (
+                    &[Arm::Left, Arm::Right, Arm::Up],
+                    match idx {
+                        0 => 0b110,
+                        1 => 0b001,
+                        _ => 0b111,
+                    },
+                ),
             };
             double_line(canvas, x, y, w, h, dirs, mask, light, color);
         }
@@ -529,4 +578,284 @@ pub fn draw_box_drawing_char(
         }
         _ => {}
     }
+}
+
+fn paint_rect(ctx: &mut PaintContext, origin: Point, x: i32, y: i32, w: i32, h: i32, color: Color) {
+    if w > 0 && h > 0 {
+        ctx.fill_rect(
+            Rect::new(
+                Point::new(origin.x + x as f32, origin.y + y as f32),
+                Size::new(w as f32, h as f32),
+            ),
+            color,
+        );
+    }
+}
+
+fn paint_lower_block(
+    ctx: &mut PaintContext,
+    origin: Point,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    eighths: u32,
+    color: Color,
+) {
+    let fill = h.saturating_mul(eighths) / 8;
+    paint_rect(
+        ctx,
+        origin,
+        x,
+        y + h.saturating_sub(fill) as i32,
+        w as i32,
+        fill as i32,
+        color,
+    );
+}
+
+fn paint_quad(
+    ctx: &mut PaintContext,
+    origin: Point,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    ul: bool,
+    ur: bool,
+    ll: bool,
+    lr: bool,
+    color: Color,
+) {
+    let lw = w / 2;
+    let rw = w - lw;
+    let th = h / 2;
+    let bh = h - th;
+    if ul {
+        paint_rect(ctx, origin, x, y, lw as i32, th as i32, color);
+    }
+    if ur {
+        paint_rect(ctx, origin, x + lw as i32, y, rw as i32, th as i32, color);
+    }
+    if ll {
+        paint_rect(ctx, origin, x, y + th as i32, lw as i32, bh as i32, color);
+    }
+    if lr {
+        paint_rect(
+            ctx,
+            origin,
+            x + lw as i32,
+            y + th as i32,
+            rw as i32,
+            bh as i32,
+            color,
+        );
+    }
+}
+
+fn paint_arm(
+    ctx: &mut PaintContext,
+    origin: Point,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    dir: Arm,
+    stroke: u32,
+    color: Color,
+) {
+    let cx = x + w as i32 / 2;
+    let cy = y + h as i32 / 2;
+    let end_x = x.saturating_add(w as i32);
+    let end_y = y.saturating_add(h as i32);
+    let stroke = stroke as i32;
+    let half = stroke / 2;
+    match dir {
+        Arm::Right => paint_rect(
+            ctx,
+            origin,
+            cx - half,
+            cy - half,
+            end_x - cx + half,
+            stroke,
+            color,
+        ),
+        Arm::Left => paint_rect(ctx, origin, x, cy - half, cx - x + half, stroke, color),
+        Arm::Down => paint_rect(
+            ctx,
+            origin,
+            cx - half,
+            cy - half,
+            stroke,
+            end_y - cy + half,
+            color,
+        ),
+        Arm::Up => paint_rect(ctx, origin, cx - half, y, stroke, cy - y + half, color),
+    }
+}
+
+fn paint_shade(
+    ctx: &mut PaintContext,
+    origin: Point,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    ch: char,
+    color: Color,
+) -> bool {
+    let factor = match ch {
+        '░' => 0.25,
+        '▒' => 0.50,
+        '▓' => 0.75,
+        _ => return false,
+    };
+    ctx.fill_rect(
+        Rect::new(
+            Point::new(origin.x + x as f32, origin.y + y as f32),
+            Size::new(w as f32, h as f32),
+        ),
+        dim(color, factor),
+    );
+    true
+}
+
+/// Emit fill-rect based paint commands for built-in box-drawing and block-element glyphs.
+pub(crate) fn paint_box_drawing_char(
+    ctx: &mut PaintContext,
+    origin: Point,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    ch: char,
+    color: Color,
+) -> bool {
+    match ch {
+        '▁' => paint_lower_block(ctx, origin, x, y, w, h, 1, color),
+        '▂' => paint_lower_block(ctx, origin, x, y, w, h, 2, color),
+        '▃' => paint_lower_block(ctx, origin, x, y, w, h, 3, color),
+        '▄' => paint_lower_block(ctx, origin, x, y, w, h, 4, color),
+        '▅' => paint_lower_block(ctx, origin, x, y, w, h, 5, color),
+        '▆' => paint_lower_block(ctx, origin, x, y, w, h, 6, color),
+        '▇' => paint_lower_block(ctx, origin, x, y, w, h, 7, color),
+        '▀' => paint_rect(ctx, origin, x, y, w as i32, (h / 2) as i32, color),
+        '█' => paint_rect(ctx, origin, x, y, w as i32, h as i32, color),
+        '▉' => paint_rect(
+            ctx,
+            origin,
+            x,
+            y,
+            w.saturating_mul(7) as i32 / 8,
+            h as i32,
+            color,
+        ),
+        '▊' => paint_rect(
+            ctx,
+            origin,
+            x,
+            y,
+            w.saturating_mul(6) as i32 / 8,
+            h as i32,
+            color,
+        ),
+        '▋' => paint_rect(
+            ctx,
+            origin,
+            x,
+            y,
+            w.saturating_mul(5) as i32 / 8,
+            h as i32,
+            color,
+        ),
+        '▌' => paint_rect(ctx, origin, x, y, (w / 2) as i32, h as i32, color),
+        '▍' => paint_rect(
+            ctx,
+            origin,
+            x,
+            y,
+            w.saturating_mul(3) as i32 / 8,
+            h as i32,
+            color,
+        ),
+        '▎' => paint_rect(ctx, origin, x, y, (w / 4) as i32, h as i32, color),
+        '▏' => paint_rect(ctx, origin, x, y, (w / 8) as i32, h as i32, color),
+        '▐' => paint_rect(
+            ctx,
+            origin,
+            x + (w / 2) as i32,
+            y,
+            (w - w / 2) as i32,
+            h as i32,
+            color,
+        ),
+        '▔' => paint_rect(ctx, origin, x, y, w as i32, (h / 8).max(1) as i32, color),
+        '▕' => paint_rect(
+            ctx,
+            origin,
+            x + w.saturating_sub((w / 8).max(1)) as i32,
+            y,
+            (w / 8).max(1) as i32,
+            h as i32,
+            color,
+        ),
+        '▖' => paint_quad(ctx, origin, x, y, w, h, false, false, true, false, color),
+        '▗' => paint_quad(ctx, origin, x, y, w, h, false, false, false, true, color),
+        '▘' => paint_quad(ctx, origin, x, y, w, h, true, false, false, false, color),
+        '▙' => paint_quad(ctx, origin, x, y, w, h, true, false, true, true, color),
+        '▚' => paint_quad(ctx, origin, x, y, w, h, true, false, false, true, color),
+        '▛' => paint_quad(ctx, origin, x, y, w, h, true, true, true, false, color),
+        '▜' => paint_quad(ctx, origin, x, y, w, h, true, true, false, true, color),
+        '▝' => paint_quad(ctx, origin, x, y, w, h, false, true, false, false, color),
+        '▞' => paint_quad(ctx, origin, x, y, w, h, false, true, true, false, color),
+        '▟' => paint_quad(ctx, origin, x, y, w, h, false, true, true, true, color),
+        '░' | '▒' | '▓' => return paint_shade(ctx, origin, x, y, w, h, ch, color),
+        _ => {
+            let light = libm::roundf(w as f32 / 8.0).max(1.0) as u32;
+            let heavy = light * 2;
+            let stroke = if matches!(ch, '━' | '┃' | '╸' | '╹' | '╺' | '╻') {
+                heavy
+            } else {
+                light
+            };
+            match ch {
+                '─' | '━' | '═' => {
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Left, stroke, color);
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Right, stroke, color);
+                }
+                '│' | '┃' | '║' => {
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Up, stroke, color);
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Down, stroke, color);
+                }
+                '╴' | '╸' => paint_arm(ctx, origin, x, y, w, h, Arm::Left, stroke, color),
+                '╵' | '╹' => paint_arm(ctx, origin, x, y, w, h, Arm::Up, stroke, color),
+                '╶' | '╺' => paint_arm(ctx, origin, x, y, w, h, Arm::Right, stroke, color),
+                '╷' | '╻' => paint_arm(ctx, origin, x, y, w, h, Arm::Down, stroke, color),
+                '╭' | '┌' => {
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Right, light, color);
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Down, light, color);
+                }
+                '╮' | '┐' => {
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Left, light, color);
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Down, light, color);
+                }
+                '╰' | '└' => {
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Right, light, color);
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Up, light, color);
+                }
+                '╯' | '┘' => {
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Left, light, color);
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Up, light, color);
+                }
+                '┼' | '╋' | '╬' => {
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Left, stroke, color);
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Right, stroke, color);
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Up, stroke, color);
+                    paint_arm(ctx, origin, x, y, w, h, Arm::Down, stroke, color);
+                }
+                _ => return false,
+            }
+        }
+    }
+    true
 }

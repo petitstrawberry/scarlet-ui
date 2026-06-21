@@ -16,6 +16,7 @@ use crate::element::{
 use crate::event::{FocusEvent, KeyCode, KeyEvent};
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::renderer::PaintContext;
 use crate::state::{Listenable, State};
 use crate::view::View;
 
@@ -293,6 +294,38 @@ impl ElementRenderObject for TextFieldRenderObject {
         self.preedit_anchor_byte = preedit_anchor_byte;
         self.preedit_spans = preedit_spans;
         crate::element::UpdateResult::Updated
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let rect = Rect::new(origin, self.size);
+        let border = if self.focused {
+            self.focused_border_color
+        } else {
+            self.border_color
+        };
+        ctx.fill_rect(rect, self.background_color);
+        ctx.stroke_rect(rect, 1.0, border);
+
+        let display = if self.text.is_empty() && self.preedit.is_empty() {
+            self.placeholder.clone()
+        } else if self.focused && !self.preedit.is_empty() {
+            text_with_preedit_cursor(&self.text, &self.preedit, self.preedit_cursor_byte)
+        } else if self.focused {
+            let mut display = self.text.clone();
+            display.push('|');
+            display
+        } else {
+            self.text.clone()
+        };
+        let color = if self.text.is_empty() && self.preedit.is_empty() {
+            self.placeholder_color
+        } else {
+            self.text_color
+        };
+        let x = origin.x + self.padding;
+        let y = origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0);
+        ctx.draw_text(Point::new(x, y), display, color, self.font_size);
+        true
     }
 }
 

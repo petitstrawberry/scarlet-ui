@@ -3,9 +3,11 @@
 //! This allows embedding any rendering system (Slint, custom graphics, etc.) into Scarlet UI.
 
 use crate::buffer::Buffer;
+use crate::color::Color;
 use crate::element::{Element, ElementRenderObject, LayoutConstraints};
 use crate::event::Event;
-use crate::geometry::Size;
+use crate::geometry::{Point, Rect, Size};
+use crate::renderer::PaintContext;
 use crate::view::View;
 
 use core::any::Any;
@@ -204,5 +206,15 @@ impl ElementRenderObject for CanvasRenderObject {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let rect = Rect::new(origin, self.size);
+        if let Some(buffer) = self.buffer.as_ref() {
+            ctx.draw_buffer(rect, buffer.clone());
+        } else {
+            ctx.fill_rect(rect, Color::TRANSPARENT);
+        }
+        true
     }
 }

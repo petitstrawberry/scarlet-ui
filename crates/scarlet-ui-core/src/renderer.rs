@@ -20,7 +20,10 @@ pub fn path_rect(rect: Rect) -> Path {
     alloc::vec![
         Point::new(rect.origin.x, rect.origin.y),
         Point::new(rect.origin.x + rect.size.width, rect.origin.y),
-        Point::new(rect.origin.x + rect.size.width, rect.origin.y + rect.size.height),
+        Point::new(
+            rect.origin.x + rect.size.width,
+            rect.origin.y + rect.size.height
+        ),
         Point::new(rect.origin.x, rect.origin.y + rect.size.height),
     ]
 }
@@ -44,7 +47,9 @@ pub fn path_circle(center: Point, radius: f32) -> Path {
 
 pub fn path_rounded_rect(rect: Rect, corner_radius: f32) -> Path {
     const CORNER_SEGMENTS: usize = 8;
-    let r = corner_radius.min(rect.size.width / 2.0).min(rect.size.height / 2.0);
+    let r = corner_radius
+        .min(rect.size.width / 2.0)
+        .min(rect.size.height / 2.0);
     let x0 = rect.origin.x;
     let y0 = rect.origin.y;
     let x1 = rect.origin.x + rect.size.width;
@@ -58,7 +63,8 @@ pub fn path_rounded_rect(rect: Rect, corner_radius: f32) -> Path {
     ];
     for (cx, cy, start_angle) in corners {
         for i in 0..CORNER_SEGMENTS {
-            let t = start_angle + core::f32::consts::FRAC_PI_2 * (i as f32) / (CORNER_SEGMENTS as f32);
+            let t =
+                start_angle + core::f32::consts::FRAC_PI_2 * (i as f32) / (CORNER_SEGMENTS as f32);
             pts.push(Point::new(cx + r * t.cos(), cy + r * t.sin()));
         }
     }
@@ -67,14 +73,38 @@ pub fn path_rounded_rect(rect: Rect, corner_radius: f32) -> Path {
 
 #[derive(Debug, Clone)]
 pub enum PaintCommand {
-    FillPath { path: Path, color: Color },
-    StrokePath { path: Path, stroke_width: f32, color: Color },
-    DrawText { position: Point, text: String, color: Color, font_size_px: f32 },
-    DrawBuffer { dst: Rect, buffer_idx: usize },
-    DrawBufferRect { dst: Rect, src: Rect, buffer_idx: usize, opacity: f32 },
-    PushClip { rect: Rect },
+    FillPath {
+        path: Path,
+        color: Color,
+    },
+    StrokePath {
+        path: Path,
+        stroke_width: f32,
+        color: Color,
+    },
+    DrawText {
+        position: Point,
+        text: String,
+        color: Color,
+        font_size_px: f32,
+    },
+    DrawBuffer {
+        dst: Rect,
+        buffer_idx: usize,
+    },
+    DrawBufferRect {
+        dst: Rect,
+        src: Rect,
+        buffer_idx: usize,
+        opacity: f32,
+    },
+    PushClip {
+        rect: Rect,
+    },
     PopClip,
-    SetOpacity { opacity: f32 },
+    SetOpacity {
+        opacity: f32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,15 +117,23 @@ pub struct PaintContext {
 
 impl Default for PaintContext {
     fn default() -> Self {
-        Self { commands: Vec::new(), buffers: Vec::new() }
+        Self {
+            commands: Vec::new(),
+            buffers: Vec::new(),
+        }
     }
 }
 
 impl PaintContext {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn fill_path(&mut self, path: impl Into<Path>, color: Color) {
-        self.commands.push(PaintCommand::FillPath { path: path.into(), color });
+        self.commands.push(PaintCommand::FillPath {
+            path: path.into(),
+            color,
+        });
     }
 
     pub fn fill_rect(&mut self, rect: Rect, color: Color) {
@@ -130,7 +168,13 @@ impl PaintContext {
         self.stroke_path(alloc::vec![from, to], stroke_width, color);
     }
 
-    pub fn draw_text(&mut self, position: Point, text: impl Into<String>, color: Color, font_size_px: f32) {
+    pub fn draw_text(
+        &mut self,
+        position: Point,
+        text: impl Into<String>,
+        color: Color,
+        font_size_px: f32,
+    ) {
         self.commands.push(PaintCommand::DrawText {
             position,
             text: text.into(),
@@ -142,14 +186,28 @@ impl PaintContext {
     pub fn draw_buffer(&mut self, dst: Rect, buffer: Buffer) -> BufferHandle {
         let idx = self.buffers.len();
         self.buffers.push(buffer);
-        self.commands.push(PaintCommand::DrawBuffer { dst, buffer_idx: idx });
+        self.commands.push(PaintCommand::DrawBuffer {
+            dst,
+            buffer_idx: idx,
+        });
         BufferHandle(idx)
     }
 
-    pub fn draw_buffer_rect(&mut self, dst: Rect, src: Rect, buffer: Buffer, opacity: f32) -> BufferHandle {
+    pub fn draw_buffer_rect(
+        &mut self,
+        dst: Rect,
+        src: Rect,
+        buffer: Buffer,
+        opacity: f32,
+    ) -> BufferHandle {
         let idx = self.buffers.len();
         self.buffers.push(buffer);
-        self.commands.push(PaintCommand::DrawBufferRect { dst, src, buffer_idx: idx, opacity });
+        self.commands.push(PaintCommand::DrawBufferRect {
+            dst,
+            src,
+            buffer_idx: idx,
+            opacity,
+        });
         BufferHandle(idx)
     }
 
@@ -165,10 +223,19 @@ impl PaintContext {
         self.commands.push(PaintCommand::SetOpacity { opacity });
     }
 
-    pub fn commands(&self) -> &[PaintCommand] { &self.commands }
-    pub fn buffers(&self) -> &[Buffer] { &self.buffers }
-    pub fn clear(&mut self) { self.commands.clear(); self.buffers.clear(); }
-    pub fn is_empty(&self) -> bool { self.commands.is_empty() }
+    pub fn commands(&self) -> &[PaintCommand] {
+        &self.commands
+    }
+    pub fn buffers(&self) -> &[Buffer] {
+        &self.buffers
+    }
+    pub fn clear(&mut self) {
+        self.commands.clear();
+        self.buffers.clear();
+    }
+    pub fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+    }
 }
 
 pub struct Frame<'a> {
@@ -192,10 +259,16 @@ pub struct CpuRenderer {
 
 impl CpuRenderer {
     pub fn new(size: Size, scale_milli: u32, background_color: Color) -> Self {
-        Self { compositor: Compositor::new(size, scale_milli, background_color) }
+        Self {
+            compositor: Compositor::new(size, scale_milli, background_color),
+        }
     }
-    pub fn compositor(&self) -> &Compositor { &self.compositor }
-    pub fn compositor_mut(&mut self) -> &mut Compositor { &mut self.compositor }
+    pub fn compositor(&self) -> &Compositor {
+        &self.compositor
+    }
+    pub fn compositor_mut(&mut self) -> &mut Compositor {
+        &mut self.compositor
+    }
 }
 
 impl Renderer for CpuRenderer {
@@ -208,17 +281,25 @@ impl Renderer for CpuRenderer {
         self.compositor.set_background_color(color);
     }
     fn composite(&mut self, root: &dyn Element, dirty_ids: &[ElementId]) {
-        self.compositor.composite_elements_with_dirty(root, dirty_ids);
+        self.compositor
+            .composite_elements_with_dirty(root, dirty_ids);
     }
     fn render_paint(&mut self, _ctx: &PaintContext) {}
-    fn buffer(&self) -> &Buffer { self.compositor.window_buffer() }
-    fn buffer_mut(&mut self) -> &mut Buffer { self.compositor.window_buffer_mut() }
-    fn damage(&self) -> Option<&[DamageRect]> { self.compositor.last_damage_rects() }
+    fn buffer(&self) -> &Buffer {
+        self.compositor.window_buffer()
+    }
+    fn buffer_mut(&mut self) -> &mut Buffer {
+        self.compositor.window_buffer_mut()
+    }
+    fn damage(&self) -> Option<&[DamageRect]> {
+        self.compositor.last_damage_rects()
+    }
 }
 
 pub struct CpuPaintRenderer {
     buffer: Buffer,
     background_color: Color,
+    scale_milli: u32,
     clip_stack: Vec<Rect>,
 }
 
@@ -226,11 +307,41 @@ impl CpuPaintRenderer {
     pub fn new(size: Size, scale_milli: u32, background_color: Color) -> Self {
         Self {
             buffer: Buffer::from_logical_dimensions_with_scale(
-                size.width as u32, size.height as u32, scale_milli,
+                size.width as u32,
+                size.height as u32,
+                scale_milli,
             ),
             background_color,
+            scale_milli,
             clip_stack: Vec::new(),
         }
+    }
+
+    pub fn resize(&mut self, size: Size, scale_milli: u32) {
+        self.buffer = Buffer::from_logical_dimensions_with_scale(
+            size.width as u32,
+            size.height as u32,
+            scale_milli,
+        );
+        self.scale_milli = scale_milli;
+    }
+
+    fn scale_f32(&self, value: f32) -> f32 {
+        value * (self.scale_milli as f32) / 1000.0
+    }
+
+    fn scale_point(&self, p: Point) -> Point {
+        Point::new(self.scale_f32(p.x), self.scale_f32(p.y))
+    }
+
+    fn scale_rect(&self, rect: Rect) -> Rect {
+        Rect::new(
+            self.scale_point(rect.origin),
+            Size::new(
+                self.scale_f32(rect.size.width),
+                self.scale_f32(rect.size.height),
+            ),
+        )
     }
 
     pub fn execute(&mut self, ctx: &PaintContext) {
@@ -241,52 +352,88 @@ impl CpuPaintRenderer {
             let clip = self.clip_stack.last().copied();
             match cmd {
                 PaintCommand::FillPath { path, color } => {
-                    let clip_i = clip.map(|c| (c.origin.x, c.origin.y, c.size.width, c.size.height));
-                    fill_polygon(&mut self.buffer, path, *color, clip_i);
+                    let scaled: Vec<Point> =
+                        path.iter().copied().map(|p| self.scale_point(p)).collect();
+                    let clip_i = clip.map(|c| {
+                        let r = self.scale_rect(c);
+                        (r.origin.x, r.origin.y, r.size.width, r.size.height)
+                    });
+                    fill_polygon(&mut self.buffer, &scaled, *color, clip_i);
                 }
-                PaintCommand::StrokePath { path, stroke_width, color } => {
+                PaintCommand::StrokePath {
+                    path,
+                    stroke_width,
+                    color,
+                } => {
                     let sw = stroke_width.max(1.0) as i32;
                     let mut canvas = crate::graphics::Canvas::for_buffer(&mut self.buffer);
                     for window in path.windows(2) {
                         canvas.draw_line(
-                            window[0].x as i32, window[0].y as i32,
-                            window[1].x as i32, window[1].y as i32, *color,
+                            window[0].x as i32,
+                            window[0].y as i32,
+                            window[1].x as i32,
+                            window[1].y as i32,
+                            *color,
                         );
                     }
                     if path.len() > 2 {
                         let first = path[0];
                         let last = path[path.len() - 1];
                         canvas.draw_line(
-                            last.x as i32, last.y as i32,
-                            first.x as i32, first.y as i32, *color,
+                            last.x as i32,
+                            last.y as i32,
+                            first.x as i32,
+                            first.y as i32,
+                            *color,
                         );
                     }
                     let _ = sw;
                 }
-                PaintCommand::DrawText { position, text, color, font_size_px } => {
+                PaintCommand::DrawText {
+                    position,
+                    text,
+                    color,
+                    font_size_px,
+                } => {
                     let mut canvas = crate::graphics::Canvas::for_buffer(&mut self.buffer);
                     canvas.draw_text_sized(
-                        position.x as i32, position.y as i32,
-                        text, *color, *font_size_px,
+                        position.x as i32,
+                        position.y as i32,
+                        text,
+                        *color,
+                        *font_size_px,
                     );
                 }
                 PaintCommand::DrawBuffer { dst, buffer_idx } => {
                     if let Some(src) = ctx.buffers().get(*buffer_idx) {
+                        let dst = self.scale_rect(*dst);
                         let dst_x = dst.origin.x as i32;
                         let dst_y = dst.origin.y as i32;
                         if let Some(c) = clip {
+                            let c = self.scale_rect(c);
                             self.buffer.composite_clipped(
-                                src, dst_x, dst_y, 1.0,
-                                c.origin.x as i32, c.origin.y as i32,
-                                c.size.width as i32, c.size.height as i32,
+                                src,
+                                dst_x,
+                                dst_y,
+                                1.0,
+                                c.origin.x as i32,
+                                c.origin.y as i32,
+                                c.size.width as i32,
+                                c.size.height as i32,
                             );
                         } else {
                             self.buffer.composite(src, dst_x, dst_y, 1.0);
                         }
                     }
                 }
-                PaintCommand::DrawBufferRect { dst, src: _, buffer_idx, opacity } => {
+                PaintCommand::DrawBufferRect {
+                    dst,
+                    src: _,
+                    buffer_idx,
+                    opacity,
+                } => {
                     if let Some(buf) = ctx.buffers().get(*buffer_idx) {
+                        let dst = self.scale_rect(*dst);
                         let dst_x = dst.origin.x as i32;
                         let dst_y = dst.origin.y as i32;
                         self.buffer.composite(buf, dst_x, dst_y, *opacity);
@@ -303,7 +450,13 @@ impl CpuPaintRenderer {
         }
     }
 
-    pub fn buffer(&self) -> &Buffer { &self.buffer }
+    pub fn buffer(&self) -> &Buffer {
+        &self.buffer
+    }
+
+    pub fn set_background_color(&mut self, color: Color) {
+        self.background_color = color;
+    }
 }
 
 fn fill_polygon(
@@ -391,7 +544,10 @@ mod tests {
     #[test]
     fn fill_rect_writes_pixels() {
         let mut ctx = PaintContext::new();
-        ctx.fill_rect(Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0)), Color::rgb(255, 0, 0));
+        ctx.fill_rect(
+            Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0)),
+            Color::rgb(255, 0, 0),
+        );
         let mut r = CpuPaintRenderer::new(Size::new(100.0, 100.0), 1000, Color::rgb(0, 0, 0));
         r.execute(&ctx);
         assert!(r.buffer().get_pixel(5, 5).unwrap() > 0);
@@ -437,7 +593,10 @@ mod tests {
     fn clip_skips_outside() {
         let mut ctx = PaintContext::new();
         ctx.push_clip(Rect::new(Point::new(50.0, 50.0), Size::new(10.0, 10.0)));
-        ctx.fill_rect(Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0)), Color::rgb(255, 0, 0));
+        ctx.fill_rect(
+            Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0)),
+            Color::rgb(255, 0, 0),
+        );
         ctx.pop_clip();
         let bg = Color::rgb(0, 0, 0);
         let mut r = CpuPaintRenderer::new(Size::new(100.0, 100.0), 1000, bg);
@@ -461,7 +620,12 @@ mod tests {
     #[test]
     fn draw_text_command_recorded() {
         let mut ctx = PaintContext::new();
-        ctx.draw_text(Point::new(10.0, 10.0), "Hello", Color::rgb(255, 255, 255), 14.0);
+        ctx.draw_text(
+            Point::new(10.0, 10.0),
+            "Hello",
+            Color::rgb(255, 255, 255),
+            14.0,
+        );
         assert_eq!(ctx.commands().len(), 1);
         assert!(matches!(ctx.commands()[0], PaintCommand::DrawText { .. }));
     }
@@ -479,8 +643,14 @@ mod tests {
     #[ignore]
     fn visual_dump() {
         let mut ctx = PaintContext::new();
-        ctx.fill_rect(Rect::new(Point::new(0.0, 0.0), Size::new(200.0, 200.0)), Color::rgb(40, 40, 40));
-        ctx.fill_rect(Rect::new(Point::new(10.0, 10.0), Size::new(80.0, 80.0)), Color::rgb(255, 100, 100));
+        ctx.fill_rect(
+            Rect::new(Point::new(0.0, 0.0), Size::new(200.0, 200.0)),
+            Color::rgb(40, 40, 40),
+        );
+        ctx.fill_rect(
+            Rect::new(Point::new(10.0, 10.0), Size::new(80.0, 80.0)),
+            Color::rgb(255, 100, 100),
+        );
         ctx.fill_circle(Point::new(150.0, 50.0), 30.0, Color::rgb(100, 255, 100));
         ctx.fill_triangle(
             Point::new(50.0, 110.0),
@@ -493,7 +663,11 @@ mod tests {
             15.0,
             Color::rgb(255, 255, 100),
         );
-        ctx.stroke_rect(Rect::new(Point::new(5.0, 5.0), Size::new(190.0, 190.0)), 2.0, Color::rgb(200, 200, 200));
+        ctx.stroke_rect(
+            Rect::new(Point::new(5.0, 5.0), Size::new(190.0, 190.0)),
+            2.0,
+            Color::rgb(200, 200, 200),
+        );
 
         let mut r = CpuPaintRenderer::new(Size::new(200.0, 200.0), 1000, Color::rgb(20, 20, 20));
         r.execute(&ctx);

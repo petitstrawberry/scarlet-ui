@@ -10,6 +10,7 @@ use core::any::Any;
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
 use crate::geometry::{Point, Rect, Size};
 use crate::pipeline::{MountContext, PipelineId};
+use crate::renderer::PaintContext;
 use crate::view::View;
 
 /// RenderObject trait for leaf rendering nodes
@@ -29,6 +30,15 @@ pub trait RenderObject: Any {
     ///
     /// For leaf nodes, this renders content to the buffer.
     fn render(&mut self);
+
+    /// Emit paint commands instead of rendering to a local buffer.
+    ///
+    /// `origin` is this element's absolute position in the window.
+    /// Return `true` if commands were emitted (skips the legacy render/buffer path).
+    /// Default `false` keeps the old path.
+    fn paint(&self, _ctx: &mut PaintContext, _origin: Point) -> bool {
+        false
+    }
 
     /// Get the buffer (for compositing)
     ///
