@@ -554,6 +554,30 @@ fn text_x(prefix: &str) -> i32 {
 }
 
 #[test]
+fn down_arrow_moves_from_text_line_to_following_empty_line() {
+    let text = State::new(StateId::new(199), String::from("first\n\nthird"));
+    let selection = State::new(StateId::new(198), TextSelection::collapsed("first".len()));
+    let view = TextView::new(text.clone(), selection.clone());
+    let mut render_object = focused_render_object(&view);
+
+    assert!(handle_text_view_keyboard(
+        &view,
+        &mut render_object,
+        KeyEvent::Pressed {
+            keycode: KeyCode::Down,
+            modifiers: KeyModifiers::empty(),
+        }
+    ));
+
+    assert_eq!(
+        render_object
+            .layout
+            .line_index_at_byte(render_object.selection.caret.byte),
+        1
+    );
+}
+
+#[test]
 fn keyboard_character_insertion_updates_document_and_caret() {
     let text = State::new(StateId::new(200), String::new());
     let selection = State::new(StateId::new(201), TextSelection::collapsed(0));

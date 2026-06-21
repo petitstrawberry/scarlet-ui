@@ -204,7 +204,7 @@ impl TextViewLayout {
         let line_index = self
             .visual_lines
             .iter()
-            .position(|line| byte >= line.text_range.start && byte <= line.text_range.end)
+            .position(|line| line.contains_byte(byte))
             .unwrap_or_else(|| self.visual_lines.len().saturating_sub(1));
         let line = &self.visual_lines[line_index];
         let clamped = byte.clamp(line.text_range.start, line.text_range.end);
@@ -226,7 +226,7 @@ impl TextViewLayout {
     pub fn line_index_at_byte(&self, byte_offset: usize) -> usize {
         self.visual_lines
             .iter()
-            .find(|line| byte_offset >= line.text_range.start && byte_offset <= line.text_range.end)
+            .find(|line| line.contains_byte(byte_offset))
             .map(|line| line.logical_line)
             .unwrap_or_else(|| {
                 self.visual_lines
@@ -301,6 +301,14 @@ impl VisualLine {
 
     pub(crate) fn text(&self) -> &str {
         &self.text
+    }
+
+    pub(crate) fn contains_byte(&self, byte: usize) -> bool {
+        if self.text_range.is_empty() {
+            byte == self.text_range.start
+        } else {
+            byte >= self.text_range.start && byte <= self.text_range.end
+        }
     }
 
     pub(crate) fn display_byte_for_document_byte(&self, document_byte: usize) -> usize {

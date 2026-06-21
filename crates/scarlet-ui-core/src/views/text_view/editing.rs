@@ -687,7 +687,7 @@ fn visual_line_index(render_object: &TextViewRenderObject, byte: usize) -> usize
         .layout
         .visual_lines
         .iter()
-        .position(|line| byte >= line.text_range.start && byte <= line.text_range.end)
+        .position(|line| line.contains_byte(byte))
         .unwrap_or_else(|| render_object.layout.visual_lines.len().saturating_sub(1))
 }
 
