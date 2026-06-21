@@ -47,8 +47,14 @@ pub struct WindowSizeLimits {
 /// Text-input state exposed by focused editable elements.
 #[derive(Clone, Debug)]
 pub struct TextInputElementState {
+    /// Caret rectangle in element-local coordinates.
     pub cursor_rect: Rect,
+    /// Text surrounding the caret that is exposed to the platform IME.
     pub surrounding_text: String,
+    /// Byte offset of the caret within `surrounding_text`.
+    pub cursor_byte: u32,
+    /// Byte offset of the selection anchor within `surrounding_text`.
+    pub anchor_byte: u32,
 }
 
 impl WindowSizeLimits {

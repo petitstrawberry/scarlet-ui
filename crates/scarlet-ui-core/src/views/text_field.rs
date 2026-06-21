@@ -49,11 +49,11 @@ impl TextField {
             placeholder: String::new(),
             on_submit: None,
             blur_on_submit: false,
-            background_color: Color::rgb(248u8, 249u8, 251u8),
-            border_color: Color::rgb(190u8, 196u8, 205u8),
-            focused_border_color: Color::rgb(35u8, 95u8, 160u8),
-            text_color: palette.text_primary(),
-            placeholder_color: Color::gray(0.55),
+            background_color: palette.background(),
+            border_color: palette.background_tertiary(),
+            focused_border_color: palette.primary_light().lighten(0.4),
+            text_color: palette.text(),
+            placeholder_color: palette.text_secondary(),
             font_size: 14.0,
             padding: 8.0,
         }
@@ -89,6 +89,62 @@ impl TextField {
         self
     }
 
+    /// Set the text field background color.
+    ///
+    /// # Arguments
+    ///
+    /// * `color` - Background color used to fill the text field.
+    ///
+    /// # Returns
+    ///
+    /// The updated text field.
+    pub fn background_color(mut self, color: Color) -> Self {
+        self.background_color = color;
+        self
+    }
+
+    /// Set the unfocused border color.
+    ///
+    /// # Arguments
+    ///
+    /// * `color` - Border color used while the text field is not focused.
+    ///
+    /// # Returns
+    ///
+    /// The updated text field.
+    pub fn border_color(mut self, color: Color) -> Self {
+        self.border_color = color;
+        self
+    }
+
+    /// Set the focused border color.
+    ///
+    /// # Arguments
+    ///
+    /// * `color` - Border color used while the text field has keyboard focus.
+    ///
+    /// # Returns
+    ///
+    /// The updated text field.
+    pub fn focused_border_color(mut self, color: Color) -> Self {
+        self.focused_border_color = color;
+        self
+    }
+
+    /// Set the main text color.
+    ///
+    /// # Arguments
+    ///
+    /// * `color` - Color used for entered text and the caret marker.
+    ///
+    /// # Returns
+    ///
+    /// The updated text field.
+    pub fn text_color(mut self, color: Color) -> Self {
+        self.text_color = color;
+        self
+    }
+
     /// Return the bound text state.
     pub fn text_state(&self) -> &State<String> {
         &self.text
@@ -110,6 +166,7 @@ impl TextField {
         let mut display = text.clone();
         display.push_str(preedit_prefix(preedit, cursor_byte));
         let (text_width, _) = graphics::measure_text_sized(&display, self.font_size);
+        let text_len = text.len() as u32;
         TextInputElementState {
             cursor_rect: Rect::from_xywh(
                 self.padding + text_width as f32,
@@ -118,6 +175,8 @@ impl TextField {
                 self.font_size * 1.25,
             ),
             surrounding_text: text,
+            cursor_byte: text_len,
+            anchor_byte: text_len,
         }
     }
 }
@@ -410,6 +469,7 @@ pub(crate) fn handle_text_field_keyboard(
         }
         KeyEvent::Pressed {
             keycode: KeyCode::Backspace,
+            ..
         } => {
             let mut text = field.text.get();
             text.pop();
@@ -418,6 +478,7 @@ pub(crate) fn handle_text_field_keyboard(
         }
         KeyEvent::Pressed {
             keycode: KeyCode::Enter,
+            ..
         } => {
             field.invoke_submit();
             if field.blur_on_submit {
@@ -427,9 +488,11 @@ pub(crate) fn handle_text_field_keyboard(
         }
         KeyEvent::Pressed {
             keycode: KeyCode::Escape,
+            ..
         }
         | KeyEvent::Pressed {
             keycode: KeyCode::Tab,
+            ..
         } => {
             render_object.set_focused(false);
             true

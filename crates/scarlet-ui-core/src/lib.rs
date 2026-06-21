@@ -135,6 +135,10 @@ pub use views::{
     Button, HStack, Image, Rectangle, Spacer, Text, TextField, VStack, Window, WindowContentLayout,
     ZStack,
 };
+pub use views::{
+    EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView, TextViewRenderObject,
+    TextViewScroll, WrapMode,
+};
 pub use views::{NavigationLink, NavigationView};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
 
@@ -171,6 +175,10 @@ pub mod prelude {
     pub use crate::views::{
         Button, Either, Either3, Either4, Either5, Either6, HStack, Image, Rectangle, Spacer, Text,
         TextField, VStack, Window, WindowContentLayout, ZStack,
+    };
+    pub use crate::views::{
+        EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView,
+        TextViewRenderObject, TextViewScroll, WrapMode,
     };
     pub use crate::views::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};
     pub use crate::views::{

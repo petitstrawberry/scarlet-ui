@@ -12,10 +12,10 @@ use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::element::TextInputElementState;
 use scarlet_ui_core::error::{Error, Result};
-use scarlet_ui_core::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent};
+use scarlet_ui_core::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent};
 use scarlet_ui_core::geometry::{Point, Size};
 use scarlet_ui_core::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ::winit::application::ApplicationHandler;
 use ::winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
@@ -24,13 +24,16 @@ use ::winit::event::{
     WindowEvent,
 };
 use ::winit::event_loop::{ActiveEventLoop, EventLoop};
-use ::winit::keyboard::{Key, NamedKey};
+use ::winit::keyboard::{Key, ModifiersState, NamedKey};
 use ::winit::platform::pump_events::EventLoopExtPumpEvents;
 use ::winit::window::{Window as WinitWindow, WindowAttributes, WindowId};
 
 type SoftbufferContext = softbuffer::Context<::winit::event_loop::OwnedDisplayHandle>;
 type SoftbufferSurface =
     softbuffer::Surface<::winit::event_loop::OwnedDisplayHandle, Rc<WinitWindow>>;
+
+const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
+const DOUBLE_CLICK_DISTANCE: i32 = 5;
 
 pub struct WinitBackend {
     shared: Rc<WinitSharedState>,
@@ -84,7 +87,70 @@ struct WinitEventState {
     text_input_context_id: u32,
     text_input_serial: u32,
     pending_empty_preedit: Option<(u32, u32)>,
+    modifiers: KeyModifiers,
+    click_state: ClickState,
     queue: VecDeque<Event>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ClickState {
+    last_button: Option<MouseButton>,
+    last_x: i32,
+    last_y: i32,
+    last_time: Option<Instant>,
+    last_count: u8,
+    active_button: Option<MouseButton>,
+    active_count: u8,
+}
+
+impl Default for ClickState {
+    fn default() -> Self {
+        Self {
+            last_button: None,
+            last_x: 0,
+            last_y: 0,
+            last_time: None,
+            last_count: 0,
+            active_button: None,
+            active_count: 1,
+        }
+    }
+}
+
+impl ClickState {
+    fn press_count(&mut self, button: MouseButton, x: i32, y: i32) -> u8 {
+        let now = Instant::now();
+        let same_button = self.last_button == Some(button);
+        let close_enough = (self.last_x - x).abs() <= DOUBLE_CLICK_DISTANCE
+            && (self.last_y - y).abs() <= DOUBLE_CLICK_DISTANCE;
+        let soon_enough = self
+            .last_time
+            .is_some_and(|last_time| now.duration_since(last_time) <= DOUBLE_CLICK_THRESHOLD);
+        let count = if same_button && close_enough && soon_enough {
+            self.last_count.saturating_add(1).max(1)
+        } else {
+            1
+        };
+        self.last_button = Some(button);
+        self.last_x = x;
+        self.last_y = y;
+        self.last_time = Some(now);
+        self.last_count = count;
+        self.active_button = Some(button);
+        self.active_count = count;
+        count
+    }
+
+    fn release_count(&mut self, button: MouseButton) -> u8 {
+        let count = if self.active_button == Some(button) {
+            self.active_count
+        } else {
+            1
+        };
+        self.active_button = None;
+        self.active_count = 1;
+        count
+    }
 }
 
 impl WinitEventState {
@@ -105,6 +171,8 @@ impl WinitEventState {
             text_input_context_id: 1,
             text_input_serial: 1,
             pending_empty_preedit: None,
+            modifiers: KeyModifiers::empty(),
+            click_state: ClickState::default(),
             queue: VecDeque::new(),
         }
     }
@@ -222,8 +290,12 @@ impl ApplicationHandler for WinitPumpHandler {
                 if !focused {
                     state.manual_move_active = false;
                     state.ime_preedit_active = false;
+                    state.modifiers = KeyModifiers::empty();
                     state.discard_pending_empty_preedit();
                 }
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                state.modifiers = map_modifiers(modifiers.state());
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let new_x = physical_to_logical_pos(position.x, state.scale_factor);
@@ -278,18 +350,32 @@ impl ApplicationHandler for WinitPumpHandler {
                 if state.manual_move_active {
                     if button == MouseButton::Left && button_state == WinitElementState::Released {
                         state.manual_move_active = false;
+                        let click_count = state.click_state.release_count(MouseButton::Left);
                         state.push(Event::Mouse(MouseEvent::ButtonReleased {
                             button: MouseButton::Left,
                             x,
                             y,
+                            click_count,
                         }));
                     }
                     return;
                 }
                 let event = if button_state == WinitElementState::Pressed {
-                    MouseEvent::ButtonPressed { button, x, y }
+                    let click_count = state.click_state.press_count(button, x, y);
+                    MouseEvent::ButtonPressed {
+                        button,
+                        x,
+                        y,
+                        click_count,
+                    }
                 } else {
-                    MouseEvent::ButtonReleased { button, x, y }
+                    let click_count = state.click_state.release_count(button);
+                    MouseEvent::ButtonReleased {
+                        button,
+                        x,
+                        y,
+                        click_count,
+                    }
                 };
                 state.push(Event::Mouse(event));
             }
@@ -305,8 +391,9 @@ impl ApplicationHandler for WinitPumpHandler {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let keycode = map_key(&event.logical_key);
+                let modifiers = state.modifiers;
                 if event.state == WinitElementState::Pressed {
-                    state.push(Event::Keyboard(KeyEvent::Pressed { keycode }));
+                    state.push(Event::Keyboard(KeyEvent::Pressed { keycode, modifiers }));
                     if !state.ime_preedit_active
                         && let Key::Character(text) = &event.logical_key
                     {
@@ -317,7 +404,7 @@ impl ApplicationHandler for WinitPumpHandler {
                         }
                     }
                 } else {
-                    state.push(Event::Keyboard(KeyEvent::Released { keycode }));
+                    state.push(Event::Keyboard(KeyEvent::Released { keycode, modifiers }));
                 }
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
@@ -785,6 +872,15 @@ fn map_mouse_button(button: WinitMouseButton) -> Option<MouseButton> {
         WinitMouseButton::Middle => Some(MouseButton::Middle),
         WinitMouseButton::Right => Some(MouseButton::Right),
         _ => None,
+    }
+}
+
+fn map_modifiers(modifiers: ModifiersState) -> KeyModifiers {
+    KeyModifiers {
+        shift: modifiers.shift_key(),
+        control: modifiers.control_key(),
+        alt: modifiers.alt_key(),
+        super_key: modifiers.super_key(),
     }
 }
 

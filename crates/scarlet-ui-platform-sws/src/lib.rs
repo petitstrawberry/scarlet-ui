@@ -14,11 +14,14 @@ use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::element::TextInputElementState;
 use scarlet_ui_core::error::Result;
-use scarlet_ui_core::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent};
+use scarlet_ui_core::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent};
 use scarlet_ui_core::geometry::{Point, Rect, Size};
 use scarlet_ui_core::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code};
 use sws_client as sws;
+
+#[cfg(feature = "std")]
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "std")]
 macro_rules! logln {
@@ -42,6 +45,97 @@ const KEY_RIGHTSHIFT: u16 = 0x36;
 const KEY_LEFTALT: u16 = 0x38;
 const KEY_RIGHTCTRL: u16 = 0x61;
 const KEY_RIGHTALT: u16 = 0x64;
+const KEY_LEFTMETA: u16 = 0x7d;
+const KEY_RIGHTMETA: u16 = 0x7e;
+
+#[cfg(feature = "std")]
+const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
+#[cfg(not(feature = "std"))]
+const DOUBLE_CLICK_EVENT_THRESHOLD: u64 = 20;
+const DOUBLE_CLICK_DISTANCE: i32 = 5;
+
+#[derive(Clone, Copy, Debug)]
+struct ClickState {
+    last_button: Option<MouseButton>,
+    last_x: i32,
+    last_y: i32,
+    #[cfg(feature = "std")]
+    last_time: Option<Instant>,
+    #[cfg(not(feature = "std"))]
+    last_tick: u64,
+    #[cfg(not(feature = "std"))]
+    current_tick: u64,
+    last_count: u8,
+    active_button: Option<MouseButton>,
+    active_count: u8,
+}
+
+impl Default for ClickState {
+    fn default() -> Self {
+        Self {
+            last_button: None,
+            last_x: 0,
+            last_y: 0,
+            #[cfg(feature = "std")]
+            last_time: None,
+            #[cfg(not(feature = "std"))]
+            last_tick: 0,
+            #[cfg(not(feature = "std"))]
+            current_tick: 0,
+            last_count: 0,
+            active_button: None,
+            active_count: 1,
+        }
+    }
+}
+
+impl ClickState {
+    fn press_count(&mut self, button: MouseButton, x: i32, y: i32) -> u8 {
+        let same_button = self.last_button == Some(button);
+        let close_enough = (self.last_x - x).abs() <= DOUBLE_CLICK_DISTANCE
+            && (self.last_y - y).abs() <= DOUBLE_CLICK_DISTANCE;
+        #[cfg(feature = "std")]
+        let soon_enough = {
+            let now = Instant::now();
+            let soon = self
+                .last_time
+                .is_some_and(|last_time| now.duration_since(last_time) <= DOUBLE_CLICK_THRESHOLD);
+            self.last_time = Some(now);
+            soon
+        };
+        #[cfg(not(feature = "std"))]
+        let soon_enough = {
+            self.current_tick = self.current_tick.saturating_add(1);
+            let soon =
+                self.current_tick.saturating_sub(self.last_tick) <= DOUBLE_CLICK_EVENT_THRESHOLD;
+            self.last_tick = self.current_tick;
+            soon
+        };
+        let count = if same_button && close_enough && soon_enough {
+            self.last_count.saturating_add(1).max(1)
+        } else {
+            1
+        };
+        self.last_button = Some(button);
+        self.last_x = x;
+        self.last_y = y;
+        self.last_count = count;
+        self.active_button = Some(button);
+        self.active_count = count;
+        count
+    }
+
+    fn release_count(&mut self, button: MouseButton) -> u8 {
+        let count = if self.active_button == Some(button) {
+            self.active_count
+        } else {
+            1
+        };
+        self.active_button = None;
+        self.active_count = 1;
+        count
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct TextInputContext {
@@ -67,6 +161,9 @@ pub struct SWSPlatformWindow {
     right_control_pressed: bool,
     left_alt_pressed: bool,
     right_alt_pressed: bool,
+    left_super_pressed: bool,
+    right_super_pressed: bool,
+    click_state: ClickState,
     text_input: Option<TextInputContext>,
     needs_full_present: bool,
 }
@@ -257,6 +354,9 @@ impl SWSPlatformWindow {
             right_control_pressed: false,
             left_alt_pressed: false,
             right_alt_pressed: false,
+            left_super_pressed: false,
+            right_super_pressed: false,
+            click_state: ClickState::default(),
             text_input: None,
             needs_full_present: false,
         })
@@ -360,11 +460,10 @@ impl SWSPlatformWindow {
             cursor_rect.size.width.max(1.0) as u32,
             cursor_rect.size.height.max(1.0) as u32,
         );
-        let cursor_byte = state.surrounding_text.len() as u32;
         let _ = self.conn.set_text_input_surrounding_text(
             context_id,
-            cursor_byte,
-            cursor_byte,
+            state.cursor_byte,
+            state.anchor_byte,
             &state.surrounding_text,
         );
         let _ = self.conn.set_text_input_content_type(
@@ -576,6 +675,8 @@ impl SWSPlatformWindow {
                 | KEY_RIGHTCTRL
                 | KEY_LEFTALT
                 | KEY_RIGHTALT
+                | KEY_LEFTMETA
+                | KEY_RIGHTMETA
         )
     }
 
@@ -587,6 +688,8 @@ impl SWSPlatformWindow {
             KEY_RIGHTCTRL => self.right_control_pressed = pressed,
             KEY_LEFTALT => self.left_alt_pressed = pressed,
             KEY_RIGHTALT => self.right_alt_pressed = pressed,
+            KEY_LEFTMETA => self.left_super_pressed = pressed,
+            KEY_RIGHTMETA => self.right_super_pressed = pressed,
             _ => {}
         }
     }
@@ -598,6 +701,8 @@ impl SWSPlatformWindow {
         self.right_control_pressed = false;
         self.left_alt_pressed = false;
         self.right_alt_pressed = false;
+        self.left_super_pressed = false;
+        self.right_super_pressed = false;
     }
 
     fn shift_pressed(&self) -> bool {
@@ -606,6 +711,41 @@ impl SWSPlatformWindow {
 
     fn control_pressed(&self) -> bool {
         self.left_control_pressed || self.right_control_pressed
+    }
+
+    fn current_modifiers(&self) -> KeyModifiers {
+        KeyModifiers {
+            shift: self.shift_pressed(),
+            control: self.control_pressed(),
+            alt: self.left_alt_pressed || self.right_alt_pressed,
+            super_key: self.left_super_pressed || self.right_super_pressed,
+        }
+    }
+
+    fn push_mouse_button_event(&mut self, button: MouseButton, pressed: bool) {
+        let x = self.pointer_x;
+        let y = self.pointer_y;
+        let click_count = if pressed {
+            self.click_state.press_count(button, x, y)
+        } else {
+            self.click_state.release_count(button)
+        };
+        let event = if pressed {
+            MouseEvent::ButtonPressed {
+                button,
+                x,
+                y,
+                click_count,
+            }
+        } else {
+            MouseEvent::ButtonReleased {
+                button,
+                x,
+                y,
+                click_count,
+            }
+        };
+        self.push_event(Event::Mouse(event));
     }
 
     fn map_key_char_with_modifiers(&self, code: u16) -> Option<char> {
@@ -693,6 +833,9 @@ impl PlatformWindow for SWSPlatformWindow {
             right_control_pressed: false,
             left_alt_pressed: false,
             right_alt_pressed: false,
+            left_super_pressed: false,
+            right_super_pressed: false,
+            click_state: ClickState::default(),
             text_input: None,
             needs_full_present: false,
         })
@@ -943,6 +1086,9 @@ impl PlatformWindow for SWSPlatformWindow {
             right_control_pressed: false,
             left_alt_pressed: false,
             right_alt_pressed: false,
+            left_super_pressed: false,
+            right_super_pressed: false,
+            click_state: ClickState::default(),
             text_input: None,
             needs_full_present: false,
         })
@@ -1084,11 +1230,7 @@ impl SWSPlatformWindow {
                     (event_type::EV_KEY, key_code::BTN_LEFT) => {
                         let button = MouseButton::Left;
                         if input.value != 0 {
-                            self.push_event(Event::Mouse(MouseEvent::ButtonPressed {
-                                button,
-                                x: self.pointer_x,
-                                y: self.pointer_y,
-                            }));
+                            self.push_mouse_button_event(button, true);
                             if debug {
                                 logln!(
                                     "[SWSPlatformWindow] MouseDown: left x={}, y={}",
@@ -1097,11 +1239,7 @@ impl SWSPlatformWindow {
                                 );
                             }
                         } else {
-                            self.push_event(Event::Mouse(MouseEvent::ButtonReleased {
-                                button,
-                                x: self.pointer_x,
-                                y: self.pointer_y,
-                            }));
+                            self.push_mouse_button_event(button, false);
                             if debug {
                                 logln!(
                                     "[SWSPlatformWindow] MouseUp: left x={}, y={}",
@@ -1114,11 +1252,7 @@ impl SWSPlatformWindow {
                     (event_type::EV_KEY, key_code::BTN_RIGHT) => {
                         let button = MouseButton::Right;
                         if input.value != 0 {
-                            self.push_event(Event::Mouse(MouseEvent::ButtonPressed {
-                                button,
-                                x: self.pointer_x,
-                                y: self.pointer_y,
-                            }));
+                            self.push_mouse_button_event(button, true);
                             if debug {
                                 logln!(
                                     "[SWSPlatformWindow] MouseDown: right x={}, y={}",
@@ -1127,11 +1261,7 @@ impl SWSPlatformWindow {
                                 );
                             }
                         } else {
-                            self.push_event(Event::Mouse(MouseEvent::ButtonReleased {
-                                button,
-                                x: self.pointer_x,
-                                y: self.pointer_y,
-                            }));
+                            self.push_mouse_button_event(button, false);
                             if debug {
                                 logln!(
                                     "[SWSPlatformWindow] MouseUp: right x={}, y={}",
@@ -1144,11 +1274,7 @@ impl SWSPlatformWindow {
                     (event_type::EV_KEY, key_code::BTN_MIDDLE) => {
                         let button = MouseButton::Middle;
                         if input.value != 0 {
-                            self.push_event(Event::Mouse(MouseEvent::ButtonPressed {
-                                button,
-                                x: self.pointer_x,
-                                y: self.pointer_y,
-                            }));
+                            self.push_mouse_button_event(button, true);
                             if debug {
                                 logln!(
                                     "[SWSPlatformWindow] MouseDown: middle x={}, y={}",
@@ -1157,11 +1283,7 @@ impl SWSPlatformWindow {
                                 );
                             }
                         } else {
-                            self.push_event(Event::Mouse(MouseEvent::ButtonReleased {
-                                button,
-                                x: self.pointer_x,
-                                y: self.pointer_y,
-                            }));
+                            self.push_mouse_button_event(button, false);
                             if debug {
                                 logln!(
                                     "[SWSPlatformWindow] MouseUp: middle x={}, y={}",
@@ -1192,8 +1314,12 @@ impl SWSPlatformWindow {
                                 mapped_char
                             );
                         }
+                        let modifiers = self.current_modifiers();
                         if pressed {
-                            self.push_event(Event::Keyboard(KeyEvent::Pressed { keycode: mapped }));
+                            self.push_event(Event::Keyboard(KeyEvent::Pressed {
+                                keycode: mapped,
+                                modifiers,
+                            }));
                             if let Some(c) = mapped_char
                                 && !c.is_control()
                             {
@@ -1202,6 +1328,7 @@ impl SWSPlatformWindow {
                         } else {
                             self.push_event(Event::Keyboard(KeyEvent::Released {
                                 keycode: mapped,
+                                modifiers,
                             }));
                         }
                     }

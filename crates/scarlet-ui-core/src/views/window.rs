@@ -1106,6 +1106,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                 x,
                 y,
                 button: crate::event::MouseButton::Left,
+                ..
             }) => {
                 // SWS coordinates are already window-relative
                 let local_x = *x;
@@ -1166,6 +1167,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                 x,
                 y,
                 button: crate::event::MouseButton::Left,
+                ..
             }) => {
                 // Only handle if we had a button pressed
                 if self.pressed_button != 0 {

@@ -91,10 +91,20 @@ pub enum MouseEvent {
     Exited { x: i32, y: i32 },
 
     /// Mouse button pressed
-    ButtonPressed { button: MouseButton, x: i32, y: i32 },
+    ButtonPressed {
+        button: MouseButton,
+        x: i32,
+        y: i32,
+        click_count: u8,
+    },
 
     /// Mouse button released
-    ButtonReleased { button: MouseButton, x: i32, y: i32 },
+    ButtonReleased {
+        button: MouseButton,
+        x: i32,
+        y: i32,
+        click_count: u8,
+    },
 
     /// Mouse wheel scrolled
     Wheel { delta_x: i32, delta_y: i32 },
@@ -108,14 +118,61 @@ pub enum MouseButton {
     Right,
 }
 
+/// Keyboard modifier flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyModifiers {
+    /// Shift modifier state.
+    pub shift: bool,
+    /// Control modifier state.
+    pub control: bool,
+    /// Alt modifier state.
+    pub alt: bool,
+    /// Super/Command/Windows modifier state.
+    pub super_key: bool,
+}
+
+impl KeyModifiers {
+    /// Returns the platform primary modifier state.
+    ///
+    /// Ctrl and Super are both treated as primary so callers can use one shortcut
+    /// path across Linux, Windows, macOS, and Scarlet OS.
+    ///
+    /// # Returns
+    ///
+    /// `true` when either Control or Super is pressed.
+    pub fn primary(self) -> bool {
+        self.control || self.super_key
+    }
+
+    /// Returns empty keyboard modifiers.
+    ///
+    /// # Returns
+    ///
+    /// A modifier set with Shift, Control, Alt, and Super all cleared.
+    pub const fn empty() -> Self {
+        Self {
+            shift: false,
+            control: false,
+            alt: false,
+            super_key: false,
+        }
+    }
+}
+
 /// Keyboard events
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum KeyEvent {
     /// Key pressed
-    Pressed { keycode: KeyCode },
+    Pressed {
+        keycode: KeyCode,
+        modifiers: KeyModifiers,
+    },
 
     /// Key released
-    Released { keycode: KeyCode },
+    Released {
+        keycode: KeyCode,
+        modifiers: KeyModifiers,
+    },
 
     /// Character received (Unicode)
     Char { c: char },

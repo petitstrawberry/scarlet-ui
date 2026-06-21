@@ -60,6 +60,8 @@ struct WidgetFactory {
     toggle_on: State<bool>,
     text_value: State<String>,
     selected: State<usize>,
+    text_document: State<TextDocument>,
+    text_selection: State<TextSelection>,
 }
 
 impl Default for WidgetFactory {
@@ -69,6 +71,13 @@ impl Default for WidgetFactory {
             toggle_on: State::new(StateId::new(21), true),
             text_value: State::new(StateId::new(22), String::from("Factory text field")),
             selected: State::new(StateId::new(23), 1usize),
+            text_document: State::new(
+                StateId::new(24),
+                TextDocument::from_str(
+                    "# Hello TextView\n\nType here...\n\n- Item 1\n- Item 2\n- Item 3\n",
+                ),
+            ),
+            text_selection: State::new(StateId::new(25), TextSelection::collapsed(0)),
         }
     }
 }
@@ -125,6 +134,14 @@ impl WidgetFactory {
         Divider::new().frame(220.0, 1.0)
     }
 
+    fn text_view(&self) -> impl View + Clone + use<> {
+        TextView::with_document(self.text_document.clone(), self.text_selection.clone())
+            .placeholder("Type something...")
+            .font_size(14.0)
+            .padding(8.0)
+            .frame_height(200.0)
+    }
+
     fn overview_page(&self) -> impl View + Clone + use<> {
         vstack! {
             Text::new("Widget Factory").font_size(28.0),
@@ -155,6 +172,8 @@ impl WidgetFactory {
             self.row("TextField", self.text_field()),
             self.row("Select", self.select()),
             self.row("Slider", self.slider()),
+            Text::new("TextView (multi-line editor)").font_size(14.0),
+            self.text_view(),
         }
         .spacing(16.0)
         .padding(24.0)
@@ -221,6 +240,21 @@ fn widget_factory_preview() -> impl View + Clone {
         NavigationLink::new("Display", Icon::Info, move || display.display_page()),
     }
     .sidebar_width(190.0)
+}
+
+#[scarlet_ui::preview(width = 600.0, height = 400.0)]
+fn text_view_preview() -> impl View + Clone {
+    let text = State::new(
+        StateId::new(30),
+        String::from(
+            "# TextView Demo\n\nThis is a multi-line text editor built with ScarletUI.\n\nFeatures:\n- Keyboard editing with cursor movement\n- Japanese IME support (preedit/commit)\n- Mouse click/drag selection\n- Double-click word select, triple-click line select\n- Both wrap modes (None / Soft)\n- Horizontal and vertical scrolling\n- Clipboard callbacks (copy/paste/cut)\n\nTry typing here!\n",
+        ),
+    );
+    let selection = State::new(StateId::new(31), TextSelection::collapsed(0));
+    TextView::new(text, selection)
+        .placeholder("Start typing...")
+        .font_size(14.0)
+        .padding(12.0)
 }
 
 fn main() -> scarlet_ui::Result<()> {

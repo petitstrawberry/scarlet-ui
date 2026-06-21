@@ -20,6 +20,7 @@ mod text;
 pub(crate) mod text_field;
 mod text_grid;
 pub(crate) mod text_grid_boxdraw;
+pub mod text_view;
 mod toggle;
 mod window;
 
@@ -40,6 +41,10 @@ pub use text_field::{TextField, TextFieldRenderObject};
 pub use text_grid::{
     TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, TextGridRenderObject,
     text_grid_cell_width,
+};
+pub use text_view::{
+    EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView, TextViewRenderObject,
+    TextViewScroll, WrapMode,
 };
 pub use toggle::{Toggle, ToggleRenderObject};
 pub use window::window_type;

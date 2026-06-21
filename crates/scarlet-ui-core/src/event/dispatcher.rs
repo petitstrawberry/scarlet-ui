@@ -908,20 +908,28 @@ impl EventDispatcher {
                 x: x - origin.x as i32,
                 y: y - origin.y as i32,
             },
-            crate::event::MouseEvent::ButtonPressed { button, x, y } => {
-                crate::event::MouseEvent::ButtonPressed {
-                    button,
-                    x: x - origin.x as i32,
-                    y: y - origin.y as i32,
-                }
-            }
-            crate::event::MouseEvent::ButtonReleased { button, x, y } => {
-                crate::event::MouseEvent::ButtonReleased {
-                    button,
-                    x: x - origin.x as i32,
-                    y: y - origin.y as i32,
-                }
-            }
+            crate::event::MouseEvent::ButtonPressed {
+                button,
+                x,
+                y,
+                click_count,
+            } => crate::event::MouseEvent::ButtonPressed {
+                button,
+                x: x - origin.x as i32,
+                y: y - origin.y as i32,
+                click_count,
+            },
+            crate::event::MouseEvent::ButtonReleased {
+                button,
+                x,
+                y,
+                click_count,
+            } => crate::event::MouseEvent::ButtonReleased {
+                button,
+                x: x - origin.x as i32,
+                y: y - origin.y as i32,
+                click_count,
+            },
             crate::event::MouseEvent::Wheel { delta_x, delta_y } => {
                 crate::event::MouseEvent::Wheel { delta_x, delta_y }
             }
