@@ -358,12 +358,13 @@ fn fill_polygon(
         for pair in chunks.by_ref() {
             let x_start = ((pair[0] - 0.5).ceil() as i32).max(0);
             let x_end = ((pair[1] - 0.5).ceil() as i32).min(bw);
-            for x in x_start..x_end {
-                if x < 0 || x >= bw {
-                    continue;
-                }
-                data[(y as usize * bw as usize) + x as usize] = bgra;
+            if x_start >= x_end || x_start >= bw {
+                continue;
             }
+            let start = (y as usize * bw as usize) + x_start as usize;
+            let count = (x_end - x_start) as usize;
+            let row = &mut data[start..start + count];
+            row.fill(bgra);
         }
     }
 }
