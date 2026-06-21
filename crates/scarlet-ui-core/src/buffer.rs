@@ -202,6 +202,98 @@ impl Buffer {
         }
     }
 
+    /// Composite a source rectangle from another buffer into this buffer.
+    pub fn composite_rect(
+        &mut self,
+        src: &Buffer,
+        src_x: i32,
+        src_y: i32,
+        src_w: i32,
+        src_h: i32,
+        dst_x: i32,
+        dst_y: i32,
+        opacity: f32,
+    ) {
+        self.composite_rect_clipped(
+            src,
+            src_x,
+            src_y,
+            src_w,
+            src_h,
+            dst_x,
+            dst_y,
+            opacity,
+            0,
+            0,
+            self.width as i32,
+            self.height as i32,
+        );
+    }
+
+    /// Composite a source rectangle from another buffer with a clip rect in destination space.
+    pub fn composite_rect_clipped(
+        &mut self,
+        src: &Buffer,
+        src_x: i32,
+        src_y: i32,
+        src_w: i32,
+        src_h: i32,
+        dst_x: i32,
+        dst_y: i32,
+        opacity: f32,
+        clip_x: i32,
+        clip_y: i32,
+        clip_w: i32,
+        clip_h: i32,
+    ) {
+        if src_w <= 0 || src_h <= 0 || clip_w <= 0 || clip_h <= 0 {
+            return;
+        }
+
+        let dst_left = dst_x.max(clip_x).max(0).max(dst_x - src_x);
+        let dst_top = dst_y.max(clip_y).max(0).max(dst_y - src_y);
+        let dst_right = (dst_x + src_w)
+            .min(clip_x + clip_w)
+            .min(self.width as i32)
+            .min(dst_x + src.width as i32 - src_x);
+        let dst_bottom = (dst_y + src_h)
+            .min(clip_y + clip_h)
+            .min(self.height as i32)
+            .min(dst_y + src.height as i32 - src_y);
+
+        if dst_right <= dst_left || dst_bottom <= dst_top {
+            return;
+        }
+
+        let fully_opaque = opacity >= 1.0;
+
+        for target_y in dst_top..dst_bottom {
+            let source_y = src_y + (target_y - dst_y);
+            let src_row_start = source_y as usize * src.width as usize;
+            let dst_row_start = target_y as usize * self.width as usize;
+            let source_x = src_x + (dst_left - dst_x);
+            let width = (dst_right - dst_left) as usize;
+
+            if fully_opaque {
+                let src_slice = &src.data
+                    [src_row_start + source_x as usize..src_row_start + source_x as usize + width];
+                let dst_slice = &mut self.data
+                    [dst_row_start + dst_left as usize..dst_row_start + dst_left as usize + width];
+
+                if src_slice.iter().all(|&p| (p >> 24) == 0xFF) {
+                    dst_slice.copy_from_slice(src_slice);
+                    continue;
+                }
+            }
+
+            for dx in 0..width {
+                let src_pixel = src.data[src_row_start + source_x as usize + dx];
+                let dst_idx = dst_row_start + dst_left as usize + dx;
+                self.data[dst_idx] = Self::blend_pixels(self.data[dst_idx], src_pixel, opacity);
+            }
+        }
+    }
+
     /// Composite another buffer into this buffer with a clip rect in destination space.
     pub fn composite_clipped(
         &mut self,
@@ -337,6 +429,90 @@ impl Buffer {
                 let src_pixel = src.data[src_row + src_x as usize];
                 let dst_idx = dst_row + target_x as usize;
                 self.data[dst_idx] = Self::blend_pixels(self.data[dst_idx], src_pixel, opacity);
+            }
+        }
+    }
+
+    /// Composite a source rectangle with a rounded clip rect in destination space.
+    pub fn composite_rect_clipped_rounded(
+        &mut self,
+        src: &Buffer,
+        src_x: i32,
+        src_y: i32,
+        src_w: i32,
+        src_h: i32,
+        dst_x: i32,
+        dst_y: i32,
+        opacity: f32,
+        clip_x: i32,
+        clip_y: i32,
+        clip_w: i32,
+        clip_h: i32,
+        radius: f32,
+    ) {
+        if radius <= 0.0 {
+            self.composite_rect_clipped(
+                src, src_x, src_y, src_w, src_h, dst_x, dst_y, opacity, clip_x, clip_y, clip_w,
+                clip_h,
+            );
+            return;
+        }
+        if src_w <= 0 || src_h <= 0 || clip_w <= 0 || clip_h <= 0 {
+            return;
+        }
+
+        let dst_left = dst_x.max(clip_x).max(0).max(dst_x - src_x);
+        let dst_top = dst_y.max(clip_y).max(0).max(dst_y - src_y);
+        let dst_right = (dst_x + src_w)
+            .min(clip_x + clip_w)
+            .min(self.width as i32)
+            .min(dst_x + src.width as i32 - src_x);
+        let dst_bottom = (dst_y + src_h)
+            .min(clip_y + clip_h)
+            .min(self.height as i32)
+            .min(dst_y + src.height as i32 - src_y);
+
+        if dst_right <= dst_left || dst_bottom <= dst_top {
+            return;
+        }
+
+        let max_radius = (clip_w.min(clip_h) as f32) / 2.0;
+        let radius = radius.max(0.0).min(max_radius);
+        let radius_sq = radius * radius;
+
+        for target_y in dst_top..dst_bottom {
+            let source_y = src_y + (target_y - dst_y);
+            let src_row = source_y as usize * src.width as usize;
+            let dst_row = target_y as usize * self.width as usize;
+            let center_y = (target_y - clip_y) as f32 + 0.5;
+            let dy_top = center_y;
+            let dy_bottom = (clip_h as f32) - center_y;
+            for target_x in dst_left..dst_right {
+                let center_x = (target_x - clip_x) as f32 + 0.5;
+                let dx_left = center_x;
+                let dx_right = (clip_w as f32) - center_x;
+                let mut coverage = 1.0;
+
+                let in_center = (dx_left >= radius && dx_right >= radius)
+                    || (dy_top >= radius && dy_bottom >= radius);
+                if !in_center {
+                    let corner_dx = radius - dx_left.min(dx_right);
+                    let corner_dy = radius - dy_top.min(dy_bottom);
+                    let dist_sq = corner_dx * corner_dx + corner_dy * corner_dy;
+                    if dist_sq > radius_sq {
+                        let dist = libm::sqrtf(dist_sq);
+                        coverage = (radius + 0.5 - dist).max(0.0).min(1.0);
+                        if coverage <= 0.0 {
+                            continue;
+                        }
+                    }
+                }
+
+                let source_x = src_x + (target_x - dst_x);
+                let src_pixel = src.data[src_row + source_x as usize];
+                let dst_idx = dst_row + target_x as usize;
+                self.data[dst_idx] =
+                    Self::blend_pixels(self.data[dst_idx], src_pixel, opacity * coverage);
             }
         }
     }

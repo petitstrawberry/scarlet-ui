@@ -594,22 +594,31 @@ impl CpuPaintRenderer {
                 }
                 PaintCommand::DrawBufferRect {
                     dst,
-                    src: _,
+                    src,
                     buffer_idx,
                     opacity,
                 } => {
                     if let Some(buf) = ctx.buffer(BufferHandle(*buffer_idx)) {
                         let dst = self.scale_rect(*dst);
+                        let src = self.scale_rect(*src);
                         let dst_x = dst.origin.x as i32;
                         let dst_y = dst.origin.y as i32;
+                        let src_x = src.origin.x as i32;
+                        let src_y = src.origin.y as i32;
+                        let src_w = src.size.width as i32;
+                        let src_h = src.size.height as i32;
                         if let Some(c) = clip {
                             let c = ClipRegion {
                                 rect: self.scale_rect(c.rect),
                                 corner_radius: self.scale_f32(c.corner_radius),
                             };
                             if c.corner_radius > 0.0 {
-                                self.buffer.composite_clipped_rounded(
+                                self.buffer.composite_rect_clipped_rounded(
                                     buf,
+                                    src_x,
+                                    src_y,
+                                    src_w,
+                                    src_h,
                                     dst_x,
                                     dst_y,
                                     *opacity,
@@ -620,8 +629,12 @@ impl CpuPaintRenderer {
                                     c.corner_radius,
                                 );
                             } else {
-                                self.buffer.composite_clipped(
+                                self.buffer.composite_rect_clipped(
                                     buf,
+                                    src_x,
+                                    src_y,
+                                    src_w,
+                                    src_h,
                                     dst_x,
                                     dst_y,
                                     *opacity,
@@ -632,7 +645,9 @@ impl CpuPaintRenderer {
                                 );
                             }
                         } else {
-                            self.buffer.composite(buf, dst_x, dst_y, *opacity);
+                            self.buffer.composite_rect(
+                                buf, src_x, src_y, src_w, src_h, dst_x, dst_y, *opacity,
+                            );
                         }
                     }
                 }
@@ -1020,6 +1035,30 @@ mod tests {
         let mut r = CpuPaintRenderer::new(Size::new(100.0, 100.0), 1000, Color::rgb(0, 0, 0));
         r.execute(&ctx);
         assert!(r.buffer().get_pixel(12, 12).unwrap() > 0);
+    }
+
+    #[test]
+    fn draw_buffer_rect_uses_source_rect() {
+        let mut src = Buffer::new(Size::new(4.0, 4.0));
+        let selected = Color::rgb(255, 0, 0);
+        src.set_pixel(2, 1, selected.to_bgra());
+
+        let mut ctx = PaintContext::new();
+        ctx.draw_buffer_rect_ref(
+            Rect::from_xywh(0.0, 0.0, 1.0, 1.0),
+            Rect::from_xywh(2.0, 1.0, 1.0, 1.0),
+            &src,
+            1.0,
+        );
+
+        let mut r = CpuPaintRenderer::new(Size::new(4.0, 4.0), 1000, Color::rgb(0, 0, 0));
+        r.execute(&ctx);
+
+        assert_eq!(r.buffer().get_pixel(0, 0).unwrap(), selected.to_bgra());
+        assert_eq!(
+            r.buffer().get_pixel(1, 0).unwrap(),
+            Color::rgb(0, 0, 0).to_bgra()
+        );
     }
 
     #[test]

@@ -12,6 +12,9 @@ pub struct WgpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     texture: Option<wgpu::Texture>,
+    texture_view: Option<wgpu::TextureView>,
+    texture_width: u32,
+    texture_height: u32,
     pipeline: Option<wgpu::RenderPipeline>,
     bind_group: Option<wgpu::BindGroup>,
     sampler: Option<wgpu::Sampler>,
@@ -57,6 +60,9 @@ impl WgpuRenderer {
             device,
             queue,
             texture: None,
+            texture_view: None,
+            texture_width: 0,
+            texture_height: 0,
             pipeline: None,
             bind_group: None,
             sampler: Some(sampler),
@@ -180,8 +186,43 @@ impl WgpuRenderer {
         let width = width.max(1);
         let height = height.max(1);
         self.resize_surface(width, height);
+        upload_frame_texture(
+            &self.device,
+            &self.queue,
+            self.pipeline.as_ref(),
+            self.sampler.as_ref(),
+            &mut self.texture,
+            &mut self.texture_view,
+            &mut self.texture_width,
+            &mut self.texture_height,
+            &mut self.bind_group,
+            data,
+            width,
+            height,
+        );
+    }
+}
 
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+fn upload_frame_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: Option<&wgpu::RenderPipeline>,
+    sampler: Option<&wgpu::Sampler>,
+    texture: &mut Option<wgpu::Texture>,
+    texture_view: &mut Option<wgpu::TextureView>,
+    texture_width: &mut u32,
+    texture_height: &mut u32,
+    bind_group: &mut Option<wgpu::BindGroup>,
+    data: &[u32],
+    width: u32,
+    height: u32,
+) {
+    let width = width.max(1);
+    let height = height.max(1);
+
+    let needs_texture = texture.is_none() || *texture_width != width || *texture_height != height;
+    if needs_texture {
+        let new_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("scarlet-ui frame texture"),
             size: wgpu::Extent3d {
                 width,
@@ -195,34 +236,12 @@ impl WgpuRenderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        let view = new_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let bytes_per_row = width * 4;
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(data),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bytes_per_row),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let bind_group_layout = self.pipeline.as_ref().map(|p| p.get_bind_group_layout(0));
-        if let Some(layout) = bind_group_layout {
-            let sampler = self.sampler.as_ref().unwrap();
-            self.bind_group = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        if let (Some(layout), Some(sampler)) =
+            (pipeline.map(|p| p.get_bind_group_layout(0)), sampler)
+        {
+            *bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("scarlet-ui bind group"),
                 layout: &layout,
                 entries: &[
@@ -236,11 +255,66 @@ impl WgpuRenderer {
                     },
                 ],
             }));
+        } else {
+            *bind_group = None;
         }
 
-        self.texture = Some(texture);
+        *texture = Some(new_texture);
+        *texture_view = Some(view);
+        *texture_width = width;
+        *texture_height = height;
     }
 
+    if bind_group.is_none()
+        && let (Some(layout), Some(sampler), Some(view)) = (
+            pipeline.map(|p| p.get_bind_group_layout(0)),
+            sampler,
+            texture_view.as_ref(),
+        )
+    {
+        *bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scarlet-ui bind group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        }));
+    }
+
+    let Some(texture) = texture.as_ref() else {
+        return;
+    };
+
+    let bytes_per_row = width * 4;
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(data),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(bytes_per_row),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+impl WgpuRenderer {
     pub fn present(&mut self) {
         let Some(surface) = self.surface.as_ref() else {
             return;
@@ -311,11 +385,26 @@ impl Renderer for WgpuRenderer {
 
     fn composite(&mut self, root: &dyn Element, dirty_ids: &[ElementId]) {
         self.cpu.composite(root, dirty_ids);
-        let (data, width, height) = {
+        let (width, height) = {
             let buf = self.cpu.buffer();
-            (buf.as_slice().to_vec(), buf.width(), buf.height())
+            (buf.width(), buf.height())
         };
-        self.upload_buffer(&data, width, height);
+        self.resize_surface(width, height);
+        let buf = self.cpu.buffer();
+        upload_frame_texture(
+            &self.device,
+            &self.queue,
+            self.pipeline.as_ref(),
+            self.sampler.as_ref(),
+            &mut self.texture,
+            &mut self.texture_view,
+            &mut self.texture_width,
+            &mut self.texture_height,
+            &mut self.bind_group,
+            buf.as_slice(),
+            buf.width(),
+            buf.height(),
+        );
     }
 
     fn render_paint(&mut self, _ctx: &PaintContext<'_>) {}
