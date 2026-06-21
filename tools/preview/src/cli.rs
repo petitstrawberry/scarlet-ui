@@ -22,8 +22,11 @@ pub struct RunArgs {
     #[arg(long)]
     pub build_only: bool,
     #[cfg(feature = "gpu")]
-    #[arg(long)]
+    #[arg(long, default_value_t = true)]
     pub gpu: bool,
+    #[cfg(feature = "gpu")]
+    #[arg(long)]
+    pub no_gpu: bool,
 }
 
 /// IPC server mode (invoked as `scarlet-ui-preview serve ...`).
@@ -43,19 +46,32 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = 250, value_name = "MILLIS")]
     pub poll_ms: u64,
     #[cfg(feature = "gpu")]
-    #[arg(long)]
+    #[arg(long, default_value_t = true)]
     pub gpu: bool,
+    #[cfg(feature = "gpu")]
+    #[arg(long)]
+    pub no_gpu: bool,
 }
 
 impl RunArgs {
     pub fn poll_interval(&self) -> Duration {
         Duration::from_millis(self.poll_ms.max(16))
     }
+
+    #[cfg(feature = "gpu")]
+    pub fn use_gpu(&self) -> bool {
+        self.gpu && !self.no_gpu
+    }
 }
 
 impl ServeArgs {
     pub fn poll_interval(&self) -> Duration {
         Duration::from_millis(self.poll_ms.max(16))
+    }
+
+    #[cfg(feature = "gpu")]
+    pub fn use_gpu(&self) -> bool {
+        self.gpu && !self.no_gpu
     }
 }
 
@@ -118,5 +134,33 @@ mod tests {
         ]);
 
         assert!(args.is_err());
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn run_args_enable_gpu_by_default_when_feature_is_enabled() {
+        let args = RunArgs::try_parse_from(["scarlet-ui-preview", "--manifest-path", "X"])
+            .expect("run args should parse");
+
+        assert!(args.use_gpu());
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn run_args_no_gpu_disables_gpu() {
+        let args =
+            RunArgs::try_parse_from(["scarlet-ui-preview", "--manifest-path", "X", "--no-gpu"])
+                .expect("run args should parse");
+
+        assert!(!args.use_gpu());
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn serve_args_enable_gpu_by_default_when_feature_is_enabled() {
+        let args = ServeArgs::try_parse_from(["scarlet-ui-preview", "--manifest-path", "X"])
+            .expect("serve args should parse");
+
+        assert!(args.use_gpu());
     }
 }

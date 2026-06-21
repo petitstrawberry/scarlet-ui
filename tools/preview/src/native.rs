@@ -44,7 +44,7 @@ pub fn run(args: RunArgs) -> Result<(), String> {
     }
 
     #[cfg(feature = "gpu")]
-    if args.gpu {
+    if args.use_gpu() {
         if let Some(ref mut host) = host {
             crate::gpu::setup_gpu_present(host);
         }

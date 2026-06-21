@@ -331,7 +331,7 @@ impl PreviewServer {
             )
             .map_err(|error| ErrorObject::preview_host_window_error(&error))?;
             #[cfg(feature = "gpu")]
-            if self.args.gpu {
+            if self.args.use_gpu() {
                 crate::gpu::setup_gpu_present(&mut host);
             }
             self.host = Some(host);
@@ -820,6 +820,8 @@ mod tests {
                 poll_ms: 250,
                 #[cfg(feature = "gpu")]
                 gpu: false,
+                #[cfg(feature = "gpu")]
+                no_gpu: false,
             };
             let project = PreviewProject {
                 manifest_path: manifest_path.clone(),
