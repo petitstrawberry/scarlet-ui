@@ -8,6 +8,7 @@ use crate::element::{Element, ElementRenderObject, RenderElement};
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 use crate::renderer::PaintContext;
+use crate::renderer::path_rounded_rect;
 use crate::view::View;
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -374,7 +375,7 @@ impl ElementRenderObject for ButtonRenderObject {
                 highlight,
             );
         }
-        ctx.stroke_rect(rect, 1.0, border);
+        ctx.stroke_path(path_rounded_rect(rect, 6.0), 1.0, border);
 
         let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
         let x = origin.x + ((self.size.width - text_w as f32) / 2.0).max(0.0);

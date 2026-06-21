@@ -62,6 +62,29 @@ fn button_preview() -> impl View + Clone {
     Button::new("Standalone Button reloads").padding(20.0)
 }
 
+#[scarlet_ui::preview(width = 520.0, height = 520.0)]
+fn showcase_preview() -> impl View + Clone {
+    let slider_value = State::new(StateId::new(10), 0.35f32);
+    let toggle_on = State::new(StateId::new(11), true);
+    let text_value = State::new(StateId::new(12), String::from("Hello ScarletUI"));
+    let selected = State::new(StateId::new(13), 1usize);
+
+    vstack! {
+        Text::new("Showcase").font_size(28.0),
+        TextField::new(text_value).placeholder("Type something"),
+        Slider::new(slider_value.clone()).min(0.0).max(1.0),
+        Toggle::new(toggle_on),
+        ProgressView::new(0.62),
+        Select::new(
+            vec![String::from("Alpha"), String::from("Beta"), String::from("Gamma")],
+            selected,
+        ),
+        Button::new("Primary Action").padding(12.0),
+    }
+    .spacing(16.0)
+    .padding(20.0)
+}
+
 fn main() -> scarlet_ui::Result<()> {
     let mut app = PreviewApp::default();
     app.run()

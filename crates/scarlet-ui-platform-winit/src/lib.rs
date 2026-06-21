@@ -524,7 +524,12 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn size(&self) -> Size {
-        self.observed_logical_size()
+        let physical = self.window.inner_size();
+        physical_to_logical_size(
+            physical.width.max(1),
+            physical.height.max(1),
+            self.window.scale_factor(),
+        )
     }
 
     fn physical_size(&self) -> (u32, u32) {

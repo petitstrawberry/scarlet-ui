@@ -36,6 +36,7 @@ pub fn run(args: RunArgs) -> Result<(), String> {
                 library,
                 args.preview.as_deref(),
                 &mut backend,
+                args.force_scale_milli(),
             )?);
         }
         Err(error) => {
@@ -74,6 +75,7 @@ pub fn run(args: RunArgs) -> Result<(), String> {
                             library,
                             args.preview.as_deref(),
                             &mut backend,
+                            args.force_scale_milli(),
                         )?);
                         println!("[preview] loaded");
                     }

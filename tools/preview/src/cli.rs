@@ -19,6 +19,8 @@ pub struct RunArgs {
     pub preview: Option<String>,
     #[arg(long, default_value_t = 250, value_name = "MILLIS")]
     pub poll_ms: u64,
+    #[arg(long, value_name = "SCALE")]
+    pub force_scale: Option<f32>,
     #[arg(long)]
     pub build_only: bool,
     #[arg(long)]
@@ -47,6 +49,8 @@ pub struct ServeArgs {
     pub preview: Option<String>,
     #[arg(long, default_value_t = 250, value_name = "MILLIS")]
     pub poll_ms: u64,
+    #[arg(long, value_name = "SCALE")]
+    pub force_scale: Option<f32>,
     #[cfg(feature = "gpu")]
     #[arg(long, default_value_t = true)]
     pub gpu: bool,
@@ -60,6 +64,10 @@ impl RunArgs {
         Duration::from_millis(self.poll_ms.max(16))
     }
 
+    pub fn force_scale_milli(&self) -> Option<u32> {
+        self.force_scale.map(scale_to_milli)
+    }
+
     #[cfg(feature = "gpu")]
     pub fn use_gpu(&self) -> bool {
         self.gpu && !self.no_gpu
@@ -71,10 +79,18 @@ impl ServeArgs {
         Duration::from_millis(self.poll_ms.max(16))
     }
 
+    pub fn force_scale_milli(&self) -> Option<u32> {
+        self.force_scale.map(scale_to_milli)
+    }
+
     #[cfg(feature = "gpu")]
     pub fn use_gpu(&self) -> bool {
         self.gpu && !self.no_gpu
     }
+}
+
+fn scale_to_milli(scale: f32) -> u32 {
+    (scale.max(0.001) * 1000.0).round() as u32
 }
 
 #[cfg(test)]

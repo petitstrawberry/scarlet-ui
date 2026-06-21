@@ -46,10 +46,10 @@ pub fn path_circle(center: Point, radius: f32) -> Path {
 }
 
 pub fn path_rounded_rect(rect: Rect, corner_radius: f32) -> Path {
-    const CORNER_SEGMENTS: usize = 8;
     let r = corner_radius
         .min(rect.size.width / 2.0)
         .min(rect.size.height / 2.0);
+    let corner_segments = ((r * 0.75).ceil() as usize).clamp(8, 32);
     let x0 = rect.origin.x;
     let y0 = rect.origin.y;
     let x1 = rect.origin.x + rect.size.width;
@@ -62,9 +62,9 @@ pub fn path_rounded_rect(rect: Rect, corner_radius: f32) -> Path {
         (x1 - r, y0 + r, 3.0 * core::f32::consts::FRAC_PI_2),
     ];
     for (cx, cy, start_angle) in corners {
-        for i in 0..CORNER_SEGMENTS {
+        for i in 0..corner_segments {
             let t =
-                start_angle + core::f32::consts::FRAC_PI_2 * (i as f32) / (CORNER_SEGMENTS as f32);
+                start_angle + core::f32::consts::FRAC_PI_2 * (i as f32) / (corner_segments as f32);
             pts.push(Point::new(cx + r * t.cos(), cy + r * t.sin()));
         }
     }
