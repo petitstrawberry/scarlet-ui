@@ -36,7 +36,9 @@ pub use menu::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};
 pub use navigation::{NavigationLink, NavigationView};
 pub use progress::{ProgressView, ProgressViewRenderObject};
 pub use rectangle::{Rectangle, RectangleRenderObject};
-pub use scroll::{ScrollAxis, ScrollView, ScrollViewRenderObject, ScrollWheelDirection};
+pub use scroll::{
+    ScrollAxis, ScrollView, ScrollViewRenderObject, ScrollWheelDirection, ScrollbarVisibility,
+};
 pub use select::{Select, SelectChangeCallback, SelectRenderObject};
 pub use slider::{Slider, SliderRenderObject};
 pub use spacer::{Spacer, SpacerRenderObject};

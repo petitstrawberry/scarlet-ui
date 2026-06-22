@@ -325,6 +325,10 @@ impl RenderingPipeline {
             }
         }
 
+        if Self::paint_element_overlay(ctx, element, abs) {
+            painted = true;
+        }
+
         if clip.is_some() {
             ctx.pop_clip();
         }
@@ -406,6 +410,19 @@ impl RenderingPipeline {
         }
 
         false
+    }
+
+    fn paint_element_overlay<'a>(
+        ctx: &mut PaintContext<'a>,
+        element: &'a dyn Element,
+        abs: Point,
+    ) -> bool {
+        let Some(ro) = element.render_object() else {
+            return false;
+        };
+
+        let before = ctx.commands().len();
+        ro.paint_overlay(ctx, abs) || ctx.commands().len() > before
     }
 
     /// Handle a render frame and return the buffer with physical damage rectangles.

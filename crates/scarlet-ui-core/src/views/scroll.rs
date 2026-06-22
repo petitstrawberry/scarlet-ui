@@ -4,9 +4,11 @@
 //! a normal View subtree, so controls inside the scrolled content keep their own
 //! elements, hit testing, and event behavior.
 
+use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, LayoutConstraints, RenderElement};
-use crate::event::{Event, MouseEvent, Phase};
+use crate::event::{Event, MouseEvent, Phase, WheelPhase};
 use crate::geometry::{Point, Rect, Size};
+use crate::renderer::PaintContext;
 use crate::view::View;
 use alloc::boxed::Box;
 use alloc::vec;
@@ -19,6 +21,9 @@ const DEFAULT_AXIS_LOCK_MIN_DELTA: f32 = 2.0;
 const DEFAULT_EXCLUSIVE_AXIS_LOCK_RATIO: f32 = 4.0;
 const DEFAULT_EXCLUSIVE_AXIS_LOCK_MIN_DELTA: f32 = 1.0;
 const DEFAULT_WHEEL_SENSITIVITY: f32 = 0.25;
+const DEFAULT_SCROLLBAR_THICKNESS: f32 = 6.0;
+const DEFAULT_SCROLLBAR_INSET: f32 = 3.0;
+const DEFAULT_SCROLLBAR_MIN_THUMB_LEN: f32 = 24.0;
 
 /// Scrollable axes for [`ScrollView`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +64,27 @@ impl ScrollWheelDirection {
     }
 }
 
+/// Visibility policy for [`ScrollView`] scrollbars.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollbarVisibility {
+    /// Use the platform-style policy.
+    ///
+    /// Currently this behaves like [`ScrollbarVisibility::WhileScrolling`].
+    Automatic,
+    /// Show scrollbars whenever the corresponding axis can scroll.
+    Always,
+    /// Show scrollbars only while a wheel or trackpad gesture is active.
+    WhileScrolling,
+    /// Never show scrollbars.
+    Never,
+}
+
+impl Default for ScrollbarVisibility {
+    fn default() -> Self {
+        Self::Automatic
+    }
+}
+
 /// Scrollable viewport for a child view.
 #[derive(Clone)]
 pub struct ScrollView<V: View> {
@@ -72,6 +98,8 @@ pub struct ScrollView<V: View> {
     axis_lock_min_delta: f32,
     exclusive_axis_lock_ratio: f32,
     exclusive_axis_lock_min_delta: f32,
+    scrollbar_visibility: ScrollbarVisibility,
+    scrollbar_color: Option<Color>,
 }
 
 impl<V: View> ScrollView<V> {
@@ -96,6 +124,8 @@ impl<V: View> ScrollView<V> {
             axis_lock_min_delta: DEFAULT_AXIS_LOCK_MIN_DELTA,
             exclusive_axis_lock_ratio: DEFAULT_EXCLUSIVE_AXIS_LOCK_RATIO,
             exclusive_axis_lock_min_delta: DEFAULT_EXCLUSIVE_AXIS_LOCK_MIN_DELTA,
+            scrollbar_visibility: ScrollbarVisibility::default(),
+            scrollbar_color: None,
         }
     }
 
@@ -275,6 +305,36 @@ impl<V: View> ScrollView<V> {
         self
     }
 
+    /// Set scrollbar visibility.
+    ///
+    /// Scrollbars are still hidden for axes whose content fits in the viewport.
+    ///
+    /// # Arguments
+    ///
+    /// * `visibility` - Policy controlling when scrollbars are shown.
+    ///
+    /// # Returns
+    ///
+    /// Updated scroll view.
+    pub fn scrollbar_visibility(mut self, visibility: ScrollbarVisibility) -> Self {
+        self.scrollbar_visibility = visibility;
+        self
+    }
+
+    /// Set scrollbar thumb color.
+    ///
+    /// # Arguments
+    ///
+    /// * `color` - Thumb color used for horizontal and vertical scrollbars.
+    ///
+    /// # Returns
+    ///
+    /// Updated scroll view.
+    pub fn scrollbar_color(mut self, color: Color) -> Self {
+        self.scrollbar_color = Some(color);
+        self
+    }
+
     /// Return the configured axes.
     ///
     /// # Returns
@@ -352,6 +412,24 @@ impl<V: View> ScrollView<V> {
             self.exclusive_axis_lock_min_delta,
         )
     }
+
+    /// Return the scrollbar visibility policy.
+    ///
+    /// # Returns
+    ///
+    /// Current scrollbar visibility policy.
+    pub fn scrollbar_visibility_value(&self) -> ScrollbarVisibility {
+        self.scrollbar_visibility
+    }
+
+    /// Return the configured scrollbar color.
+    ///
+    /// # Returns
+    ///
+    /// Explicit scrollbar thumb color, if configured.
+    pub fn scrollbar_color_value(&self) -> Option<Color> {
+        self.scrollbar_color
+    }
 }
 
 impl<V: View + Clone + 'static> View for ScrollView<V> {
@@ -383,10 +461,13 @@ pub struct ScrollViewRenderObject<V: View> {
     axis_lock_min_delta: f32,
     exclusive_axis_lock_ratio: f32,
     exclusive_axis_lock_min_delta: f32,
+    scrollbar_visibility: ScrollbarVisibility,
+    scrollbar_color: Option<Color>,
     viewport_size: Size,
     content_size: Size,
     offset_x: f32,
     offset_y: f32,
+    scrollbar_active: bool,
     _marker: PhantomData<V>,
 }
 
@@ -413,10 +494,13 @@ impl<V: View> ScrollViewRenderObject<V> {
             axis_lock_min_delta: DEFAULT_AXIS_LOCK_MIN_DELTA,
             exclusive_axis_lock_ratio: DEFAULT_EXCLUSIVE_AXIS_LOCK_RATIO,
             exclusive_axis_lock_min_delta: DEFAULT_EXCLUSIVE_AXIS_LOCK_MIN_DELTA,
+            scrollbar_visibility: ScrollbarVisibility::default(),
+            scrollbar_color: None,
             viewport_size: Size::ZERO,
             content_size: Size::ZERO,
             offset_x: 0.0,
             offset_y: 0.0,
+            scrollbar_active: false,
             _marker: PhantomData,
         }
     }
@@ -448,6 +532,8 @@ impl<V: View> ScrollViewRenderObject<V> {
             render_object.exclusive_axis_lock_ratio,
             render_object.exclusive_axis_lock_min_delta,
         ) = view.exclusive_wheel_axis_lock_values();
+        render_object.scrollbar_visibility = view.scrollbar_visibility_value();
+        render_object.scrollbar_color = view.scrollbar_color_value();
         render_object
     }
 
@@ -551,6 +637,104 @@ impl<V: View> ScrollViewRenderObject<V> {
     fn scale_wheel_axis_delta(&self, delta: f32) -> f32 {
         delta * self.wheel_scale
     }
+
+    fn scrollbar_color(&self) -> Color {
+        self.scrollbar_color.unwrap_or_else(|| {
+            ColorPalette::default()
+                .secondary()
+                .with_opacity(default_scrollbar_opacity())
+        })
+    }
+
+    fn should_show_scrollbar(&self, scrollable: bool) -> bool {
+        if !scrollable {
+            return false;
+        }
+        match self.scrollbar_visibility {
+            ScrollbarVisibility::Automatic | ScrollbarVisibility::WhileScrolling => {
+                self.scrollbar_active
+            }
+            ScrollbarVisibility::Always => true,
+            ScrollbarVisibility::Never => false,
+        }
+    }
+
+    fn horizontal_scrollbar_rect(&self, origin: Point, reserve_vertical: bool) -> Option<Rect> {
+        let max_offset = self.max_offset_x();
+        if max_offset <= 0.0 || self.viewport_size.width <= 0.0 || self.content_size.width <= 0.0 {
+            return None;
+        }
+
+        let reserved = if reserve_vertical {
+            DEFAULT_SCROLLBAR_THICKNESS + DEFAULT_SCROLLBAR_INSET
+        } else {
+            0.0
+        };
+        let track_x = origin.x + DEFAULT_SCROLLBAR_INSET;
+        let track_y = origin.y + self.viewport_size.height
+            - DEFAULT_SCROLLBAR_INSET
+            - DEFAULT_SCROLLBAR_THICKNESS;
+        let track_w =
+            (self.viewport_size.width - DEFAULT_SCROLLBAR_INSET * 2.0 - reserved).max(0.0);
+        if track_w <= 0.0 || track_y < origin.y {
+            return None;
+        }
+
+        let thumb_w = (self.viewport_size.width / self.content_size.width * track_w)
+            .max(DEFAULT_SCROLLBAR_MIN_THUMB_LEN.min(track_w))
+            .min(track_w);
+        let travel = (track_w - thumb_w).max(0.0);
+        let progress = if max_offset > 0.0 {
+            self.offset_x / max_offset
+        } else {
+            0.0
+        };
+        Some(Rect::from_xywh(
+            track_x + travel * progress.clamp(0.0, 1.0),
+            track_y,
+            thumb_w,
+            DEFAULT_SCROLLBAR_THICKNESS,
+        ))
+    }
+
+    fn vertical_scrollbar_rect(&self, origin: Point, reserve_horizontal: bool) -> Option<Rect> {
+        let max_offset = self.max_offset_y();
+        if max_offset <= 0.0 || self.viewport_size.height <= 0.0 || self.content_size.height <= 0.0
+        {
+            return None;
+        }
+
+        let reserved = if reserve_horizontal {
+            DEFAULT_SCROLLBAR_THICKNESS + DEFAULT_SCROLLBAR_INSET
+        } else {
+            0.0
+        };
+        let track_x = origin.x + self.viewport_size.width
+            - DEFAULT_SCROLLBAR_INSET
+            - DEFAULT_SCROLLBAR_THICKNESS;
+        let track_y = origin.y + DEFAULT_SCROLLBAR_INSET;
+        let track_h =
+            (self.viewport_size.height - DEFAULT_SCROLLBAR_INSET * 2.0 - reserved).max(0.0);
+        if track_h <= 0.0 || track_x < origin.x {
+            return None;
+        }
+
+        let thumb_h = (self.viewport_size.height / self.content_size.height * track_h)
+            .max(DEFAULT_SCROLLBAR_MIN_THUMB_LEN.min(track_h))
+            .min(track_h);
+        let travel = (track_h - thumb_h).max(0.0);
+        let progress = if max_offset > 0.0 {
+            self.offset_y / max_offset
+        } else {
+            0.0
+        };
+        Some(Rect::from_xywh(
+            track_x,
+            track_y + travel * progress.clamp(0.0, 1.0),
+            DEFAULT_SCROLLBAR_THICKNESS,
+            thumb_h,
+        ))
+    }
 }
 
 impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V> {
@@ -614,6 +798,8 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let old_axis_lock_min_delta = self.axis_lock_min_delta;
         let old_exclusive_axis_lock_ratio = self.exclusive_axis_lock_ratio;
         let old_exclusive_axis_lock_min_delta = self.exclusive_axis_lock_min_delta;
+        let old_scrollbar_visibility = self.scrollbar_visibility;
+        let old_scrollbar_color = self.scrollbar_color;
 
         self.axes = scroll_view.scroll_axes();
         self.configured_content_size = scroll_view.configured_content_size();
@@ -627,6 +813,8 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
             self.exclusive_axis_lock_ratio,
             self.exclusive_axis_lock_min_delta,
         ) = scroll_view.exclusive_wheel_axis_lock_values();
+        self.scrollbar_visibility = scroll_view.scrollbar_visibility_value();
+        self.scrollbar_color = scroll_view.scrollbar_color_value();
         self.clamp_offsets();
 
         if self.axes != old_axes
@@ -639,6 +827,8 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
             || (self.exclusive_axis_lock_ratio - old_exclusive_axis_lock_ratio).abs() > 0.001
             || (self.exclusive_axis_lock_min_delta - old_exclusive_axis_lock_min_delta).abs()
                 > 0.001
+            || self.scrollbar_visibility != old_scrollbar_visibility
+            || self.scrollbar_color != old_scrollbar_color
         {
             crate::element::UpdateResult::Updated
         } else {
@@ -672,11 +862,17 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         }
 
         let Event::Mouse(MouseEvent::Wheel {
-            delta_x, delta_y, ..
+            delta_x,
+            delta_y,
+            phase: wheel_phase,
+            ..
         }) = event
         else {
             return false;
         };
+
+        let old_scrollbar_active = self.scrollbar_active;
+        self.scrollbar_active = matches!(wheel_phase, WheelPhase::Started | WheelPhase::Moved);
 
         let (scaled_x, scaled_y) = self.normalized_wheel_delta(*delta_x, *delta_y);
         let mut next_x = self.offset_x;
@@ -689,7 +885,29 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
             next_y += scaled_y;
         }
 
-        self.set_offset(next_x, next_y)
+        let offset_changed = self.set_offset(next_x, next_y);
+        offset_changed || self.scrollbar_active != old_scrollbar_active
+    }
+
+    fn paint_overlay<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
+        let horizontal_scrollable = self.axes.allows_x() && self.max_offset_x() > 0.0;
+        let vertical_scrollable = self.axes.allows_y() && self.max_offset_y() > 0.0;
+        let show_horizontal = self.should_show_scrollbar(horizontal_scrollable);
+        let show_vertical = self.should_show_scrollbar(vertical_scrollable);
+        if !show_horizontal && !show_vertical {
+            return false;
+        }
+
+        let color = self.scrollbar_color();
+        let radius = DEFAULT_SCROLLBAR_THICKNESS * 0.5;
+        if show_horizontal && let Some(rect) = self.horizontal_scrollbar_rect(origin, show_vertical)
+        {
+            ctx.fill_rounded_rect(rect, radius, color);
+        }
+        if show_vertical && let Some(rect) = self.vertical_scrollbar_rect(origin, show_horizontal) {
+            ctx.fill_rounded_rect(rect, radius, color);
+        }
+        true
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -738,6 +956,10 @@ fn sanitize_non_negative(value: f32, fallback: f32) -> f32 {
     } else {
         fallback
     }
+}
+
+fn default_scrollbar_opacity() -> f32 {
+    0.55
 }
 
 #[cfg(test)]
@@ -1129,5 +1351,73 @@ mod tests {
         assert!(!middle.handle_event(&wheel, Phase::Bubble));
         assert!(outer.handle_event(&wheel, Phase::Bubble));
         assert_eq!(outer.offset(), (0.0, 32.0));
+    }
+
+    #[test]
+    fn always_visible_scrollbar_paints_for_scrollable_axis() {
+        let view = ScrollView::new(Text::new("content"))
+            .vertical()
+            .content_size(100.0, 300.0)
+            .scrollbar_visibility(ScrollbarVisibility::Always);
+        let mut render_object = ScrollViewRenderObject::<Text>::from_view(&view);
+        render_object.layout(LayoutConstraints::tight(100.0, 100.0));
+
+        let mut ctx = PaintContext::new();
+        assert!(render_object.paint_overlay(&mut ctx, Point::ZERO));
+        assert_eq!(ctx.commands().len(), 1);
+    }
+
+    #[test]
+    fn scrollbar_does_not_paint_when_content_fits() {
+        let view = ScrollView::new(Text::new("content"))
+            .vertical()
+            .content_size(100.0, 100.0)
+            .scrollbar_visibility(ScrollbarVisibility::Always);
+        let mut render_object = ScrollViewRenderObject::<Text>::from_view(&view);
+        render_object.layout(LayoutConstraints::tight(100.0, 100.0));
+
+        let mut ctx = PaintContext::new();
+        assert!(!render_object.paint_overlay(&mut ctx, Point::ZERO));
+        assert!(ctx.commands().is_empty());
+    }
+
+    #[test]
+    fn while_scrolling_scrollbar_tracks_wheel_phase() {
+        let view = ScrollView::new(Text::new("content"))
+            .vertical()
+            .content_size(100.0, 300.0)
+            .scrollbar_visibility(ScrollbarVisibility::WhileScrolling);
+        let mut render_object = ScrollViewRenderObject::<Text>::from_view(&view);
+        render_object.layout(LayoutConstraints::tight(100.0, 100.0));
+
+        let mut ctx = PaintContext::new();
+        assert!(!render_object.paint_overlay(&mut ctx, Point::ZERO));
+
+        assert!(render_object.handle_event(
+            &Event::Mouse(MouseEvent::Wheel {
+                delta_x: 0,
+                delta_y: 40,
+                x: 10,
+                y: 10,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Trackpad,
+            }),
+            Phase::Target,
+        ));
+        assert!(render_object.paint_overlay(&mut ctx, Point::ZERO));
+
+        assert!(render_object.handle_event(
+            &Event::Mouse(MouseEvent::Wheel {
+                delta_x: 0,
+                delta_y: 0,
+                x: 10,
+                y: 10,
+                phase: WheelPhase::Ended,
+                source: ScrollSource::Trackpad,
+            }),
+            Phase::Target,
+        ));
+        let mut ended_ctx = PaintContext::new();
+        assert!(!render_object.paint_overlay(&mut ended_ctx, Point::ZERO));
     }
 }

@@ -170,6 +170,7 @@ impl WidgetFactory {
         )
         .both_axes()
         .content_size(520.0, 360.0)
+        .scrollbar_visibility(ScrollbarVisibility::Always)
         .frame(320.0, 160.0)
     }
 

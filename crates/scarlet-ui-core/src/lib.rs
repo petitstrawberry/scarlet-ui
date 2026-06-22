@@ -130,7 +130,7 @@ pub use views::modifiers::{
 pub use views::navigation::Icon;
 pub use views::{
     BitmapImage, CanvasView, Divider, DividerOrientation, ProgressView, ScrollAxis, ScrollView,
-    ScrollWheelDirection, Select, Slider, TabItem, TabView, Toggle,
+    ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabItem, TabView, Toggle,
 };
 pub use views::{
     Button, HStack, Image, Rectangle, Spacer, SplitAxis, SplitView, Text, TextField, VStack,
@@ -174,7 +174,7 @@ pub mod prelude {
     pub use crate::views::modifiers::{Background, Clip, Focusable, Frame, OnKey, Padding};
     pub use crate::views::{
         BitmapImage, CanvasView, Divider, DividerOrientation, ProgressView, ScrollAxis, ScrollView,
-        ScrollWheelDirection, Select, Slider, TabItem, TabView, Toggle,
+        ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabItem, TabView, Toggle,
     };
     pub use crate::views::{
         Button, Either, Either3, Either4, Either5, Either6, HStack, Image, Rectangle, Spacer,

@@ -51,6 +51,24 @@ pub trait RenderObject: Any {
         false
     }
 
+    /// Emit overlay paint commands after this render object's children.
+    ///
+    /// Container render objects use this for chrome that must appear above
+    /// child content, such as scroll indicators. The overlay is emitted while
+    /// the element's clip is still active.
+    ///
+    /// # Arguments
+    ///
+    /// * `ctx` - Paint command context receiving overlay commands.
+    /// * `origin` - Absolute position of this element in the window.
+    ///
+    /// # Returns
+    ///
+    /// `true` if commands were emitted.
+    fn paint_overlay<'a>(&'a self, _ctx: &mut PaintContext<'a>, _origin: Point) -> bool {
+        false
+    }
+
     /// Get the buffer (for compositing).
     ///
     /// Returns the buffer if this RenderObject has rendered content.
