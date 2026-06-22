@@ -91,6 +91,16 @@ pub fn paint_text_view(
             background_color,
         );
     }
+    let text_clip_left = (origin.x + layout.text_origin_x).max(clip_rect.origin.x);
+    let text_clip_right = (clip_rect.origin.x + clip_rect.size.width).max(text_clip_left);
+    let text_clip = Rect::from_xywh(
+        text_clip_left,
+        clip_rect.origin.y,
+        text_clip_right - text_clip_left,
+        clip_rect.size.height,
+    );
+    ctx.push_clip(text_clip);
+
     paint_visible_text(
         ctx,
         origin,
@@ -129,6 +139,7 @@ pub fn paint_text_view(
         ctx.fill_rect(caret, text_color);
     }
 
+    ctx.pop_clip();
     ctx.pop_clip();
     let border = if focused {
         focused_border_color

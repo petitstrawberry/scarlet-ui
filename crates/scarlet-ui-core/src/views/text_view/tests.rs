@@ -1026,6 +1026,56 @@ fn paint_preedit_hides_placeholder_for_empty_document() {
 }
 
 #[test]
+fn paint_text_is_clipped_to_text_area_when_horizontally_scrolled_with_line_numbers() {
+    let source = String::from("abcdefghijklmnopqrstuvwxyz");
+    let text = State::new(StateId::new(2226), source.clone());
+    let selection = State::new(StateId::new(2227), TextSelection::collapsed(0));
+    let scroll = State::new(StateId::new(2228), TextViewScroll { x: 80.0, y: 0.0 });
+    let view = TextView::new(text, selection)
+        .line_numbers(true)
+        .scroll_state(scroll);
+    let render_object = render_object_with_size(&view, 160.0, 48.0);
+
+    let mut ctx = crate::renderer::PaintContext::new();
+    render_object.paint(&mut ctx, Point::ZERO);
+    let commands = ctx.commands();
+
+    let text_clip_index = commands
+        .iter()
+        .position(|command| {
+            matches!(
+                command,
+                PaintCommand::PushClip { rect, .. }
+                    if rect.origin.x == render_object.layout.text_origin_x
+                        && rect.origin.y == BORDER_WIDTH
+            )
+        })
+        .expect("text area clip should be pushed separately from the border clip");
+    let line_number_index = commands
+        .iter()
+        .position(|command| {
+            matches!(
+                command,
+                PaintCommand::DrawText { text, .. } if text == "1"
+            )
+        })
+        .expect("line number should be painted");
+    let text_index = commands
+        .iter()
+        .position(|command| {
+            matches!(
+                command,
+                PaintCommand::DrawText { text, position, .. }
+                    if text == &source && position.x < render_object.layout.text_origin_x
+            )
+        })
+        .expect("horizontally scrolled text should move left of the text origin");
+
+    assert!(line_number_index < text_clip_index);
+    assert!(text_clip_index < text_index);
+}
+
+#[test]
 fn ime_delete_surrounding_text_deletes_around_caret() {
     let text = State::new(StateId::new(224), String::from("abcd"));
     let selection = State::new(StateId::new(225), TextSelection::collapsed(2));
