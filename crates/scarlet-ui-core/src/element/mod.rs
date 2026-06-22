@@ -18,6 +18,6 @@ pub use element::{
 pub(crate) use focus::{focused_descendant_path, restore_focus_at_path};
 pub use hstack::HStackElement;
 pub use id::ElementId;
-pub use render::{RenderElement, RenderObject as ElementRenderObject};
+pub use render::{RenderElement, RenderObject as ElementRenderObject, ScrollPaintState};
 pub use tree::{ElementTree, generate_element_id};
 pub use vstack::VStackElement;

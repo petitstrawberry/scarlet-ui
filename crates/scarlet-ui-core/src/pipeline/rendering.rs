@@ -7,7 +7,7 @@
 
 use crate::buffer::Buffer;
 use crate::compositor::DamageRect;
-use crate::element::{Element, ElementId, ElementTree, LayoutConstraints};
+use crate::element::{Element, ElementId, ElementTree, LayoutConstraints, ScrollPaintState};
 use crate::event::EventDispatcher;
 use crate::geometry::{Point, Rect, Size};
 use crate::pipeline::{PipelineId, PipelineOwner};
@@ -21,6 +21,23 @@ const MAX_PRESENT_DAMAGE_RECTS: usize = 4;
 const PRESENT_DAMAGE_FULL_AREA_NUMERATOR: u64 = 3;
 const PRESENT_DAMAGE_FULL_AREA_DENOMINATOR: u64 = 5;
 
+#[derive(Clone, Debug)]
+struct ScrollPaintSnapshot {
+    viewport: Rect,
+    offset_x_physical: i32,
+    offset_y_physical: i32,
+    overlay_rects: Vec<Rect>,
+}
+
+#[derive(Clone, Debug)]
+struct ScrollShift {
+    id: ElementId,
+    physical_rect: DamageRect,
+    dx_physical: i32,
+    dy_physical: i32,
+    damage_rects: Vec<Rect>,
+}
+
 /// RenderingPipeline integrates all components of the rendering system
 pub struct RenderingPipeline {
     element_tree: ElementTree,
@@ -31,6 +48,7 @@ pub struct RenderingPipeline {
     event_dispatcher: EventDispatcher,
     paint_renderer: Option<CpuPaintRenderer>,
     last_paint_bounds: BTreeMap<ElementId, Rect>,
+    last_scroll_snapshots: BTreeMap<ElementId, ScrollPaintSnapshot>,
     paint_damage: Option<Vec<DamageRect>>,
     paint_needs_full: bool,
     paint_background_color: Option<crate::color::Color>,
@@ -54,6 +72,7 @@ impl RenderingPipeline {
             event_dispatcher: EventDispatcher::new(),
             paint_renderer: None,
             last_paint_bounds: BTreeMap::new(),
+            last_scroll_snapshots: BTreeMap::new(),
             paint_damage: None,
             paint_needs_full: true,
             paint_background_color: None,
@@ -77,6 +96,7 @@ impl RenderingPipeline {
         self.renderer = None;
         self.paint_renderer = None;
         self.last_paint_bounds.clear();
+        self.last_scroll_snapshots.clear();
         self.paint_damage = None;
         self.paint_needs_full = true;
         self.paint_background_color = None;
@@ -97,6 +117,7 @@ impl RenderingPipeline {
             paint_renderer.resize(self.window_size, self.scale_milli);
         }
         self.last_paint_bounds.clear();
+        self.last_scroll_snapshots.clear();
         self.paint_damage = None;
         self.paint_needs_full = true;
         if let Some(root) = self.element_tree.root_mut() {
@@ -252,6 +273,7 @@ impl RenderingPipeline {
             paint_renderer.resize(new_size, self.scale_milli);
         }
         self.last_paint_bounds.clear();
+        self.last_scroll_snapshots.clear();
         self.paint_damage = None;
         self.paint_needs_full = true;
 
@@ -317,10 +339,16 @@ impl RenderingPipeline {
             || self.paint_background_color != Some(background_color);
 
         let dirty_ids = self.pipeline_owner.last_paint_ids();
+        let current_scroll_snapshots = self.current_scroll_snapshots();
+        let scroll_shifts = if force_full {
+            Vec::new()
+        } else {
+            self.scroll_shifts(dirty_ids, &current_scroll_snapshots)
+        };
         let mut dirty_rects = if force_full {
             None
         } else {
-            Some(self.paint_dirty_rects(dirty_ids))
+            Some(self.paint_dirty_rects(dirty_ids, &scroll_shifts))
         };
 
         let present_damage = match dirty_rects.as_mut() {
@@ -352,6 +380,15 @@ impl RenderingPipeline {
         if force_full || any_painted {
             let pr = self.paint_renderer.as_mut().unwrap();
             pr.set_background_color(background_color);
+            if damage_clip.is_some() {
+                for shift in scroll_shifts.iter() {
+                    pr.shift_physical_rect(
+                        shift.physical_rect,
+                        shift.dx_physical,
+                        shift.dy_physical,
+                    );
+                }
+            }
             pr.execute_with_damage(&ctx, damage_clip);
         }
 
@@ -361,6 +398,7 @@ impl RenderingPipeline {
         if let Some(root) = self.element_tree.root() {
             Self::collect_paint_bounds(root, Point::ZERO, &mut self.last_paint_bounds);
         }
+        self.last_scroll_snapshots = current_scroll_snapshots;
 
         let pr = self.paint_renderer.as_ref().unwrap();
         Some(pr.buffer())
@@ -519,7 +557,11 @@ impl RenderingPipeline {
         Rect::from_xywh(absolute_origin.x, absolute_origin.y, width, height)
     }
 
-    fn paint_dirty_rects(&self, dirty_ids: &[ElementId]) -> Vec<Rect> {
+    fn paint_dirty_rects(
+        &self,
+        dirty_ids: &[ElementId],
+        scroll_shifts: &[ScrollShift],
+    ) -> Vec<Rect> {
         if dirty_ids.is_empty() {
             return Vec::new();
         }
@@ -529,8 +571,12 @@ impl RenderingPipeline {
         };
 
         let dirty_set: BTreeSet<ElementId> = dirty_ids.iter().copied().collect();
+        let scroll_shift_map: BTreeMap<ElementId, &[Rect]> = scroll_shifts
+            .iter()
+            .map(|shift| (shift.id, shift.damage_rects.as_slice()))
+            .collect();
         let mut rects = Vec::new();
-        self.collect_dirty_rects(root, Point::ZERO, &dirty_set, &mut rects);
+        self.collect_dirty_rects(root, Point::ZERO, &dirty_set, &scroll_shift_map, &mut rects);
         rects
     }
 
@@ -539,6 +585,7 @@ impl RenderingPipeline {
         element: &dyn Element,
         origin: Point,
         dirty_ids: &BTreeSet<ElementId>,
+        scroll_shift_map: &BTreeMap<ElementId, &[Rect]>,
         rects: &mut Vec<Rect>,
     ) {
         let abs = Point::new(
@@ -547,15 +594,202 @@ impl RenderingPipeline {
         );
 
         if dirty_ids.contains(&element.id()) {
-            rects.push(Self::element_paint_bounds(element, abs));
-            if let Some(old_bounds) = self.last_paint_bounds.get(&element.id()) {
-                rects.push(*old_bounds);
+            if let Some(shift_rects) = scroll_shift_map.get(&element.id()) {
+                rects.extend_from_slice(shift_rects);
+            } else {
+                rects.push(Self::element_paint_bounds(element, abs));
+                if let Some(old_bounds) = self.last_paint_bounds.get(&element.id()) {
+                    rects.push(*old_bounds);
+                }
             }
         }
 
         for child in element.children() {
-            self.collect_dirty_rects(child.as_ref(), abs, dirty_ids, rects);
+            self.collect_dirty_rects(child.as_ref(), abs, dirty_ids, scroll_shift_map, rects);
         }
+    }
+
+    fn current_scroll_snapshots(&self) -> BTreeMap<ElementId, ScrollPaintSnapshot> {
+        let mut snapshots = BTreeMap::new();
+        if let Some(root) = self.element_tree.root() {
+            self.collect_scroll_snapshots(root, Point::ZERO, &mut snapshots);
+        }
+        snapshots
+    }
+
+    fn collect_scroll_snapshots(
+        &self,
+        element: &dyn Element,
+        origin: Point,
+        snapshots: &mut BTreeMap<ElementId, ScrollPaintSnapshot>,
+    ) {
+        let abs = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+
+        if let Some(state) = element
+            .render_object()
+            .and_then(|render_object| render_object.scroll_paint_state())
+        {
+            snapshots.insert(element.id(), self.scroll_snapshot(abs, state));
+        }
+
+        for child in element.children() {
+            self.collect_scroll_snapshots(child.as_ref(), abs, snapshots);
+        }
+    }
+
+    fn scroll_snapshot(&self, abs: Point, state: ScrollPaintState) -> ScrollPaintSnapshot {
+        let scale = self.scale_milli.max(1) as f32 / 1000.0;
+        let overlay_rects = state
+            .overlay_rects
+            .into_iter()
+            .map(|rect| {
+                Rect::from_xywh(
+                    abs.x + rect.origin.x,
+                    abs.y + rect.origin.y,
+                    rect.size.width,
+                    rect.size.height,
+                )
+            })
+            .collect();
+        ScrollPaintSnapshot {
+            viewport: Rect::new(abs, state.viewport_size),
+            offset_x_physical: libm::floorf(state.offset.x * scale) as i32,
+            offset_y_physical: libm::floorf(state.offset.y * scale) as i32,
+            overlay_rects,
+        }
+    }
+
+    fn scroll_shifts(
+        &self,
+        dirty_ids: &[ElementId],
+        current: &BTreeMap<ElementId, ScrollPaintSnapshot>,
+    ) -> Vec<ScrollShift> {
+        let dirty_set: BTreeSet<ElementId> = dirty_ids.iter().copied().collect();
+        current
+            .iter()
+            .filter_map(|(id, snapshot)| {
+                if !dirty_set.contains(id) {
+                    return None;
+                }
+                let previous = self.last_scroll_snapshots.get(id)?;
+                self.scroll_shift(*id, previous, snapshot)
+            })
+            .collect()
+    }
+
+    fn scroll_shift(
+        &self,
+        id: ElementId,
+        previous: &ScrollPaintSnapshot,
+        current: &ScrollPaintSnapshot,
+    ) -> Option<ScrollShift> {
+        if previous.viewport.size != current.viewport.size {
+            return None;
+        }
+
+        let dx_physical = previous
+            .offset_x_physical
+            .saturating_sub(current.offset_x_physical);
+        let dy_physical = previous
+            .offset_y_physical
+            .saturating_sub(current.offset_y_physical);
+        if dx_physical == 0 && dy_physical == 0 {
+            return None;
+        }
+
+        let physical_rect = Self::rect_to_damage(
+            current.viewport,
+            self.scale_milli,
+            Self::scale_len(self.window_size.width as u32, self.scale_milli),
+            Self::scale_len(self.window_size.height as u32, self.scale_milli),
+        );
+        if physical_rect.2 == 0 || physical_rect.3 == 0 {
+            return None;
+        }
+        if dx_physical.unsigned_abs() >= physical_rect.2
+            || dy_physical.unsigned_abs() >= physical_rect.3
+        {
+            return None;
+        }
+
+        let mut damage_rects = Self::scroll_exposed_rects(
+            current.viewport,
+            dx_physical,
+            dy_physical,
+            self.scale_milli,
+        );
+        let dx_logical = Self::physical_len_to_logical(dx_physical, self.scale_milli);
+        let dy_logical = Self::physical_len_to_logical(dy_physical, self.scale_milli);
+        for rect in previous.overlay_rects.iter().copied() {
+            damage_rects.push(rect);
+            damage_rects.push(Rect::from_xywh(
+                rect.origin.x + dx_logical,
+                rect.origin.y + dy_logical,
+                rect.size.width,
+                rect.size.height,
+            ));
+        }
+        damage_rects.extend(current.overlay_rects.iter().copied());
+
+        Some(ScrollShift {
+            id,
+            physical_rect,
+            dx_physical,
+            dy_physical,
+            damage_rects,
+        })
+    }
+
+    fn scroll_exposed_rects(
+        viewport: Rect,
+        dx_physical: i32,
+        dy_physical: i32,
+        scale_milli: u32,
+    ) -> Vec<Rect> {
+        let mut rects = Vec::new();
+        let dx = Self::physical_len_to_logical(dx_physical, scale_milli).abs();
+        let dy = Self::physical_len_to_logical(dy_physical, scale_milli).abs();
+
+        if dx_physical > 0 {
+            rects.push(Rect::from_xywh(
+                viewport.left(),
+                viewport.top(),
+                dx,
+                viewport.height(),
+            ));
+        } else if dx_physical < 0 {
+            rects.push(Rect::from_xywh(
+                viewport.right() - dx,
+                viewport.top(),
+                dx,
+                viewport.height(),
+            ));
+        }
+
+        if dy_physical > 0 {
+            rects.push(Rect::from_xywh(
+                viewport.left(),
+                viewport.top(),
+                viewport.width(),
+                dy,
+            ));
+        } else if dy_physical < 0 {
+            rects.push(Rect::from_xywh(
+                viewport.left(),
+                viewport.bottom() - dy,
+                viewport.width(),
+                dy,
+            ));
+        }
+
+        rects
+    }
+
+    fn physical_len_to_logical(value: i32, scale_milli: u32) -> f32 {
+        value as f32 * 1000.0 / scale_milli.max(1) as f32
     }
 
     fn collect_paint_bounds(

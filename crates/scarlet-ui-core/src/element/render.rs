@@ -17,6 +17,13 @@ use crate::renderer::PaintContext;
 use crate::state::{InvalidationKind, SubscriptionId};
 use crate::view::View;
 
+#[derive(Clone, Debug)]
+pub struct ScrollPaintState {
+    pub viewport_size: Size,
+    pub offset: Point,
+    pub overlay_rects: Vec<Rect>,
+}
+
 /// RenderObject trait for leaf rendering nodes
 ///
 /// RenderObjects are responsible for:
@@ -55,6 +62,11 @@ pub trait RenderObject: Any {
     /// before its PaintCommand implementation can draw correctly.
     fn requires_buffer_render_for_paint(&self) -> bool {
         false
+    }
+
+    /// Return scroll state used by the retained PaintCommand renderer.
+    fn scroll_paint_state(&self) -> Option<ScrollPaintState> {
+        None
     }
 
     /// Emit overlay paint commands after this render object's children.

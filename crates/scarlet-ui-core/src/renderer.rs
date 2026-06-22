@@ -773,6 +773,11 @@ impl CpuPaintRenderer {
         }
     }
 
+    pub fn shift_physical_rect(&mut self, rect: DamageRect, dx: i32, dy: i32) {
+        self.buffer
+            .shift_rect(rect.0, rect.1, rect.2, rect.3, dx, dy);
+    }
+
     fn rect_to_u32(&self, rect: Rect) -> (u32, u32, u32, u32) {
         let x0 = libm::floorf(rect.origin.x * self.scale_milli as f32 / 1000.0).max(0.0);
         let y0 = libm::floorf(rect.origin.y * self.scale_milli as f32 / 1000.0).max(0.0);
