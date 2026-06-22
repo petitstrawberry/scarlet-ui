@@ -421,7 +421,12 @@ pub struct CpuPaintRenderer {
     buffer: Buffer,
     background_color: Color,
     scale_milli: u32,
-    clip_stack: Vec<ClipRegion>,
+    layer_stack: Vec<PaintLayer>,
+}
+
+struct PaintLayer {
+    buffer: Buffer,
+    clip: ClipRegion,
 }
 
 impl CpuPaintRenderer {
@@ -434,7 +439,7 @@ impl CpuPaintRenderer {
             ),
             background_color,
             scale_milli,
-            clip_stack: Vec::new(),
+            layer_stack: Vec::new(),
         }
     }
 
@@ -465,21 +470,74 @@ impl CpuPaintRenderer {
         )
     }
 
+    fn current_buffer_mut(&mut self) -> &mut Buffer {
+        if let Some(layer) = self.layer_stack.last_mut() {
+            &mut layer.buffer
+        } else {
+            &mut self.buffer
+        }
+    }
+
+    fn scale_clip_region(&self, clip: ClipRegion) -> ClipRegion {
+        ClipRegion {
+            rect: self.scale_rect(clip.rect),
+            corner_radius: self.scale_f32(clip.corner_radius),
+        }
+    }
+
+    fn push_clip_layer(&mut self, clip: ClipRegion) {
+        let layer = PaintLayer {
+            buffer: Buffer::from_logical_dimensions_with_scale(
+                self.buffer.logical_width(),
+                self.buffer.logical_height(),
+                self.scale_milli,
+            ),
+            clip,
+        };
+        self.layer_stack.push(layer);
+    }
+
+    fn pop_clip_layer(&mut self) {
+        let Some(layer) = self.layer_stack.pop() else {
+            return;
+        };
+        let clip = self.scale_clip_region(layer.clip);
+        if clip.corner_radius > 0.0 {
+            self.current_buffer_mut().composite_clipped_rounded(
+                &layer.buffer,
+                0,
+                0,
+                1.0,
+                clip.rect.origin.x as i32,
+                clip.rect.origin.y as i32,
+                clip.rect.size.width as i32,
+                clip.rect.size.height as i32,
+                clip.corner_radius,
+            );
+        } else {
+            self.current_buffer_mut().composite_clipped(
+                &layer.buffer,
+                0,
+                0,
+                1.0,
+                clip.rect.origin.x as i32,
+                clip.rect.origin.y as i32,
+                clip.rect.size.width as i32,
+                clip.rect.size.height as i32,
+            );
+        }
+    }
+
     pub fn execute(&mut self, ctx: &PaintContext<'_>) {
         self.buffer.clear(self.background_color);
-        self.clip_stack.clear();
+        self.layer_stack.clear();
 
         for cmd in ctx.commands() {
-            let clip = self.clip_stack.last().copied();
             match cmd {
                 PaintCommand::FillPath { path, color } => {
                     let scaled: Vec<Point> =
                         path.iter().copied().map(|p| self.scale_point(p)).collect();
-                    let clip_i = clip.map(|c| ClipRegion {
-                        rect: self.scale_rect(c.rect),
-                        corner_radius: self.scale_f32(c.corner_radius),
-                    });
-                    fill_polygon(&mut self.buffer, &scaled, *color, clip_i);
+                    fill_polygon(self.current_buffer_mut(), &scaled, *color, None);
                 }
                 PaintCommand::StrokeRect {
                     rect,
@@ -488,11 +546,14 @@ impl CpuPaintRenderer {
                 } => {
                     let rect = self.scale_rect(*rect);
                     let stroke_width = self.scale_f32(stroke_width.max(1.0));
-                    let clip = clip.map(|c| ClipRegion {
-                        rect: self.scale_rect(c.rect),
-                        corner_radius: self.scale_f32(c.corner_radius),
-                    });
-                    stroke_rounded_rect(&mut self.buffer, rect, 0.0, stroke_width, *color, clip);
+                    stroke_rounded_rect(
+                        self.current_buffer_mut(),
+                        rect,
+                        0.0,
+                        stroke_width,
+                        *color,
+                        None,
+                    );
                 }
                 PaintCommand::StrokeRoundedRect {
                     rect,
@@ -503,11 +564,14 @@ impl CpuPaintRenderer {
                     let rect = self.scale_rect(*rect);
                     let radius = self.scale_f32(*corner_radius);
                     let stroke_width = self.scale_f32(stroke_width.max(1.0));
-                    let clip = clip.map(|c| ClipRegion {
-                        rect: self.scale_rect(c.rect),
-                        corner_radius: self.scale_f32(c.corner_radius),
-                    });
-                    stroke_rounded_rect(&mut self.buffer, rect, radius, stroke_width, *color, clip);
+                    stroke_rounded_rect(
+                        self.current_buffer_mut(),
+                        rect,
+                        radius,
+                        stroke_width,
+                        *color,
+                        None,
+                    );
                 }
                 PaintCommand::StrokePath {
                     path,
@@ -515,7 +579,7 @@ impl CpuPaintRenderer {
                     color,
                 } => {
                     let sw = stroke_width.max(1.0) as i32;
-                    let mut canvas = crate::graphics::Canvas::for_buffer(&mut self.buffer);
+                    let mut canvas = crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
                     for window in path.windows(2) {
                         canvas.draw_line(
                             window[0].x as i32,
@@ -544,64 +608,21 @@ impl CpuPaintRenderer {
                     color,
                     font_size_px,
                 } => {
-                    let mut canvas = crate::graphics::Canvas::for_buffer(&mut self.buffer);
-                    if let Some(c) = clip {
-                        canvas.draw_text_sized_clipped(
-                            position.x as i32,
-                            position.y as i32,
-                            text,
-                            *color,
-                            *font_size_px,
-                            c.rect,
-                            c.corner_radius,
-                        );
-                    } else {
-                        canvas.draw_text_sized(
-                            position.x as i32,
-                            position.y as i32,
-                            text,
-                            *color,
-                            *font_size_px,
-                        );
-                    }
+                    let mut canvas = crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
+                    canvas.draw_text_sized(
+                        position.x as i32,
+                        position.y as i32,
+                        text,
+                        *color,
+                        *font_size_px,
+                    );
                 }
                 PaintCommand::DrawBuffer { dst, buffer_idx } => {
                     if let Some(src) = ctx.buffer(BufferHandle(*buffer_idx)) {
                         let dst = self.scale_rect(*dst);
                         let dst_x = dst.origin.x as i32;
                         let dst_y = dst.origin.y as i32;
-                        if let Some(c) = clip {
-                            let c = ClipRegion {
-                                rect: self.scale_rect(c.rect),
-                                corner_radius: self.scale_f32(c.corner_radius),
-                            };
-                            if c.corner_radius > 0.0 {
-                                self.buffer.composite_clipped_rounded(
-                                    src,
-                                    dst_x,
-                                    dst_y,
-                                    1.0,
-                                    c.rect.origin.x as i32,
-                                    c.rect.origin.y as i32,
-                                    c.rect.size.width as i32,
-                                    c.rect.size.height as i32,
-                                    c.corner_radius,
-                                );
-                            } else {
-                                self.buffer.composite_clipped(
-                                    src,
-                                    dst_x,
-                                    dst_y,
-                                    1.0,
-                                    c.rect.origin.x as i32,
-                                    c.rect.origin.y as i32,
-                                    c.rect.size.width as i32,
-                                    c.rect.size.height as i32,
-                                );
-                            }
-                        } else {
-                            self.buffer.composite(src, dst_x, dst_y, 1.0);
-                        }
+                        self.current_buffer_mut().composite(src, dst_x, dst_y, 1.0);
                     }
                 }
                 PaintCommand::DrawBufferRect {
@@ -619,64 +640,29 @@ impl CpuPaintRenderer {
                         let src_y = src.origin.y as i32;
                         let src_w = src.size.width as i32;
                         let src_h = src.size.height as i32;
-                        if let Some(c) = clip {
-                            let c = ClipRegion {
-                                rect: self.scale_rect(c.rect),
-                                corner_radius: self.scale_f32(c.corner_radius),
-                            };
-                            if c.corner_radius > 0.0 {
-                                self.buffer.composite_rect_clipped_rounded(
-                                    buf,
-                                    src_x,
-                                    src_y,
-                                    src_w,
-                                    src_h,
-                                    dst_x,
-                                    dst_y,
-                                    *opacity,
-                                    c.rect.origin.x as i32,
-                                    c.rect.origin.y as i32,
-                                    c.rect.size.width as i32,
-                                    c.rect.size.height as i32,
-                                    c.corner_radius,
-                                );
-                            } else {
-                                self.buffer.composite_rect_clipped(
-                                    buf,
-                                    src_x,
-                                    src_y,
-                                    src_w,
-                                    src_h,
-                                    dst_x,
-                                    dst_y,
-                                    *opacity,
-                                    c.rect.origin.x as i32,
-                                    c.rect.origin.y as i32,
-                                    c.rect.size.width as i32,
-                                    c.rect.size.height as i32,
-                                );
-                            }
-                        } else {
-                            self.buffer.composite_rect(
-                                buf, src_x, src_y, src_w, src_h, dst_x, dst_y, *opacity,
-                            );
-                        }
+                        self.current_buffer_mut().composite_rect(
+                            buf, src_x, src_y, src_w, src_h, dst_x, dst_y, *opacity,
+                        );
                     }
                 }
                 PaintCommand::PushClip {
                     rect,
                     corner_radius,
                 } => {
-                    self.clip_stack.push(ClipRegion {
+                    self.push_clip_layer(ClipRegion {
                         rect: *rect,
                         corner_radius: *corner_radius,
                     });
                 }
                 PaintCommand::PopClip => {
-                    self.clip_stack.pop();
+                    self.pop_clip_layer();
                 }
                 PaintCommand::SetOpacity { opacity: _ } => {}
             }
+        }
+
+        while !self.layer_stack.is_empty() {
+            self.pop_clip_layer();
         }
     }
 
@@ -1021,6 +1007,45 @@ mod tests {
 
         assert_eq!(r.buffer().get_pixel(0, 0).unwrap(), bg.to_bgra());
         assert_eq!(r.buffer().get_pixel(10, 10).unwrap(), fill.to_bgra());
+    }
+
+    #[test]
+    fn clip_layer_composites_only_inside_clip() {
+        let bg = Color::rgb(0, 0, 0);
+        let fill = Color::rgb(255, 0, 0);
+        let mut ctx = PaintContext::new();
+        ctx.push_clip(Rect::from_xywh(10.0, 10.0, 20.0, 20.0));
+        ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 50.0, 50.0), fill);
+        ctx.pop_clip();
+
+        let mut r = CpuPaintRenderer::new(Size::new(50.0, 50.0), 1000, bg);
+        r.execute(&ctx);
+
+        let bg_pixel = bg.to_bgra();
+        assert_eq!(r.buffer().get_pixel(5, 5).unwrap(), bg_pixel);
+        assert_eq!(r.buffer().get_pixel(15, 15).unwrap(), fill.to_bgra());
+        assert_eq!(r.buffer().get_pixel(35, 15).unwrap(), bg_pixel);
+    }
+
+    #[test]
+    fn nested_clip_layers_intersect_during_composite() {
+        let bg = Color::rgb(0, 0, 0);
+        let fill = Color::rgb(255, 0, 0);
+        let mut ctx = PaintContext::new();
+        ctx.push_clip(Rect::from_xywh(10.0, 10.0, 30.0, 30.0));
+        ctx.push_clip(Rect::from_xywh(20.0, 0.0, 30.0, 30.0));
+        ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 60.0, 60.0), fill);
+        ctx.pop_clip();
+        ctx.pop_clip();
+
+        let mut r = CpuPaintRenderer::new(Size::new(60.0, 60.0), 1000, bg);
+        r.execute(&ctx);
+
+        let bg_pixel = bg.to_bgra();
+        assert_eq!(r.buffer().get_pixel(25, 15).unwrap(), fill.to_bgra());
+        assert_eq!(r.buffer().get_pixel(15, 15).unwrap(), bg_pixel);
+        assert_eq!(r.buffer().get_pixel(45, 15).unwrap(), bg_pixel);
+        assert_eq!(r.buffer().get_pixel(25, 5).unwrap(), bg_pixel);
     }
 
     #[test]

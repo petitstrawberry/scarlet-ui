@@ -288,35 +288,12 @@ impl Compositor {
             x: origin.x + position.x,
             y: origin.y + position.y,
         };
-        let bounds = element.bounds();
-        let absolute_bounds = Rect::from_xywh(
-            absolute_origin.x,
-            absolute_origin.y,
-            bounds.size.width,
-            bounds.size.height,
-        );
         let paint_bounds = self.element_paint_bounds(element, absolute_origin);
         self.last_bounds.insert(element.id(), paint_bounds);
 
-        let mut next_clip = clip;
-        if let Some(render_object) = element.render_object() {
-            if let Some(clip_render) = render_object
-                .as_any()
-                .downcast_ref::<crate::views::modifiers::ClipRenderObject>()
-            {
-                let current = ClipRegion {
-                    rect: absolute_bounds,
-                    radius: clip_render.radius(),
-                };
-                next_clip = match next_clip {
-                    Some(existing) => self.intersect_clip(existing, current),
-                    None => Some(current),
-                };
-                if next_clip.is_none() {
-                    return;
-                }
-            }
-        }
+        let Some(next_clip) = self.next_clip_for_element(element, absolute_origin, clip) else {
+            return;
+        };
 
         if let Some(buffer) = element.get_buffer() {
             let opacity = 1.0;
@@ -360,13 +337,6 @@ impl Compositor {
             x: origin.x + position.x,
             y: origin.y + position.y,
         };
-        let bounds = element.bounds();
-        let absolute_bounds = Rect::from_xywh(
-            absolute_origin.x,
-            absolute_origin.y,
-            bounds.size.width,
-            bounds.size.height,
-        );
         let paint_bounds = self.element_paint_bounds(element, absolute_origin);
         self.last_bounds.insert(element.id(), paint_bounds);
 
@@ -374,25 +344,9 @@ impl Compositor {
             return;
         }
 
-        let mut next_clip = clip;
-        if let Some(render_object) = element.render_object() {
-            if let Some(clip_render) = render_object
-                .as_any()
-                .downcast_ref::<crate::views::modifiers::ClipRenderObject>()
-            {
-                let current = ClipRegion {
-                    rect: absolute_bounds,
-                    radius: clip_render.radius(),
-                };
-                next_clip = match next_clip {
-                    Some(existing) => self.intersect_clip(existing, current),
-                    None => Some(current),
-                };
-                if next_clip.is_none() {
-                    return;
-                }
-            }
-        }
+        let Some(next_clip) = self.next_clip_for_element(element, absolute_origin, clip) else {
+            return;
+        };
 
         if let Some(buffer) = element.get_buffer() {
             let opacity = 1.0;
@@ -459,33 +413,10 @@ impl Compositor {
             x: origin.x + position.x,
             y: origin.y + position.y,
         };
-        let bounds = element.bounds();
-        let absolute_bounds = Rect::from_xywh(
-            absolute_origin.x,
-            absolute_origin.y,
-            bounds.size.width,
-            bounds.size.height,
-        );
 
-        let mut next_clip = clip;
-        if let Some(render_object) = element.render_object() {
-            if let Some(clip_render) = render_object
-                .as_any()
-                .downcast_ref::<crate::views::modifiers::ClipRenderObject>()
-            {
-                let current = ClipRegion {
-                    rect: absolute_bounds,
-                    radius: clip_render.radius(),
-                };
-                next_clip = match next_clip {
-                    Some(existing) => self.intersect_clip(existing, current),
-                    None => Some(current),
-                };
-                if next_clip.is_none() {
-                    return;
-                }
-            }
-        }
+        let Some(next_clip) = self.next_clip_for_element(element, absolute_origin, clip) else {
+            return;
+        };
 
         for child in element.children() {
             self.composite_select_overlays(child.as_ref(), absolute_origin, next_clip);
@@ -534,33 +465,10 @@ impl Compositor {
             x: origin.x + position.x,
             y: origin.y + position.y,
         };
-        let bounds = element.bounds();
-        let absolute_bounds = Rect::from_xywh(
-            absolute_origin.x,
-            absolute_origin.y,
-            bounds.size.width,
-            bounds.size.height,
-        );
 
-        let mut next_clip = clip;
-        if let Some(render_object) = element.render_object() {
-            if let Some(clip_render) = render_object
-                .as_any()
-                .downcast_ref::<crate::views::modifiers::ClipRenderObject>()
-            {
-                let current = ClipRegion {
-                    rect: absolute_bounds,
-                    radius: clip_render.radius(),
-                };
-                next_clip = match next_clip {
-                    Some(existing) => self.intersect_clip(existing, current),
-                    None => Some(current),
-                };
-                if next_clip.is_none() {
-                    return;
-                }
-            }
-        }
+        let Some(next_clip) = self.next_clip_for_element(element, absolute_origin, clip) else {
+            return;
+        };
 
         for child in element.children() {
             self.composite_select_overlays_clipped(
@@ -669,6 +577,25 @@ impl Compositor {
 
         for child in node.children() {
             self.composite_node_clipped(child, absolute_origin, dirty_rects);
+        }
+    }
+
+    fn next_clip_for_element(
+        &self,
+        element: &dyn Element,
+        absolute_origin: Point,
+        clip: Option<ClipRegion>,
+    ) -> Option<Option<ClipRegion>> {
+        let Some(render_object) = element.render_object() else {
+            return Some(clip);
+        };
+        let Some((rect, radius)) = render_object.clip_bounds(absolute_origin) else {
+            return Some(clip);
+        };
+        let current = ClipRegion { rect, radius };
+        match clip {
+            Some(existing) => self.intersect_clip(existing, current).map(Some),
+            None => Some(Some(current)),
         }
     }
 
