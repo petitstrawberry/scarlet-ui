@@ -365,6 +365,10 @@ impl ElementRenderObject for ImageRenderObject {
         }
         true
     }
+
+    fn requires_buffer_render_for_paint(&self) -> bool {
+        matches!(&self.source, ImageSource::Bitmap(_)) && self.buffer.is_some()
+    }
 }
 
 fn render_raw_image(

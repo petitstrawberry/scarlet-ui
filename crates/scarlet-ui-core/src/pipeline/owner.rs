@@ -234,6 +234,16 @@ impl PipelineOwner {
     ///
     /// This processes build, layout, and paint in order.
     pub fn flush(&mut self, element_tree: &mut ElementTree, window_size: Size) {
+        self.flush_with_legacy_paint(element_tree, window_size, true);
+    }
+
+    /// Flush all dirty phases, optionally rendering legacy element buffers.
+    pub fn flush_with_legacy_paint(
+        &mut self,
+        element_tree: &mut ElementTree,
+        window_size: Size,
+        render_legacy_paint: bool,
+    ) {
         self.collect_global_dirty();
 
         // 1. Build Phase: Rebuild Elements whose State changed
@@ -244,7 +254,7 @@ impl PipelineOwner {
         self.flush_layout(element_tree, window_size);
 
         // 3. Paint Phase: Repaint dirty elements
-        self.flush_paint(element_tree);
+        self.flush_paint(element_tree, render_legacy_paint);
     }
 
     fn collect_global_dirty(&mut self) {
@@ -378,12 +388,26 @@ impl PipelineOwner {
     }
 
     /// Flush the paint phase
-    fn flush_paint(&mut self, element_tree: &mut ElementTree) {
+    fn flush_paint(&mut self, element_tree: &mut ElementTree, render_legacy_paint: bool) {
         let dirty_paint = core::mem::take(&mut self.dirty_paint);
         let dirty_self_paint = core::mem::take(&mut self.dirty_self_paint);
         self.last_paint_ids.clear();
         self.last_paint_ids.extend(dirty_paint.iter().copied());
         self.last_paint_ids.extend(dirty_self_paint.iter().copied());
+
+        if !render_legacy_paint {
+            for id in dirty_paint.iter().copied() {
+                if let Some(element) = element_tree.find_element_mut(id) {
+                    Self::render_paint_buffers_recursive(element);
+                }
+            }
+            for id in dirty_self_paint.iter().copied() {
+                if let Some(element) = element_tree.find_element_mut(id) {
+                    Self::render_paint_buffers_recursive(element);
+                }
+            }
+            return;
+        }
 
         if crate::debug::is_enabled() {
             crate::logln!(
@@ -456,6 +480,22 @@ impl PipelineOwner {
 
         // Render this element
         element.render();
+    }
+
+    /// Render only legacy buffers that are still referenced by PaintCommand output.
+    fn render_paint_buffers_recursive(element: &mut Box<dyn crate::element::Element>) {
+        for child in element.children_mut().iter_mut() {
+            Self::render_paint_buffers_recursive(child);
+        }
+
+        let requires_buffer = element
+            .render_object()
+            .is_some_and(|render_object| render_object.requires_buffer_render_for_paint());
+        if requires_buffer {
+            if let Some(render_object) = element.render_object_mut() {
+                render_object.render();
+            }
+        }
     }
 
     /// Get the StateRegistry

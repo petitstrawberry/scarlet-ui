@@ -7,14 +7,19 @@
 
 use crate::buffer::Buffer;
 use crate::compositor::DamageRect;
-use crate::element::{Element, ElementTree, LayoutConstraints};
+use crate::element::{Element, ElementId, ElementTree, LayoutConstraints};
 use crate::event::EventDispatcher;
 use crate::geometry::{Point, Rect, Size};
 use crate::pipeline::{PipelineId, PipelineOwner};
 use crate::renderer::{CpuPaintRenderer, CpuRenderer, FrameSize, PaintContext};
 use crate::views::WindowInfo;
 use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
+
+const MAX_PRESENT_DAMAGE_RECTS: usize = 4;
+const PRESENT_DAMAGE_FULL_AREA_NUMERATOR: u64 = 3;
+const PRESENT_DAMAGE_FULL_AREA_DENOMINATOR: u64 = 5;
 
 /// RenderingPipeline integrates all components of the rendering system
 pub struct RenderingPipeline {
@@ -25,6 +30,10 @@ pub struct RenderingPipeline {
     scale_milli: u32,
     event_dispatcher: EventDispatcher,
     paint_renderer: Option<CpuPaintRenderer>,
+    last_paint_bounds: BTreeMap<ElementId, Rect>,
+    paint_damage: Option<Vec<DamageRect>>,
+    paint_needs_full: bool,
+    paint_background_color: Option<crate::color::Color>,
     paint_enabled: bool,
 }
 
@@ -44,6 +53,10 @@ impl RenderingPipeline {
             scale_milli: 1000,
             event_dispatcher: EventDispatcher::new(),
             paint_renderer: None,
+            last_paint_bounds: BTreeMap::new(),
+            paint_damage: None,
+            paint_needs_full: true,
+            paint_background_color: None,
             paint_enabled: true,
         }
     }
@@ -63,6 +76,10 @@ impl RenderingPipeline {
         crate::pipeline::clear_global_dirty(self.pipeline_id());
         self.renderer = None;
         self.paint_renderer = None;
+        self.last_paint_bounds.clear();
+        self.paint_damage = None;
+        self.paint_needs_full = true;
+        self.paint_background_color = None;
     }
 
     /// Set the output scale in milli-units.
@@ -79,6 +96,9 @@ impl RenderingPipeline {
         if let Some(ref mut paint_renderer) = self.paint_renderer {
             paint_renderer.resize(self.window_size, self.scale_milli);
         }
+        self.last_paint_bounds.clear();
+        self.paint_damage = None;
+        self.paint_needs_full = true;
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
         }
@@ -207,6 +227,7 @@ impl RenderingPipeline {
             window_info.background_color,
         )));
         self.window_size = window_size;
+        self.paint_needs_full = true;
 
         // Mark root as dirty for initial paint
         if let Some(root) = self.element_tree.root() {
@@ -230,6 +251,9 @@ impl RenderingPipeline {
         if let Some(ref mut paint_renderer) = self.paint_renderer {
             paint_renderer.resize(new_size, self.scale_milli);
         }
+        self.last_paint_bounds.clear();
+        self.paint_damage = None;
+        self.paint_needs_full = true;
 
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
@@ -251,8 +275,11 @@ impl RenderingPipeline {
         }
         // Flush all dirty phases (build, layout, paint)
         crate::graphics::set_current_scale_milli(self.scale_milli);
-        self.pipeline_owner
-            .flush(&mut self.element_tree, self.window_size);
+        self.pipeline_owner.flush_with_legacy_paint(
+            &mut self.element_tree,
+            self.window_size,
+            !self.paint_enabled,
+        );
         if crate::debug::is_enabled() {
             crate::logln!("[RenderingPipeline] flush() completed");
         }
@@ -279,27 +306,63 @@ impl RenderingPipeline {
     fn render_paint_path(&mut self, background_color: crate::color::Color) -> Option<&Buffer> {
         let size = self.window_size;
         let scale = self.scale_milli;
+        let creating_renderer = self.paint_renderer.is_none();
 
         if self.paint_renderer.is_none() {
             self.paint_renderer = Some(CpuPaintRenderer::new(size, scale, background_color));
         }
 
-        let pr = self.paint_renderer.as_mut().unwrap();
-        pr.set_background_color(background_color);
+        let force_full = self.paint_needs_full
+            || creating_renderer
+            || self.paint_background_color != Some(background_color);
+
+        let dirty_ids = self.pipeline_owner.last_paint_ids();
+        let mut dirty_rects = if force_full {
+            None
+        } else {
+            Some(self.paint_dirty_rects(dirty_ids))
+        };
+
+        let present_damage = match dirty_rects.as_mut() {
+            Some(rects) if rects.is_empty() => Some(Vec::new()),
+            Some(rects) => {
+                Self::merge_overlapping_rects(rects);
+                let damage = Self::present_damage_rects(rects, size, scale);
+                if damage.is_none() {
+                    dirty_rects = None;
+                }
+                damage
+            }
+            None => None,
+        };
+
+        self.paint_damage = present_damage;
 
         let mut ctx = PaintContext::new();
+        let damage_clip = dirty_rects.as_deref();
         let any_painted = if let Some(root) = self.element_tree.root() {
-            let base_painted = Self::walk_and_paint(&mut ctx, root, Point::ZERO);
-            let overlay_painted = Self::paint_select_overlays(&mut ctx, root, Point::ZERO);
+            let base_painted = Self::walk_and_paint(&mut ctx, root, Point::ZERO, damage_clip);
+            let overlay_painted =
+                Self::paint_select_overlays(&mut ctx, root, Point::ZERO, damage_clip);
             base_painted || overlay_painted
         } else {
             false
         };
 
-        if any_painted {
-            pr.execute(&ctx);
+        if force_full || any_painted {
+            let pr = self.paint_renderer.as_mut().unwrap();
+            pr.set_background_color(background_color);
+            pr.execute_with_damage(&ctx, damage_clip);
         }
 
+        self.paint_needs_full = false;
+        self.paint_background_color = Some(background_color);
+        self.last_paint_bounds.clear();
+        if let Some(root) = self.element_tree.root() {
+            Self::collect_paint_bounds(root, Point::ZERO, &mut self.last_paint_bounds);
+        }
+
+        let pr = self.paint_renderer.as_ref().unwrap();
         Some(pr.buffer())
     }
 
@@ -307,12 +370,17 @@ impl RenderingPipeline {
         ctx: &mut PaintContext<'a>,
         element: &'a dyn Element,
         origin: Point,
+        damage_rects: Option<&[Rect]>,
     ) -> bool {
         let abs = Point::new(
             origin.x + element.position().x,
             origin.y + element.position().y,
         );
-        let mut painted = Self::paint_element_self(ctx, element, abs);
+        let paint_bounds = Self::element_paint_bounds(element, abs);
+        let should_paint_self = damage_rects
+            .map(|rects| Self::overlaps_any(paint_bounds, rects))
+            .unwrap_or(true);
+        let mut painted = should_paint_self && Self::paint_element_self(ctx, element, abs);
         let clip = Self::clip_for_element(element, abs);
 
         if let Some((rect, radius)) = clip {
@@ -320,7 +388,7 @@ impl RenderingPipeline {
         }
 
         for child in element.children() {
-            if Self::walk_and_paint(ctx, child.as_ref(), abs) {
+            if Self::walk_and_paint(ctx, child.as_ref(), abs, damage_rects) {
                 painted = true;
             }
         }
@@ -340,6 +408,7 @@ impl RenderingPipeline {
         ctx: &mut PaintContext<'a>,
         element: &'a dyn Element,
         origin: Point,
+        damage_rects: Option<&[Rect]>,
     ) -> bool {
         let abs = Point::new(
             origin.x + element.position().x,
@@ -353,12 +422,19 @@ impl RenderingPipeline {
         }
 
         for child in element.children() {
-            if Self::paint_select_overlays(ctx, child.as_ref(), abs) {
+            if Self::paint_select_overlays(ctx, child.as_ref(), abs, damage_rects) {
                 painted = true;
             }
         }
 
-        if Self::is_expanded_select(element) && Self::paint_element_self(ctx, element, abs) {
+        let paint_bounds = Self::element_paint_bounds(element, abs);
+        let should_paint_self = damage_rects
+            .map(|rects| Self::overlaps_any(paint_bounds, rects))
+            .unwrap_or(true);
+        if should_paint_self
+            && Self::is_expanded_select(element)
+            && Self::paint_element_self(ctx, element, abs)
+        {
             painted = true;
         }
 
@@ -425,17 +501,244 @@ impl RenderingPipeline {
         ro.paint_overlay(ctx, abs) || ctx.commands().len() > before
     }
 
+    fn element_paint_bounds(element: &dyn Element, absolute_origin: Point) -> Rect {
+        let bounds = element.bounds();
+        let mut width = bounds.size.width;
+        let mut height = bounds.size.height;
+        if let Some(select) = element.render_object().and_then(|render_object| {
+            render_object
+                .as_any()
+                .downcast_ref::<crate::views::SelectRenderObject>()
+        }) {
+            height = height.max(select.paint_height());
+        }
+        if let Some(buffer) = element.get_buffer() {
+            width = width.max(buffer.logical_width() as f32);
+            height = height.max(buffer.logical_height() as f32);
+        }
+        Rect::from_xywh(absolute_origin.x, absolute_origin.y, width, height)
+    }
+
+    fn paint_dirty_rects(&self, dirty_ids: &[ElementId]) -> Vec<Rect> {
+        if dirty_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let Some(root) = self.element_tree.root() else {
+            return Vec::new();
+        };
+
+        let dirty_set: BTreeSet<ElementId> = dirty_ids.iter().copied().collect();
+        let mut rects = Vec::new();
+        self.collect_dirty_rects(root, Point::ZERO, &dirty_set, &mut rects);
+        rects
+    }
+
+    fn collect_dirty_rects(
+        &self,
+        element: &dyn Element,
+        origin: Point,
+        dirty_ids: &BTreeSet<ElementId>,
+        rects: &mut Vec<Rect>,
+    ) {
+        let abs = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+
+        if dirty_ids.contains(&element.id()) {
+            rects.push(Self::element_paint_bounds(element, abs));
+            if let Some(old_bounds) = self.last_paint_bounds.get(&element.id()) {
+                rects.push(*old_bounds);
+            }
+        }
+
+        for child in element.children() {
+            self.collect_dirty_rects(child.as_ref(), abs, dirty_ids, rects);
+        }
+    }
+
+    fn collect_paint_bounds(
+        element: &dyn Element,
+        origin: Point,
+        bounds: &mut BTreeMap<ElementId, Rect>,
+    ) {
+        let abs = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+        bounds.insert(element.id(), Self::element_paint_bounds(element, abs));
+
+        for child in element.children() {
+            Self::collect_paint_bounds(child.as_ref(), abs, bounds);
+        }
+    }
+
+    fn overlaps_any(rect: Rect, rects: &[Rect]) -> bool {
+        rects.iter().any(|r| rect.overlaps(r))
+    }
+
+    fn merge_overlapping_rects(rects: &mut Vec<Rect>) {
+        let mut merged: Vec<Rect> = Vec::new();
+        'outer: for rect in rects.drain(..) {
+            for existing in merged.iter_mut() {
+                if existing.overlaps(&rect) {
+                    let left = existing.left().min(rect.left());
+                    let top = existing.top().min(rect.top());
+                    let right = existing.right().max(rect.right());
+                    let bottom = existing.bottom().max(rect.bottom());
+                    *existing = Rect::from_xywh(left, top, right - left, bottom - top);
+                    continue 'outer;
+                }
+            }
+            merged.push(rect);
+        }
+        *rects = merged;
+    }
+
+    fn present_damage_rects(
+        rects: &[Rect],
+        window_size: Size,
+        scale_milli: u32,
+    ) -> Option<Vec<DamageRect>> {
+        let physical_width = Self::scale_len(window_size.width as u32, scale_milli);
+        let physical_height = Self::scale_len(window_size.height as u32, scale_milli);
+        let mut damage: Vec<DamageRect> = rects
+            .iter()
+            .map(|rect| Self::rect_to_damage(*rect, scale_milli, physical_width, physical_height))
+            .filter(|(_, _, width, height)| *width > 0 && *height > 0)
+            .collect();
+
+        Self::coalesce_damage_rects(&mut damage);
+
+        let damage_area = Self::damage_rects_area(&damage);
+        let window_area = (physical_width as u64).saturating_mul(physical_height as u64);
+        if damage_area.saturating_mul(PRESENT_DAMAGE_FULL_AREA_DENOMINATOR)
+            >= window_area.saturating_mul(PRESENT_DAMAGE_FULL_AREA_NUMERATOR)
+        {
+            return None;
+        }
+
+        Some(damage)
+    }
+
+    fn scale_len(value: u32, scale_milli: u32) -> u32 {
+        ((value as u64)
+            .saturating_mul(scale_milli.max(1) as u64)
+            .saturating_add(999)
+            / 1000)
+            .max(1) as u32
+    }
+
+    fn rect_to_damage(
+        rect: Rect,
+        scale_milli: u32,
+        physical_width: u32,
+        physical_height: u32,
+    ) -> DamageRect {
+        let scale = scale_milli.max(1) as f32 / 1000.0;
+        let x0 = libm::floorf(rect.origin.x * scale).max(0.0);
+        let y0 = libm::floorf(rect.origin.y * scale).max(0.0);
+        let x1 = libm::ceilf((rect.origin.x + rect.size.width) * scale).min(physical_width as f32);
+        let y1 =
+            libm::ceilf((rect.origin.y + rect.size.height) * scale).min(physical_height as f32);
+        (
+            x0 as u32,
+            y0 as u32,
+            (x1 - x0).max(0.0) as u32,
+            (y1 - y0).max(0.0) as u32,
+        )
+    }
+
+    fn coalesce_damage_rects(rects: &mut Vec<DamageRect>) {
+        rects.retain(|(_, _, width, height)| *width > 0 && *height > 0);
+
+        let mut index = 0usize;
+        while index < rects.len() {
+            let mut merged = false;
+            let mut other = index + 1;
+            while other < rects.len() {
+                if Self::damage_rects_touch_or_overlap(rects[index], rects[other]) {
+                    rects[index] = Self::union_damage_rect(rects[index], rects[other]);
+                    rects.remove(other);
+                    merged = true;
+                } else {
+                    other += 1;
+                }
+            }
+            if !merged {
+                index += 1;
+            }
+        }
+
+        while rects.len() > MAX_PRESENT_DAMAGE_RECTS {
+            let mut best_pair = (0usize, 1usize);
+            let mut best_extra = u64::MAX;
+
+            for i in 0..rects.len() {
+                for j in (i + 1)..rects.len() {
+                    let union = Self::union_damage_rect(rects[i], rects[j]);
+                    let extra = Self::damage_rect_area(union)
+                        .saturating_sub(Self::damage_rect_area(rects[i]))
+                        .saturating_sub(Self::damage_rect_area(rects[j]));
+                    if extra < best_extra {
+                        best_extra = extra;
+                        best_pair = (i, j);
+                    }
+                }
+            }
+
+            let (i, j) = best_pair;
+            rects[i] = Self::union_damage_rect(rects[i], rects[j]);
+            rects.remove(j);
+        }
+    }
+
+    fn damage_rect_area(rect: DamageRect) -> u64 {
+        u64::from(rect.2).saturating_mul(u64::from(rect.3))
+    }
+
+    fn damage_rects_area(rects: &[DamageRect]) -> u64 {
+        rects.iter().fold(0u64, |area, rect| {
+            area.saturating_add(Self::damage_rect_area(*rect))
+        })
+    }
+
+    fn union_damage_rect(a: DamageRect, b: DamageRect) -> DamageRect {
+        let left = a.0.min(b.0);
+        let top = a.1.min(b.1);
+        let right = a.0.saturating_add(a.2).max(b.0.saturating_add(b.2));
+        let bottom = a.1.saturating_add(a.3).max(b.1.saturating_add(b.3));
+        (
+            left,
+            top,
+            right.saturating_sub(left),
+            bottom.saturating_sub(top),
+        )
+    }
+
+    fn damage_rects_touch_or_overlap(a: DamageRect, b: DamageRect) -> bool {
+        let a_right = a.0.saturating_add(a.2);
+        let a_bottom = a.1.saturating_add(a.3);
+        let b_right = b.0.saturating_add(b.2);
+        let b_bottom = b.1.saturating_add(b.3);
+        a.0 <= b_right && a_right >= b.0 && a.1 <= b_bottom && a_bottom >= b.1
+    }
+
     /// Handle a render frame and return the buffer with physical damage rectangles.
     ///
     /// The damage is `None` when the whole window should be presented.
     pub fn render_with_damage(&mut self) -> Option<(&Buffer, Option<&[DamageRect]>)> {
         if self.paint_enabled {
             crate::graphics::set_current_scale_milli(self.scale_milli);
-            self.pipeline_owner
-                .flush(&mut self.element_tree, self.window_size);
+            self.pipeline_owner.flush_with_legacy_paint(
+                &mut self.element_tree,
+                self.window_size,
+                false,
+            );
             self.render_paint_path(self.extract_window_info().background_color)?;
             let pr = self.paint_renderer.as_ref().unwrap();
-            return Some((pr.buffer(), None));
+            return Some((pr.buffer(), self.paint_damage.as_deref()));
         }
         self.render()?;
         let renderer = self.renderer.as_ref()?;

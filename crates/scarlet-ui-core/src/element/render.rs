@@ -51,6 +51,12 @@ pub trait RenderObject: Any {
         false
     }
 
+    /// Return true when this render object must refresh its legacy buffer
+    /// before its PaintCommand implementation can draw correctly.
+    fn requires_buffer_render_for_paint(&self) -> bool {
+        false
+    }
+
     /// Emit overlay paint commands after this render object's children.
     ///
     /// Container render objects use this for chrome that must appear above

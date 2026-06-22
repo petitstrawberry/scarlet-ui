@@ -261,6 +261,10 @@ impl SelectRenderObject {
         self.expanded
     }
 
+    pub fn paint_height(&self) -> f32 {
+        self.popup_height()
+    }
+
     pub fn hovered_index(&self) -> Option<usize> {
         self.hovered_index
     }

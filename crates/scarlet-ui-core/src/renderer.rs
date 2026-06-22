@@ -529,7 +529,20 @@ impl CpuPaintRenderer {
     }
 
     pub fn execute(&mut self, ctx: &PaintContext<'_>) {
-        self.buffer.clear(self.background_color);
+        self.execute_with_damage(ctx, None);
+    }
+
+    pub fn execute_with_damage(&mut self, ctx: &PaintContext<'_>, damage_rects: Option<&[Rect]>) {
+        match damage_rects {
+            Some(rects) => {
+                for rect in rects {
+                    let (x, y, width, height) = self.rect_to_u32(*rect);
+                    self.buffer
+                        .clear_rect(x, y, width, height, self.background_color);
+                }
+            }
+            None => self.buffer.clear(self.background_color),
+        }
         self.layer_stack.clear();
 
         for cmd in ctx.commands() {
@@ -537,7 +550,17 @@ impl CpuPaintRenderer {
                 PaintCommand::FillPath { path, color } => {
                     let scaled: Vec<Point> =
                         path.iter().copied().map(|p| self.scale_point(p)).collect();
-                    fill_polygon(self.current_buffer_mut(), &scaled, *color, None);
+                    if let Some(rects) = damage_rects {
+                        for rect in rects {
+                            let clip = ClipRegion {
+                                rect: self.scale_rect(*rect),
+                                corner_radius: 0.0,
+                            };
+                            fill_polygon(self.current_buffer_mut(), &scaled, *color, Some(clip));
+                        }
+                    } else {
+                        fill_polygon(self.current_buffer_mut(), &scaled, *color, None);
+                    }
                 }
                 PaintCommand::StrokeRect {
                     rect,
@@ -546,14 +569,31 @@ impl CpuPaintRenderer {
                 } => {
                     let rect = self.scale_rect(*rect);
                     let stroke_width = self.scale_f32(stroke_width.max(1.0));
-                    stroke_rounded_rect(
-                        self.current_buffer_mut(),
-                        rect,
-                        0.0,
-                        stroke_width,
-                        *color,
-                        None,
-                    );
+                    if let Some(rects) = damage_rects {
+                        for damage_rect in rects {
+                            let clip = ClipRegion {
+                                rect: self.scale_rect(*damage_rect),
+                                corner_radius: 0.0,
+                            };
+                            stroke_rounded_rect(
+                                self.current_buffer_mut(),
+                                rect,
+                                0.0,
+                                stroke_width,
+                                *color,
+                                Some(clip),
+                            );
+                        }
+                    } else {
+                        stroke_rounded_rect(
+                            self.current_buffer_mut(),
+                            rect,
+                            0.0,
+                            stroke_width,
+                            *color,
+                            None,
+                        );
+                    }
                 }
                 PaintCommand::StrokeRoundedRect {
                     rect,
@@ -564,14 +604,31 @@ impl CpuPaintRenderer {
                     let rect = self.scale_rect(*rect);
                     let radius = self.scale_f32(*corner_radius);
                     let stroke_width = self.scale_f32(stroke_width.max(1.0));
-                    stroke_rounded_rect(
-                        self.current_buffer_mut(),
-                        rect,
-                        radius,
-                        stroke_width,
-                        *color,
-                        None,
-                    );
+                    if let Some(rects) = damage_rects {
+                        for damage_rect in rects {
+                            let clip = ClipRegion {
+                                rect: self.scale_rect(*damage_rect),
+                                corner_radius: 0.0,
+                            };
+                            stroke_rounded_rect(
+                                self.current_buffer_mut(),
+                                rect,
+                                radius,
+                                stroke_width,
+                                *color,
+                                Some(clip),
+                            );
+                        }
+                    } else {
+                        stroke_rounded_rect(
+                            self.current_buffer_mut(),
+                            rect,
+                            radius,
+                            stroke_width,
+                            *color,
+                            None,
+                        );
+                    }
                 }
                 PaintCommand::StrokePath {
                     path,
@@ -609,20 +666,50 @@ impl CpuPaintRenderer {
                     font_size_px,
                 } => {
                     let mut canvas = crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
-                    canvas.draw_text_sized(
-                        position.x as i32,
-                        position.y as i32,
-                        text,
-                        *color,
-                        *font_size_px,
-                    );
+                    if let Some(rects) = damage_rects {
+                        for rect in rects {
+                            canvas.draw_text_sized_clipped(
+                                position.x as i32,
+                                position.y as i32,
+                                text,
+                                *color,
+                                *font_size_px,
+                                *rect,
+                                0.0,
+                            );
+                        }
+                    } else {
+                        canvas.draw_text_sized(
+                            position.x as i32,
+                            position.y as i32,
+                            text,
+                            *color,
+                            *font_size_px,
+                        );
+                    }
                 }
                 PaintCommand::DrawBuffer { dst, buffer_idx } => {
                     if let Some(src) = ctx.buffer(BufferHandle(*buffer_idx)) {
                         let dst = self.scale_rect(*dst);
                         let dst_x = dst.origin.x as i32;
                         let dst_y = dst.origin.y as i32;
-                        self.current_buffer_mut().composite(src, dst_x, dst_y, 1.0);
+                        if let Some(rects) = damage_rects {
+                            for rect in rects {
+                                let clip = self.scale_rect(*rect);
+                                self.current_buffer_mut().composite_clipped(
+                                    src,
+                                    dst_x,
+                                    dst_y,
+                                    1.0,
+                                    clip.origin.x as i32,
+                                    clip.origin.y as i32,
+                                    clip.size.width as i32,
+                                    clip.size.height as i32,
+                                );
+                            }
+                        } else {
+                            self.current_buffer_mut().composite(src, dst_x, dst_y, 1.0);
+                        }
                     }
                 }
                 PaintCommand::DrawBufferRect {
@@ -640,9 +727,29 @@ impl CpuPaintRenderer {
                         let src_y = src.origin.y as i32;
                         let src_w = src.size.width as i32;
                         let src_h = src.size.height as i32;
-                        self.current_buffer_mut().composite_rect(
-                            buf, src_x, src_y, src_w, src_h, dst_x, dst_y, *opacity,
-                        );
+                        if let Some(rects) = damage_rects {
+                            for rect in rects {
+                                let clip = self.scale_rect(*rect);
+                                self.current_buffer_mut().composite_rect_clipped(
+                                    buf,
+                                    src_x,
+                                    src_y,
+                                    src_w,
+                                    src_h,
+                                    dst_x,
+                                    dst_y,
+                                    *opacity,
+                                    clip.origin.x as i32,
+                                    clip.origin.y as i32,
+                                    clip.size.width as i32,
+                                    clip.size.height as i32,
+                                );
+                            }
+                        } else {
+                            self.current_buffer_mut().composite_rect(
+                                buf, src_x, src_y, src_w, src_h, dst_x, dst_y, *opacity,
+                            );
+                        }
                     }
                 }
                 PaintCommand::PushClip {
@@ -664,6 +771,18 @@ impl CpuPaintRenderer {
         while !self.layer_stack.is_empty() {
             self.pop_clip_layer();
         }
+    }
+
+    fn rect_to_u32(&self, rect: Rect) -> (u32, u32, u32, u32) {
+        let x0 = libm::floorf(rect.origin.x * self.scale_milli as f32 / 1000.0).max(0.0);
+        let y0 = libm::floorf(rect.origin.y * self.scale_milli as f32 / 1000.0).max(0.0);
+        let x1 = libm::ceilf((rect.origin.x + rect.size.width) * self.scale_milli as f32 / 1000.0)
+            .min(self.buffer.width() as f32);
+        let y1 = libm::ceilf((rect.origin.y + rect.size.height) * self.scale_milli as f32 / 1000.0)
+            .min(self.buffer.height() as f32);
+        let w = (x1 - x0).max(0.0);
+        let h = (y1 - y0).max(0.0);
+        (x0 as u32, y0 as u32, w as u32, h as u32)
     }
 
     pub fn buffer(&self) -> &Buffer {
