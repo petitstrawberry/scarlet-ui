@@ -150,52 +150,6 @@ impl Buffer {
         }
     }
 
-    /// Shift pixels inside a physical rectangle by a physical pixel delta.
-    ///
-    /// Pixels exposed by the shift are left unchanged; callers should clear or
-    /// repaint those strips explicitly.
-    pub fn shift_rect(&mut self, x: u32, y: u32, width: u32, height: u32, dx: i32, dy: i32) {
-        if width == 0 || height == 0 || (dx == 0 && dy == 0) {
-            return;
-        }
-
-        let left = x.min(self.width) as i32;
-        let top = y.min(self.height) as i32;
-        let right = x.saturating_add(width).min(self.width) as i32;
-        let bottom = y.saturating_add(height).min(self.height) as i32;
-        if right <= left || bottom <= top {
-            return;
-        }
-
-        let dst_left = left.max(left.saturating_add(dx));
-        let dst_top = top.max(top.saturating_add(dy));
-        let dst_right = right.min(right.saturating_add(dx));
-        let dst_bottom = bottom.min(bottom.saturating_add(dy));
-        if dst_right <= dst_left || dst_bottom <= dst_top {
-            return;
-        }
-
-        let copy_width = (dst_right - dst_left) as usize;
-        let copy_height = (dst_bottom - dst_top) as usize;
-        let mut scratch = Vec::with_capacity(copy_width.saturating_mul(copy_height));
-
-        for row in 0..copy_height {
-            let dst_y = dst_top + row as i32;
-            let src_y = dst_y - dy;
-            let src_x = dst_left - dx;
-            let start = (src_y as u32 * self.width + src_x as u32) as usize;
-            scratch.extend_from_slice(&self.data[start..start + copy_width]);
-        }
-
-        for row in 0..copy_height {
-            let dst_y = dst_top + row as i32;
-            let start = (dst_y as u32 * self.width + dst_left as u32) as usize;
-            let scratch_start = row * copy_width;
-            self.data[start..start + copy_width]
-                .copy_from_slice(&scratch[scratch_start..scratch_start + copy_width]);
-        }
-    }
-
     /// Composite another buffer into this buffer
     ///
     /// # Arguments
@@ -648,45 +602,5 @@ impl Buffer {
         unsafe {
             core::slice::from_raw_parts_mut(self.data.as_mut_ptr() as *mut u8, self.data.len() * 4)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shift_rect_moves_pixels_within_region() {
-        let mut buffer = Buffer::from_dimensions(4, 3);
-        for y in 0..3 {
-            for x in 0..4 {
-                buffer.set_pixel(x, y, y * 10 + x);
-            }
-        }
-
-        buffer.shift_rect(0, 0, 4, 3, -1, 0);
-
-        assert_eq!(buffer.get_pixel(0, 0), Some(1));
-        assert_eq!(buffer.get_pixel(1, 0), Some(2));
-        assert_eq!(buffer.get_pixel(2, 0), Some(3));
-        assert_eq!(buffer.get_pixel(0, 1), Some(11));
-        assert_eq!(buffer.get_pixel(2, 2), Some(23));
-    }
-
-    #[test]
-    fn shift_rect_keeps_pixels_outside_region() {
-        let mut buffer = Buffer::from_dimensions(4, 4);
-        for y in 0..4 {
-            for x in 0..4 {
-                buffer.set_pixel(x, y, y * 10 + x);
-            }
-        }
-
-        buffer.shift_rect(1, 1, 2, 2, 0, 1);
-
-        assert_eq!(buffer.get_pixel(0, 0), Some(0));
-        assert_eq!(buffer.get_pixel(3, 3), Some(33));
-        assert_eq!(buffer.get_pixel(1, 2), Some(11));
-        assert_eq!(buffer.get_pixel(2, 2), Some(12));
     }
 }

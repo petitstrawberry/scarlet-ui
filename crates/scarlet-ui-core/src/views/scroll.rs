@@ -5,9 +5,7 @@
 //! elements, hit testing, and event behavior.
 
 use crate::color::{Color, ColorPalette};
-use crate::element::{
-    Element, ElementRenderObject, LayoutConstraints, RenderElement, ScrollPaintState,
-};
+use crate::element::{Element, ElementRenderObject, LayoutConstraints, RenderElement};
 use crate::event::{Event, MouseEvent, Phase, WheelPhase};
 use crate::geometry::{Point, Rect, Size};
 use crate::renderer::PaintContext;
@@ -922,30 +920,6 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
             child.set_position(Point::new(-self.offset_x, -self.offset_y));
         }
         true
-    }
-
-    fn scroll_paint_state(&self) -> Option<ScrollPaintState> {
-        let mut overlay_rects = Vec::new();
-        let horizontal_scrollable = self.axes.allows_x() && self.max_offset_x() > 0.0;
-        let vertical_scrollable = self.axes.allows_y() && self.max_offset_y() > 0.0;
-        let show_horizontal = self.should_show_scrollbar(horizontal_scrollable);
-        let show_vertical = self.should_show_scrollbar(vertical_scrollable);
-        if show_horizontal
-            && let Some(rect) = self.horizontal_scrollbar_rect(Point::ZERO, show_vertical)
-        {
-            overlay_rects.push(rect);
-        }
-        if show_vertical
-            && let Some(rect) = self.vertical_scrollbar_rect(Point::ZERO, show_horizontal)
-        {
-            overlay_rects.push(rect);
-        }
-
-        Some(ScrollPaintState {
-            viewport_size: self.viewport_size,
-            offset: Point::new(self.offset_x, self.offset_y),
-            overlay_rects,
-        })
     }
 
     fn as_any(&self) -> &dyn Any {
