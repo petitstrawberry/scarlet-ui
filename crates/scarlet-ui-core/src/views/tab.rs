@@ -261,6 +261,7 @@ pub struct TabViewRenderObject {
     labels: Vec<String>,
     selected_index: State<usize>,
     hovered_index: Option<usize>,
+    pressed_index: Option<usize>,
     tab_bar_height: f32,
     tab_padding: f32,
     font_size: f32,
@@ -293,6 +294,7 @@ impl TabViewRenderObject {
             labels,
             selected_index,
             hovered_index: None,
+            pressed_index: None,
             tab_bar_height,
             tab_padding,
             font_size,
@@ -313,6 +315,15 @@ impl TabViewRenderObject {
     /// Hovered index if the pointer is over a tab.
     pub fn hovered_index(&self) -> Option<usize> {
         self.hovered_index
+    }
+
+    /// Return the pressed tab index.
+    ///
+    /// # Returns
+    ///
+    /// Pressed index if a tab is currently held down.
+    pub fn pressed_index(&self) -> Option<usize> {
+        self.pressed_index
     }
 
     fn tab_width(&self, label: &str) -> f32 {
@@ -395,8 +406,20 @@ impl ElementRenderObject for TabViewRenderObject {
                 changed
             }
             MouseEvent::Exited { .. } => {
-                let changed = self.hovered_index.is_some();
+                let changed = self.hovered_index.is_some() || self.pressed_index.is_some();
                 self.hovered_index = None;
+                self.pressed_index = None;
+                changed
+            }
+            MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x,
+                y,
+                ..
+            } => {
+                let pressed = self.tab_index_at(Point::new(x as f32, y as f32));
+                let changed = pressed != self.pressed_index;
+                self.pressed_index = pressed;
                 changed
             }
             MouseEvent::ButtonReleased {
@@ -405,13 +428,14 @@ impl ElementRenderObject for TabViewRenderObject {
                 y,
                 ..
             } => {
+                let was_pressed = self.pressed_index.take();
                 if let Some(index) = self.tab_index_at(Point::new(x as f32, y as f32)) {
                     if self.selected_index.get() != index {
                         self.selected_index.set(index);
                     }
                     return true;
                 }
-                false
+                was_pressed.is_some()
             }
             _ => false,
         }
@@ -432,7 +456,9 @@ impl ElementRenderObject for TabViewRenderObject {
                 rect.size.width,
                 rect.size.height,
             );
-            if index == selected {
+            if self.pressed_index == Some(index) {
+                ctx.fill_rect(rect, self.hover_color);
+            } else if index == selected {
                 ctx.fill_rect(rect, self.selected_color);
             } else if self.hovered_index == Some(index) {
                 ctx.fill_rect(rect, self.hover_color);
@@ -524,5 +550,48 @@ mod tests {
             Phase::Target,
         ));
         assert_eq!(selected.get(), 1);
+    }
+
+    #[test]
+    fn pressing_selected_first_tab_sets_pressed_index() {
+        let selected = State::initial(crate::state::generate_state_id());
+        let mut render_object = TabViewRenderObject::new(
+            vec![String::from("Mixer"), String::from("Editor")],
+            selected.clone(),
+            30.0,
+            12.0,
+            13.0,
+            ColorPalette::default().background_secondary(),
+            ColorPalette::default().surface(),
+            ColorPalette::default().menu_hover(),
+            ColorPalette::default().border(),
+            ColorPalette::default().text_secondary(),
+            ColorPalette::default().text(),
+        );
+        render_object.layout(LayoutConstraints::tight(300.0, 180.0));
+
+        assert_eq!(selected.get(), 0);
+        assert!(render_object.handle_event(
+            &Event::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: 12,
+                y: 12,
+                click_count: 1,
+            }),
+            Phase::Target,
+        ));
+        assert_eq!(render_object.pressed_index(), Some(0));
+
+        assert!(render_object.handle_event(
+            &Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 12,
+                y: 12,
+                click_count: 1,
+            }),
+            Phase::Target,
+        ));
+        assert_eq!(render_object.pressed_index(), None);
+        assert_eq!(selected.get(), 0);
     }
 }
