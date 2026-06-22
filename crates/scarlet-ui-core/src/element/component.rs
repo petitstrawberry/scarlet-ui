@@ -263,10 +263,6 @@ impl<V: View + Clone> Element for ComponentElement<V> {
 
     fn set_position(&mut self, position: Point) {
         self.position = position;
-        // Update child position
-        if let Some(ref mut child) = self.child {
-            child.set_position(position);
-        }
     }
 
     fn bounds(&self) -> crate::geometry::Rect {
@@ -312,5 +308,23 @@ impl<V: View + Clone> Element for ComponentElement<V> {
             .as_ref()
             .map(|child| child.fill_height())
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::element::LayoutConstraints;
+    use crate::views::Text;
+
+    #[test]
+    fn component_position_does_not_propagate_to_child() {
+        let mut element = ComponentElement::new(Text::new("child"));
+
+        element.layout(LayoutConstraints::loose(200.0, 100.0));
+        element.set_position(Point::new(10.0, 32.0));
+
+        assert_eq!(element.position(), Point::new(10.0, 32.0));
+        assert_eq!(element.children()[0].position(), Point::ZERO);
     }
 }
