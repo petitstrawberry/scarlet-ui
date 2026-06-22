@@ -125,7 +125,7 @@ pub use scene::{Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowGroup,
 pub use state::{InvalidationKind, Listenable, State, StateId, SubscriptionId, generate_state_id};
 pub use view::{View, ViewExt};
 pub use views::modifiers::{
-    AlignmentFrame, Background, Clip, Focusable, Frame, OnKey, Padding, SetSize,
+    AlignmentFrame, Background, Border, Clip, Focusable, Frame, OnKey, Padding, SetSize,
 };
 pub use views::navigation::Icon;
 pub use views::{
@@ -171,7 +171,7 @@ pub mod prelude {
     };
     pub use crate::state::{InvalidationKind, Listenable, State, StateId, SubscriptionId};
     pub use crate::view::{View, ViewExt};
-    pub use crate::views::modifiers::{Background, Clip, Focusable, Frame, OnKey, Padding};
+    pub use crate::views::modifiers::{Background, Border, Clip, Focusable, Frame, OnKey, Padding};
     pub use crate::views::{
         BitmapImage, CanvasView, Divider, DividerOrientation, ProgressView, ScrollAxis, ScrollView,
         ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabItem, TabView, Toggle,

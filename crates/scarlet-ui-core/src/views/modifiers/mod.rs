@@ -4,6 +4,7 @@
 
 mod alignment;
 mod background;
+mod border;
 mod clip;
 mod events;
 mod frame;
@@ -12,6 +13,7 @@ mod size;
 
 pub use alignment::{AlignmentFrame, AlignmentRenderObject};
 pub use background::{Background, BackgroundRenderObject};
+pub use border::{Border, BorderRenderObject};
 pub use clip::{Clip, ClipRenderObject};
 pub use events::{
     Focusable, FocusableRenderObject, OnClick, OnClickRenderObject, OnExit, OnExitRenderObject,
