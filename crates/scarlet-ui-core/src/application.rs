@@ -22,6 +22,17 @@ use crate::scene::{
 use crate::state::{InvalidationKind, StateId, SubscriptionId};
 use crate::view::View;
 
+#[cfg(feature = "std")]
+fn wheel_log_env_enabled() -> bool {
+    std::env::var("SCARLET_UI_WHEEL_LOG")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+#[cfg(not(feature = "std"))]
+fn wheel_log_env_enabled() -> bool {
+    false
+}
+
 /// Application trait - main entry point for ScarletUI apps.
 ///
 /// Applications declare top-level windows via `scenes()`.
@@ -135,6 +146,7 @@ impl ApplicationRunner {
     /// `Ok(())` when the application exits normally.
     pub fn run<A: Application + View>(&mut self, app: &mut A) -> Result<()> {
         crate::debug::set_enabled(app.debug_logging());
+        crate::debug::set_wheel_log_enabled(wheel_log_env_enabled());
         app.init();
 
         let declarations = collect_scene_declarations(app)?;

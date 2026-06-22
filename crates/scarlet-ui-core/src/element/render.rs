@@ -109,6 +109,51 @@ pub trait RenderObject: Any {
         false
     }
 
+    /// Return an element-local clip region for this render object.
+    ///
+    /// # Arguments
+    ///
+    /// * `origin` - Absolute origin of this element.
+    ///
+    /// # Returns
+    ///
+    /// A clipping rectangle and corner radius when this render object clips its
+    /// children.
+    fn clip_bounds(&self, _origin: Point) -> Option<(Rect, f32)> {
+        None
+    }
+
+    /// Return whether this render object should capture a wheel gesture.
+    ///
+    /// Containers such as `ScrollView` use this to lock a wheel gesture to the
+    /// scrollable element selected at gesture start. The method is queried
+    /// before event dispatch and must not mutate render state.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - Wheel event localized to this element.
+    ///
+    /// # Returns
+    ///
+    /// `true` when this object should become the wheel gesture target.
+    fn captures_wheel_event(&self, _event: &crate::event::MouseEvent) -> bool {
+        false
+    }
+
+    /// Handle an input event dispatched to this render object.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - Event localized to this element.
+    /// * `phase` - Current event dispatch phase.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the event was handled.
+    fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
+        false
+    }
+
     /// Layout this RenderObject and its children
     ///
     /// Container render objects can override this to implement custom layout
@@ -831,6 +876,15 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     return true;
                 }
             }
+        }
+
+        if self.render_object.handle_event(_event, _phase) {
+            if self.render_object.update_needs_layout() {
+                crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
+            } else {
+                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+            }
+            return true;
         }
 
         if !is_target_phase {

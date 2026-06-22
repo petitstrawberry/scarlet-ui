@@ -106,8 +106,53 @@ pub enum MouseEvent {
         click_count: u8,
     },
 
-    /// Mouse wheel scrolled
-    Wheel { delta_x: i32, delta_y: i32 },
+    /// Mouse wheel scrolled.
+    ///
+    /// Positive deltas move the content offset right/down.
+    Wheel {
+        delta_x: i32,
+        delta_y: i32,
+        x: i32,
+        y: i32,
+        phase: WheelPhase,
+        source: ScrollSource,
+    },
+}
+
+/// Phase of a wheel or trackpad scroll gesture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WheelPhase {
+    /// A new scroll gesture started.
+    Started,
+    /// A scroll gesture moved.
+    Moved,
+    /// A scroll gesture ended normally.
+    Ended,
+    /// A scroll gesture was cancelled by the platform.
+    Cancelled,
+}
+
+/// Physical source of a scroll event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollSource {
+    /// A discrete mouse wheel or wheel-like device.
+    Wheel,
+    /// A high-resolution touchpad gesture.
+    Trackpad,
+    /// A platform source that could not be classified.
+    Unknown,
+}
+
+impl ScrollSource {
+    /// Returns whether this source should keep a single scroll transaction target.
+    ///
+    /// # Returns
+    ///
+    /// `true` when events from this source should remain captured by the
+    /// initially selected scroll view until the platform ends the gesture.
+    pub const fn uses_transaction_capture(self) -> bool {
+        matches!(self, Self::Trackpad)
+    }
 }
 
 /// Mouse button

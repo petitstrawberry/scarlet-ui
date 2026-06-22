@@ -4,7 +4,7 @@
 
 use crate::element::LayoutConstraints;
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::{Point, Size};
+use crate::geometry::{Point, Rect, Size};
 use crate::view::View;
 use alloc::boxed::Box;
 use alloc::vec;
@@ -118,6 +118,10 @@ impl ElementRenderObject for ClipRenderObject {
 
     fn hit_test(&self, point: Point) -> bool {
         self.point_in_rounded_rect(point)
+    }
+
+    fn clip_bounds(&self, origin: Point) -> Option<(Rect, f32)> {
+        Some((Rect::new(origin, self.size), self.radius))
     }
 
     fn as_any(&self) -> &dyn Any {

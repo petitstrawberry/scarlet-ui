@@ -366,12 +366,9 @@ impl RenderingPipeline {
     }
 
     fn clip_for_element(element: &dyn Element, abs: Point) -> Option<(Rect, f32)> {
-        element.render_object().and_then(|render_object| {
-            render_object
-                .as_any()
-                .downcast_ref::<crate::views::modifiers::ClipRenderObject>()
-                .map(|clip| (Rect::new(abs, render_object.size()), clip.radius()))
-        })
+        element
+            .render_object()
+            .and_then(|render_object| render_object.clip_bounds(abs))
     }
 
     fn is_expanded_select(element: &dyn Element) -> bool {

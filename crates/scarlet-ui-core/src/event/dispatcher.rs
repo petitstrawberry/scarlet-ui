@@ -68,6 +68,7 @@ pub struct EventDispatcher {
     captured_id: Option<ElementId>,
     captured_path: Vec<ElementId>,
     captured_point: Option<Point>,
+    wheel_captured_id: Option<ElementId>,
     left_button_down: bool,
     focused_id: Option<ElementId>,
     focused_path: Vec<ElementId>,
@@ -85,6 +86,7 @@ impl EventDispatcher {
             captured_id: None,
             captured_path: Vec::new(),
             captured_point: None,
+            wheel_captured_id: None,
             left_button_down: false,
             focused_id: None,
             focused_path: Vec::new(),
@@ -167,7 +169,90 @@ impl EventDispatcher {
     ) -> bool {
         // 1. Hit test to find target and path
         let point = self.extract_point_from_mouse(&event);
-        let mut path = if matches!(event, crate::event::MouseEvent::Moved { .. })
+        let is_wheel = matches!(event, crate::event::MouseEvent::Wheel { .. });
+        let uses_wheel_capture = Self::wheel_uses_transaction_capture(event);
+        let mut wheel_target_locked = false;
+        let mut wheel_consumed_without_path = false;
+        if crate::debug::wheel_log_enabled()
+            && let crate::event::MouseEvent::Wheel {
+                delta_x,
+                delta_y,
+                phase,
+                source,
+                ..
+            } = event
+        {
+            crate::logln!(
+                "[Wheel] dispatch source={:?} phase={:?} delta=({}, {}) point=({:.0}, {:.0}) captured={:?} tx={}",
+                source,
+                phase,
+                delta_x,
+                delta_y,
+                point.x,
+                point.y,
+                self.wheel_captured_id,
+                uses_wheel_capture
+            );
+        }
+
+        let mut path = if uses_wheel_capture {
+            if let Some(captured_id) = self.wheel_captured_id {
+                wheel_target_locked = true;
+                match element_tree.find_path_ids(captured_id) {
+                    Some(path) => {
+                        if crate::debug::wheel_log_enabled() {
+                            crate::logln!("[Wheel] reuse target={:?}", captured_id);
+                        }
+                        Some(path)
+                    }
+                    None => {
+                        if crate::debug::wheel_log_enabled() {
+                            crate::logln!("[Wheel] captured target vanished id={:?}", captured_id);
+                        }
+                        wheel_consumed_without_path = true;
+                        None
+                    }
+                }
+            } else if self.wheel_phase_finished(event) {
+                None
+            } else {
+                match self.hit_test_with_path_ids(element_tree, point) {
+                    Some(hit_path) => {
+                        if let Some(capture_path) =
+                            Self::wheel_capture_path_for_event(element_tree, &hit_path, event)
+                        {
+                            self.wheel_captured_id = capture_path.last().copied();
+                            wheel_target_locked = true;
+                            if crate::debug::wheel_log_enabled() {
+                                crate::logln!(
+                                    "[Wheel] acquire target={:?}",
+                                    self.wheel_captured_id
+                                );
+                            }
+                            Some(capture_path)
+                        } else {
+                            if crate::debug::wheel_log_enabled() {
+                                crate::logln!(
+                                    "[Wheel] no capture hit_target={:?}",
+                                    hit_path.last().copied()
+                                );
+                            }
+                            Some(hit_path)
+                        }
+                    }
+                    None => None,
+                }
+            }
+        } else if is_wheel {
+            let hit_path = self.hit_test_with_path_ids(element_tree, point);
+            if crate::debug::wheel_log_enabled() {
+                crate::logln!(
+                    "[Wheel] direct target={:?}",
+                    hit_path.as_ref().and_then(|path| path.last().copied())
+                );
+            }
+            hit_path
+        } else if matches!(event, crate::event::MouseEvent::Moved { .. })
             && !(self.left_button_down && self.captured_id.is_some())
         {
             self.cached_path_if_inside(element_tree, point)
@@ -336,7 +421,7 @@ impl EventDispatcher {
             }
 
             // 2.3 Bubble Phase: target's parent → root
-            if !handled {
+            if !handled && !wheel_target_locked {
                 for (index, id) in path.iter().rev().skip(1).enumerate() {
                     if let Some(element) = element_tree.find_element_mut(*id) {
                         let origin_index = path.len().saturating_sub(2).saturating_sub(index);
@@ -355,8 +440,24 @@ impl EventDispatcher {
                 }
             }
 
+            if uses_wheel_capture && self.wheel_phase_finished(event) {
+                if crate::debug::wheel_log_enabled() {
+                    crate::logln!("[Wheel] release phase=end");
+                }
+                self.clear_wheel_capture();
+            }
+
             if crate::debug::is_enabled() {
                 crate::logln!("[EventDispatcher] mouse handled={}", handled);
+            }
+            if crate::debug::wheel_log_enabled() && is_wheel {
+                crate::logln!(
+                    "[Wheel] result target={:?} handled={} locked={} consumed={}",
+                    target_id,
+                    handled,
+                    wheel_target_locked,
+                    handled || wheel_target_locked
+                );
             }
             if let crate::event::MouseEvent::ButtonReleased {
                 button: crate::event::MouseButton::Left,
@@ -368,7 +469,7 @@ impl EventDispatcher {
                 self.captured_path.clear();
                 self.captured_point = None;
             }
-            handled
+            handled || wheel_target_locked
         } else {
             if let crate::event::MouseEvent::Moved { x, y } = event {
                 if let Some(old_id) = self.hovered_id {
@@ -397,7 +498,19 @@ impl EventDispatcher {
                 self.captured_path.clear();
                 self.captured_point = None;
             }
-            false
+            if uses_wheel_capture && self.wheel_phase_finished(event) {
+                if crate::debug::wheel_log_enabled() {
+                    crate::logln!("[Wheel] release phase=end");
+                }
+                self.clear_wheel_capture();
+            }
+            if crate::debug::wheel_log_enabled() && is_wheel {
+                crate::logln!(
+                    "[Wheel] result no_path consumed={}",
+                    wheel_consumed_without_path
+                );
+            }
+            wheel_consumed_without_path
         }
     }
 
@@ -581,6 +694,10 @@ impl EventDispatcher {
         element: &'a dyn Element,
         point: Point,
     ) -> Option<(&'a dyn Element, Vec<&'a dyn Element>)> {
+        if !Self::point_inside_element_clip(element, point) {
+            return None;
+        }
+
         let local_point = Point {
             x: point.x - element.position().x,
             y: point.y - element.position().y,
@@ -623,6 +740,10 @@ impl EventDispatcher {
         element: &dyn Element,
         point: Point,
     ) -> Option<Vec<ElementId>> {
+        if !Self::point_inside_element_clip(element, point) {
+            return None;
+        }
+
         let local_point = Point {
             x: point.x - element.position().x,
             y: point.y - element.position().y,
@@ -693,6 +814,42 @@ impl EventDispatcher {
         None
     }
 
+    fn point_inside_element_clip(element: &dyn Element, point: Point) -> bool {
+        let Some(render_object) = element.render_object() else {
+            return true;
+        };
+        let Some((clip_rect, _radius)) = render_object.clip_bounds(element.position()) else {
+            return true;
+        };
+        clip_rect.contains(point)
+    }
+
+    fn wheel_capture_path_for_event(
+        element_tree: &mut ElementTree,
+        hit_path: &[ElementId],
+        event: &crate::event::MouseEvent,
+    ) -> Option<Vec<ElementId>> {
+        if !matches!(event, crate::event::MouseEvent::Wheel { .. }) {
+            return None;
+        }
+
+        let origins = Self::path_origins(element_tree, hit_path);
+        for index in (0..hit_path.len()).rev() {
+            let localized = Self::localize_mouse_event(event, origins[index]);
+            let Some(element) = element_tree.find_element_mut(hit_path[index]) else {
+                continue;
+            };
+            if element
+                .render_object()
+                .is_some_and(|render_object| render_object.captures_wheel_event(&localized))
+            {
+                return Some(hit_path[..=index].to_vec());
+            }
+        }
+
+        None
+    }
+
     fn is_expanded_select(element: &dyn Element) -> bool {
         element
             .render_object()
@@ -727,7 +884,10 @@ impl EventDispatcher {
                 x: *x as f32,
                 y: *y as f32,
             },
-            crate::event::MouseEvent::Wheel { .. } => Point::ZERO,
+            crate::event::MouseEvent::Wheel { x, y, .. } => Point {
+                x: *x as f32,
+                y: *y as f32,
+            },
         }
     }
 
@@ -809,6 +969,27 @@ impl EventDispatcher {
             x: absolute_origin.x + bounds.width / 2.0,
             y: absolute_origin.y + bounds.height / 2.0,
         });
+    }
+
+    fn clear_wheel_capture(&mut self) {
+        self.wheel_captured_id = None;
+    }
+
+    fn wheel_phase_finished(&self, event: &crate::event::MouseEvent) -> bool {
+        matches!(
+            event,
+            crate::event::MouseEvent::Wheel {
+                phase: crate::event::WheelPhase::Ended | crate::event::WheelPhase::Cancelled,
+                ..
+            }
+        )
+    }
+
+    fn wheel_uses_transaction_capture(event: &crate::event::MouseEvent) -> bool {
+        matches!(
+            event,
+            crate::event::MouseEvent::Wheel { source, .. } if source.uses_transaction_capture()
+        )
     }
 
     fn set_focused_element(
@@ -930,9 +1111,21 @@ impl EventDispatcher {
                 y: y - origin.y as i32,
                 click_count,
             },
-            crate::event::MouseEvent::Wheel { delta_x, delta_y } => {
-                crate::event::MouseEvent::Wheel { delta_x, delta_y }
-            }
+            crate::event::MouseEvent::Wheel {
+                delta_x,
+                delta_y,
+                x,
+                y,
+                phase,
+                source,
+            } => crate::event::MouseEvent::Wheel {
+                delta_x,
+                delta_y,
+                x: x - origin.x as i32,
+                y: y - origin.y as i32,
+                phase,
+                source,
+            },
         }
     }
 }
@@ -940,5 +1133,365 @@ impl EventDispatcher {
 impl Default for EventDispatcher {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::element::{ElementRenderObject, LayoutConstraints, UpdateResult};
+    use crate::event::{MouseEvent, ScrollSource, WheelPhase};
+    use crate::geometry::Size;
+    use crate::view::View;
+    use alloc::boxed::Box;
+    use alloc::rc::Rc;
+    use core::any::Any;
+    use core::cell::Cell;
+
+    struct WheelTestElement {
+        id: ElementId,
+        position: Point,
+        size: Size,
+        handles_wheel: bool,
+        wheel_count: Rc<Cell<u32>>,
+        render_object: WheelCaptureRenderObject,
+        children: Vec<Box<dyn Element>>,
+    }
+
+    struct WheelCaptureRenderObject {
+        size: Size,
+        captures_wheel: bool,
+    }
+
+    impl ElementRenderObject for WheelCaptureRenderObject {
+        fn layout(&mut self, _constraints: LayoutConstraints) -> Size {
+            self.size
+        }
+
+        fn size(&self) -> Size {
+            self.size
+        }
+
+        fn render(&mut self) {}
+
+        fn captures_wheel_event(&self, event: &MouseEvent) -> bool {
+            self.captures_wheel && matches!(event, MouseEvent::Wheel { .. })
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    impl WheelTestElement {
+        fn new(
+            id: u32,
+            position: Point,
+            size: Size,
+            handles_wheel: bool,
+            captures_wheel: bool,
+            wheel_count: Rc<Cell<u32>>,
+            children: Vec<Box<dyn Element>>,
+        ) -> Self {
+            Self {
+                id: ElementId::new(id),
+                position,
+                size,
+                handles_wheel,
+                wheel_count,
+                render_object: WheelCaptureRenderObject {
+                    size,
+                    captures_wheel,
+                },
+                children,
+            }
+        }
+    }
+
+    impl Element for WheelTestElement {
+        fn id(&self) -> ElementId {
+            self.id
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+
+        fn children(&self) -> &[Box<dyn Element>] {
+            &self.children
+        }
+
+        fn children_mut(&mut self) -> &mut [Box<dyn Element>] {
+            &mut self.children
+        }
+
+        fn update(&mut self, _new_view: &dyn View) -> UpdateResult {
+            UpdateResult::NoChange
+        }
+
+        fn rebuild(&mut self) -> UpdateResult {
+            UpdateResult::NoChange
+        }
+
+        fn layout(&mut self, _constraints: LayoutConstraints) -> Size {
+            self.size
+        }
+
+        fn position(&self) -> Point {
+            self.position
+        }
+
+        fn set_position(&mut self, position: Point) {
+            self.position = position;
+        }
+
+        fn bounds(&self) -> Rect {
+            Rect::new(self.position, self.size)
+        }
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds().contains(point)
+        }
+
+        fn handle_event(&mut self, event: &Event, phase: Phase) -> bool {
+            if !self.handles_wheel || !matches!(phase, Phase::Target | Phase::Bubble) {
+                return false;
+            }
+            if matches!(event, Event::Mouse(MouseEvent::Wheel { .. })) {
+                self.wheel_count.set(self.wheel_count.get() + 1);
+                return true;
+            }
+            false
+        }
+
+        fn render_object(&self) -> Option<&dyn ElementRenderObject> {
+            Some(&self.render_object)
+        }
+    }
+
+    fn wheel_event(y: i32, phase: WheelPhase) -> Event {
+        wheel_event_with_source(y, phase, ScrollSource::Trackpad)
+    }
+
+    fn wheel_event_with_source(y: i32, phase: WheelPhase, source: ScrollSource) -> Event {
+        Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: 40,
+            x: 10,
+            y,
+            phase,
+            source,
+        })
+    }
+
+    fn mouse_moved(y: i32) -> Event {
+        Event::Mouse(MouseEvent::Moved { x: 10, y })
+    }
+
+    fn nested_wheel_tree(outer_count: Rc<Cell<u32>>, inner_count: Rc<Cell<u32>>) -> ElementTree {
+        nested_wheel_tree_with_inner_behavior(outer_count, inner_count, true)
+    }
+
+    fn nested_wheel_tree_with_inner_behavior(
+        outer_count: Rc<Cell<u32>>,
+        inner_count: Rc<Cell<u32>>,
+        inner_handles_wheel: bool,
+    ) -> ElementTree {
+        nested_wheel_tree_with_ids(1, 2, 3, outer_count, inner_count, inner_handles_wheel)
+    }
+
+    fn nested_wheel_tree_with_ids(
+        root_id: u32,
+        outer_id: u32,
+        inner_id: u32,
+        outer_count: Rc<Cell<u32>>,
+        inner_count: Rc<Cell<u32>>,
+        inner_handles_wheel: bool,
+    ) -> ElementTree {
+        let inner = Box::new(WheelTestElement::new(
+            inner_id,
+            Point::new(0.0, 50.0),
+            Size::new(100.0, 50.0),
+            inner_handles_wheel,
+            true,
+            inner_count,
+            Vec::new(),
+        ));
+        let outer = Box::new(WheelTestElement::new(
+            outer_id,
+            Point::ZERO,
+            Size::new(100.0, 100.0),
+            true,
+            true,
+            outer_count,
+            alloc::vec![inner],
+        ));
+        let root = Box::new(WheelTestElement::new(
+            root_id,
+            Point::ZERO,
+            Size::new(100.0, 100.0),
+            false,
+            false,
+            Rc::new(Cell::new(0)),
+            alloc::vec![outer],
+        ));
+
+        let mut tree = ElementTree::new();
+        tree.set_root(root);
+        tree
+    }
+
+    #[test]
+    fn wheel_capture_keeps_initial_handler_even_when_pointer_moves_over_child() {
+        let outer_count = Rc::new(Cell::new(0));
+        let inner_count = Rc::new(Cell::new(0));
+        let mut tree = nested_wheel_tree(outer_count.clone(), inner_count.clone());
+        let mut dispatcher = EventDispatcher::new();
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(10, WheelPhase::Started)));
+        assert_eq!(outer_count.get(), 1);
+        assert_eq!(inner_count.get(), 0);
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Moved)));
+        assert_eq!(outer_count.get(), 2);
+        assert_eq!(inner_count.get(), 0);
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Started)));
+        assert_eq!(outer_count.get(), 3);
+        assert_eq!(inner_count.get(), 0);
+    }
+
+    #[test]
+    fn discrete_wheel_does_not_transaction_capture_between_nested_scroll_views() {
+        let outer_count = Rc::new(Cell::new(0));
+        let inner_count = Rc::new(Cell::new(0));
+        let mut tree = nested_wheel_tree(outer_count.clone(), inner_count.clone());
+        let mut dispatcher = EventDispatcher::new();
+
+        assert!(dispatcher.dispatch(
+            &mut tree,
+            &wheel_event_with_source(10, WheelPhase::Moved, ScrollSource::Wheel)
+        ));
+        assert_eq!(outer_count.get(), 1);
+        assert_eq!(inner_count.get(), 0);
+
+        assert!(dispatcher.dispatch(
+            &mut tree,
+            &wheel_event_with_source(60, WheelPhase::Moved, ScrollSource::Wheel)
+        ));
+        assert_eq!(outer_count.get(), 1);
+        assert_eq!(inner_count.get(), 1);
+    }
+
+    #[test]
+    fn wheel_capture_can_start_from_moved_phase() {
+        let outer_count = Rc::new(Cell::new(0));
+        let inner_count = Rc::new(Cell::new(0));
+        let mut tree = nested_wheel_tree(outer_count.clone(), inner_count.clone());
+        let mut dispatcher = EventDispatcher::new();
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(10, WheelPhase::Moved)));
+        assert_eq!(outer_count.get(), 1);
+        assert_eq!(inner_count.get(), 0);
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Moved)));
+        assert_eq!(outer_count.get(), 2);
+        assert_eq!(inner_count.get(), 0);
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Ended)));
+        assert_eq!(outer_count.get(), 3);
+        assert_eq!(inner_count.get(), 0);
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Moved)));
+        assert_eq!(outer_count.get(), 3);
+        assert_eq!(inner_count.get(), 1);
+    }
+
+    #[test]
+    fn wheel_capture_ignores_mouse_move_until_wheel_phase_ends() {
+        let outer_count = Rc::new(Cell::new(0));
+        let inner_count = Rc::new(Cell::new(0));
+        let mut tree = nested_wheel_tree(outer_count.clone(), inner_count.clone());
+        let mut dispatcher = EventDispatcher::new();
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(10, WheelPhase::Started)));
+        assert_eq!(outer_count.get(), 1);
+        assert_eq!(inner_count.get(), 0);
+
+        assert!(!dispatcher.dispatch(&mut tree, &mouse_moved(60)));
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Moved)));
+        assert_eq!(outer_count.get(), 2);
+        assert_eq!(inner_count.get(), 0);
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Ended)));
+        assert_eq!(outer_count.get(), 3);
+        assert_eq!(inner_count.get(), 0);
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Started)));
+        assert_eq!(outer_count.get(), 3);
+        assert_eq!(inner_count.get(), 1);
+    }
+
+    #[test]
+    fn wheel_capture_does_not_retarget_when_captured_element_disappears_mid_gesture() {
+        let old_outer_count = Rc::new(Cell::new(0));
+        let old_inner_count = Rc::new(Cell::new(0));
+        let mut tree = nested_wheel_tree_with_ids(
+            1,
+            2,
+            3,
+            old_outer_count.clone(),
+            old_inner_count.clone(),
+            true,
+        );
+        let mut dispatcher = EventDispatcher::new();
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(10, WheelPhase::Started)));
+        assert_eq!(old_outer_count.get(), 1);
+        assert_eq!(old_inner_count.get(), 0);
+
+        let new_outer_count = Rc::new(Cell::new(0));
+        let new_inner_count = Rc::new(Cell::new(0));
+        tree = nested_wheel_tree_with_ids(
+            10,
+            20,
+            30,
+            new_outer_count.clone(),
+            new_inner_count.clone(),
+            true,
+        );
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Moved)));
+        assert_eq!(new_outer_count.get(), 0);
+        assert_eq!(new_inner_count.get(), 0);
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Ended)));
+        assert_eq!(new_outer_count.get(), 0);
+        assert_eq!(new_inner_count.get(), 0);
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Started)));
+        assert_eq!(new_outer_count.get(), 0);
+        assert_eq!(new_inner_count.get(), 1);
+    }
+
+    #[test]
+    fn wheel_capture_does_not_bubble_to_parent_when_selected_target_is_at_edge() {
+        let outer_count = Rc::new(Cell::new(0));
+        let inner_count = Rc::new(Cell::new(0));
+        let mut tree =
+            nested_wheel_tree_with_inner_behavior(outer_count.clone(), inner_count.clone(), false);
+        let mut dispatcher = EventDispatcher::new();
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Started)));
+        assert_eq!(outer_count.get(), 0);
+        assert_eq!(inner_count.get(), 0);
     }
 }

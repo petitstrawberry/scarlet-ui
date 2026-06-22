@@ -5,7 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::color::ColorPalette;
 use crate::element::{ElementRenderObject, LayoutConstraints};
-use crate::event::{Event, FocusEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent};
+use crate::event::{
+    Event, FocusEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource,
+    WheelPhase,
+};
 use crate::renderer::PaintCommand;
 use crate::state::{State, StateId};
 use crate::view::View;
@@ -1314,6 +1317,10 @@ fn mouse_wheel_scrolls_vertically_and_clamps() {
         &MouseEvent::Wheel {
             delta_x: 0,
             delta_y: 10_000,
+            x: 0,
+            y: 0,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
         }
     ));
 
@@ -1342,6 +1349,10 @@ fn mouse_wheel_scrolls_horizontally_without_wrapping() {
         &MouseEvent::Wheel {
             delta_x: 40,
             delta_y: 0,
+            x: 0,
+            y: 0,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
         }
     ));
 

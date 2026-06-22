@@ -185,6 +185,10 @@ impl ElementTree {
         element: &'a dyn Element,
         point: crate::geometry::Point,
     ) -> Option<&'a dyn Element> {
+        if !Self::point_inside_element_clip(element, point) {
+            return None;
+        }
+
         let local_point = crate::geometry::Point {
             x: point.x - element.position().x,
             y: point.y - element.position().y,
@@ -234,6 +238,16 @@ impl ElementTree {
         }
 
         None
+    }
+
+    fn point_inside_element_clip(element: &dyn Element, point: crate::geometry::Point) -> bool {
+        let Some(render_object) = element.render_object() else {
+            return true;
+        };
+        let Some((clip_rect, _radius)) = render_object.clip_bounds(element.position()) else {
+            return true;
+        };
+        clip_rect.contains(point)
     }
 
     fn find_path_recursive(

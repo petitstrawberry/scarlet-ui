@@ -107,7 +107,7 @@ pub use element::{
 pub use error::{Error, Result};
 pub use event::{
     Event, EventDispatcher, FocusEvent, InputEvent, KeyCode, KeyEvent, LifecycleEvent, MouseButton,
-    MouseEvent,
+    MouseEvent, ScrollSource, WheelPhase,
 };
 pub use geometry::{Alignment, EdgeInsets, Offset, Point, Rect, Size};
 pub use graphics::{
@@ -129,11 +129,12 @@ pub use views::modifiers::{
 };
 pub use views::navigation::Icon;
 pub use views::{
-    BitmapImage, CanvasView, Divider, DividerOrientation, ProgressView, Select, Slider, Toggle,
+    BitmapImage, CanvasView, Divider, DividerOrientation, ProgressView, ScrollAxis, ScrollView,
+    ScrollWheelDirection, Select, Slider, TabItem, TabView, Toggle,
 };
 pub use views::{
-    Button, HStack, Image, Rectangle, Spacer, Text, TextField, VStack, Window, WindowContentLayout,
-    ZStack,
+    Button, HStack, Image, Rectangle, Spacer, SplitAxis, SplitView, Text, TextField, VStack,
+    Window, WindowContentLayout, ZStack,
 };
 pub use views::{
     EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView, TextViewRenderObject,
@@ -156,7 +157,9 @@ pub mod prelude {
         DirtyFlags, Element, ElementId, ElementRenderObject, LayoutConstraints,
     };
     pub use crate::error::{Error, Result};
-    pub use crate::event::{Event, FocusEvent, KeyEvent, LifecycleEvent, MouseEvent};
+    pub use crate::event::{
+        Event, FocusEvent, KeyEvent, LifecycleEvent, MouseEvent, ScrollSource, WheelPhase,
+    };
     pub use crate::geometry::*;
     pub use crate::graphics::{
         FontStack, add_default_font_fallback, clear_default_font_fallbacks, default_font_stack,
@@ -170,11 +173,12 @@ pub mod prelude {
     pub use crate::view::{View, ViewExt};
     pub use crate::views::modifiers::{Background, Clip, Focusable, Frame, OnKey, Padding};
     pub use crate::views::{
-        BitmapImage, CanvasView, Divider, DividerOrientation, ProgressView, Select, Slider, Toggle,
+        BitmapImage, CanvasView, Divider, DividerOrientation, ProgressView, ScrollAxis, ScrollView,
+        ScrollWheelDirection, Select, Slider, TabItem, TabView, Toggle,
     };
     pub use crate::views::{
-        Button, Either, Either3, Either4, Either5, Either6, HStack, Image, Rectangle, Spacer, Text,
-        TextField, VStack, Window, WindowContentLayout, ZStack,
+        Button, Either, Either3, Either4, Either5, Either6, HStack, Image, Rectangle, Spacer,
+        SplitAxis, SplitView, Text, TextField, VStack, Window, WindowContentLayout, ZStack,
     };
     pub use crate::views::{
         EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView,

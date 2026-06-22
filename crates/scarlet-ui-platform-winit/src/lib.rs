@@ -12,7 +12,9 @@ use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::element::TextInputElementState;
 use scarlet_ui_core::error::{Error, Result};
-use scarlet_ui_core::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent};
+use scarlet_ui_core::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
+};
 use scarlet_ui_core::geometry::{Point, Size};
 use scarlet_ui_core::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
 use std::time::{Duration, Instant};
@@ -21,7 +23,7 @@ use ::winit::application::ApplicationHandler;
 use ::winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use ::winit::event::{
     ElementState as WinitElementState, Ime, MouseButton as WinitMouseButton, MouseScrollDelta,
-    WindowEvent,
+    TouchPhase, WindowEvent,
 };
 use ::winit::event_loop::{ActiveEventLoop, EventLoop};
 use ::winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -34,6 +36,7 @@ type SoftbufferSurface =
 
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_DISTANCE: i32 = 5;
+const TRACKPAD_END_GRACE: Duration = Duration::from_millis(120);
 
 pub struct WinitBackend {
     shared: Rc<WinitSharedState>,
@@ -46,10 +49,20 @@ impl WinitBackend {
     ///
     /// A backend that creates native desktop windows.
     pub fn new() -> Self {
+        let wheel_log_enabled = wheel_log_env_enabled();
+        scarlet_ui_core::debug::set_wheel_log_enabled(wheel_log_enabled);
+        if wheel_log_enabled {
+            println!("[Wheel] logging enabled in scarlet-ui-platform-winit");
+        }
         Self {
             shared: Rc::new(WinitSharedState::new()),
         }
     }
+}
+
+fn wheel_log_env_enabled() -> bool {
+    std::env::var("SCARLET_UI_WHEEL_LOG")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 impl PlatformBackend for WinitBackend {
@@ -89,7 +102,14 @@ struct WinitEventState {
     pending_empty_preedit: Option<(u32, u32)>,
     modifiers: KeyModifiers,
     click_state: ClickState,
+    pending_trackpad_end: Option<PendingTrackpadEnd>,
     queue: VecDeque<Event>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingTrackpadEnd {
+    event: Event,
+    queued_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -173,12 +193,79 @@ impl WinitEventState {
             pending_empty_preedit: None,
             modifiers: KeyModifiers::empty(),
             click_state: ClickState::default(),
+            pending_trackpad_end: None,
             queue: VecDeque::new(),
         }
     }
 
-    fn push(&mut self, event: Event) {
+    fn push(&mut self, mut event: Event) {
+        self.flush_expired_trackpad_end();
+
+        if Self::is_trackpad_end(&event) {
+            self.pending_trackpad_end = Some(PendingTrackpadEnd {
+                event,
+                queued_at: Instant::now(),
+            });
+            return;
+        }
+
+        if Self::is_trackpad_wheel(&event)
+            && let Some(pending) = self.pending_trackpad_end.take()
+        {
+            if pending.queued_at.elapsed() <= TRACKPAD_END_GRACE {
+                if let Event::Mouse(MouseEvent::Wheel {
+                    phase: phase @ WheelPhase::Started,
+                    ..
+                }) = &mut event
+                {
+                    *phase = WheelPhase::Moved;
+                }
+                if scarlet_ui_core::debug::wheel_log_enabled() {
+                    println!("[Wheel] join deferred trackpad end into continuing gesture");
+                }
+            } else {
+                self.queue.push_back(pending.event);
+            }
+        }
+
         self.queue.push_back(event);
+    }
+
+    fn pop(&mut self) -> Option<Event> {
+        self.flush_expired_trackpad_end();
+        self.queue.pop_front()
+    }
+
+    fn flush_expired_trackpad_end(&mut self) {
+        let Some(pending) = self.pending_trackpad_end.as_ref() else {
+            return;
+        };
+        if pending.queued_at.elapsed() >= TRACKPAD_END_GRACE
+            && let Some(pending) = self.pending_trackpad_end.take()
+        {
+            self.queue.push_back(pending.event);
+        }
+    }
+
+    fn is_trackpad_wheel(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::Mouse(MouseEvent::Wheel {
+                source: ScrollSource::Trackpad,
+                ..
+            })
+        )
+    }
+
+    fn is_trackpad_end(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::Mouse(MouseEvent::Wheel {
+                source: ScrollSource::Trackpad,
+                phase: WheelPhase::Ended | WheelPhase::Cancelled,
+                ..
+            })
+        )
     }
 
     fn next_text_input_serial(&mut self) -> u32 {
@@ -379,15 +466,34 @@ impl ApplicationHandler for WinitPumpHandler {
                 };
                 state.push(Event::Mouse(event));
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let (delta_x, delta_y) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => ((x * 32.0) as i32, (y * 32.0) as i32),
+            WindowEvent::MouseWheel { delta, phase, .. } => {
+                let (delta_x, delta_y, source) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => {
+                        ((-x * 32.0) as i32, (-y * 32.0) as i32, ScrollSource::Wheel)
+                    }
                     MouseScrollDelta::PixelDelta(delta) => (
-                        physical_to_logical_pos(delta.x, state.scale_factor),
-                        physical_to_logical_pos(delta.y, state.scale_factor),
+                        -physical_to_logical_pos(delta.x, state.scale_factor),
+                        -physical_to_logical_pos(delta.y, state.scale_factor),
+                        ScrollSource::Trackpad,
                     ),
                 };
-                state.push(Event::Mouse(MouseEvent::Wheel { delta_x, delta_y }));
+                let x = state.cursor_x;
+                let y = state.cursor_y;
+                let mapped_phase = map_wheel_phase(phase);
+                if scarlet_ui_core::debug::wheel_log_enabled() {
+                    println!(
+                        "[Wheel] winit source={:?} phase={:?} delta=({}, {}) cursor=({}, {})",
+                        source, mapped_phase, delta_x, delta_y, x, y
+                    );
+                }
+                state.push(Event::Mouse(MouseEvent::Wheel {
+                    delta_x,
+                    delta_y,
+                    x,
+                    y,
+                    phase: mapped_phase,
+                    source,
+                }));
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let keycode = map_key(&event.logical_key);
@@ -527,7 +633,9 @@ impl WinitPlatformWindow {
             .event_loop
             .borrow_mut()
             .pump_app_events(Some(Duration::ZERO), &mut handler);
-        self.state.borrow_mut().flush_pending_empty_preedit();
+        let mut state = self.state.borrow_mut();
+        state.flush_pending_empty_preedit();
+        state.flush_expired_trackpad_end();
     }
 
     fn resize_surface(&mut self, width: u32, height: u32) -> Result<()> {
@@ -572,7 +680,7 @@ impl PlatformWindow for WinitPlatformWindow {
 
     fn poll_event(&mut self) -> Option<Event> {
         self.pump_events();
-        let event = self.state.borrow_mut().queue.pop_front();
+        let event = self.state.borrow_mut().pop();
         if let Some(Event::Resize { width, height }) = event {
             let size = Size::new(width as f32, height as f32);
             self.set_observed_logical_size(size);
@@ -591,7 +699,9 @@ impl PlatformWindow for WinitPlatformWindow {
             .event_loop
             .borrow_mut()
             .pump_app_events(Some(timeout), &mut handler);
-        self.state.borrow_mut().flush_pending_empty_preedit();
+        let mut state = self.state.borrow_mut();
+        state.flush_pending_empty_preedit();
+        state.flush_expired_trackpad_end();
     }
 
     fn output_scale_milli(&self) -> u32 {
@@ -872,6 +982,15 @@ fn map_mouse_button(button: WinitMouseButton) -> Option<MouseButton> {
         WinitMouseButton::Middle => Some(MouseButton::Middle),
         WinitMouseButton::Right => Some(MouseButton::Right),
         _ => None,
+    }
+}
+
+fn map_wheel_phase(phase: TouchPhase) -> WheelPhase {
+    match phase {
+        TouchPhase::Started => WheelPhase::Started,
+        TouchPhase::Moved => WheelPhase::Moved,
+        TouchPhase::Ended => WheelPhase::Ended,
+        TouchPhase::Cancelled => WheelPhase::Cancelled,
     }
 }
 
