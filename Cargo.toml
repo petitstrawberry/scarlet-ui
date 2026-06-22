@@ -9,4 +9,5 @@ members = [
     "crates/scarlet-ui-renderer-wgpu",
     "tools/preview",
     "examples/preview-demo",
+    "examples/widget-factory",
 ]

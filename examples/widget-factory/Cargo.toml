@@ -1,0 +1,13 @@
+[package]
+name = "scarlet-ui-widget-factory"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+scarlet-ui-macros = { path = "../../crates/scarlet-ui-macros" }
+
+[target.'cfg(target_os = "scarlet")'.dependencies]
+scarlet-ui = { path = "../../crates/scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
+
+[target.'cfg(not(target_os = "scarlet"))'.dependencies]
+scarlet-ui = { path = "../../crates/scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
