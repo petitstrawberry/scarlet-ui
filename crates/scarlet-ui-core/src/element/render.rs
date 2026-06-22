@@ -65,7 +65,7 @@ pub trait RenderObject: Any {
     /// # Returns
     ///
     /// `true` if commands were emitted.
-    fn paint_overlay<'a>(&'a self, _ctx: &mut PaintContext<'a>, _origin: Point) -> bool {
+    fn paint_overlay(&self, _ctx: &mut PaintContext<'_>, _origin: Point) -> bool {
         false
     }
 
@@ -194,6 +194,26 @@ pub trait RenderObject: Any {
         }
 
         size
+    }
+
+    /// Sync child positions after an input event without a full re-layout.
+    ///
+    /// Scroll-like containers override this to translate their children by the
+    /// current scroll offset directly, so that an offset change only needs a
+    /// repaint instead of re-laying out the child subtree.
+    ///
+    /// # Arguments
+    ///
+    /// * `children` - Mutable child elements whose positions may need syncing.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the caller may skip layout and only request a repaint for
+    /// this event. The default implementation does nothing and returns
+    /// `false`, leaving the layout/paint decision to
+    /// [`ElementRenderObject::update_needs_layout`].
+    fn apply_scroll_offset(&mut self, _children: &mut [Box<dyn Element>]) -> bool {
+        false
     }
 }
 
@@ -897,7 +917,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         }
 
         if self.render_object.handle_event(_event, _phase) {
-            if self.render_object.update_needs_layout() {
+            if self.render_object.apply_scroll_offset(&mut self.children) {
+                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+            } else if self.render_object.update_needs_layout() {
                 crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
             } else {
                 crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);

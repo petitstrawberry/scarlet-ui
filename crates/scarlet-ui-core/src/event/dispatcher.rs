@@ -69,6 +69,7 @@ pub struct EventDispatcher {
     captured_path: Vec<ElementId>,
     captured_point: Option<Point>,
     wheel_captured_id: Option<ElementId>,
+    sticky_wheel_target: Option<(ElementId, Point)>,
     left_button_down: bool,
     focused_id: Option<ElementId>,
     focused_path: Vec<ElementId>,
@@ -87,6 +88,7 @@ impl EventDispatcher {
             captured_path: Vec::new(),
             captured_point: None,
             wheel_captured_id: None,
+            sticky_wheel_target: None,
             left_button_down: false,
             focused_id: None,
             focused_path: Vec::new(),
@@ -244,7 +246,7 @@ impl EventDispatcher {
                 }
             }
         } else if is_wheel {
-            let hit_path = self.hit_test_with_path_ids(element_tree, point);
+            let hit_path = self.discrete_wheel_target_path(element_tree, point);
             if crate::debug::wheel_log_enabled() {
                 crate::logln!(
                     "[Wheel] direct target={:?}",
@@ -848,6 +850,31 @@ impl EventDispatcher {
         }
 
         None
+    }
+
+    /// Resolve the dispatch path for a discrete (non-trackpad) wheel event.
+    ///
+    /// Discrete mouse-wheel events carry no gesture phases, so without a
+    /// sticky target every event re-hit-tests from scratch. When content
+    /// scrolls under a stationary cursor that re-targets a nested scroll view
+    /// mid-gesture and causes visible stutter. To prevent this, the previous
+    /// wheel target is reused as long as the cursor has not moved.
+    fn discrete_wheel_target_path(
+        &mut self,
+        element_tree: &mut ElementTree,
+        point: Point,
+    ) -> Option<Vec<ElementId>> {
+        if let Some((id, prev_point)) = self.sticky_wheel_target
+            && prev_point == point
+            && let Some(path) = element_tree.find_path_ids(id)
+        {
+            return Some(path);
+        }
+        let hit_path = self.hit_test_with_path_ids(element_tree, point)?;
+        if let Some(last) = hit_path.last().copied() {
+            self.sticky_wheel_target = Some((last, point));
+        }
+        Some(hit_path)
     }
 
     fn is_expanded_select(element: &dyn Element) -> bool {

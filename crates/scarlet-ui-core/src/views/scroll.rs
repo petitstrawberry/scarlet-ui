@@ -872,9 +872,13 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         };
 
         let old_scrollbar_active = self.scrollbar_active;
-        self.scrollbar_active = matches!(wheel_phase, WheelPhase::Started | WheelPhase::Moved);
+        let gesture_active = matches!(wheel_phase, WheelPhase::Started | WheelPhase::Moved);
 
         let (scaled_x, scaled_y) = self.normalized_wheel_delta(*delta_x, *delta_y);
+        let scrollable = (self.axes.allows_x() && self.max_offset_x() > 0.0)
+            || (self.axes.allows_y() && self.max_offset_y() > 0.0);
+        self.scrollbar_active = gesture_active && scrollable;
+
         let mut next_x = self.offset_x;
         let mut next_y = self.offset_y;
 
@@ -886,10 +890,11 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         }
 
         let offset_changed = self.set_offset(next_x, next_y);
-        offset_changed || self.scrollbar_active != old_scrollbar_active
+        let scrollbar_deactivated = old_scrollbar_active && !self.scrollbar_active;
+        offset_changed || scrollbar_deactivated
     }
 
-    fn paint_overlay<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
+    fn paint_overlay(&self, ctx: &mut PaintContext<'_>, origin: Point) -> bool {
         let horizontal_scrollable = self.axes.allows_x() && self.max_offset_x() > 0.0;
         let vertical_scrollable = self.axes.allows_y() && self.max_offset_y() > 0.0;
         let show_horizontal = self.should_show_scrollbar(horizontal_scrollable);
@@ -906,6 +911,13 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         }
         if show_vertical && let Some(rect) = self.vertical_scrollbar_rect(origin, show_horizontal) {
             ctx.fill_rounded_rect(rect, radius, color);
+        }
+        true
+    }
+
+    fn apply_scroll_offset(&mut self, children: &mut [Box<dyn Element>]) -> bool {
+        if let Some(child) = children.first_mut() {
+            child.set_position(Point::new(-self.offset_x, -self.offset_y));
         }
         true
     }
