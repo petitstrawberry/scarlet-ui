@@ -390,6 +390,7 @@ impl EventDispatcher {
 
             // 2. Three-phase dispatch
             let mut handled = false;
+            let mut handled_id = None;
 
             // 2.1 Capture Phase: root → target (excluding target)
             for (index, id) in path.iter().take(path.len().saturating_sub(1)).enumerate() {
@@ -401,6 +402,7 @@ impl EventDispatcher {
                             self.emitted_events.push(Event::Window(window_event));
                         }
                         handled = true;
+                        handled_id = Some(*id);
                         break;
                     }
                 }
@@ -415,6 +417,7 @@ impl EventDispatcher {
                     ));
                     handled = target.handle_event(&localized, Phase::Target);
                     if handled {
+                        handled_id = Some(target_id);
                         if let Some(window_event) = target.take_window_action() {
                             self.emitted_events.push(Event::Window(window_event));
                         }
@@ -436,10 +439,19 @@ impl EventDispatcher {
                                 self.emitted_events.push(Event::Window(window_event));
                             }
                             handled = true;
+                            handled_id = Some(*id);
                             break;
                         }
                     }
                 }
+            }
+
+            if is_wheel
+                && !uses_wheel_capture
+                && handled
+                && let Some(id) = handled_id
+            {
+                self.sticky_wheel_target = Some((id, point));
             }
 
             if uses_wheel_capture && self.wheel_phase_finished(event) {
@@ -454,8 +466,9 @@ impl EventDispatcher {
             }
             if crate::debug::wheel_log_enabled() && is_wheel {
                 crate::logln!(
-                    "[Wheel] result target={:?} handled={} locked={} consumed={}",
+                    "[Wheel] result target={:?} handler={:?} handled={} locked={} consumed={}",
                     target_id,
+                    handled_id,
                     handled,
                     wheel_target_locked,
                     handled || wheel_target_locked
@@ -870,11 +883,7 @@ impl EventDispatcher {
         {
             return Some(path);
         }
-        let hit_path = self.hit_test_with_path_ids(element_tree, point)?;
-        if let Some(last) = hit_path.last().copied() {
-            self.sticky_wheel_target = Some((last, point));
-        }
-        Some(hit_path)
+        self.hit_test_with_path_ids(element_tree, point)
     }
 
     fn is_expanded_select(element: &dyn Element) -> bool {
@@ -1416,6 +1425,27 @@ mod tests {
         ));
         assert_eq!(outer_count.get(), 1);
         assert_eq!(inner_count.get(), 1);
+    }
+
+    #[test]
+    fn discrete_wheel_sticks_to_actual_handler_not_hit_leaf() {
+        let outer_count = Rc::new(Cell::new(0));
+        let inner_count = Rc::new(Cell::new(0));
+        let mut tree =
+            nested_wheel_tree_with_inner_behavior(outer_count.clone(), inner_count.clone(), false);
+        let mut dispatcher = EventDispatcher::new();
+
+        assert!(dispatcher.dispatch(
+            &mut tree,
+            &wheel_event_with_source(60, WheelPhase::Moved, ScrollSource::Wheel)
+        ));
+
+        assert_eq!(outer_count.get(), 1);
+        assert_eq!(inner_count.get(), 0);
+        assert_eq!(
+            dispatcher.sticky_wheel_target.map(|(id, _)| id),
+            Some(ElementId::new(2))
+        );
     }
 
     #[test]
