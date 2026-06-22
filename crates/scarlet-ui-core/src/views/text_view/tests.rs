@@ -975,6 +975,57 @@ fn paint_preedit_text_uses_normal_text_color() {
 }
 
 #[test]
+fn paint_preedit_shifts_following_text_instead_of_overlapping() {
+    let text = State::new(StateId::new(2222), String::from("abc"));
+    let selection = State::new(StateId::new(2223), TextSelection::collapsed(1));
+    let view = TextView::new(text, selection);
+    let mut render_object = focused_render_object(&view);
+    render_object.set_preedit_state("か", 3, 0, &[]);
+    let line = &render_object.layout.visual_lines[0];
+    let prefix_width = graphics::measure_text_sized("a", render_object.font_size).0 as f32;
+    let preedit_width = graphics::measure_text_sized("か", render_object.font_size).0 as f32;
+    let expected_suffix_x = line.x + prefix_width + preedit_width;
+
+    let mut ctx = crate::renderer::PaintContext::new();
+    render_object.paint(&mut ctx, Point::ZERO);
+
+    assert!(!ctx.commands().iter().any(|command| matches!(
+        command,
+        PaintCommand::DrawText { text, .. } if text == "abc"
+    )));
+    assert!(ctx.commands().iter().any(|command| matches!(
+        command,
+        PaintCommand::DrawText { text, .. } if text == "a"
+    )));
+    assert!(ctx.commands().iter().any(|command| matches!(
+        command,
+        PaintCommand::DrawText { text, position, .. }
+            if text == "bc" && position.x == expected_suffix_x
+    )));
+}
+
+#[test]
+fn paint_preedit_hides_placeholder_for_empty_document() {
+    let text = State::new(StateId::new(2224), String::new());
+    let selection = State::new(StateId::new(2225), TextSelection::collapsed(0));
+    let view = TextView::new(text, selection).placeholder("Start typing...");
+    let mut render_object = focused_render_object(&view);
+    render_object.set_preedit_state("よ", 3, 0, &[]);
+
+    let mut ctx = crate::renderer::PaintContext::new();
+    render_object.paint(&mut ctx, Point::ZERO);
+
+    assert!(!ctx.commands().iter().any(|command| matches!(
+        command,
+        PaintCommand::DrawText { text, .. } if text == "Start typing..."
+    )));
+    assert!(ctx.commands().iter().any(|command| matches!(
+        command,
+        PaintCommand::DrawText { text, .. } if text == "よ"
+    )));
+}
+
+#[test]
 fn ime_delete_surrounding_text_deletes_around_caret() {
     let text = State::new(StateId::new(224), String::from("abcd"));
     let selection = State::new(StateId::new(225), TextSelection::collapsed(2));

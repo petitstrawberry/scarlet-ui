@@ -3,7 +3,7 @@
 mod document;
 mod editing;
 mod layout;
-mod paint;
+pub(crate) mod paint;
 mod selection;
 #[cfg(test)]
 mod tests;

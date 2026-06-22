@@ -539,14 +539,19 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn text_input_state(&self) -> Option<crate::element::TextInputElementState> {
-        if let Some(field) = self.view.as_any().downcast_ref::<crate::views::TextField>() {
+        if self
+            .view
+            .as_any()
+            .downcast_ref::<crate::views::TextField>()
+            .is_some()
+        {
             let render_object = self
                 .render_object
                 .as_any()
                 .downcast_ref::<crate::views::TextFieldRenderObject>()?;
-            return render_object.is_focused().then(|| {
-                field.text_input_state(render_object.preedit(), render_object.preedit_cursor_byte())
-            });
+            return render_object
+                .is_focused()
+                .then(|| render_object.text_input_state());
         }
 
         let render_object = self
@@ -767,6 +772,24 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
         let is_target_phase = _phase == Phase::Target;
         let is_bubble_phase = _phase == Phase::Bubble;
+
+        if is_target_phase
+            && let Some(text_field) = self.view.as_any().downcast_ref::<crate::views::TextField>()
+            && let Some(render_object) = self
+                .render_object
+                .as_any_mut()
+                .downcast_mut::<crate::views::TextFieldRenderObject>()
+        {
+            let handled = crate::views::text_field::handle_text_field_mouse(
+                text_field,
+                render_object,
+                mouse_event,
+            );
+            if handled {
+                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+            }
+            return handled;
+        }
 
         if is_target_phase
             && let Some(text_view) = self.view.as_any().downcast_ref::<crate::views::TextView>()

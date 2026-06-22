@@ -1,28 +1,30 @@
 //! Text field View - editable single-line text input.
 //!
-//! TextField owns keyboard editing behavior for focused text input controls.
+//! TextField shares the TextView document, selection, layout, IME, and paint
+//! primitives, while keeping single-line submit behavior.
 
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::any::Any;
 
-use crate::buffer::Buffer;
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::color::{Color, ColorPalette};
 use crate::element::{
     Element, ElementRenderObject, LayoutConstraints, RenderElement, TextInputElementState,
 };
-use crate::event::{FocusEvent, KeyCode, KeyEvent};
-use crate::geometry::{Point, Rect, Size};
+use crate::event::{FocusEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent};
+use crate::geometry::{Point, Size};
 use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::state::{Listenable, State};
 use crate::view::View;
 
-const PREEDIT_STYLE_HIGHLIGHT: u32 = 1 << 2;
-const PREEDIT_STYLE_SELECTED: u32 = 1 << 3;
-const PREEDIT_STYLE_TARGET_CONVERTING: u32 = 1 << 5;
+use super::text_view::paint;
+use super::text_view::{
+    TextDocument, TextPosition, TextSelection, TextViewLayout, TextViewScroll, WrapMode,
+};
 
 /// Single-line editable text input.
 #[derive(Clone)]
@@ -156,29 +158,6 @@ impl TextField {
             callback();
         }
     }
-
-    pub(crate) fn text_input_state(
-        &self,
-        preedit: &str,
-        cursor_byte: u32,
-    ) -> TextInputElementState {
-        let text = self.text.get();
-        let mut display = text.clone();
-        display.push_str(preedit_prefix(preedit, cursor_byte));
-        let (text_width, _) = graphics::measure_text_sized(&display, self.font_size);
-        let text_len = text.len() as u32;
-        TextInputElementState {
-            cursor_rect: Rect::from_xywh(
-                self.padding + text_width as f32,
-                self.padding * 0.5,
-                1.0,
-                self.font_size * 1.25,
-            ),
-            surrounding_text: text,
-            cursor_byte: text_len,
-            anchor_byte: text_len,
-        }
-    }
 }
 
 impl View for TextField {
@@ -200,12 +179,15 @@ impl View for TextField {
 
 /// TextField RenderObject.
 pub struct TextFieldRenderObject {
-    text: String,
+    text_document: TextDocument,
+    selection: TextSelection,
+    layout: TextViewLayout,
     preedit: String,
     preedit_cursor_byte: u32,
     preedit_anchor_byte: u32,
-    preedit_spans: Vec<u8>,
+    preedit_spans: alloc::vec::Vec<u8>,
     focused: bool,
+    dragging: bool,
     placeholder: String,
     background_color: Color,
     border_color: Color,
@@ -215,19 +197,24 @@ pub struct TextFieldRenderObject {
     font_size: f32,
     padding: f32,
     size: Size,
-    buffer: Option<Buffer>,
 }
 
 impl TextFieldRenderObject {
     /// Create a render object from a TextField view.
     pub fn from_view(view: &TextField) -> Self {
+        let text_document = TextDocument::from_str(&view.text.get());
+        let selection = TextSelection::collapsed(text_document.len());
+        let layout = text_field_layout(&text_document, view.font_size, view.padding, Size::ZERO);
         Self {
-            text: view.text.get(),
+            text_document,
+            selection,
+            layout,
             preedit: String::new(),
             preedit_cursor_byte: 0,
             preedit_anchor_byte: 0,
-            preedit_spans: Vec::new(),
+            preedit_spans: alloc::vec::Vec::new(),
             focused: false,
+            dragging: false,
             placeholder: view.placeholder.clone(),
             background_color: view.background_color,
             border_color: view.border_color,
@@ -237,32 +224,36 @@ impl TextFieldRenderObject {
             font_size: view.font_size,
             padding: view.padding,
             size: Size::ZERO,
-            buffer: None,
         }
+    }
+
+    fn compute_layout(&mut self) {
+        self.layout =
+            text_field_layout(&self.text_document, self.font_size, self.padding, self.size);
     }
 }
 
 impl ElementRenderObject for TextFieldRenderObject {
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
-        let text = if self.text.is_empty() {
-            self.placeholder.as_str()
+        let document_text = self.text_document.as_str();
+        let visible_text = if self.text_document.is_empty() && self.preedit.is_empty() {
+            alloc::borrow::Cow::Borrowed(self.placeholder.as_str())
         } else {
-            self.text.as_str()
+            document_text
         };
-        let (measured_width, measured_height) = graphics::measure_text_sized(text, self.font_size);
-        let intrinsic = Size {
-            width: measured_width as f32 + self.padding * 2.0,
-            height: measured_height as f32 + self.padding * 2.0,
+        let preedit_width = if self.preedit.is_empty() {
+            0.0
+        } else {
+            graphics::measure_text_sized(&self.preedit, self.font_size).0 as f32
         };
+        let (measured_width, _) = graphics::measure_text_sized(&visible_text, self.font_size);
+        let line_height = graphics::line_height_sized(self.font_size).max(1) as f32;
+        let intrinsic = Size::new(
+            measured_width as f32 + preedit_width + self.padding * 2.0,
+            line_height + self.padding * 2.0,
+        );
         self.size = constraints.constrain(intrinsic);
-        let width = libm::ceilf(self.size.width.max(1.0)) as u32;
-        let height = libm::ceilf(self.size.height.max(1.0)) as u32;
-        let needs_resize = self.buffer.as_ref().map_or(true, |b| {
-            b.logical_width() != width || b.logical_height() != height
-        });
-        if needs_resize {
-            self.buffer = Some(Buffer::from_logical_dimensions(width, height));
-        }
+        self.compute_layout();
         self.size
     }
 
@@ -274,60 +265,13 @@ impl ElementRenderObject for TextFieldRenderObject {
         point.x >= 0.0 && point.y >= 0.0 && point.x < self.size.width && point.y < self.size.height
     }
 
-    fn render(&mut self) {
-        if let Some(buffer) = self.buffer.as_mut() {
-            let mut canvas = graphics::Canvas::for_buffer(buffer);
-            let width = canvas.width();
-            let height = canvas.height();
-            let border = if self.focused {
-                self.focused_border_color
-            } else {
-                self.border_color
-            };
-            canvas.fill_rect(0, 0, width, height, self.background_color);
-            canvas.draw_rect(0, 0, width, height, border);
+    fn render(&mut self) {}
 
-            let display = if self.text.is_empty() && self.preedit.is_empty() {
-                self.placeholder.clone()
-            } else if self.focused && !self.preedit.is_empty() {
-                text_with_preedit_cursor(&self.text, &self.preedit, self.preedit_cursor_byte)
-            } else if self.focused {
-                let mut display = self.text.clone();
-                display.push('|');
-                display
-            } else {
-                self.text.clone()
-            };
-            let color = if self.text.is_empty() && self.preedit.is_empty() {
-                self.placeholder_color
-            } else {
-                self.text_color
-            };
-            let x = self.padding as i32;
-            let y = ((height as f32 - self.font_size * 1.2) / 2.0).max(0.0) as i32;
-            if self.focused && !self.preedit.is_empty() {
-                draw_preedit_marks(
-                    &mut canvas,
-                    x,
-                    y,
-                    &self.text,
-                    &self.preedit,
-                    &self.preedit_spans,
-                    self.font_size,
-                    self.focused_border_color,
-                );
-            }
-            canvas.draw_text_sized(x, y, &display, color, self.font_size);
-        }
+    fn get_buffer(&self) -> Option<&crate::buffer::Buffer> {
+        None
     }
 
-    fn get_buffer(&self) -> Option<&Buffer> {
-        self.buffer.as_ref()
-    }
-
-    fn clear_buffer(&mut self) {
-        self.buffer = None;
-    }
+    fn clear_buffer(&mut self) {}
 
     fn as_any(&self) -> &dyn Any {
         self
@@ -342,20 +286,25 @@ impl ElementRenderObject for TextFieldRenderObject {
             return crate::element::UpdateResult::Replaced;
         };
         let focused = self.focused;
+        let selection = self.selection;
         let preedit = self.preedit.clone();
         let preedit_cursor_byte = self.preedit_cursor_byte;
         let preedit_anchor_byte = self.preedit_anchor_byte;
         let preedit_spans = self.preedit_spans.clone();
         let size = self.size;
-        let buffer = self.buffer.take();
         *self = TextFieldRenderObject::from_view(view);
+        let len = self.text_document.len();
+        self.selection = TextSelection {
+            anchor: TextPosition::new(selection.anchor.byte.min(len)),
+            caret: TextPosition::new(selection.caret.byte.min(len)),
+        };
         self.focused = focused;
         self.preedit = preedit;
         self.preedit_cursor_byte = preedit_cursor_byte;
         self.preedit_anchor_byte = preedit_anchor_byte;
         self.preedit_spans = preedit_spans;
         self.size = size;
-        self.buffer = buffer;
+        self.compute_layout();
         crate::element::UpdateResult::Updated
     }
 
@@ -364,46 +313,30 @@ impl ElementRenderObject for TextFieldRenderObject {
     }
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
-        let rect = Rect::new(origin, self.size);
-        let border = if self.focused {
-            self.focused_border_color
-        } else {
-            self.border_color
-        };
-        ctx.fill_rect(rect, self.background_color);
-        ctx.stroke_rect(rect, 1.0, border);
-
-        let display = if self.text.is_empty() && self.preedit.is_empty() {
-            self.placeholder.clone()
-        } else if self.focused && !self.preedit.is_empty() {
-            text_with_preedit_cursor(&self.text, &self.preedit, self.preedit_cursor_byte)
-        } else if self.focused {
-            let mut display = self.text.clone();
-            display.push('|');
-            display
-        } else {
-            self.text.clone()
-        };
-        let color = if self.text.is_empty() && self.preedit.is_empty() {
-            self.placeholder_color
-        } else {
-            self.text_color
-        };
-        let x = origin.x + self.padding;
-        let y = origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0);
-        if self.focused && !self.preedit.is_empty() {
-            paint_preedit_marks(
-                ctx,
-                x,
-                y,
-                &self.text,
-                &self.preedit,
-                &self.preedit_spans,
-                self.font_size,
-                self.focused_border_color,
-            );
-        }
-        ctx.draw_text(Point::new(x, y), display, color, self.font_size);
+        paint::paint_text_view(
+            ctx,
+            origin,
+            self.size,
+            &self.layout,
+            &self.text_document,
+            self.selection,
+            self.focused,
+            self.font_size,
+            self.padding,
+            self.background_color,
+            self.text_color,
+            self.placeholder_color,
+            self.selection_color(),
+            Color::TRANSPARENT,
+            self.border_color,
+            self.focused_border_color,
+            &self.placeholder,
+            &self.preedit,
+            self.preedit_cursor_byte,
+            &self.preedit_spans,
+            false,
+            false,
+        );
         true
     }
 }
@@ -420,14 +353,6 @@ impl TextFieldRenderObject {
         }
     }
 
-    pub(crate) fn preedit(&self) -> &str {
-        &self.preedit
-    }
-
-    pub(crate) fn preedit_cursor_byte(&self) -> u32 {
-        self.preedit_cursor_byte
-    }
-
     pub(crate) fn set_preedit_state(
         &mut self,
         preedit: &str,
@@ -436,9 +361,9 @@ impl TextFieldRenderObject {
         spans: &[u8],
     ) {
         self.preedit.clear();
-        self.preedit.push_str(preedit);
-        self.preedit_cursor_byte = clamp_byte_boundary(preedit, cursor_byte);
-        self.preedit_anchor_byte = clamp_byte_boundary(preedit, anchor_byte);
+        self.preedit.push_str(single_line_text(preedit).as_str());
+        self.preedit_cursor_byte = clamp_byte_boundary(&self.preedit, cursor_byte);
+        self.preedit_anchor_byte = clamp_byte_boundary(&self.preedit, anchor_byte);
         self.preedit_spans.clear();
         self.preedit_spans.extend_from_slice(spans);
     }
@@ -448,6 +373,26 @@ impl TextFieldRenderObject {
         self.preedit_cursor_byte = 0;
         self.preedit_anchor_byte = 0;
         self.preedit_spans.clear();
+    }
+
+    pub(crate) fn text_input_state(&self) -> TextInputElementState {
+        let mut cursor_rect = self
+            .layout
+            .cursor_rect(self.selection.caret, &self.text_document);
+        if !self.preedit.is_empty() {
+            let prefix = preedit_prefix(&self.preedit, self.preedit_anchor_byte);
+            cursor_rect.origin.x += graphics::measure_text_sized(prefix, self.font_size).0 as f32;
+        }
+        TextInputElementState {
+            cursor_rect,
+            surrounding_text: self.text_document.as_str().into_owned(),
+            cursor_byte: self.selection.caret.byte as u32,
+            anchor_byte: self.selection.anchor.byte as u32,
+        }
+    }
+
+    fn selection_color(&self) -> Color {
+        ColorPalette::default().primary().with_opacity(0.3)
     }
 }
 
@@ -462,18 +407,72 @@ pub(crate) fn handle_text_field_keyboard(
     match event {
         KeyEvent::Char { c } if !c.is_control() => {
             render_object.clear_preedit();
-            let mut text = field.text.get();
+            let mut text = String::new();
             text.push(c);
-            field.text.set(text);
+            insert_text(field, render_object, &text);
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::Space,
+            ..
+        } => {
+            render_object.clear_preedit();
+            insert_text(field, render_object, " ");
             true
         }
         KeyEvent::Pressed {
             keycode: KeyCode::Backspace,
             ..
         } => {
-            let mut text = field.text.get();
-            text.pop();
-            field.text.set(text);
+            render_object.clear_preedit();
+            delete_backward(field, render_object);
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::Delete,
+            ..
+        } => {
+            render_object.clear_preedit();
+            delete_forward(field, render_object);
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::Left,
+            modifiers,
+        } => {
+            move_caret(render_object, CaretMove::Left, modifiers);
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::Right,
+            modifiers,
+        } => {
+            move_caret(render_object, CaretMove::Right, modifiers);
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::Home,
+            modifiers,
+        } => {
+            move_caret(render_object, CaretMove::Start, modifiers);
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::End,
+            modifiers,
+        } => {
+            move_caret(render_object, CaretMove::End, modifiers);
+            true
+        }
+        KeyEvent::Pressed {
+            keycode: KeyCode::Char('a' | 'A'),
+            modifiers,
+        } if modifiers.primary() => {
+            let len = render_object.text_document.len();
+            render_object.selection = TextSelection {
+                anchor: TextPosition::new(0),
+                caret: TextPosition::new(len),
+            };
             true
         }
         KeyEvent::Pressed {
@@ -524,9 +523,7 @@ pub(crate) fn handle_text_field_text_input(
     match event {
         crate::event::Event::TextInputCommit { text, .. } => {
             render_object.clear_preedit();
-            let mut current = field.text.get();
-            current.push_str(text);
-            field.text.set(current);
+            insert_text(field, render_object, &single_line_text(text));
             true
         }
         crate::event::Event::TextInputPreedit {
@@ -545,7 +542,7 @@ pub(crate) fn handle_text_field_text_input(
             ..
         } => {
             render_object.clear_preedit();
-            delete_surrounding_text_at_end(field, *before_bytes, *after_bytes);
+            delete_surrounding_text(field, render_object, *before_bytes, *after_bytes);
             true
         }
         crate::event::Event::TextInputDone { .. } => true,
@@ -553,14 +550,268 @@ pub(crate) fn handle_text_field_text_input(
     }
 }
 
-fn text_with_preedit_cursor(text: &str, preedit: &str, cursor_byte: u32) -> String {
-    let cursor_byte = clamp_byte_boundary(preedit, cursor_byte) as usize;
-    let mut display = String::new();
-    display.push_str(text);
-    display.push_str(&preedit[..cursor_byte]);
-    display.push('|');
-    display.push_str(&preedit[cursor_byte..]);
-    display
+pub(crate) fn handle_text_field_mouse(
+    _field: &TextField,
+    render_object: &mut TextFieldRenderObject,
+    event: &MouseEvent,
+) -> bool {
+    match *event {
+        MouseEvent::ButtonPressed {
+            button: MouseButton::Left,
+            x,
+            y,
+            click_count,
+        } => handle_primary_click(render_object, x, y, click_count),
+        MouseEvent::Moved { x, y } => handle_drag_selection(render_object, x, y),
+        MouseEvent::ButtonReleased {
+            button: MouseButton::Left,
+            ..
+        } => {
+            render_object.dragging = false;
+            true
+        }
+        MouseEvent::Entered { .. }
+        | MouseEvent::Exited { .. }
+        | MouseEvent::Wheel { .. }
+        | MouseEvent::ButtonPressed { .. }
+        | MouseEvent::ButtonReleased { .. } => false,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CaretMove {
+    Left,
+    Right,
+    Start,
+    End,
+}
+
+fn insert_text(field: &TextField, render_object: &mut TextFieldRenderObject, text: &str) {
+    let text = single_line_text(text);
+    if text.is_empty() {
+        return;
+    }
+    let range = render_object
+        .selection
+        .normalized_range()
+        .unwrap_or(render_object.selection.caret.byte..render_object.selection.caret.byte);
+    let (document, delta) = render_object.text_document.replace(range, &text);
+    let caret = delta.replaced_range.start + text.len();
+    render_object.text_document = document;
+    render_object.selection = TextSelection::collapsed(caret);
+    render_object.compute_layout();
+    field
+        .text
+        .set(render_object.text_document.as_str().into_owned());
+}
+
+fn delete_backward(field: &TextField, render_object: &mut TextFieldRenderObject) {
+    if delete_selection(field, render_object) {
+        return;
+    }
+    let text = render_object.text_document.as_str();
+    let caret = render_object.selection.caret.byte.min(text.len());
+    let Some(start) = previous_grapheme_boundary(&text, caret) else {
+        return;
+    };
+    delete_range(field, render_object, start..caret);
+}
+
+fn delete_forward(field: &TextField, render_object: &mut TextFieldRenderObject) {
+    if delete_selection(field, render_object) {
+        return;
+    }
+    let text = render_object.text_document.as_str();
+    let caret = render_object.selection.caret.byte.min(text.len());
+    let Some(end) = next_grapheme_boundary(&text, caret) else {
+        return;
+    };
+    delete_range(field, render_object, caret..end);
+}
+
+fn delete_selection(field: &TextField, render_object: &mut TextFieldRenderObject) -> bool {
+    let Some(range) = render_object.selection.normalized_range() else {
+        return false;
+    };
+    delete_range(field, render_object, range);
+    true
+}
+
+fn delete_surrounding_text(
+    field: &TextField,
+    render_object: &mut TextFieldRenderObject,
+    before_bytes: u32,
+    after_bytes: u32,
+) {
+    let text = render_object.text_document.as_str();
+    let caret = render_object.selection.caret.byte.min(text.len());
+    let start = clamp_byte_boundary_usize(&text, caret.saturating_sub(before_bytes as usize));
+    let end = clamp_byte_boundary_usize(&text, caret.saturating_add(after_bytes as usize));
+    drop(text);
+    delete_range(field, render_object, start..end);
+}
+
+fn delete_range(
+    field: &TextField,
+    render_object: &mut TextFieldRenderObject,
+    range: core::ops::Range<usize>,
+) {
+    if range.is_empty() {
+        return;
+    }
+    let start = range.start;
+    let (document, _) = render_object.text_document.delete(range);
+    render_object.text_document = document;
+    render_object.selection = TextSelection::collapsed(start);
+    render_object.compute_layout();
+    field
+        .text
+        .set(render_object.text_document.as_str().into_owned());
+}
+
+fn move_caret(
+    render_object: &mut TextFieldRenderObject,
+    movement: CaretMove,
+    modifiers: KeyModifiers,
+) {
+    let text = render_object.text_document.as_str();
+    let current = render_object.selection.caret.byte.min(text.len());
+    let byte = match movement {
+        CaretMove::Left => previous_grapheme_boundary(&text, current).unwrap_or(0),
+        CaretMove::Right => next_grapheme_boundary(&text, current).unwrap_or(text.len()),
+        CaretMove::Start => 0,
+        CaretMove::End => text.len(),
+    };
+    let position = TextPosition::new(byte).clamp_to_grapheme(&text);
+    if modifiers.shift {
+        render_object.selection.caret = position;
+    } else {
+        render_object.selection = TextSelection {
+            anchor: position,
+            caret: position,
+        };
+    }
+}
+
+fn handle_primary_click(
+    render_object: &mut TextFieldRenderObject,
+    x: i32,
+    y: i32,
+    click_count: u8,
+) -> bool {
+    render_object.set_focused(true);
+    let Some(position) = hit_test_mouse(render_object, x, y) else {
+        render_object.dragging = false;
+        return false;
+    };
+
+    render_object.clear_preedit();
+    match click_count {
+        0 | 1 => {
+            render_object.selection = TextSelection {
+                anchor: position,
+                caret: position,
+            };
+            render_object.dragging = true;
+        }
+        2 => {
+            render_object.selection = word_selection(render_object, position.byte);
+            render_object.dragging = false;
+        }
+        _ => {
+            render_object.selection = TextSelection {
+                anchor: TextPosition::new(0),
+                caret: TextPosition::new(render_object.text_document.len()),
+            };
+            render_object.dragging = false;
+        }
+    }
+    true
+}
+
+fn handle_drag_selection(render_object: &mut TextFieldRenderObject, x: i32, y: i32) -> bool {
+    if !render_object.dragging {
+        return false;
+    }
+    if let Some(position) = hit_test_mouse(render_object, x, y) {
+        render_object.selection.caret = position;
+    }
+    true
+}
+
+fn hit_test_mouse(render_object: &TextFieldRenderObject, x: i32, _y: i32) -> Option<TextPosition> {
+    let x = (x as f32).max(render_object.layout.text_origin_x);
+    let y = render_object.layout.padding + render_object.layout.line_height * 0.5;
+    render_object
+        .layout
+        .hit_test(Point::new(x, y))
+        .map(|position| position.clamp_to_grapheme(&render_object.text_document.as_str()))
+}
+
+fn word_selection(render_object: &TextFieldRenderObject, byte: usize) -> TextSelection {
+    let text = render_object.text_document.as_str();
+    if text.is_empty() {
+        return TextSelection::collapsed(0);
+    }
+
+    let byte = clamp_byte_boundary_usize(&text, byte.min(text.len()));
+    let mut word_start = byte;
+    let mut word_end = byte;
+
+    for (start, grapheme) in text.grapheme_indices(true) {
+        let end = start + grapheme.len();
+        if byte >= start && byte <= end {
+            if !is_word_grapheme(grapheme) {
+                return TextSelection::collapsed(start);
+            }
+            word_start = start;
+            word_end = end;
+            break;
+        }
+    }
+
+    while let Some((start, grapheme)) = previous_grapheme(word_start, &text)
+        && is_word_grapheme(grapheme)
+    {
+        word_start = start;
+    }
+    while word_end < text.len() {
+        let Some((_, grapheme)) = next_grapheme(word_end, &text) else {
+            break;
+        };
+        if !is_word_grapheme(grapheme) {
+            break;
+        }
+        word_end += grapheme.len();
+    }
+
+    TextSelection {
+        anchor: TextPosition::new(word_start),
+        caret: TextPosition::new(word_end),
+    }
+}
+
+fn text_field_layout(
+    document: &TextDocument,
+    font_size: f32,
+    padding: f32,
+    size: Size,
+) -> TextViewLayout {
+    TextViewLayout::compute(
+        document,
+        font_size,
+        padding,
+        WrapMode::None,
+        size,
+        TextViewScroll::default(),
+        false,
+    )
+}
+
+fn single_line_text(text: &str) -> String {
+    text.chars()
+        .filter(|character| *character != '\n' && *character != '\r')
+        .collect()
 }
 
 fn preedit_prefix(preedit: &str, byte: u32) -> &str {
@@ -569,268 +820,61 @@ fn preedit_prefix(preedit: &str, byte: u32) -> &str {
 }
 
 fn clamp_byte_boundary(text: &str, byte: u32) -> u32 {
-    let mut byte = (byte as usize).min(text.len());
+    clamp_byte_boundary_usize(text, byte as usize) as u32
+}
+
+fn clamp_byte_boundary_usize(text: &str, byte: usize) -> usize {
+    let mut byte = byte.min(text.len());
     while byte > 0 && !text.is_char_boundary(byte) {
         byte -= 1;
     }
-    byte as u32
+    byte
 }
 
-fn draw_preedit_marks(
-    canvas: &mut graphics::Canvas<'_>,
-    x: i32,
-    y: i32,
-    text: &str,
-    preedit: &str,
-    spans: &[u8],
-    font_size: f32,
-    active_color: Color,
-) {
-    if spans.is_empty() {
-        draw_preedit_mark_span(
-            canvas,
-            x,
-            y,
-            text,
-            preedit,
-            0,
-            preedit.len(),
-            false,
-            font_size,
-            active_color,
-        );
-        return;
+fn previous_grapheme_boundary(text: &str, byte: usize) -> Option<usize> {
+    if byte == 0 {
+        return None;
     }
-
-    let mut offset = 0usize;
-    while offset + 12 <= spans.len() {
-        let start = u32::from_le_bytes([
-            spans[offset],
-            spans[offset + 1],
-            spans[offset + 2],
-            spans[offset + 3],
-        ]);
-        let length = u32::from_le_bytes([
-            spans[offset + 4],
-            spans[offset + 5],
-            spans[offset + 6],
-            spans[offset + 7],
-        ]);
-        let style = u32::from_le_bytes([
-            spans[offset + 8],
-            spans[offset + 9],
-            spans[offset + 10],
-            spans[offset + 11],
-        ]);
-        let start = clamp_byte_boundary(preedit, start) as usize;
-        let end =
-            clamp_byte_boundary(preedit, start.saturating_add(length as usize) as u32) as usize;
-        if start < end {
-            let active = style
-                & (PREEDIT_STYLE_HIGHLIGHT
-                    | PREEDIT_STYLE_SELECTED
-                    | PREEDIT_STYLE_TARGET_CONVERTING)
-                != 0;
-            draw_preedit_mark_span(
-                canvas,
-                x,
-                y,
-                text,
-                preedit,
-                start,
-                end,
-                active,
-                font_size,
-                active_color,
-            );
-        }
-        offset += 12;
-    }
+    text[..byte]
+        .grapheme_indices(true)
+        .map(|(offset, _)| offset)
+        .last()
 }
 
-fn draw_preedit_mark_span(
-    canvas: &mut graphics::Canvas<'_>,
-    x: i32,
-    y: i32,
-    text: &str,
-    preedit: &str,
-    start: usize,
-    end: usize,
-    active: bool,
-    font_size: f32,
-    active_color: Color,
-) {
-    let mut prefix = String::new();
-    prefix.push_str(text);
-    prefix.push_str(&preedit[..start]);
-    let (prefix_width, _) = graphics::measure_text_sized(&prefix, font_size);
-    let (span_width, _) = graphics::measure_text_sized(&preedit[start..end], font_size);
-    let underline_x = x + prefix_width as i32;
-    let underline_y = (y as f32 + font_size * 1.15).max(0.0) as i32;
-    let thickness = if active { 3 } else { 1 };
-    let color = if active {
-        active_color
-    } else {
-        Color::rgb(150u8, 158u8, 170u8)
-    };
-    if active {
-        canvas.fill_rect(
-            underline_x,
-            y.saturating_sub(1),
-            span_width.max(1) as u32,
-            (font_size * 1.25).max(1.0) as u32,
-            Color::rgba(218u8, 232u8, 255u8, 0.95),
-        );
+fn next_grapheme_boundary(text: &str, byte: usize) -> Option<usize> {
+    if byte >= text.len() {
+        return None;
     }
-    canvas.fill_rect(
-        underline_x,
-        underline_y,
-        span_width.max(1) as u32,
-        thickness,
-        color,
-    );
+    text[byte..]
+        .grapheme_indices(true)
+        .map(|(offset, grapheme)| byte + offset + grapheme.len())
+        .next()
 }
 
-fn paint_preedit_marks(
-    ctx: &mut PaintContext,
-    x: f32,
-    y: f32,
-    text: &str,
-    preedit: &str,
-    spans: &[u8],
-    font_size: f32,
-    active_color: Color,
-) {
-    if preedit.is_empty() {
-        return;
-    }
-    if spans.is_empty() {
-        paint_preedit_mark_span(
-            ctx,
-            x,
-            y,
-            text,
-            preedit,
-            0,
-            preedit.len(),
-            false,
-            font_size,
-            active_color,
-        );
-        return;
-    }
-
-    let mut offset = 0usize;
-    while offset + 12 <= spans.len() {
-        let start = u32::from_le_bytes([
-            spans[offset],
-            spans[offset + 1],
-            spans[offset + 2],
-            spans[offset + 3],
-        ]);
-        let length = u32::from_le_bytes([
-            spans[offset + 4],
-            spans[offset + 5],
-            spans[offset + 6],
-            spans[offset + 7],
-        ]);
-        let style = u32::from_le_bytes([
-            spans[offset + 8],
-            spans[offset + 9],
-            spans[offset + 10],
-            spans[offset + 11],
-        ]);
-        let start = clamp_byte_boundary(preedit, start) as usize;
-        let end =
-            clamp_byte_boundary(preedit, start.saturating_add(length as usize) as u32) as usize;
-        if start < end {
-            let active = style
-                & (PREEDIT_STYLE_HIGHLIGHT
-                    | PREEDIT_STYLE_SELECTED
-                    | PREEDIT_STYLE_TARGET_CONVERTING)
-                != 0;
-            paint_preedit_mark_span(
-                ctx,
-                x,
-                y,
-                text,
-                preedit,
-                start,
-                end,
-                active,
-                font_size,
-                active_color,
-            );
-        }
-        offset += 12;
-    }
+fn previous_grapheme(byte: usize, text: &str) -> Option<(usize, &str)> {
+    text[..byte]
+        .grapheme_indices(true)
+        .map(|(offset, grapheme)| (offset, grapheme))
+        .last()
 }
 
-fn paint_preedit_mark_span(
-    ctx: &mut PaintContext,
-    x: f32,
-    y: f32,
-    text: &str,
-    preedit: &str,
-    start: usize,
-    end: usize,
-    active: bool,
-    font_size: f32,
-    active_color: Color,
-) {
-    let mut prefix = String::new();
-    prefix.push_str(text);
-    prefix.push_str(&preedit[..start]);
-    let (prefix_width, _) = graphics::measure_text_sized(&prefix, font_size);
-    let (span_width, _) = graphics::measure_text_sized(&preedit[start..end], font_size);
-    let underline_x = x + prefix_width as f32;
-    let underline_y = (y + font_size * 1.15).max(0.0);
-    let thickness = if active { 3.0 } else { 1.0 };
-    let color = if active {
-        active_color
-    } else {
-        Color::rgb(150u8, 158u8, 170u8)
-    };
-    let span_width = (span_width as f32).max(1.0);
-    if active {
-        ctx.fill_rect(
-            Rect::from_xywh(
-                underline_x,
-                y - 1.0,
-                span_width,
-                (font_size * 1.25).max(1.0),
-            ),
-            Color::rgba(218u8, 232u8, 255u8, 0.95),
-        );
-    }
-    ctx.fill_rect(
-        Rect::from_xywh(underline_x, underline_y, span_width, thickness),
-        color,
-    );
+fn next_grapheme(byte: usize, text: &str) -> Option<(usize, &str)> {
+    text[byte..]
+        .grapheme_indices(true)
+        .map(|(offset, grapheme)| (byte + offset, grapheme))
+        .next()
 }
 
-fn delete_surrounding_text_at_end(field: &TextField, before_bytes: u32, after_bytes: u32) {
-    if after_bytes != 0 {
-        return;
-    }
-
-    let mut text = field.text.get();
-    let delete_bytes = before_bytes as usize;
-    if delete_bytes == 0 {
-        return;
-    }
-
-    let mut remove_from = text.len().saturating_sub(delete_bytes);
-    while remove_from > 0 && !text.is_char_boundary(remove_from) {
-        remove_from -= 1;
-    }
-    text.truncate(remove_from);
-    field.text.set(text);
+fn is_word_grapheme(grapheme: &str) -> bool {
+    grapheme
+        .chars()
+        .any(|character| character.is_alphanumeric() || character == '_')
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{Event, MouseButton, MouseEvent};
     use crate::renderer::PaintCommand;
     use crate::state::StateId;
 
@@ -854,5 +898,138 @@ mod tests {
             fill_count >= 2,
             "expected background fill plus preedit underline"
         );
+    }
+
+    #[test]
+    fn preedit_hides_placeholder() {
+        let field = TextField::new(State::new(StateId::new(2), String::new())).placeholder("Name");
+        let mut render_object = TextFieldRenderObject::from_view(&field);
+        render_object.focused = true;
+        render_object.set_preedit_state("な", 3, 0, &[]);
+        render_object.layout(LayoutConstraints::tight(160.0, 32.0));
+
+        let mut ctx = PaintContext::new();
+        render_object.paint(&mut ctx, Point::ZERO);
+
+        assert!(!ctx.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::DrawText { text, .. } if text == "Name"
+        )));
+        assert!(ctx.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::DrawText { text, .. } if text == "な"
+        )));
+    }
+
+    #[test]
+    fn commit_inserts_at_caret_and_remains_single_line() {
+        let text = State::new(StateId::new(3), String::from("ac"));
+        let field = TextField::new(text.clone());
+        let mut render_object = TextFieldRenderObject::from_view(&field);
+        render_object.focused = true;
+        render_object.selection = TextSelection::collapsed(1);
+
+        assert!(handle_text_field_text_input(
+            &field,
+            &mut render_object,
+            &Event::TextInputCommit {
+                context_id: 1,
+                serial: 1,
+                text: String::from("b\n"),
+            }
+        ));
+
+        assert_eq!(text.get(), "abc");
+        assert_eq!(render_object.selection, TextSelection::collapsed(2));
+    }
+
+    #[test]
+    fn mouse_single_click_positions_caret() {
+        let field = TextField::new(State::new(StateId::new(4), String::from("abcd")));
+        let mut render_object = TextFieldRenderObject::from_view(&field);
+        render_object.layout(LayoutConstraints::tight(240.0, 32.0));
+
+        assert!(handle_text_field_mouse(
+            &field,
+            &mut render_object,
+            &MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: text_x("ab"),
+                y: 10,
+                click_count: 1,
+            }
+        ));
+
+        assert_eq!(render_object.selection, TextSelection::collapsed(2));
+        assert!(render_object.is_focused());
+        assert!(render_object.dragging);
+    }
+
+    #[test]
+    fn mouse_drag_extends_selection_and_release_clears_dragging() {
+        let field = TextField::new(State::new(StateId::new(5), String::from("abcdef")));
+        let mut render_object = TextFieldRenderObject::from_view(&field);
+        render_object.layout(LayoutConstraints::tight(240.0, 32.0));
+
+        assert!(handle_text_field_mouse(
+            &field,
+            &mut render_object,
+            &MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: text_x("a"),
+                y: 10,
+                click_count: 1,
+            }
+        ));
+        let anchor = render_object.selection.anchor;
+
+        assert!(handle_text_field_mouse(
+            &field,
+            &mut render_object,
+            &MouseEvent::Moved {
+                x: text_x("abcd"),
+                y: 10,
+            }
+        ));
+
+        assert_eq!(render_object.selection.anchor, anchor);
+        assert_eq!(render_object.selection.caret.byte, 4);
+
+        assert!(handle_text_field_mouse(
+            &field,
+            &mut render_object,
+            &MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: text_x("abcd"),
+                y: 10,
+                click_count: 1,
+            }
+        ));
+        assert!(!render_object.dragging);
+    }
+
+    #[test]
+    fn mouse_double_click_selects_word() {
+        let field = TextField::new(State::new(StateId::new(6), String::from("hello world")));
+        let mut render_object = TextFieldRenderObject::from_view(&field);
+        render_object.layout(LayoutConstraints::tight(240.0, 32.0));
+
+        assert!(handle_text_field_mouse(
+            &field,
+            &mut render_object,
+            &MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: text_x("hello wo"),
+                y: 10,
+                click_count: 2,
+            }
+        ));
+
+        assert_eq!(render_object.selection.anchor.byte, "hello ".len());
+        assert_eq!(render_object.selection.caret.byte, "hello world".len());
+    }
+
+    fn text_x(prefix: &str) -> i32 {
+        (8.0 + crate::graphics::measure_text_sized(prefix, 14.0).0 as f32) as i32
     }
 }

@@ -96,7 +96,10 @@ pub fn paint_text_view(
         origin,
         layout,
         document,
+        selection,
+        focused,
         placeholder,
+        preedit,
         text_color,
         placeholder_color,
         font_size,
@@ -219,12 +222,15 @@ fn paint_visible_text(
     origin: Point,
     layout: &TextViewLayout,
     document: &TextDocument,
+    selection: TextSelection,
+    focused: bool,
     placeholder: &str,
+    preedit: &str,
     text_color: Color,
     placeholder_color: Color,
     font_size: f32,
 ) {
-    if document.len() == 0 && !placeholder.is_empty() {
+    if document.len() == 0 && preedit.is_empty() && !placeholder.is_empty() {
         if let Some(line) = layout.visual_lines.first() {
             ctx.draw_text(
                 Point::new(origin.x + line.x, origin.y + line.y),
@@ -236,9 +242,51 @@ fn paint_visible_text(
         return;
     }
     for line in visible_lines(layout) {
+        if focused && !preedit.is_empty() && line.contains_byte(selection.caret.byte) {
+            paint_line_with_preedit_gap(
+                ctx,
+                origin,
+                line,
+                selection.caret,
+                preedit,
+                text_color,
+                font_size,
+            );
+            continue;
+        }
         ctx.draw_text(
             Point::new(origin.x + line.x, origin.y + line.y),
             line.text(),
+            text_color,
+            font_size,
+        );
+    }
+}
+
+fn paint_line_with_preedit_gap(
+    ctx: &mut PaintContext,
+    origin: Point,
+    line: &VisualLine,
+    position: TextPosition,
+    preedit: &str,
+    text_color: Color,
+    font_size: f32,
+) {
+    let display_byte = line.display_byte_for_document_byte(position.byte);
+    let (prefix, suffix) = split_at_char_boundary(line.text(), display_byte);
+    let x = origin.x + line.x;
+    let y = origin.y + line.y;
+
+    if !prefix.is_empty() {
+        ctx.draw_text(Point::new(x, y), prefix, text_color, font_size);
+    }
+
+    let prefix_width = graphics::measure_text_sized(prefix, font_size).0 as f32;
+    let preedit_width = graphics::measure_text_sized(preedit, font_size).0 as f32;
+    if !suffix.is_empty() {
+        ctx.draw_text(
+            Point::new(x + prefix_width + preedit_width, y),
+            suffix,
             text_color,
             font_size,
         );
@@ -400,4 +448,12 @@ fn clamp_str_prefix(text: &str, byte: usize) -> &str {
         byte -= 1;
     }
     &text[..byte]
+}
+
+fn split_at_char_boundary(text: &str, byte: usize) -> (&str, &str) {
+    let mut byte = byte.min(text.len());
+    while byte > 0 && !text.is_char_boundary(byte) {
+        byte -= 1;
+    }
+    text.split_at(byte)
 }
