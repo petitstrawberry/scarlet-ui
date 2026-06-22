@@ -258,6 +258,40 @@ pub trait ViewExt: View {
     {
         crate::views::modifiers::Clip::new(self, radius)
     }
+
+    /// Draw a sharp border over this view.
+    ///
+    /// The border is painted on top of the view and kept inside its bounds. It
+    /// is separate from clipping: use `.clip_radius()` together with
+    /// `.border_rounded()` for a rounded view with a matching border.
+    ///
+    /// # Arguments
+    /// * `color` - Border color
+    /// * `width` - Border width
+    fn border(self, color: crate::color::Color, width: f32) -> crate::views::modifiers::Border<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::Border::new(self, color, width)
+    }
+
+    /// Draw a rounded border over this view.
+    ///
+    /// # Arguments
+    /// * `color` - Border color
+    /// * `width` - Border width
+    /// * `radius` - Corner radius
+    fn border_rounded(
+        self,
+        color: crate::color::Color,
+        width: f32,
+        radius: f32,
+    ) -> crate::views::modifiers::Border<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::Border::with_corner_radius(self, color, width, radius)
+    }
 }
 
 /// Blanket implementation of ViewExt for all View types
