@@ -765,25 +765,27 @@ impl CpuPaintRenderer {
                     stroke_width,
                     color,
                 } => {
-                    let _ = stroke_width.max(1.0);
+                    let scaled_width = self.scale_f32(stroke_width.max(1.0));
                     let scaled: Vec<Point> =
                         path.iter().copied().map(|p| self.scale_point(p)).collect();
                     match self.effective_clip_rects(damage_rects) {
                         EffectiveClipRects::Unclipped => {
                             for window in scaled.windows(2) {
-                                draw_line_clipped(
+                                draw_thick_line_clipped(
                                     self.current_buffer_mut(),
                                     window[0],
                                     window[1],
+                                    scaled_width,
                                     *color,
                                     None,
                                 );
                             }
                             if scaled.len() > 2 {
-                                draw_line_clipped(
+                                draw_thick_line_clipped(
                                     self.current_buffer_mut(),
                                     scaled[scaled.len() - 1],
                                     scaled[0],
+                                    scaled_width,
                                     *color,
                                     None,
                                 );
@@ -794,19 +796,21 @@ impl CpuPaintRenderer {
                             for clip_rect in rects {
                                 let clip = self.scale_rect(clip_rect);
                                 for window in scaled.windows(2) {
-                                    draw_line_clipped(
+                                    draw_thick_line_clipped(
                                         self.current_buffer_mut(),
                                         window[0],
                                         window[1],
+                                        scaled_width,
                                         *color,
                                         Some(clip),
                                     );
                                 }
                                 if scaled.len() > 2 {
-                                    draw_line_clipped(
+                                    draw_thick_line_clipped(
                                         self.current_buffer_mut(),
                                         scaled[scaled.len() - 1],
                                         scaled[0],
+                                        scaled_width,
                                         *color,
                                         Some(clip),
                                     );
@@ -1149,6 +1153,67 @@ fn draw_line_clipped(
             y0 += sy;
         }
     }
+}
+
+/// Draws a line segment with a physical-pixel `width`.
+///
+/// `width <= 1.0` falls back to the crisp single-pixel [`draw_line_clipped`].
+/// Thicker strokes rasterize an oriented quad with square caps via
+/// [`fill_polygon`]; the quad is extended by `half_w` along the segment
+/// direction so neighbouring segments in a path overlap and leave no gaps.
+fn draw_thick_line_clipped(
+    buffer: &mut Buffer,
+    from: Point,
+    to: Point,
+    width: f32,
+    color: Color,
+    clip: Option<Rect>,
+) {
+    if color.a <= 0.0 || width <= 0.0 {
+        return;
+    }
+    if width <= 1.0 {
+        draw_line_clipped(buffer, from, to, color, clip);
+        return;
+    }
+
+    let half_w = width / 2.0;
+    let clip_region =
+        clip.map(|rect| ClipRegion { rect, corner_radius: 0.0 });
+
+    let dx = to.x - from.x;
+    let dy = to.y - from.y;
+    let len = libm::sqrtf(dx * dx + dy * dy);
+
+    if len < 0.001 {
+        let quad = [
+            Point::new(from.x - half_w, from.y - half_w),
+            Point::new(from.x + half_w, from.y - half_w),
+            Point::new(from.x + half_w, from.y + half_w),
+            Point::new(from.x - half_w, from.y + half_w),
+        ];
+        fill_polygon(buffer, &quad, color, clip_region);
+        return;
+    }
+
+    let inv_len = 1.0 / len;
+    let dirx = dx * inv_len;
+    let diry = dy * inv_len;
+    let nx = -diry;
+    let ny = dirx;
+
+    let start_x = from.x - dirx * half_w;
+    let start_y = from.y - diry * half_w;
+    let end_x = to.x + dirx * half_w;
+    let end_y = to.y + diry * half_w;
+
+    let quad = [
+        Point::new(start_x + nx * half_w, start_y + ny * half_w),
+        Point::new(end_x + nx * half_w, end_y + ny * half_w),
+        Point::new(end_x - nx * half_w, end_y - ny * half_w),
+        Point::new(start_x - nx * half_w, start_y - ny * half_w),
+    ];
+    fill_polygon(buffer, &quad, color, clip_region);
 }
 
 fn blend_pixel(buffer: &mut Buffer, x: i32, y: i32, color: Color) {
@@ -1606,6 +1671,43 @@ mod tests {
         let bg_pixel = bg.to_bgra();
         assert_eq!(r.buffer().get_pixel(10, 5).unwrap(), bg_pixel);
         assert_eq!(r.buffer().get_pixel(5, 10).unwrap(), bg_pixel);
+    }
+
+    #[test]
+    fn stroke_path_honors_stroke_width() {
+        let bg = Color::rgb(0, 0, 0);
+        let stroke = Color::rgb(255, 0, 0);
+        let mut ctx = PaintContext::new();
+        ctx.draw_line(Point::new(2.0, 5.0), Point::new(8.0, 5.0), 4.0, stroke);
+        let mut r = CpuPaintRenderer::new(Size::new(20.0, 20.0), 1000, bg);
+        r.execute(&ctx);
+
+        let bg_pixel = bg.to_bgra();
+        let stroke_pixel = stroke.to_bgra();
+        assert_eq!(r.buffer().get_pixel(5, 2).unwrap(), bg_pixel);
+        assert_eq!(r.buffer().get_pixel(5, 3).unwrap(), stroke_pixel);
+        assert_eq!(r.buffer().get_pixel(5, 4).unwrap(), stroke_pixel);
+        assert_eq!(r.buffer().get_pixel(5, 5).unwrap(), stroke_pixel);
+        assert_eq!(r.buffer().get_pixel(5, 6).unwrap(), stroke_pixel);
+        assert_eq!(r.buffer().get_pixel(5, 7).unwrap(), bg_pixel);
+    }
+
+    #[test]
+    fn stroke_path_scales_width_with_scale_factor() {
+        let bg = Color::rgb(0, 0, 0);
+        let stroke = Color::rgb(255, 0, 0);
+
+        let mut ctx = PaintContext::new();
+        ctx.draw_line(Point::new(2.0, 5.0), Point::new(8.0, 5.0), 1.0, stroke);
+        let mut r = CpuPaintRenderer::new(Size::new(40.0, 40.0), 2000, bg);
+        r.execute(&ctx);
+
+        let bg_pixel = bg.to_bgra();
+        let stroke_pixel = stroke.to_bgra();
+        assert_eq!(r.buffer().get_pixel(10, 8).unwrap(), bg_pixel);
+        assert_eq!(r.buffer().get_pixel(10, 9).unwrap(), stroke_pixel);
+        assert_eq!(r.buffer().get_pixel(10, 10).unwrap(), stroke_pixel);
+        assert_eq!(r.buffer().get_pixel(10, 11).unwrap(), bg_pixel);
     }
 
     #[test]
