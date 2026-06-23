@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["std", "platform-sws"]
+default = ["std"]
 legacy-scarlet-std = [
     "scarlet-ui-core/legacy-scarlet-std",
     "scarlet-ui-platform-sws?/legacy-scarlet-std",
