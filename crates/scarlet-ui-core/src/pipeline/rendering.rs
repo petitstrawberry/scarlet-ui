@@ -6,9 +6,8 @@
 #![allow(deprecated)]
 
 use crate::buffer::Buffer;
-use crate::color::Color;
 use crate::compositor::DamageRect;
-use crate::element::{Element, ElementId, ElementTree, LayoutConstraints, ScrollLayerInfo};
+use crate::element::{Element, ElementId, ElementTree, LayoutConstraints};
 use crate::event::EventDispatcher;
 use crate::geometry::{Point, Rect, Size};
 use crate::pipeline::{PipelineId, PipelineOwner};
@@ -16,63 +15,9 @@ use crate::renderer::{CpuPaintRenderer, CpuRenderer, FrameSize, PaintContext};
 use crate::views::WindowInfo;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 const MAX_PRESENT_DAMAGE_RECTS: usize = 4;
-const SCROLL_LAYER_TILE_SIZE: f32 = 512.0;
-const MAX_SCROLL_LAYER_TILES: usize = 96;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct ScrollTileKey {
-    x: i32,
-    y: i32,
-}
-
-struct ScrollTile {
-    rect: Rect,
-    buffer: Arc<Buffer>,
-    last_used: u64,
-}
-
-struct ScrollLayerCache {
-    scale_milli: u32,
-    viewport_size: Size,
-    content_size: Size,
-    tile_size: f32,
-    tiles: BTreeMap<ScrollTileKey, ScrollTile>,
-}
-
-impl ScrollLayerCache {
-    fn new(info: ScrollLayerInfo, scale_milli: u32) -> Self {
-        Self {
-            scale_milli,
-            viewport_size: info.viewport_size,
-            content_size: info.content_size,
-            tile_size: SCROLL_LAYER_TILE_SIZE,
-            tiles: BTreeMap::new(),
-        }
-    }
-
-    fn matches(&self, info: ScrollLayerInfo, scale_milli: u32) -> bool {
-        self.scale_milli == scale_milli
-            && self.viewport_size == info.viewport_size
-            && self.content_size == info.content_size
-            && (self.tile_size - SCROLL_LAYER_TILE_SIZE).abs() < 0.001
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct PaintFrameStats {
-    elements_visited: usize,
-    elements_painted: usize,
-    command_count: usize,
-    scroll_layers: usize,
-    scroll_tile_hits: usize,
-    scroll_tile_misses: usize,
-    scroll_tiles_invalidated: usize,
-    scroll_tiles_evicted: usize,
-}
 
 /// RenderingPipeline integrates all components of the rendering system
 pub struct RenderingPipeline {
@@ -88,9 +33,6 @@ pub struct RenderingPipeline {
     paint_needs_full: bool,
     paint_background_color: Option<crate::color::Color>,
     paint_enabled: bool,
-    scroll_layers: BTreeMap<ElementId, ScrollLayerCache>,
-    paint_frame_seq: u64,
-    last_paint_stats: PaintFrameStats,
 }
 
 impl RenderingPipeline {
@@ -114,9 +56,6 @@ impl RenderingPipeline {
             paint_needs_full: true,
             paint_background_color: None,
             paint_enabled: true,
-            scroll_layers: BTreeMap::new(),
-            paint_frame_seq: 0,
-            last_paint_stats: PaintFrameStats::default(),
         }
     }
 
@@ -139,9 +78,6 @@ impl RenderingPipeline {
         self.paint_damage = None;
         self.paint_needs_full = true;
         self.paint_background_color = None;
-        self.scroll_layers.clear();
-        self.paint_frame_seq = 0;
-        self.last_paint_stats = PaintFrameStats::default();
     }
 
     /// Set the output scale in milli-units.
@@ -161,7 +97,6 @@ impl RenderingPipeline {
         self.last_paint_bounds.clear();
         self.paint_damage = None;
         self.paint_needs_full = true;
-        self.scroll_layers.clear();
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
         }
@@ -317,7 +252,6 @@ impl RenderingPipeline {
         self.last_paint_bounds.clear();
         self.paint_damage = None;
         self.paint_needs_full = true;
-        self.scroll_layers.clear();
 
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
@@ -398,45 +332,16 @@ impl RenderingPipeline {
 
         self.paint_damage = present_damage;
 
-        self.paint_frame_seq = self.paint_frame_seq.wrapping_add(1);
-
         let mut ctx = PaintContext::new();
         let damage_clip = dirty_rects.as_deref();
-        let dirty_set: BTreeSet<ElementId> = dirty_ids.iter().copied().collect();
-        let mut stats = PaintFrameStats::default();
         let any_painted = if let Some(root) = self.element_tree.root() {
-            let mut walker = PaintWalker {
-                scroll_layers: &mut self.scroll_layers,
-                last_paint_bounds: &self.last_paint_bounds,
-                dirty_set: &dirty_set,
-                frame_seq: self.paint_frame_seq,
-                scale_milli: self.scale_milli,
-                stats: &mut stats,
-            };
-            let base_painted =
-                walker.walk_and_paint(&mut ctx, root, Point::ZERO, damage_clip, false);
+            let base_painted = Self::walk_and_paint(&mut ctx, root, Point::ZERO, damage_clip);
             let overlay_painted =
                 Self::paint_select_overlays(&mut ctx, root, Point::ZERO, damage_clip);
             base_painted || overlay_painted
         } else {
             false
         };
-        stats.command_count = ctx.commands().len();
-
-        if crate::debug::is_enabled() {
-            crate::logln!(
-                "[Paint] visited={} painted={} commands={} scroll_layers={} tile_hits={} tile_misses={} invalidated={} evicted={}",
-                stats.elements_visited,
-                stats.elements_painted,
-                stats.command_count,
-                stats.scroll_layers,
-                stats.scroll_tile_hits,
-                stats.scroll_tile_misses,
-                stats.scroll_tiles_invalidated,
-                stats.scroll_tiles_evicted,
-            );
-        }
-        self.last_paint_stats = stats;
 
         if force_full || any_painted {
             let pr = self.paint_renderer.as_mut().unwrap();
@@ -453,6 +358,44 @@ impl RenderingPipeline {
 
         let pr = self.paint_renderer.as_ref().unwrap();
         Some(pr.buffer())
+    }
+
+    fn walk_and_paint<'a>(
+        ctx: &mut PaintContext<'a>,
+        element: &'a dyn Element,
+        origin: Point,
+        damage_rects: Option<&[Rect]>,
+    ) -> bool {
+        let abs = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+        let paint_bounds = Self::element_paint_bounds(element, abs);
+        let should_paint_self = damage_rects
+            .map(|rects| Self::overlaps_any(paint_bounds, rects))
+            .unwrap_or(true);
+        let mut painted = should_paint_self && Self::paint_element_self(ctx, element, abs);
+        let clip = Self::clip_for_element(element, abs);
+
+        if let Some((rect, radius)) = clip {
+            ctx.push_rounded_clip(rect, radius);
+        }
+
+        for child in element.children() {
+            if Self::walk_and_paint(ctx, child.as_ref(), abs, damage_rects) {
+                painted = true;
+            }
+        }
+
+        if Self::paint_element_overlay(ctx, element, abs) {
+            painted = true;
+        }
+
+        if clip.is_some() {
+            ctx.pop_clip();
+        }
+
+        painted
     }
 
     fn paint_select_overlays<'a>(
@@ -826,424 +769,6 @@ impl RenderingPipeline {
     }
 }
 
-struct PaintWalker<'a> {
-    scroll_layers: &'a mut BTreeMap<ElementId, ScrollLayerCache>,
-    last_paint_bounds: &'a BTreeMap<ElementId, Rect>,
-    dirty_set: &'a BTreeSet<ElementId>,
-    frame_seq: u64,
-    scale_milli: u32,
-    stats: &'a mut PaintFrameStats,
-}
-
-impl<'a> PaintWalker<'a> {
-    fn walk_and_paint<'p>(
-        &mut self,
-        ctx: &mut PaintContext<'p>,
-        element: &'p dyn Element,
-        origin: Point,
-        damage_rects: Option<&[Rect]>,
-        ancestor_dirty: bool,
-    ) -> bool {
-        self.stats.elements_visited += 1;
-
-        let abs = Point::new(
-            origin.x + element.position().x,
-            origin.y + element.position().y,
-        );
-        let paint_bounds = RenderingPipeline::element_paint_bounds(element, abs);
-        let should_paint_self = damage_rects
-            .map(|rects| RenderingPipeline::overlaps_any(paint_bounds, rects))
-            .unwrap_or(true);
-        let element_dirty = self.dirty_set.contains(&element.id());
-
-        if let Some(info) = element
-            .render_object()
-            .and_then(|render_object| render_object.scroll_layer_info())
-            && !element.children().is_empty()
-        {
-            if !should_paint_self {
-                return false;
-            }
-            return self.paint_scroll_layer(ctx, element, abs, info, damage_rects, ancestor_dirty);
-        }
-
-        let mut painted =
-            should_paint_self && RenderingPipeline::paint_element_self(ctx, element, abs);
-        let clip = RenderingPipeline::clip_for_element(element, abs);
-
-        if let Some((rect, radius)) = clip {
-            ctx.push_rounded_clip(rect, radius);
-        }
-
-        for child in element.children() {
-            if self.walk_and_paint(
-                ctx,
-                child.as_ref(),
-                abs,
-                damage_rects,
-                ancestor_dirty || element_dirty,
-            ) {
-                painted = true;
-            }
-        }
-
-        if RenderingPipeline::paint_element_overlay(ctx, element, abs) {
-            painted = true;
-        }
-
-        if clip.is_some() {
-            ctx.pop_clip();
-        }
-
-        if painted {
-            self.stats.elements_painted += 1;
-        }
-        painted
-    }
-
-    fn paint_scroll_layer<'p>(
-        &mut self,
-        ctx: &mut PaintContext<'p>,
-        element: &'p dyn Element,
-        abs: Point,
-        info: ScrollLayerInfo,
-        damage_rects: Option<&[Rect]>,
-        ancestor_dirty: bool,
-    ) -> bool {
-        self.stats.scroll_layers += 1;
-        self.reset_scroll_layer_if_needed(element.id(), info);
-        self.invalidate_scroll_layer_tiles(element, abs, info, ancestor_dirty);
-
-        let mut painted = RenderingPipeline::paint_element_self(ctx, element, abs);
-        let clip = RenderingPipeline::clip_for_element(element, abs);
-        if let Some((rect, radius)) = clip {
-            ctx.push_rounded_clip(rect, radius);
-        }
-
-        if self.paint_scroll_tiles(ctx, element, abs, info, damage_rects, ancestor_dirty) {
-            painted = true;
-        }
-
-        if RenderingPipeline::paint_element_overlay(ctx, element, abs) {
-            painted = true;
-        }
-
-        if clip.is_some() {
-            ctx.pop_clip();
-        }
-
-        if painted {
-            self.stats.elements_painted += 1;
-        }
-        painted
-    }
-
-    fn reset_scroll_layer_if_needed(&mut self, id: ElementId, info: ScrollLayerInfo) {
-        let needs_reset = match self.scroll_layers.get(&id) {
-            Some(cache) => !cache.matches(info, self.scale_milli),
-            None => true,
-        };
-        if !needs_reset {
-            return;
-        }
-        if let Some(cache) = self.scroll_layers.get(&id) {
-            self.stats.scroll_tiles_invalidated += cache.tiles.len();
-        }
-        self.scroll_layers
-            .insert(id, ScrollLayerCache::new(info, self.scale_milli));
-    }
-
-    fn invalidate_scroll_layer_tiles(
-        &mut self,
-        element: &dyn Element,
-        abs: Point,
-        info: ScrollLayerInfo,
-        ancestor_dirty: bool,
-    ) {
-        if ancestor_dirty {
-            let Some(cache) = self.scroll_layers.get_mut(&element.id()) else {
-                return;
-            };
-            self.stats.scroll_tiles_invalidated += cache.tiles.len();
-            cache.tiles.clear();
-            return;
-        }
-
-        let mut dirty_content_rects = Vec::new();
-        for child in element.children() {
-            self.collect_dirty_content_rects(
-                child.as_ref(),
-                abs,
-                abs,
-                info.offset,
-                &mut dirty_content_rects,
-            );
-        }
-        if dirty_content_rects.is_empty() {
-            return;
-        }
-
-        let Some(cache) = self.scroll_layers.get_mut(&element.id()) else {
-            return;
-        };
-        let remove_keys: Vec<ScrollTileKey> = cache
-            .tiles
-            .iter()
-            .filter_map(|(key, tile)| {
-                dirty_content_rects
-                    .iter()
-                    .any(|dirty| tile.rect.overlaps(dirty))
-                    .then_some(*key)
-            })
-            .collect();
-        self.stats.scroll_tiles_invalidated += remove_keys.len();
-        for key in remove_keys {
-            cache.tiles.remove(&key);
-        }
-    }
-
-    fn collect_dirty_content_rects(
-        &self,
-        element: &dyn Element,
-        origin: Point,
-        scroll_abs: Point,
-        scroll_offset: Point,
-        rects: &mut Vec<Rect>,
-    ) {
-        let abs = Point::new(
-            origin.x + element.position().x,
-            origin.y + element.position().y,
-        );
-
-        if self.dirty_set.contains(&element.id()) {
-            let current = RenderingPipeline::element_paint_bounds(element, abs);
-            rects.push(Self::window_rect_to_content(
-                current,
-                scroll_abs,
-                scroll_offset,
-            ));
-            if let Some(old) = self.last_paint_bounds.get(&element.id()) {
-                rects.push(Self::window_rect_to_content(
-                    *old,
-                    scroll_abs,
-                    scroll_offset,
-                ));
-            }
-        }
-
-        for child in element.children() {
-            self.collect_dirty_content_rects(child.as_ref(), abs, scroll_abs, scroll_offset, rects);
-        }
-    }
-
-    fn window_rect_to_content(rect: Rect, scroll_abs: Point, scroll_offset: Point) -> Rect {
-        Rect::from_xywh(
-            rect.origin.x - scroll_abs.x + scroll_offset.x,
-            rect.origin.y - scroll_abs.y + scroll_offset.y,
-            rect.size.width,
-            rect.size.height,
-        )
-    }
-
-    fn paint_scroll_tiles<'p>(
-        &mut self,
-        ctx: &mut PaintContext<'p>,
-        element: &'p dyn Element,
-        abs: Point,
-        info: ScrollLayerInfo,
-        damage_rects: Option<&[Rect]>,
-        ancestor_dirty: bool,
-    ) -> bool {
-        let Some(visible_content) = Self::visible_content_rect(info) else {
-            return false;
-        };
-
-        let mut painted = false;
-        let (start_x, start_y, end_x, end_y) = Self::visible_tile_range(visible_content);
-        for y in start_y..=end_y {
-            for x in start_x..=end_x {
-                let key = ScrollTileKey { x, y };
-                let Some(tile_rect) = Self::tile_rect(key, info.content_size) else {
-                    continue;
-                };
-                let Some(intersection) = Self::intersect_rects(tile_rect, visible_content) else {
-                    continue;
-                };
-                let dst = Rect::from_xywh(
-                    abs.x + intersection.origin.x - info.offset.x,
-                    abs.y + intersection.origin.y - info.offset.y,
-                    intersection.size.width,
-                    intersection.size.height,
-                );
-                if damage_rects.is_some_and(|rects| !RenderingPipeline::overlaps_any(dst, rects)) {
-                    continue;
-                }
-
-                let buffer = if let Some(buffer) = self.cached_scroll_tile(element.id(), key) {
-                    self.stats.scroll_tile_hits += 1;
-                    buffer
-                } else {
-                    self.stats.scroll_tile_misses += 1;
-                    let rendered =
-                        self.render_scroll_tile(element, info, tile_rect, ancestor_dirty);
-                    self.insert_scroll_tile(element.id(), key, tile_rect, rendered.clone());
-                    rendered
-                };
-
-                let src = Rect::from_xywh(
-                    intersection.origin.x - tile_rect.origin.x,
-                    intersection.origin.y - tile_rect.origin.y,
-                    intersection.size.width,
-                    intersection.size.height,
-                );
-                ctx.draw_buffer_rect_shared(dst, src, buffer, 1.0);
-                painted = true;
-            }
-        }
-        painted
-    }
-
-    fn visible_content_rect(info: ScrollLayerInfo) -> Option<Rect> {
-        let width = info
-            .viewport_size
-            .width
-            .min((info.content_size.width - info.offset.x).max(0.0));
-        let height = info
-            .viewport_size
-            .height
-            .min((info.content_size.height - info.offset.y).max(0.0));
-        (width > 0.0 && height > 0.0).then(|| {
-            Rect::from_xywh(
-                info.offset.x.max(0.0),
-                info.offset.y.max(0.0),
-                width,
-                height,
-            )
-        })
-    }
-
-    fn visible_tile_range(rect: Rect) -> (i32, i32, i32, i32) {
-        let start_x = libm::floorf(rect.left() / SCROLL_LAYER_TILE_SIZE) as i32;
-        let start_y = libm::floorf(rect.top() / SCROLL_LAYER_TILE_SIZE) as i32;
-        let end_x = libm::floorf((rect.right() - 0.001) / SCROLL_LAYER_TILE_SIZE) as i32;
-        let end_y = libm::floorf((rect.bottom() - 0.001) / SCROLL_LAYER_TILE_SIZE) as i32;
-        (start_x, start_y, end_x, end_y)
-    }
-
-    fn tile_rect(key: ScrollTileKey, content_size: Size) -> Option<Rect> {
-        let x = key.x as f32 * SCROLL_LAYER_TILE_SIZE;
-        let y = key.y as f32 * SCROLL_LAYER_TILE_SIZE;
-        let width = (content_size.width - x).min(SCROLL_LAYER_TILE_SIZE);
-        let height = (content_size.height - y).min(SCROLL_LAYER_TILE_SIZE);
-        (width > 0.0 && height > 0.0).then(|| Rect::from_xywh(x, y, width, height))
-    }
-
-    fn intersect_rects(a: Rect, b: Rect) -> Option<Rect> {
-        let left = a.left().max(b.left());
-        let top = a.top().max(b.top());
-        let right = a.right().min(b.right());
-        let bottom = a.bottom().min(b.bottom());
-        (right > left && bottom > top)
-            .then(|| Rect::from_xywh(left, top, right - left, bottom - top))
-    }
-
-    fn cached_scroll_tile(&mut self, id: ElementId, key: ScrollTileKey) -> Option<Arc<Buffer>> {
-        let cache = self.scroll_layers.get_mut(&id)?;
-        let tile = cache.tiles.get_mut(&key)?;
-        tile.last_used = self.frame_seq;
-        Some(tile.buffer.clone())
-    }
-
-    fn insert_scroll_tile(
-        &mut self,
-        id: ElementId,
-        key: ScrollTileKey,
-        rect: Rect,
-        buffer: Arc<Buffer>,
-    ) {
-        let cache = self
-            .scroll_layers
-            .entry(id)
-            .or_insert_with(|| ScrollLayerCache {
-                scale_milli: self.scale_milli,
-                viewport_size: Size::ZERO,
-                content_size: Size::ZERO,
-                tile_size: SCROLL_LAYER_TILE_SIZE,
-                tiles: BTreeMap::new(),
-            });
-        cache.tiles.insert(
-            key,
-            ScrollTile {
-                rect,
-                buffer,
-                last_used: self.frame_seq,
-            },
-        );
-        self.evict_scroll_tiles(id);
-    }
-
-    fn evict_scroll_tiles(&mut self, id: ElementId) {
-        let Some(cache) = self.scroll_layers.get_mut(&id) else {
-            return;
-        };
-        while cache.tiles.len() > MAX_SCROLL_LAYER_TILES {
-            let Some(remove_key) = cache
-                .tiles
-                .iter()
-                .min_by_key(|(_, tile)| tile.last_used)
-                .map(|(key, _)| *key)
-            else {
-                break;
-            };
-            cache.tiles.remove(&remove_key);
-            self.stats.scroll_tiles_evicted += 1;
-        }
-    }
-
-    fn render_scroll_tile(
-        &mut self,
-        element: &dyn Element,
-        info: ScrollLayerInfo,
-        tile_rect: Rect,
-        ancestor_dirty: bool,
-    ) -> Arc<Buffer> {
-        let mut tile_ctx = PaintContext::new();
-        let tile_damage = [Rect::from_xywh(
-            0.0,
-            0.0,
-            tile_rect.size.width,
-            tile_rect.size.height,
-        )];
-        let child_origin = Point::new(
-            info.offset.x - tile_rect.origin.x,
-            info.offset.y - tile_rect.origin.y,
-        );
-
-        for child in element.children() {
-            self.walk_and_paint(
-                &mut tile_ctx,
-                child.as_ref(),
-                child_origin,
-                Some(&tile_damage),
-                ancestor_dirty,
-            );
-        }
-        for child in element.children() {
-            RenderingPipeline::paint_select_overlays(
-                &mut tile_ctx,
-                child.as_ref(),
-                child_origin,
-                Some(&tile_damage),
-            );
-        }
-
-        let mut renderer =
-            CpuPaintRenderer::new(tile_rect.size, self.scale_milli, Color::TRANSPARENT);
-        renderer.execute(&tile_ctx);
-        Arc::new(renderer.into_buffer())
-    }
-}
-
 impl Drop for RenderingPipeline {
     fn drop(&mut self) {
         self.teardown();
@@ -1257,29 +782,11 @@ impl Default for RenderingPipeline {
 }
 
 #[cfg(test)]
-impl RenderingPipeline {
-    fn last_paint_stats(&self) -> PaintFrameStats {
-        self.last_paint_stats
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::event::{Event, MouseEvent, ScrollSource, WheelPhase};
     use crate::view::View;
     use crate::views::{LazyVStack, ScrollView, Text};
-
-    fn scroll_pipeline() -> RenderingPipeline {
-        let mut pipeline = RenderingPipeline::new();
-        let root = ScrollView::new(Text::new("content"))
-            .content_size(800.0, 2_000.0)
-            .wheel_sensitivity(1.0)
-            .create_element();
-        pipeline.set_root(root);
-        pipeline.layout_initial();
-        pipeline
-    }
 
     #[test]
     fn present_damage_keeps_large_partial_region() {
@@ -1302,49 +809,6 @@ mod tests {
         );
 
         assert_eq!(damage, None);
-    }
-
-    #[test]
-    fn scroll_view_reuses_cached_tiles_when_only_offset_changes() {
-        let mut pipeline = scroll_pipeline();
-
-        pipeline.render_with_damage();
-        let first = pipeline.last_paint_stats();
-        assert!(first.scroll_layers > 0);
-        assert!(first.scroll_tile_misses > 0);
-
-        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
-            delta_x: 0,
-            delta_y: 20,
-            x: 10,
-            y: 10,
-            phase: WheelPhase::Moved,
-            source: ScrollSource::Wheel,
-        })));
-        pipeline.render_with_damage();
-        let scrolled = pipeline.last_paint_stats();
-
-        assert!(scrolled.scroll_tile_hits > 0);
-        assert_eq!(scrolled.scroll_tile_misses, 0);
-    }
-
-    #[test]
-    fn scroll_view_invalidates_tiles_for_dirty_descendants() {
-        let mut pipeline = scroll_pipeline();
-        pipeline.render_with_damage();
-
-        let child_id = pipeline
-            .element_tree()
-            .root()
-            .and_then(|root| root.children().first())
-            .map(|child| child.id())
-            .expect("scroll view should have a child");
-        pipeline.pipeline_owner_mut().mark_needs_paint(child_id);
-        pipeline.render_with_damage();
-        let stats = pipeline.last_paint_stats();
-
-        assert!(stats.scroll_tiles_invalidated > 0);
-        assert!(stats.scroll_tile_misses > 0);
     }
 
     #[test]

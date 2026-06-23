@@ -5,9 +5,7 @@
 //! elements, hit testing, and event behavior.
 
 use crate::color::{Color, ColorPalette};
-use crate::element::{
-    Element, ElementRenderObject, LayoutConstraints, RenderElement, ScrollLayerInfo,
-};
+use crate::element::{Element, ElementRenderObject, LayoutConstraints, RenderElement};
 use crate::event::{Event, MouseEvent, Phase, WheelPhase};
 use crate::geometry::{Point, Rect, Size};
 use crate::renderer::PaintContext;
@@ -850,14 +848,6 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
 
     fn clip_bounds(&self, origin: Point) -> Option<(Rect, f32)> {
         Some((Rect::new(origin, self.viewport_size), 0.0))
-    }
-
-    fn scroll_layer_info(&self) -> Option<ScrollLayerInfo> {
-        Some(ScrollLayerInfo {
-            viewport_size: self.viewport_size,
-            content_size: self.content_size,
-            offset: Point::new(self.offset_x, self.offset_y),
-        })
     }
 
     fn captures_wheel_event(&self, event: &MouseEvent) -> bool {
