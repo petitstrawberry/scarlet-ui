@@ -25,6 +25,17 @@ pub struct Buffer {
 }
 
 impl Buffer {
+    pub(crate) fn empty() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            logical_width: 0,
+            logical_height: 0,
+            scale_milli: 1,
+            data: Vec::new(),
+        }
+    }
+
     /// Create a new buffer with the given size
     pub fn new(size: Size) -> Self {
         let width = size.width as u32;
@@ -77,6 +88,23 @@ impl Buffer {
             scale_milli,
             data: vec![0; (width * height) as usize],
         }
+    }
+
+    pub(crate) fn resize_logical_dimensions_with_scale(
+        &mut self,
+        logical_width: u32,
+        logical_height: u32,
+        scale_milli: u32,
+    ) {
+        let scale_milli = scale_milli.max(1);
+        let width = Self::scale_len(logical_width, scale_milli);
+        let height = Self::scale_len(logical_height, scale_milli);
+        self.width = width;
+        self.height = height;
+        self.logical_width = logical_width;
+        self.logical_height = logical_height;
+        self.scale_milli = scale_milli;
+        self.data.resize((width * height) as usize, 0);
     }
 
     fn scale_len(value: u32, scale_milli: u32) -> u32 {

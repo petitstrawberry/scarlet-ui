@@ -240,6 +240,18 @@ pub trait ViewExt: View {
         crate::views::modifiers::Focusable::new(self, focused)
     }
 
+    /// Cache this view's rendered subtree behind a repaint boundary.
+    ///
+    /// Ancestor repaints can reuse the cached subtree and composite it at the
+    /// boundary's current position. Changes inside the boundary invalidate the
+    /// cache and repaint the subtree.
+    fn repaint_boundary(self) -> crate::views::modifiers::RepaintBoundary<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::RepaintBoundary::new(self)
+    }
+
     /// Clip this view to its bounds
     fn clip(self) -> crate::views::modifiers::Clip<Self>
     where

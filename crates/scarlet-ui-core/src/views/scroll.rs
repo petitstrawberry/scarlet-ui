@@ -10,6 +10,7 @@ use crate::event::{Event, MouseEvent, Phase, WheelPhase};
 use crate::geometry::{Point, Rect, Size};
 use crate::renderer::PaintContext;
 use crate::view::View;
+use crate::views::modifiers::RepaintBoundary;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -24,6 +25,7 @@ const DEFAULT_WHEEL_SENSITIVITY: f32 = 0.25;
 const DEFAULT_SCROLLBAR_THICKNESS: f32 = 6.0;
 const DEFAULT_SCROLLBAR_INSET: f32 = 3.0;
 const DEFAULT_SCROLLBAR_MIN_THUMB_LEN: f32 = 24.0;
+const AUTO_REPAINT_BOUNDARY_MAX_PIXELS: u64 = 8_000_000;
 
 /// Scrollable axes for [`ScrollView`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -437,7 +439,12 @@ impl<V: View + Clone + 'static> View for ScrollView<V> {
         Box::new(RenderElement::with_children(
             self.clone(),
             ScrollViewRenderObject::<V>::from_view(self),
-            vec![self.inner.create_element()],
+            vec![
+                RepaintBoundary::new(self.inner.clone())
+                    .max_cache_pixels(AUTO_REPAINT_BOUNDARY_MAX_PIXELS)
+                    .cache_nested_boundaries(false)
+                    .create_element(),
+            ],
         ))
     }
 

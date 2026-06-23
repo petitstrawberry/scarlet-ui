@@ -66,7 +66,8 @@ pub use window::{
 pub use modifiers::{
     AlignmentFrame, AlignmentRenderObject, Background, BackgroundRenderObject, Border,
     BorderRenderObject, Focusable, FocusableRenderObject, Frame, FrameRenderObject, OnKey,
-    OnKeyRenderObject, Padding, PaddingRenderObject, SetSize, SizeRenderObject,
+    OnKeyRenderObject, Padding, PaddingRenderObject, RepaintBoundary, RepaintBoundaryRenderObject,
+    SetSize, SizeRenderObject,
 };
 
 // Re-export containers for convenience

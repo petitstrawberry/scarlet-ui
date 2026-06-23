@@ -9,6 +9,7 @@ mod clip;
 mod events;
 mod frame;
 mod padding;
+mod repaint_boundary;
 mod size;
 
 pub use alignment::{AlignmentFrame, AlignmentRenderObject};
@@ -21,4 +22,5 @@ pub use events::{
 };
 pub use frame::{Frame, FrameRenderObject};
 pub use padding::{Padding, PaddingRenderObject};
+pub use repaint_boundary::{RepaintBoundary, RepaintBoundaryRenderObject};
 pub use size::{SetSize, SizeRenderObject};

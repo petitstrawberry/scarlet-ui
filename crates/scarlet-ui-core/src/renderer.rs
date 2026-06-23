@@ -482,6 +482,26 @@ impl CpuPaintRenderer {
         }
     }
 
+    pub fn execute_into_buffer(
+        buffer: &mut Buffer,
+        background_color: Color,
+        ctx: &PaintContext<'_>,
+        damage_rects: Option<&[Rect]>,
+    ) {
+        let scale_milli = buffer.scale_milli();
+        let mut renderer = Self {
+            buffer: core::mem::replace(buffer, Buffer::empty()),
+            background_color,
+            scale_milli,
+            layer_stack: Vec::new(),
+            layer_pool: Vec::new(),
+            clip_stack: Vec::new(),
+            clip_entries: Vec::new(),
+        };
+        renderer.execute_with_damage(ctx, damage_rects);
+        *buffer = renderer.into_buffer();
+    }
+
     pub fn resize(&mut self, size: Size, scale_milli: u32) {
         self.layer_stack.clear();
         self.layer_pool.clear();

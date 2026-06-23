@@ -75,6 +75,27 @@ pub trait RenderObject: Any {
         false
     }
 
+    /// Return the local bounds of a retained repaint boundary.
+    ///
+    /// The paint pipeline may rasterize this element's descendants into an
+    /// offscreen buffer and reuse that buffer while ancestors move or repaint.
+    fn repaint_boundary_size(&self) -> Option<Size> {
+        None
+    }
+
+    /// Optional physical pixel limit for this repaint boundary cache.
+    ///
+    /// Returning `None` lets the paint pipeline use its default safety limit.
+    fn repaint_boundary_max_cache_pixels(&self) -> Option<u64> {
+        None
+    }
+
+    /// Return whether this repaint boundary should flatten descendant repaint
+    /// boundaries into its own cache.
+    fn repaint_boundary_cache_nested_boundaries(&self) -> bool {
+        true
+    }
+
     /// Get the buffer (for compositing).
     ///
     /// Returns the buffer if this RenderObject has rendered content.

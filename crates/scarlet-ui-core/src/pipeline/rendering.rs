@@ -15,9 +15,19 @@ use crate::renderer::{CpuPaintRenderer, CpuRenderer, FrameSize, PaintContext};
 use crate::views::WindowInfo;
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 const MAX_PRESENT_DAMAGE_RECTS: usize = 4;
+const MAX_REPAINT_BOUNDARY_CACHE_PIXELS: u64 = 16_000_000;
+
+struct PaintCache {
+    buffer: Arc<Buffer>,
+    logical_size: Size,
+    scale_milli: u32,
+    valid: bool,
+    invalidated_by: Option<ElementId>,
+}
 
 /// RenderingPipeline integrates all components of the rendering system
 pub struct RenderingPipeline {
@@ -33,6 +43,7 @@ pub struct RenderingPipeline {
     paint_needs_full: bool,
     paint_background_color: Option<crate::color::Color>,
     paint_enabled: bool,
+    paint_caches: BTreeMap<ElementId, PaintCache>,
 }
 
 impl RenderingPipeline {
@@ -56,6 +67,7 @@ impl RenderingPipeline {
             paint_needs_full: true,
             paint_background_color: None,
             paint_enabled: true,
+            paint_caches: BTreeMap::new(),
         }
     }
 
@@ -78,6 +90,7 @@ impl RenderingPipeline {
         self.paint_damage = None;
         self.paint_needs_full = true;
         self.paint_background_color = None;
+        self.paint_caches.clear();
     }
 
     /// Set the output scale in milli-units.
@@ -97,6 +110,7 @@ impl RenderingPipeline {
         self.last_paint_bounds.clear();
         self.paint_damage = None;
         self.paint_needs_full = true;
+        self.paint_caches.clear();
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
         }
@@ -113,6 +127,7 @@ impl RenderingPipeline {
     /// Set the root Element
     pub fn set_root(&mut self, root_element: Box<dyn Element>) {
         self.element_tree.set_root(root_element);
+        self.paint_caches.clear();
         if let Some(root) = self.element_tree.root() {
             self.event_dispatcher.set_root(root.id());
         }
@@ -252,6 +267,7 @@ impl RenderingPipeline {
         self.last_paint_bounds.clear();
         self.paint_damage = None;
         self.paint_needs_full = true;
+        self.paint_caches.clear();
 
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
@@ -314,11 +330,11 @@ impl RenderingPipeline {
             || creating_renderer
             || self.paint_background_color != Some(background_color);
 
-        let dirty_ids = self.pipeline_owner.last_paint_ids();
+        let dirty_ids = self.pipeline_owner.last_paint_ids().to_vec();
         let mut dirty_rects = if force_full {
             None
         } else {
-            Some(self.paint_dirty_rects(dirty_ids))
+            Some(self.paint_dirty_rects(&dirty_ids))
         };
 
         let present_damage = match dirty_rects.as_mut() {
@@ -331,11 +347,19 @@ impl RenderingPipeline {
         };
 
         self.paint_damage = present_damage;
+        self.invalidate_repaint_boundary_caches(&dirty_ids);
 
         let mut ctx = PaintContext::new();
         let damage_clip = dirty_rects.as_deref();
         let any_painted = if let Some(root) = self.element_tree.root() {
-            let base_painted = Self::walk_and_paint(&mut ctx, root, Point::ZERO, damage_clip);
+            let base_painted = Self::walk_and_paint(
+                &mut ctx,
+                root,
+                Point::ZERO,
+                damage_clip,
+                &mut self.paint_caches,
+                self.scale_milli,
+            );
             let overlay_painted =
                 Self::paint_select_overlays(&mut ctx, root, Point::ZERO, damage_clip);
             base_painted || overlay_painted
@@ -365,6 +389,8 @@ impl RenderingPipeline {
         element: &'a dyn Element,
         origin: Point,
         damage_rects: Option<&[Rect]>,
+        paint_caches: &mut BTreeMap<ElementId, PaintCache>,
+        scale_milli: u32,
     ) -> bool {
         let abs = Point::new(
             origin.x + element.position().x,
@@ -376,14 +402,32 @@ impl RenderingPipeline {
             .unwrap_or(true);
         let mut painted = should_paint_self && Self::paint_element_self(ctx, element, abs);
         let clip = Self::clip_for_element(element, abs);
+        let mut painted_boundary = false;
 
         if let Some((rect, radius)) = clip {
             ctx.push_rounded_clip(rect, radius);
         }
 
-        for child in element.children() {
-            if Self::walk_and_paint(ctx, child.as_ref(), abs, damage_rects) {
+        if should_paint_self {
+            painted_boundary =
+                Self::paint_repaint_boundary(ctx, element, abs, paint_caches, scale_milli);
+            if painted_boundary {
                 painted = true;
+            }
+        }
+
+        if !painted_boundary {
+            for child in element.children() {
+                if Self::walk_and_paint(
+                    ctx,
+                    child.as_ref(),
+                    abs,
+                    damage_rects,
+                    paint_caches,
+                    scale_milli,
+                ) {
+                    painted = true;
+                }
             }
         }
 
@@ -396,6 +440,230 @@ impl RenderingPipeline {
         }
 
         painted
+    }
+
+    fn paint_repaint_boundary<'a>(
+        ctx: &mut PaintContext<'a>,
+        element: &'a dyn Element,
+        abs: Point,
+        paint_caches: &mut BTreeMap<ElementId, PaintCache>,
+        scale_milli: u32,
+    ) -> bool {
+        let Some(render_object) = element.render_object() else {
+            return false;
+        };
+        let Some(size) = render_object.repaint_boundary_size() else {
+            return false;
+        };
+        let max_cache_pixels = render_object
+            .repaint_boundary_max_cache_pixels()
+            .unwrap_or(MAX_REPAINT_BOUNDARY_CACHE_PIXELS);
+
+        if !render_object.repaint_boundary_cache_nested_boundaries()
+            && Self::has_descendant_repaint_boundary(element)
+        {
+            if crate::debug::repaint_boundary_log_enabled() {
+                crate::logln!(
+                    "[RepaintBoundary] skip id={} reason=nested-boundary logical={}x{}",
+                    element.id().get(),
+                    size.width,
+                    size.height
+                );
+            }
+            paint_caches.remove(&element.id());
+            return false;
+        }
+
+        let Some((physical_width, physical_height, physical_pixels)) =
+            Self::repaint_boundary_physical_size(size, scale_milli)
+        else {
+            if crate::debug::repaint_boundary_log_enabled() {
+                crate::logln!(
+                    "[RepaintBoundary] skip id={} reason=invalid-size logical={}x{}",
+                    element.id().get(),
+                    size.width,
+                    size.height
+                );
+            }
+            paint_caches.remove(&element.id());
+            return false;
+        };
+
+        if physical_pixels > max_cache_pixels {
+            if crate::debug::repaint_boundary_log_enabled() {
+                crate::logln!(
+                    "[RepaintBoundary] skip id={} reason=too-large logical={}x{} physical={}x{} pixels={} max={}",
+                    element.id().get(),
+                    size.width,
+                    size.height,
+                    physical_width,
+                    physical_height,
+                    physical_pixels,
+                    max_cache_pixels
+                );
+            }
+            paint_caches.remove(&element.id());
+            return false;
+        }
+
+        let rebuild_reason = match paint_caches.get(&element.id()) {
+            None => Some("miss"),
+            Some(cache) if cache.logical_size != size => Some("size-changed"),
+            Some(cache) if cache.scale_milli != scale_milli => Some("scale-changed"),
+            Some(cache) if !cache.valid => Some("dirty"),
+            Some(_) => None,
+        };
+
+        if let Some(reason) = rebuild_reason {
+            if crate::debug::repaint_boundary_log_enabled() {
+                crate::logln!(
+                    "[RepaintBoundary] rebuild id={} reason={} logical={}x{} physical={}x{} pixels={}",
+                    element.id().get(),
+                    reason,
+                    size.width,
+                    size.height,
+                    physical_width,
+                    physical_height,
+                    physical_pixels
+                );
+            }
+            let mut cache_ctx = PaintContext::new();
+            let painted = Self::build_repaint_boundary_context(
+                &mut cache_ctx,
+                element,
+                paint_caches,
+                scale_milli,
+            );
+            if !painted {
+                if crate::debug::repaint_boundary_log_enabled() {
+                    crate::logln!(
+                        "[RepaintBoundary] skip id={} reason=empty",
+                        element.id().get()
+                    );
+                }
+                paint_caches.remove(&element.id());
+                return false;
+            };
+
+            let reused = if let Some(cache) = paint_caches.get_mut(&element.id()) {
+                if let Some(buffer) = Arc::get_mut(&mut cache.buffer) {
+                    if cache.logical_size != size || cache.scale_milli != scale_milli {
+                        buffer.resize_logical_dimensions_with_scale(
+                            libm::ceilf(size.width) as u32,
+                            libm::ceilf(size.height) as u32,
+                            scale_milli,
+                        );
+                    }
+                    CpuPaintRenderer::execute_into_buffer(
+                        buffer,
+                        crate::color::Color::TRANSPARENT,
+                        &cache_ctx,
+                        None,
+                    );
+                    cache.logical_size = size;
+                    cache.scale_milli = scale_milli;
+                    cache.valid = true;
+                    cache.invalidated_by = None;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if !reused {
+                let mut buffer = Buffer::from_logical_dimensions_with_scale(
+                    libm::ceilf(size.width) as u32,
+                    libm::ceilf(size.height) as u32,
+                    scale_milli,
+                );
+                CpuPaintRenderer::execute_into_buffer(
+                    &mut buffer,
+                    crate::color::Color::TRANSPARENT,
+                    &cache_ctx,
+                    None,
+                );
+                paint_caches.insert(
+                    element.id(),
+                    PaintCache {
+                        buffer: Arc::new(buffer),
+                        logical_size: size,
+                        scale_milli,
+                        valid: true,
+                        invalidated_by: None,
+                    },
+                );
+            }
+        } else if crate::debug::repaint_boundary_log_enabled() {
+            crate::logln!(
+                "[RepaintBoundary] hit id={} logical={}x{} physical={}x{} pixels={}",
+                element.id().get(),
+                size.width,
+                size.height,
+                physical_width,
+                physical_height,
+                physical_pixels
+            );
+        }
+
+        let Some(cache) = paint_caches.get(&element.id()) else {
+            return false;
+        };
+        ctx.draw_buffer_rect_shared(
+            Rect::new(abs, size),
+            Rect::new(Point::ZERO, size),
+            cache.buffer.clone(),
+            1.0,
+        );
+        true
+    }
+
+    fn repaint_boundary_physical_size(size: Size, scale_milli: u32) -> Option<(u32, u32, u64)> {
+        if size.width <= 0.0
+            || size.height <= 0.0
+            || !size.width.is_finite()
+            || !size.height.is_finite()
+        {
+            return None;
+        }
+
+        let width = Self::scale_len(libm::ceilf(size.width) as u32, scale_milli);
+        let height = Self::scale_len(libm::ceilf(size.height) as u32, scale_milli);
+        let pixels = u64::from(width).saturating_mul(u64::from(height));
+        Some((width, height, pixels))
+    }
+
+    fn build_repaint_boundary_context<'a>(
+        ctx: &mut PaintContext<'a>,
+        element: &'a dyn Element,
+        paint_caches: &mut BTreeMap<ElementId, PaintCache>,
+        scale_milli: u32,
+    ) -> bool {
+        let mut painted = false;
+        for child in element.children() {
+            if Self::walk_and_paint(
+                ctx,
+                child.as_ref(),
+                Point::ZERO,
+                None,
+                paint_caches,
+                scale_milli,
+            ) {
+                painted = true;
+            }
+        }
+        painted
+    }
+
+    fn has_descendant_repaint_boundary(element: &dyn Element) -> bool {
+        element.children().iter().any(|child| {
+            child
+                .render_object()
+                .and_then(|render_object| render_object.repaint_boundary_size())
+                .is_some()
+                || Self::has_descendant_repaint_boundary(child.as_ref())
+        })
     }
 
     fn paint_select_overlays<'a>(
@@ -493,6 +761,49 @@ impl RenderingPipeline {
 
         let before = ctx.commands().len();
         ro.paint_overlay(ctx, abs) || ctx.commands().len() > before
+    }
+
+    fn invalidate_repaint_boundary_caches(&mut self, dirty_ids: &[ElementId]) {
+        if dirty_ids.is_empty() || self.paint_caches.is_empty() {
+            return;
+        }
+
+        let cached_ids: Vec<ElementId> = self.paint_caches.keys().copied().collect();
+        let mut invalidated = Vec::new();
+        for boundary_id in cached_ids {
+            if let Some(dirty_id) = dirty_ids
+                .iter()
+                .copied()
+                .find(|dirty_id| self.dirty_id_invalidates_repaint_boundary(boundary_id, *dirty_id))
+            {
+                invalidated.push((boundary_id, dirty_id));
+            }
+        }
+
+        for (id, dirty_id) in invalidated {
+            if crate::debug::repaint_boundary_log_enabled() {
+                crate::logln!(
+                    "[RepaintBoundary] invalidate id={} dirty_id={}",
+                    id.get(),
+                    dirty_id.get()
+                );
+            }
+            if let Some(cache) = self.paint_caches.get_mut(&id) {
+                cache.valid = false;
+                cache.invalidated_by = Some(dirty_id);
+            }
+        }
+    }
+
+    fn dirty_id_invalidates_repaint_boundary(
+        &self,
+        boundary_id: ElementId,
+        dirty_id: ElementId,
+    ) -> bool {
+        self.element_tree
+            .find_path_ids(dirty_id)
+            .map(|path| path.contains(&boundary_id))
+            .unwrap_or(true)
     }
 
     fn element_paint_bounds(element: &dyn Element, absolute_origin: Point) -> Rect {
@@ -785,8 +1096,8 @@ impl Default for RenderingPipeline {
 mod tests {
     use super::*;
     use crate::event::{Event, MouseEvent, ScrollSource, WheelPhase};
-    use crate::view::View;
-    use crate::views::{LazyVStack, ScrollView, Text};
+    use crate::view::{View, ViewExt};
+    use crate::views::{LazyVStack, Rectangle, ScrollView, Text};
 
     #[test]
     fn present_damage_keeps_large_partial_region() {
@@ -826,6 +1137,7 @@ mod tests {
             .element_tree()
             .root()
             .and_then(|root| root.children().first())
+            .and_then(|boundary| boundary.children().first())
             .map(|lazy| lazy.children().len())
             .expect("scroll view should have lazy child");
         assert!(initial_child_count < 100);
@@ -843,9 +1155,125 @@ mod tests {
             .element_tree()
             .root()
             .and_then(|root| root.children().first())
+            .and_then(|boundary| boundary.children().first())
             .and_then(|lazy| lazy.children().first())
             .map(|item| item.position().y)
             .expect("lazy child should materialize visible items");
         assert!(first_materialized_y > 0.0);
+    }
+
+    #[test]
+    fn repaint_boundary_cache_survives_scroll_offset_repaint() {
+        let mut pipeline = RenderingPipeline::new();
+        let root = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(220, 40, 40))
+                .frame(100.0, 300.0),
+        )
+        .content_size(100.0, 300.0)
+        .wheel_sensitivity(1.0)
+        .frame(100.0, 100.0)
+        .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        assert_eq!(pipeline.paint_caches.len(), 1);
+        let cache_id = *pipeline.paint_caches.keys().next().unwrap();
+        let before = Arc::as_ptr(&pipeline.paint_caches[&cache_id].buffer);
+
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: 40,
+            x: 10,
+            y: 10,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Wheel,
+        })));
+        pipeline.render_with_damage();
+
+        let after = Arc::as_ptr(&pipeline.paint_caches[&cache_id].buffer);
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn repaint_boundary_cache_is_invalidated_by_descendant_dirty() {
+        let mut pipeline = RenderingPipeline::new();
+        let root = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(40, 120, 220))
+                .frame(100.0, 300.0),
+        )
+        .content_size(100.0, 300.0)
+        .frame(100.0, 100.0)
+        .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        let boundary = pipeline
+            .element_tree()
+            .root()
+            .and_then(|root| root.children().first())
+            .and_then(|scroll| scroll.children().first())
+            .expect("scroll content should be a repaint boundary");
+        let descendant_id = boundary
+            .children()
+            .first()
+            .expect("boundary should have a child")
+            .id();
+        assert_eq!(pipeline.paint_caches.len(), 1);
+        let cache_id = *pipeline.paint_caches.keys().next().unwrap();
+        let before = Arc::as_ptr(&pipeline.paint_caches[&cache_id].buffer);
+
+        pipeline.pipeline_owner.mark_needs_paint(descendant_id);
+        pipeline.render_with_damage();
+        assert_eq!(pipeline.paint_caches.len(), 1);
+        let after = Arc::as_ptr(&pipeline.paint_caches[&cache_id].buffer);
+        assert_eq!(before, after);
+        assert!(pipeline.paint_caches[&cache_id].valid);
+    }
+
+    #[test]
+    fn repaint_boundary_cache_respects_ancestor_clip() {
+        let red = crate::color::Color::rgb(255, 0, 0);
+        let mut pipeline = RenderingPipeline::new();
+        let root = ScrollView::new(Rectangle::new().fill(red).frame(20.0, 20.0))
+            .content_size(20.0, 20.0)
+            .frame(10.0, 10.0)
+            .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+
+        let (inside, outside) = {
+            let (buffer, _) = pipeline.render_with_damage().expect("frame should render");
+            (buffer.get_pixel(5, 5), buffer.get_pixel(15, 5))
+        };
+        assert_eq!(pipeline.paint_caches.len(), 1);
+        assert_eq!(inside, Some(red.to_bgra()));
+        assert_ne!(outside, Some(red.to_bgra()));
+    }
+
+    #[test]
+    fn scroll_view_auto_boundary_skips_nested_boundaries() {
+        let mut pipeline = RenderingPipeline::new();
+        let inner = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(80, 180, 120))
+                .frame(100.0, 300.0),
+        )
+        .content_size(100.0, 300.0)
+        .frame(100.0, 100.0);
+        let root = ScrollView::new(inner)
+            .content_size(100.0, 200.0)
+            .frame(100.0, 100.0)
+            .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        assert_eq!(pipeline.paint_caches.len(), 1);
+        let cache = pipeline.paint_caches.values().next().unwrap();
+        assert_eq!(cache.logical_size, Size::new(100.0, 300.0));
     }
 }
