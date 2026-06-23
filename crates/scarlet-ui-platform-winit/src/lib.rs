@@ -199,8 +199,6 @@ impl WinitEventState {
     }
 
     fn push(&mut self, mut event: Event) {
-        self.flush_expired_trackpad_end();
-
         if Self::is_trackpad_end(&event) {
             self.pending_trackpad_end = Some(PendingTrackpadEnd {
                 event,
@@ -209,10 +207,8 @@ impl WinitEventState {
             return;
         }
 
-        if Self::is_trackpad_wheel(&event)
-            && let Some(pending) = self.pending_trackpad_end.take()
-        {
-            if pending.queued_at.elapsed() <= TRACKPAD_END_GRACE {
+        if Self::is_trackpad_wheel(&event) {
+            if self.pending_trackpad_end.take().is_some() {
                 if let Event::Mouse(MouseEvent::Wheel {
                     phase: phase @ WheelPhase::Started,
                     ..
@@ -223,11 +219,14 @@ impl WinitEventState {
                 if scarlet_ui_core::debug::wheel_log_enabled() {
                     println!("[Wheel] join deferred trackpad end into continuing gesture");
                 }
-            } else {
-                self.queue.push_back(pending.event);
             }
+            self.queue.push_back(event);
+            return;
         }
 
+        if let Some(pending) = self.pending_trackpad_end.take() {
+            self.queue.push_back(pending.event);
+        }
         self.queue.push_back(event);
     }
 
