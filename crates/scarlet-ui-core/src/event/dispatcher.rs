@@ -8,6 +8,45 @@ use crate::event::Event;
 use crate::geometry::{Point, Rect};
 use alloc::vec::Vec;
 
+/// Monotonic clock for expiring idle wheel gestures.
+///
+/// `scarlet_std` exposes only `core::time` (no `Instant`), so on the `no_std`
+/// target there is no monotonic clock available and `elapsed_since` returns
+/// `Duration::ZERO` (idle never expires). Discrete-wheel locking then falls
+/// back to pointer-based release via `dispatch_mouse`.
+mod wheel_clock {
+    #[cfg(feature = "std")]
+    pub use std::time::Instant;
+
+    #[cfg(not(feature = "std"))]
+    #[derive(Clone, Copy)]
+    pub struct Instant;
+
+    #[cfg(not(feature = "std"))]
+    impl Instant {
+        pub fn now() -> Self {
+            Self
+        }
+    }
+
+    #[cfg(feature = "std")]
+    pub fn elapsed_since(instant: Instant) -> core::time::Duration {
+        Instant::now().duration_since(instant)
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn elapsed_since(_instant: Instant) -> core::time::Duration {
+        core::time::Duration::ZERO
+    }
+}
+
+use wheel_clock::Instant;
+
+/// Discrete mouse wheels carry no gesture phase, so this idle window acts as
+/// the gesture boundary that decides when a locked scroll target may be
+/// re-targeted. See `EventDispatcher::wheel_target`.
+const WHEEL_GESTURE_IDLE: core::time::Duration = core::time::Duration::from_millis(200);
+
 /// Event dispatch phase
 ///
 /// Events go through three phases:
@@ -68,8 +107,14 @@ pub struct EventDispatcher {
     captured_id: Option<ElementId>,
     captured_path: Vec<ElementId>,
     captured_point: Option<Point>,
-    wheel_captured_id: Option<ElementId>,
-    sticky_wheel_target: Option<(ElementId, Point)>,
+    /// Element that currently monopolizes an in-progress wheel gesture, if any.
+    /// While set, every wheel event routes here regardless of pointer position,
+    /// so a parent scroll view does not lose capture to a nested child that
+    /// slides under the cursor mid-gesture.
+    wheel_target: Option<ElementId>,
+    /// Timestamp of the most recent wheel event, used to expire idle discrete
+    /// (non-trackpad) wheel gestures via `WHEEL_GESTURE_IDLE`.
+    wheel_last_event_at: Option<Instant>,
     left_button_down: bool,
     focused_id: Option<ElementId>,
     focused_path: Vec<ElementId>,
@@ -87,8 +132,8 @@ impl EventDispatcher {
             captured_id: None,
             captured_path: Vec::new(),
             captured_point: None,
-            wheel_captured_id: None,
-            sticky_wheel_target: None,
+            wheel_target: None,
+            wheel_last_event_at: None,
             left_button_down: false,
             focused_id: None,
             focused_path: Vec::new(),
@@ -192,50 +237,98 @@ impl EventDispatcher {
                 delta_y,
                 point.x,
                 point.y,
-                self.wheel_captured_id,
+                self.wheel_target,
                 uses_wheel_capture
             );
         }
 
-        let mut path = if uses_wheel_capture {
-            if let Some(captured_id) = self.wheel_captured_id {
-                wheel_target_locked = true;
-                match element_tree.find_path_ids(captured_id) {
-                    Some(path) => {
-                        if crate::debug::wheel_log_enabled() {
-                            crate::logln!("[Wheel] reuse target={:?}", captured_id);
-                        }
-                        Some(path)
-                    }
-                    None => {
-                        if crate::debug::wheel_log_enabled() {
-                            crate::logln!("[Wheel] captured target vanished id={:?}", captured_id);
-                        }
-                        wheel_consumed_without_path = true;
-                        None
-                    }
+        let mut path = if is_wheel {
+            // Expire an idle discrete-wheel gesture so a new gesture can
+            // re-target after the user pauses. No-op without a monotonic clock.
+            if self.wheel_target.is_some() && !uses_wheel_capture && self.wheel_idle_expired() {
+                if crate::debug::wheel_log_enabled() {
+                    crate::logln!("[Wheel] release idle-expired");
                 }
-            } else if self.wheel_phase_finished(event) {
-                None
+                self.clear_wheel_target();
+            }
+
+            // For discrete wheels we need the current hit-path both to decide
+            // whether the pointer left the locked scroller and to resolve a
+            // fresh target. Trackpad gestures are bound to finger contact, not
+            // cursor position, so they skip this.
+            let discrete_hit_path = if !uses_wheel_capture {
+                self.hit_test_with_path_ids(element_tree, point)
             } else {
-                match self.hit_test_with_path_ids(element_tree, point) {
-                    Some(hit_path) => {
-                        if let Some(capture_path) =
-                            Self::wheel_capture_path_for_event(element_tree, &hit_path, event)
-                        {
-                            self.wheel_captured_id = capture_path.last().copied();
-                            wheel_target_locked = true;
+                None
+            };
+
+            if let Some(target_id) = self.wheel_target {
+                if !uses_wheel_capture
+                    && discrete_hit_path
+                        .as_ref()
+                        .is_some_and(|hit_path| !hit_path.contains(&target_id))
+                {
+                    // Pointer left the locked scroller: release so the user
+                    // can scroll a different area, then resolve from here.
+                    if crate::debug::wheel_log_enabled() {
+                        crate::logln!("[Wheel] release pointer-left target={:?}", target_id);
+                    }
+                    self.clear_wheel_target();
+                    discrete_hit_path
+                } else {
+                    // Gesture in progress: route every wheel event to the
+                    // locked target, ignoring pointer movement. This is what
+                    // keeps a parent scroll view scrolling when a nested child
+                    // slides under the cursor mid-gesture.
+                    wheel_target_locked = true;
+                    match element_tree.find_path_ids(target_id) {
+                        Some(path) => {
+                            if crate::debug::wheel_log_enabled() {
+                                crate::logln!("[Wheel] reuse target={:?}", target_id);
+                            }
+                            Some(path)
+                        }
+                        None => {
                             if crate::debug::wheel_log_enabled() {
                                 crate::logln!(
-                                    "[Wheel] acquire target={:?}",
-                                    self.wheel_captured_id
+                                    "[Wheel] captured target vanished id={:?}",
+                                    target_id
                                 );
+                            }
+                            wheel_consumed_without_path = true;
+                            None
+                        }
+                    }
+                }
+            } else if uses_wheel_capture && self.wheel_phase_finished(event) {
+                // Terminal phase with no active gesture: nothing to deliver.
+                None
+            } else {
+                // Gesture start: hit-test, then (for trackpad) prefer the
+                // deepest wheel-capturing element. Discrete wheels resolve
+                // their handler through the normal capture/target/bubble flow
+                // and lock onto whatever handled the event after dispatch.
+                let hit_path = if uses_wheel_capture {
+                    self.hit_test_with_path_ids(element_tree, point)
+                } else {
+                    discrete_hit_path
+                };
+                match hit_path {
+                    Some(hit_path) => {
+                        if uses_wheel_capture
+                            && let Some(capture_path) =
+                                Self::wheel_capture_path_for_event(element_tree, &hit_path, event)
+                        {
+                            self.wheel_target = capture_path.last().copied();
+                            wheel_target_locked = true;
+                            if crate::debug::wheel_log_enabled() {
+                                crate::logln!("[Wheel] acquire target={:?}", self.wheel_target);
                             }
                             Some(capture_path)
                         } else {
                             if crate::debug::wheel_log_enabled() {
                                 crate::logln!(
-                                    "[Wheel] no capture hit_target={:?}",
+                                    "[Wheel] direct target={:?}",
                                     hit_path.last().copied()
                                 );
                             }
@@ -245,17 +338,6 @@ impl EventDispatcher {
                     None => None,
                 }
             }
-        } else if is_wheel {
-            let (hit_path, reused_sticky_target) =
-                self.discrete_wheel_target_path(element_tree, point);
-            wheel_target_locked = reused_sticky_target;
-            if crate::debug::wheel_log_enabled() {
-                crate::logln!(
-                    "[Wheel] direct target={:?}",
-                    hit_path.as_ref().and_then(|path| path.last().copied())
-                );
-            }
-            hit_path
         } else if matches!(event, crate::event::MouseEvent::Moved { .. })
             && !(self.left_button_down && self.captured_id.is_some())
         {
@@ -329,8 +411,10 @@ impl EventDispatcher {
             }
 
             if let crate::event::MouseEvent::Moved { x, y } = event {
-                if self.captured_id.is_some() {
-                    // Skip hover updates while dragging outside the element.
+                if self.captured_id.is_some() || self.wheel_target.is_some() {
+                    // Skip hover updates while dragging or mid-scroll, so that
+                    // content sliding under a stationary cursor does not fire
+                    // Entered/Exited on the children it crosses.
                 } else if self.hovered_id != Some(target_id) {
                     if crate::debug::is_enabled() {
                         crate::logln!(
@@ -448,19 +532,30 @@ impl EventDispatcher {
                 }
             }
 
+            // Lock the wheel gesture onto the element that actually handled
+            // the event. Once locked, subsequent wheel events keep routing
+            // here regardless of pointer position (see `wheel_target`), so a
+            // parent scroll view does not lose capture to a nested child
+            // sliding under the cursor mid-gesture.
             if is_wheel
-                && !uses_wheel_capture
                 && handled
                 && let Some(id) = handled_id
+                && self.wheel_target.is_none()
             {
-                self.sticky_wheel_target = Some((id, point));
+                self.wheel_target = Some(id);
+                if crate::debug::wheel_log_enabled() {
+                    crate::logln!("[Wheel] lock target={:?}", id);
+                }
+            }
+            if is_wheel && self.wheel_target.is_some() {
+                self.wheel_last_event_at = Some(Instant::now());
             }
 
             if uses_wheel_capture && self.wheel_phase_finished(event) {
                 if crate::debug::wheel_log_enabled() {
                     crate::logln!("[Wheel] release phase=end");
                 }
-                self.clear_wheel_capture();
+                self.clear_wheel_target();
             }
 
             if crate::debug::is_enabled() {
@@ -519,7 +614,7 @@ impl EventDispatcher {
                 if crate::debug::wheel_log_enabled() {
                     crate::logln!("[Wheel] release phase=end");
                 }
-                self.clear_wheel_capture();
+                self.clear_wheel_target();
             }
             if crate::debug::wheel_log_enabled() && is_wheel {
                 crate::logln!(
@@ -867,27 +962,6 @@ impl EventDispatcher {
         None
     }
 
-    /// Resolve the dispatch path for a discrete (non-trackpad) wheel event.
-    ///
-    /// Discrete mouse-wheel events carry no gesture phases, so without a
-    /// sticky target every event re-hit-tests from scratch. When content
-    /// scrolls under a stationary cursor that re-targets a nested scroll view
-    /// mid-gesture and causes visible stutter. To prevent this, the previous
-    /// wheel target is reused as long as the cursor has not moved.
-    fn discrete_wheel_target_path(
-        &mut self,
-        element_tree: &mut ElementTree,
-        point: Point,
-    ) -> (Option<Vec<ElementId>>, bool) {
-        if let Some((id, prev_point)) = self.sticky_wheel_target
-            && prev_point == point
-            && let Some(path) = element_tree.find_path_ids(id)
-        {
-            return (Some(path), true);
-        }
-        (self.hit_test_with_path_ids(element_tree, point), false)
-    }
-
     fn is_expanded_select(element: &dyn Element) -> bool {
         element
             .render_object()
@@ -1009,8 +1083,14 @@ impl EventDispatcher {
         });
     }
 
-    fn clear_wheel_capture(&mut self) {
-        self.wheel_captured_id = None;
+    fn clear_wheel_target(&mut self) {
+        self.wheel_target = None;
+        self.wheel_last_event_at = None;
+    }
+
+    fn wheel_idle_expired(&self) -> bool {
+        self.wheel_last_event_at
+            .is_some_and(|last| wheel_clock::elapsed_since(last) > WHEEL_GESTURE_IDLE)
     }
 
     fn wheel_phase_finished(&self, event: &crate::event::MouseEvent) -> bool {
@@ -1408,12 +1488,13 @@ mod tests {
     }
 
     #[test]
-    fn discrete_wheel_does_not_transaction_capture_between_nested_scroll_views() {
+    fn discrete_wheel_locks_to_initial_handler_across_nested_scroll_views() {
         let outer_count = Rc::new(Cell::new(0));
         let inner_count = Rc::new(Cell::new(0));
         let mut tree = nested_wheel_tree(outer_count.clone(), inner_count.clone());
         let mut dispatcher = EventDispatcher::new();
 
+        // Start scrolling over the outer region.
         assert!(dispatcher.dispatch(
             &mut tree,
             &wheel_event_with_source(10, WheelPhase::Moved, ScrollSource::Wheel)
@@ -1421,12 +1502,16 @@ mod tests {
         assert_eq!(outer_count.get(), 1);
         assert_eq!(inner_count.get(), 0);
 
+        // Moving the pointer over the nested child must NOT retarget: the
+        // outer scroll view keeps monopolizing the gesture until the user
+        // stops scrolling (see `WHEEL_GESTURE_IDLE`).
         assert!(dispatcher.dispatch(
             &mut tree,
             &wheel_event_with_source(60, WheelPhase::Moved, ScrollSource::Wheel)
         ));
-        assert_eq!(outer_count.get(), 1);
-        assert_eq!(inner_count.get(), 1);
+        assert_eq!(outer_count.get(), 2);
+        assert_eq!(inner_count.get(), 0);
+        assert_eq!(dispatcher.wheel_target, Some(ElementId::new(2)));
     }
 
     #[test]
@@ -1444,10 +1529,7 @@ mod tests {
 
         assert_eq!(outer_count.get(), 1);
         assert_eq!(inner_count.get(), 0);
-        assert_eq!(
-            dispatcher.sticky_wheel_target.map(|(id, _)| id),
-            Some(ElementId::new(2))
-        );
+        assert_eq!(dispatcher.wheel_target, Some(ElementId::new(2)));
     }
 
     #[test]
@@ -1463,10 +1545,7 @@ mod tests {
         ));
         assert_eq!(outer_count.get(), 0);
         assert_eq!(inner_count.get(), 1);
-        assert_eq!(
-            dispatcher.sticky_wheel_target.map(|(id, _)| id),
-            Some(ElementId::new(3))
-        );
+        assert_eq!(dispatcher.wheel_target, Some(ElementId::new(3)));
 
         let inner = tree
             .find_element_mut(ElementId::new(3))
