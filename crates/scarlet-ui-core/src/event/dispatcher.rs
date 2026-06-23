@@ -246,7 +246,9 @@ impl EventDispatcher {
                 }
             }
         } else if is_wheel {
-            let hit_path = self.discrete_wheel_target_path(element_tree, point);
+            let (hit_path, reused_sticky_target) =
+                self.discrete_wheel_target_path(element_tree, point);
+            wheel_target_locked = reused_sticky_target;
             if crate::debug::wheel_log_enabled() {
                 crate::logln!(
                     "[Wheel] direct target={:?}",
@@ -876,14 +878,14 @@ impl EventDispatcher {
         &mut self,
         element_tree: &mut ElementTree,
         point: Point,
-    ) -> Option<Vec<ElementId>> {
+    ) -> (Option<Vec<ElementId>>, bool) {
         if let Some((id, prev_point)) = self.sticky_wheel_target
             && prev_point == point
             && let Some(path) = element_tree.find_path_ids(id)
         {
-            return Some(path);
+            return (Some(path), true);
         }
-        self.hit_test_with_path_ids(element_tree, point)
+        (self.hit_test_with_path_ids(element_tree, point), false)
     }
 
     fn is_expanded_select(element: &dyn Element) -> bool {
@@ -1446,6 +1448,38 @@ mod tests {
             dispatcher.sticky_wheel_target.map(|(id, _)| id),
             Some(ElementId::new(2))
         );
+    }
+
+    #[test]
+    fn discrete_wheel_does_not_bubble_from_sticky_target_at_edge() {
+        let outer_count = Rc::new(Cell::new(0));
+        let inner_count = Rc::new(Cell::new(0));
+        let mut tree = nested_wheel_tree(outer_count.clone(), inner_count.clone());
+        let mut dispatcher = EventDispatcher::new();
+
+        assert!(dispatcher.dispatch(
+            &mut tree,
+            &wheel_event_with_source(60, WheelPhase::Moved, ScrollSource::Wheel)
+        ));
+        assert_eq!(outer_count.get(), 0);
+        assert_eq!(inner_count.get(), 1);
+        assert_eq!(
+            dispatcher.sticky_wheel_target.map(|(id, _)| id),
+            Some(ElementId::new(3))
+        );
+
+        let inner = tree
+            .find_element_mut(ElementId::new(3))
+            .and_then(|element| element.as_any_mut().downcast_mut::<WheelTestElement>())
+            .expect("inner test element should exist");
+        inner.handles_wheel = false;
+
+        assert!(dispatcher.dispatch(
+            &mut tree,
+            &wheel_event_with_source(60, WheelPhase::Moved, ScrollSource::Wheel)
+        ));
+        assert_eq!(outer_count.get(), 0);
+        assert_eq!(inner_count.get(), 1);
     }
 
     #[test]

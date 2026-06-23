@@ -40,6 +40,9 @@ macro_rules! logln {
 }
 
 const DEFAULT_SCALE_MILLI: u32 = 1000;
+const WHEEL_LINE_DELTA: i32 = 32;
+const WHEEL_HI_RES_UNITS_PER_NOTCH: i32 = 120;
+const SWS_LEGACY_WHEEL_PIXELS_PER_NOTCH: i32 = 10;
 
 const KEY_LEFTCTRL: u16 = 0x1d;
 const KEY_LEFTSHIFT: u16 = 0x2a;
@@ -146,6 +149,66 @@ struct TextInputContext {
     enabled: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct PendingWheelDelta {
+    discrete_x: i32,
+    discrete_y: i32,
+    hi_res_x: i32,
+    hi_res_y: i32,
+    has_discrete_x: bool,
+    has_discrete_y: bool,
+    has_hi_res_x: bool,
+    has_hi_res_y: bool,
+}
+
+impl PendingWheelDelta {
+    fn add_discrete_x(&mut self, value: i32) {
+        self.discrete_x = self.discrete_x.saturating_add(value);
+        self.has_discrete_x = true;
+    }
+
+    fn add_discrete_y(&mut self, value: i32) {
+        self.discrete_y = self.discrete_y.saturating_add(value);
+        self.has_discrete_y = true;
+    }
+
+    fn add_hi_res_x(&mut self, value: i32) {
+        self.hi_res_x = self.hi_res_x.saturating_add(value);
+        self.has_hi_res_x = true;
+    }
+
+    fn add_hi_res_y(&mut self, value: i32) {
+        self.hi_res_y = self.hi_res_y.saturating_add(value);
+        self.has_hi_res_y = true;
+    }
+
+    fn take_normalized(&mut self) -> Option<(i32, i32)> {
+        let delta_x = normalized_wheel_axis(
+            self.discrete_x,
+            self.has_discrete_x,
+            self.hi_res_x,
+            self.has_hi_res_x,
+        );
+        let delta_y = normalized_wheel_axis(
+            self.discrete_y,
+            self.has_discrete_y,
+            self.hi_res_y,
+            self.has_hi_res_y,
+        );
+        *self = Self::default();
+
+        if delta_x == 0 && delta_y == 0 {
+            None
+        } else {
+            Some((delta_x, delta_y))
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.has_discrete_x && !self.has_discrete_y && !self.has_hi_res_x && !self.has_hi_res_y
+    }
+}
+
 /// SWS platform window implementation
 pub struct SWSPlatformWindow {
     conn: sws::Connection,
@@ -167,7 +230,55 @@ pub struct SWSPlatformWindow {
     right_super_pressed: bool,
     click_state: ClickState,
     text_input: Option<TextInputContext>,
+    pending_wheel: PendingWheelDelta,
     needs_full_present: bool,
+}
+
+fn normalized_wheel_axis(discrete: i32, has_discrete: bool, hi_res: i32, has_hi_res: bool) -> i32 {
+    if has_hi_res {
+        normalize_hi_res_wheel_delta(hi_res)
+    } else if has_discrete {
+        normalize_discrete_wheel_delta(discrete)
+    } else {
+        0
+    }
+}
+
+fn normalize_hi_res_wheel_delta(value: i32) -> i32 {
+    scale_i32_round(value, WHEEL_LINE_DELTA, WHEEL_HI_RES_UNITS_PER_NOTCH)
+}
+
+fn normalize_discrete_wheel_delta(value: i32) -> i32 {
+    let detents = if value.unsigned_abs() >= SWS_LEGACY_WHEEL_PIXELS_PER_NOTCH as u32
+        && value % SWS_LEGACY_WHEEL_PIXELS_PER_NOTCH == 0
+    {
+        value / SWS_LEGACY_WHEEL_PIXELS_PER_NOTCH
+    } else {
+        value
+    };
+    detents.saturating_mul(WHEEL_LINE_DELTA)
+}
+
+fn scale_i32_round(value: i32, numerator: i32, denominator: i32) -> i32 {
+    debug_assert!(denominator > 0);
+    let scaled = (value as i64).saturating_mul(numerator as i64);
+    let divisor = denominator as i64;
+    let rounded = if scaled >= 0 {
+        scaled.saturating_add(divisor / 2) / divisor
+    } else {
+        scaled.saturating_sub(divisor / 2) / divisor
+    };
+    saturate_i64_to_i32(rounded)
+}
+
+fn saturate_i64_to_i32(value: i64) -> i32 {
+    if value < i32::MIN as i64 {
+        i32::MIN
+    } else if value > i32::MAX as i64 {
+        i32::MAX
+    } else {
+        value as i32
+    }
 }
 
 /// Scarlet Window Server backend.
@@ -360,6 +471,7 @@ impl SWSPlatformWindow {
             right_super_pressed: false,
             click_state: ClickState::default(),
             text_input: None,
+            pending_wheel: PendingWheelDelta::default(),
             needs_full_present: false,
         })
     }
@@ -845,6 +957,7 @@ impl PlatformWindow for SWSPlatformWindow {
             right_super_pressed: false,
             click_state: ClickState::default(),
             text_input: None,
+            pending_wheel: PendingWheelDelta::default(),
             needs_full_present: false,
         })
     }
@@ -1098,6 +1211,7 @@ impl PlatformWindow for SWSPlatformWindow {
             right_super_pressed: false,
             click_state: ClickState::default(),
             text_input: None,
+            pending_wheel: PendingWheelDelta::default(),
             needs_full_present: false,
         })
     }
@@ -1177,6 +1291,35 @@ impl PlatformWindow for SWSPlatformWindow {
 }
 
 impl SWSPlatformWindow {
+    fn flush_pending_wheel(&mut self) {
+        if self.pending_wheel.is_empty() {
+            return;
+        }
+
+        let Some((delta_x, delta_y)) = self.pending_wheel.take_normalized() else {
+            return;
+        };
+
+        if scarlet_ui_core::debug::wheel_log_enabled() {
+            logln!(
+                "[Wheel] sws normalized delta=({}, {}) cursor=({}, {})",
+                -delta_x,
+                -delta_y,
+                self.pointer_x,
+                self.pointer_y
+            );
+        }
+
+        self.push_event(Event::Mouse(MouseEvent::Wheel {
+            delta_x: -delta_x,
+            delta_y: -delta_y,
+            x: self.pointer_x,
+            y: self.pointer_y,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Wheel,
+        }));
+    }
+
     fn handle_sws_event(&mut self, ev: SwsEvent) {
         let debug = scarlet_ui_core::debug::is_enabled();
         if debug {
@@ -1234,26 +1377,19 @@ impl SWSPlatformWindow {
                             }
                             self.pending_move = false;
                         }
+                        self.flush_pending_wheel();
                     }
                     (event_type::EV_REL, rel_code::REL_WHEEL) => {
-                        self.push_event(Event::Mouse(MouseEvent::Wheel {
-                            delta_x: 0,
-                            delta_y: -input.value,
-                            x: self.pointer_x,
-                            y: self.pointer_y,
-                            phase: WheelPhase::Moved,
-                            source: ScrollSource::Wheel,
-                        }));
+                        self.pending_wheel.add_discrete_y(input.value);
                     }
                     (event_type::EV_REL, rel_code::REL_HWHEEL) => {
-                        self.push_event(Event::Mouse(MouseEvent::Wheel {
-                            delta_x: -input.value,
-                            delta_y: 0,
-                            x: self.pointer_x,
-                            y: self.pointer_y,
-                            phase: WheelPhase::Moved,
-                            source: ScrollSource::Wheel,
-                        }));
+                        self.pending_wheel.add_discrete_x(input.value);
+                    }
+                    (event_type::EV_REL, rel_code::REL_WHEEL_HI_RES) => {
+                        self.pending_wheel.add_hi_res_y(input.value);
+                    }
+                    (event_type::EV_REL, rel_code::REL_HWHEEL_HI_RES) => {
+                        self.pending_wheel.add_hi_res_x(input.value);
                     }
                     (event_type::EV_KEY, key_code::BTN_LEFT) => {
                         let button = MouseButton::Left;
@@ -1540,5 +1676,29 @@ impl SWSPlatformWindow {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wheel_delta_prefers_hi_res_over_discrete() {
+        let mut pending = PendingWheelDelta::default();
+        pending.add_discrete_y(10);
+        pending.add_hi_res_y(120);
+
+        let (delta_x, delta_y) = pending.take_normalized().unwrap();
+
+        assert_eq!(delta_x, 0);
+        assert_eq!(delta_y, WHEEL_LINE_DELTA);
+    }
+
+    #[test]
+    fn legacy_sws_wheel_pixels_normalize_to_line_delta() {
+        assert_eq!(normalize_discrete_wheel_delta(10), WHEEL_LINE_DELTA);
+        assert_eq!(normalize_discrete_wheel_delta(-10), -WHEEL_LINE_DELTA);
+        assert_eq!(normalize_discrete_wheel_delta(1), WHEEL_LINE_DELTA);
     }
 }
