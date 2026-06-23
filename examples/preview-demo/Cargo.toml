@@ -11,5 +11,5 @@ path = "src/main.rs"
 preview = []
 
 [dependencies]
-scarlet-ui = { path = "/Users/petitstrawberry/Development/Rust/scarlet-ui/crates/scarlet-ui", default-features = false, features = ["std", "platform-winit", "preview"] }
-scarlet-ui-macros = { path = "/Users/petitstrawberry/Development/Rust/scarlet-ui/crates/scarlet-ui-macros" }
+scarlet-ui = { path = "../../crates/scarlet-ui", default-features = false, features = ["std", "platform-winit", "preview"] }
+scarlet-ui-macros = { path = "../../crates/scarlet-ui-macros" }
