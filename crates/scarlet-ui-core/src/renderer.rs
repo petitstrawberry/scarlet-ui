@@ -1178,8 +1178,10 @@ fn draw_thick_line_clipped(
     }
 
     let half_w = width / 2.0;
-    let clip_region =
-        clip.map(|rect| ClipRegion { rect, corner_radius: 0.0 });
+    let clip_region = clip.map(|rect| ClipRegion {
+        rect,
+        corner_radius: 0.0,
+    });
 
     let dx = to.x - from.x;
     let dy = to.y - from.y;
