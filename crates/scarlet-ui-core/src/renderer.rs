@@ -443,11 +443,26 @@ pub struct CpuPaintRenderer {
     background_color: Color,
     scale_milli: u32,
     layer_stack: Vec<PaintLayer>,
+    layer_pool: Vec<Buffer>,
+    clip_stack: Vec<ClipRegion>,
+    clip_entries: Vec<ClipEntry>,
 }
 
 struct PaintLayer {
     buffer: Buffer,
     clip: ClipRegion,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClipEntry {
+    Rect,
+    Layer,
+}
+
+enum EffectiveClipRects {
+    Unclipped,
+    Empty,
+    Rects(Vec<Rect>),
 }
 
 impl CpuPaintRenderer {
@@ -461,10 +476,17 @@ impl CpuPaintRenderer {
             background_color,
             scale_milli,
             layer_stack: Vec::new(),
+            layer_pool: Vec::new(),
+            clip_stack: Vec::new(),
+            clip_entries: Vec::new(),
         }
     }
 
     pub fn resize(&mut self, size: Size, scale_milli: u32) {
+        self.layer_stack.clear();
+        self.layer_pool.clear();
+        self.clip_stack.clear();
+        self.clip_entries.clear();
         self.buffer = Buffer::from_logical_dimensions_with_scale(
             size.width as u32,
             size.height as u32,
@@ -506,47 +528,121 @@ impl CpuPaintRenderer {
         }
     }
 
+    fn acquire_layer_buffer(&mut self) -> Buffer {
+        if let Some(mut buffer) = self.layer_pool.pop() {
+            buffer.clear(Color::TRANSPARENT);
+            return buffer;
+        }
+
+        Buffer::from_logical_dimensions_with_scale(
+            self.buffer.logical_width(),
+            self.buffer.logical_height(),
+            self.scale_milli,
+        )
+    }
+
     fn push_clip_layer(&mut self, clip: ClipRegion) {
-        let layer = PaintLayer {
-            buffer: Buffer::from_logical_dimensions_with_scale(
-                self.buffer.logical_width(),
-                self.buffer.logical_height(),
-                self.scale_milli,
-            ),
-            clip,
-        };
+        let buffer = self.acquire_layer_buffer();
+        let layer = PaintLayer { buffer, clip };
         self.layer_stack.push(layer);
     }
 
-    fn pop_clip_layer(&mut self) {
+    fn pop_clip_layer(&mut self, damage_rects: Option<&[Rect]>) {
         let Some(layer) = self.layer_stack.pop() else {
             return;
         };
         let clip = self.scale_clip_region(layer.clip);
-        if clip.corner_radius > 0.0 {
-            self.current_buffer_mut().composite_clipped_rounded(
-                &layer.buffer,
-                0,
-                0,
-                1.0,
-                clip.rect.origin.x as i32,
-                clip.rect.origin.y as i32,
-                clip.rect.size.width as i32,
-                clip.rect.size.height as i32,
-                clip.corner_radius,
-            );
-        } else {
-            self.current_buffer_mut().composite_clipped(
-                &layer.buffer,
-                0,
-                0,
-                1.0,
-                clip.rect.origin.x as i32,
-                clip.rect.origin.y as i32,
-                clip.rect.size.width as i32,
-                clip.rect.size.height as i32,
-            );
+        let effective_clips = self.effective_clip_rects(damage_rects);
+
+        match effective_clips {
+            EffectiveClipRects::Unclipped => {
+                composite_layer_clipped(self.current_buffer_mut(), &layer.buffer, clip, None);
+            }
+            EffectiveClipRects::Empty => {}
+            EffectiveClipRects::Rects(rects) => {
+                for rect in rects {
+                    let scaled_rect = self.scale_rect(rect);
+                    composite_layer_clipped(
+                        self.current_buffer_mut(),
+                        &layer.buffer,
+                        clip,
+                        Some(scaled_rect),
+                    );
+                }
+            }
         }
+
+        self.layer_pool.push(layer.buffer);
+    }
+
+    fn push_clip(&mut self, clip: ClipRegion) {
+        self.clip_stack.push(clip);
+        if clip.corner_radius <= 0.0 {
+            self.clip_entries.push(ClipEntry::Rect);
+        } else {
+            self.push_clip_layer(clip);
+            self.clip_entries.push(ClipEntry::Layer);
+        }
+    }
+
+    fn pop_clip(&mut self, damage_rects: Option<&[Rect]>) {
+        let Some(entry) = self.clip_entries.pop() else {
+            return;
+        };
+        self.clip_stack.pop();
+        if entry == ClipEntry::Layer {
+            self.pop_clip_layer(damage_rects);
+        }
+    }
+
+    fn active_clip_rect(&self) -> Option<Rect> {
+        let mut active: Option<Rect> = None;
+        for clip in &self.clip_stack {
+            active = match active {
+                Some(current) => intersect_rect(current, clip.rect),
+                None => Some(clip.rect),
+            };
+            active?;
+        }
+        active
+    }
+
+    fn effective_clip_rects(&self, damage_rects: Option<&[Rect]>) -> EffectiveClipRects {
+        let active_clip = self.active_clip_rect();
+        if !self.clip_stack.is_empty() && active_clip.is_none() {
+            return EffectiveClipRects::Empty;
+        }
+
+        match (active_clip, damage_rects) {
+            (Some(active), Some(damage)) => {
+                let rects: Vec<Rect> = damage
+                    .iter()
+                    .filter_map(|rect| intersect_rect(active, *rect))
+                    .collect();
+                if rects.is_empty() {
+                    EffectiveClipRects::Empty
+                } else {
+                    EffectiveClipRects::Rects(rects)
+                }
+            }
+            (Some(active), None) => EffectiveClipRects::Rects(alloc::vec![active]),
+            (None, Some(damage)) if damage.is_empty() => EffectiveClipRects::Empty,
+            (None, Some(damage)) => EffectiveClipRects::Rects(damage.to_vec()),
+            (None, None) => EffectiveClipRects::Unclipped,
+        }
+    }
+
+    fn recycle_active_layers(&mut self) {
+        while let Some(layer) = self.layer_stack.pop() {
+            self.layer_pool.push(layer.buffer);
+        }
+        self.clip_stack.clear();
+        self.clip_entries.clear();
+    }
+
+    #[cfg(test)]
+    fn retained_layer_count(&self) -> usize {
+        self.layer_pool.len()
     }
 
     pub fn execute(&mut self, ctx: &PaintContext<'_>) {
@@ -564,23 +660,32 @@ impl CpuPaintRenderer {
             }
             None => self.buffer.clear(self.background_color),
         }
-        self.layer_stack.clear();
+        self.recycle_active_layers();
 
         for cmd in ctx.commands() {
             match cmd {
                 PaintCommand::FillPath { path, color } => {
                     let scaled: Vec<Point> =
                         path.iter().copied().map(|p| self.scale_point(p)).collect();
-                    if let Some(rects) = damage_rects {
-                        for rect in rects {
-                            let clip = ClipRegion {
-                                rect: self.scale_rect(*rect),
-                                corner_radius: 0.0,
-                            };
-                            fill_polygon(self.current_buffer_mut(), &scaled, *color, Some(clip));
+                    match self.effective_clip_rects(damage_rects) {
+                        EffectiveClipRects::Unclipped => {
+                            fill_polygon(self.current_buffer_mut(), &scaled, *color, None);
                         }
-                    } else {
-                        fill_polygon(self.current_buffer_mut(), &scaled, *color, None);
+                        EffectiveClipRects::Empty => {}
+                        EffectiveClipRects::Rects(rects) => {
+                            for rect in rects {
+                                let clip = ClipRegion {
+                                    rect: self.scale_rect(rect),
+                                    corner_radius: 0.0,
+                                };
+                                fill_polygon(
+                                    self.current_buffer_mut(),
+                                    &scaled,
+                                    *color,
+                                    Some(clip),
+                                );
+                            }
+                        }
                     }
                 }
                 PaintCommand::StrokeRect {
@@ -590,30 +695,32 @@ impl CpuPaintRenderer {
                 } => {
                     let rect = self.scale_rect(*rect);
                     let stroke_width = self.scale_f32(stroke_width.max(1.0));
-                    if let Some(rects) = damage_rects {
-                        for damage_rect in rects {
-                            let clip = ClipRegion {
-                                rect: self.scale_rect(*damage_rect),
-                                corner_radius: 0.0,
-                            };
-                            stroke_rounded_rect(
-                                self.current_buffer_mut(),
-                                rect,
-                                0.0,
-                                stroke_width,
-                                *color,
-                                Some(clip),
-                            );
-                        }
-                    } else {
-                        stroke_rounded_rect(
+                    match self.effective_clip_rects(damage_rects) {
+                        EffectiveClipRects::Unclipped => stroke_rounded_rect(
                             self.current_buffer_mut(),
                             rect,
                             0.0,
                             stroke_width,
                             *color,
                             None,
-                        );
+                        ),
+                        EffectiveClipRects::Empty => {}
+                        EffectiveClipRects::Rects(rects) => {
+                            for clip_rect in rects {
+                                let clip = ClipRegion {
+                                    rect: self.scale_rect(clip_rect),
+                                    corner_radius: 0.0,
+                                };
+                                stroke_rounded_rect(
+                                    self.current_buffer_mut(),
+                                    rect,
+                                    0.0,
+                                    stroke_width,
+                                    *color,
+                                    Some(clip),
+                                );
+                            }
+                        }
                     }
                 }
                 PaintCommand::StrokeRoundedRect {
@@ -625,30 +732,32 @@ impl CpuPaintRenderer {
                     let rect = self.scale_rect(*rect);
                     let radius = self.scale_f32(*corner_radius);
                     let stroke_width = self.scale_f32(stroke_width.max(1.0));
-                    if let Some(rects) = damage_rects {
-                        for damage_rect in rects {
-                            let clip = ClipRegion {
-                                rect: self.scale_rect(*damage_rect),
-                                corner_radius: 0.0,
-                            };
-                            stroke_rounded_rect(
-                                self.current_buffer_mut(),
-                                rect,
-                                radius,
-                                stroke_width,
-                                *color,
-                                Some(clip),
-                            );
-                        }
-                    } else {
-                        stroke_rounded_rect(
+                    match self.effective_clip_rects(damage_rects) {
+                        EffectiveClipRects::Unclipped => stroke_rounded_rect(
                             self.current_buffer_mut(),
                             rect,
                             radius,
                             stroke_width,
                             *color,
                             None,
-                        );
+                        ),
+                        EffectiveClipRects::Empty => {}
+                        EffectiveClipRects::Rects(rects) => {
+                            for clip_rect in rects {
+                                let clip = ClipRegion {
+                                    rect: self.scale_rect(clip_rect),
+                                    corner_radius: 0.0,
+                                };
+                                stroke_rounded_rect(
+                                    self.current_buffer_mut(),
+                                    rect,
+                                    radius,
+                                    stroke_width,
+                                    *color,
+                                    Some(clip),
+                                );
+                            }
+                        }
                     }
                 }
                 PaintCommand::StrokePath {
@@ -656,50 +765,65 @@ impl CpuPaintRenderer {
                     stroke_width,
                     color,
                 } => {
-                    let sw = stroke_width.max(1.0) as i32;
-                    let mut canvas = crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
-                    for window in path.windows(2) {
-                        canvas.draw_line(
-                            window[0].x as i32,
-                            window[0].y as i32,
-                            window[1].x as i32,
-                            window[1].y as i32,
-                            *color,
-                        );
+                    let _ = stroke_width.max(1.0);
+                    let scaled: Vec<Point> =
+                        path.iter().copied().map(|p| self.scale_point(p)).collect();
+                    match self.effective_clip_rects(damage_rects) {
+                        EffectiveClipRects::Unclipped => {
+                            for window in scaled.windows(2) {
+                                draw_line_clipped(
+                                    self.current_buffer_mut(),
+                                    window[0],
+                                    window[1],
+                                    *color,
+                                    None,
+                                );
+                            }
+                            if scaled.len() > 2 {
+                                draw_line_clipped(
+                                    self.current_buffer_mut(),
+                                    scaled[scaled.len() - 1],
+                                    scaled[0],
+                                    *color,
+                                    None,
+                                );
+                            }
+                        }
+                        EffectiveClipRects::Empty => {}
+                        EffectiveClipRects::Rects(rects) => {
+                            for clip_rect in rects {
+                                let clip = self.scale_rect(clip_rect);
+                                for window in scaled.windows(2) {
+                                    draw_line_clipped(
+                                        self.current_buffer_mut(),
+                                        window[0],
+                                        window[1],
+                                        *color,
+                                        Some(clip),
+                                    );
+                                }
+                                if scaled.len() > 2 {
+                                    draw_line_clipped(
+                                        self.current_buffer_mut(),
+                                        scaled[scaled.len() - 1],
+                                        scaled[0],
+                                        *color,
+                                        Some(clip),
+                                    );
+                                }
+                            }
+                        }
                     }
-                    if path.len() > 2 {
-                        let first = path[0];
-                        let last = path[path.len() - 1];
-                        canvas.draw_line(
-                            last.x as i32,
-                            last.y as i32,
-                            first.x as i32,
-                            first.y as i32,
-                            *color,
-                        );
-                    }
-                    let _ = sw;
                 }
                 PaintCommand::DrawText {
                     position,
                     text,
                     color,
                     font_size_px,
-                } => {
-                    let mut canvas = crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
-                    if let Some(rects) = damage_rects {
-                        for rect in rects {
-                            canvas.draw_text_sized_clipped(
-                                position.x as i32,
-                                position.y as i32,
-                                text,
-                                *color,
-                                *font_size_px,
-                                *rect,
-                                0.0,
-                            );
-                        }
-                    } else {
+                } => match self.effective_clip_rects(damage_rects) {
+                    EffectiveClipRects::Unclipped => {
+                        let mut canvas =
+                            crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
                         canvas.draw_text_sized(
                             position.x as i32,
                             position.y as i32,
@@ -708,28 +832,48 @@ impl CpuPaintRenderer {
                             *font_size_px,
                         );
                     }
-                }
+                    EffectiveClipRects::Empty => {}
+                    EffectiveClipRects::Rects(rects) => {
+                        for rect in rects {
+                            let mut canvas =
+                                crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
+                            canvas.draw_text_sized_clipped(
+                                position.x as i32,
+                                position.y as i32,
+                                text,
+                                *color,
+                                *font_size_px,
+                                rect,
+                                0.0,
+                            );
+                        }
+                    }
+                },
                 PaintCommand::DrawBuffer { dst, buffer_idx } => {
                     if let Some(src) = ctx.buffer(BufferHandle(*buffer_idx)) {
                         let dst = self.scale_rect(*dst);
                         let dst_x = dst.origin.x as i32;
                         let dst_y = dst.origin.y as i32;
-                        if let Some(rects) = damage_rects {
-                            for rect in rects {
-                                let clip = self.scale_rect(*rect);
-                                self.current_buffer_mut().composite_clipped(
-                                    src,
-                                    dst_x,
-                                    dst_y,
-                                    1.0,
-                                    clip.origin.x as i32,
-                                    clip.origin.y as i32,
-                                    clip.size.width as i32,
-                                    clip.size.height as i32,
-                                );
+                        match self.effective_clip_rects(damage_rects) {
+                            EffectiveClipRects::Unclipped => {
+                                self.current_buffer_mut().composite(src, dst_x, dst_y, 1.0);
                             }
-                        } else {
-                            self.current_buffer_mut().composite(src, dst_x, dst_y, 1.0);
+                            EffectiveClipRects::Empty => {}
+                            EffectiveClipRects::Rects(rects) => {
+                                for rect in rects {
+                                    let clip = self.scale_rect(rect);
+                                    self.current_buffer_mut().composite_clipped(
+                                        src,
+                                        dst_x,
+                                        dst_y,
+                                        1.0,
+                                        clip.origin.x as i32,
+                                        clip.origin.y as i32,
+                                        clip.size.width as i32,
+                                        clip.size.height as i32,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -748,28 +892,32 @@ impl CpuPaintRenderer {
                         let src_y = src.origin.y as i32;
                         let src_w = src.size.width as i32;
                         let src_h = src.size.height as i32;
-                        if let Some(rects) = damage_rects {
-                            for rect in rects {
-                                let clip = self.scale_rect(*rect);
-                                self.current_buffer_mut().composite_rect_clipped(
-                                    buf,
-                                    src_x,
-                                    src_y,
-                                    src_w,
-                                    src_h,
-                                    dst_x,
-                                    dst_y,
-                                    *opacity,
-                                    clip.origin.x as i32,
-                                    clip.origin.y as i32,
-                                    clip.size.width as i32,
-                                    clip.size.height as i32,
+                        match self.effective_clip_rects(damage_rects) {
+                            EffectiveClipRects::Unclipped => {
+                                self.current_buffer_mut().composite_rect(
+                                    buf, src_x, src_y, src_w, src_h, dst_x, dst_y, *opacity,
                                 );
                             }
-                        } else {
-                            self.current_buffer_mut().composite_rect(
-                                buf, src_x, src_y, src_w, src_h, dst_x, dst_y, *opacity,
-                            );
+                            EffectiveClipRects::Empty => {}
+                            EffectiveClipRects::Rects(rects) => {
+                                for rect in rects {
+                                    let clip = self.scale_rect(rect);
+                                    self.current_buffer_mut().composite_rect_clipped(
+                                        buf,
+                                        src_x,
+                                        src_y,
+                                        src_w,
+                                        src_h,
+                                        dst_x,
+                                        dst_y,
+                                        *opacity,
+                                        clip.origin.x as i32,
+                                        clip.origin.y as i32,
+                                        clip.size.width as i32,
+                                        clip.size.height as i32,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -777,20 +925,20 @@ impl CpuPaintRenderer {
                     rect,
                     corner_radius,
                 } => {
-                    self.push_clip_layer(ClipRegion {
+                    self.push_clip(ClipRegion {
                         rect: *rect,
                         corner_radius: *corner_radius,
                     });
                 }
                 PaintCommand::PopClip => {
-                    self.pop_clip_layer();
+                    self.pop_clip(damage_rects);
                 }
                 PaintCommand::SetOpacity { opacity: _ } => {}
             }
         }
 
-        while !self.layer_stack.is_empty() {
-            self.pop_clip_layer();
+        while !self.clip_entries.is_empty() {
+            self.pop_clip(damage_rects);
         }
     }
 
@@ -903,6 +1051,139 @@ fn fill_polygon(buffer: &mut Buffer, path: &[Point], color: Color, clip: Option<
             }
         }
     }
+}
+
+fn composite_layer_clipped(
+    dst: &mut Buffer,
+    src: &Buffer,
+    clip: ClipRegion,
+    extra_clip: Option<Rect>,
+) {
+    let Some(rect) = extra_clip.map_or(Some(clip.rect), |extra| intersect_rect(clip.rect, extra))
+    else {
+        return;
+    };
+
+    if clip.corner_radius <= 0.0 {
+        dst.composite_clipped(
+            src,
+            0,
+            0,
+            1.0,
+            rect.origin.x as i32,
+            rect.origin.y as i32,
+            rect.size.width as i32,
+            rect.size.height as i32,
+        );
+        return;
+    }
+
+    let left = libm::floorf(rect.origin.x).max(0.0) as i32;
+    let top = libm::floorf(rect.origin.y).max(0.0) as i32;
+    let right = libm::ceilf(rect.origin.x + rect.size.width)
+        .min(dst.width() as f32)
+        .min(src.width() as f32) as i32;
+    let bottom = libm::ceilf(rect.origin.y + rect.size.height)
+        .min(dst.height() as f32)
+        .min(src.height() as f32) as i32;
+    if right <= left || bottom <= top {
+        return;
+    }
+
+    let dst_width = dst.width() as usize;
+    let src_width = src.width() as usize;
+    let src_data = src.as_slice();
+    let dst_data = dst.as_mut_slice();
+
+    for y in top..bottom {
+        let py = y as f32 + 0.5;
+        let src_row = y as usize * src_width;
+        let dst_row = y as usize * dst_width;
+        for x in left..right {
+            let px = x as f32 + 0.5;
+            if !contains_rounded_rect(clip.rect, clip.corner_radius, px, py) {
+                continue;
+            }
+            let src_pixel = src_data[src_row + x as usize];
+            let dst_idx = dst_row + x as usize;
+            dst_data[dst_idx] = Buffer::blend_pixels(dst_data[dst_idx], src_pixel, 1.0);
+        }
+    }
+}
+
+fn draw_line_clipped(
+    buffer: &mut Buffer,
+    from: Point,
+    to: Point,
+    color: Color,
+    clip: Option<Rect>,
+) {
+    if color.a <= 0.0 {
+        return;
+    }
+
+    let mut x0 = from.x as i32;
+    let mut y0 = from.y as i32;
+    let x1 = to.x as i32;
+    let y1 = to.y as i32;
+    let dx = (x1 - x0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs();
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    loop {
+        if clip.is_none_or(|rect| rect_contains_pixel(rect, x0, y0)) {
+            blend_pixel(buffer, x0, y0, color);
+        }
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+fn blend_pixel(buffer: &mut Buffer, x: i32, y: i32, color: Color) {
+    if x < 0 || y < 0 || x >= buffer.width() as i32 || y >= buffer.height() as i32 {
+        return;
+    }
+    let pixel = color.to_bgra();
+    let width = buffer.width() as usize;
+    let idx = y as usize * width + x as usize;
+    let data = buffer.as_mut_slice();
+    if color.a >= 1.0 {
+        data[idx] = pixel;
+    } else {
+        data[idx] = Buffer::blend_pixels(data[idx], pixel, 1.0);
+    }
+}
+
+fn rect_contains_pixel(rect: Rect, x: i32, y: i32) -> bool {
+    let px = x as f32 + 0.5;
+    let py = y as f32 + 0.5;
+    px >= rect.origin.x
+        && py >= rect.origin.y
+        && px < rect.origin.x + rect.size.width
+        && py < rect.origin.y + rect.size.height
+}
+
+fn intersect_rect(a: Rect, b: Rect) -> Option<Rect> {
+    let left = a.origin.x.max(b.origin.x);
+    let top = a.origin.y.max(b.origin.y);
+    let right = (a.origin.x + a.size.width).min(b.origin.x + b.size.width);
+    let bottom = (a.origin.y + a.size.height).min(b.origin.y + b.size.height);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(Rect::from_xywh(left, top, right - left, bottom - top))
 }
 
 fn stroke_rounded_rect(
@@ -1172,6 +1453,38 @@ mod tests {
     }
 
     #[test]
+    fn rectangular_clip_does_not_allocate_layer_buffer() {
+        let bg = Color::rgb(0, 0, 0);
+        let fill = Color::rgb(255, 0, 0);
+        let mut ctx = PaintContext::new();
+        ctx.push_clip(Rect::from_xywh(10.0, 10.0, 20.0, 20.0));
+        ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 50.0, 50.0), fill);
+        ctx.pop_clip();
+
+        let mut r = CpuPaintRenderer::new(Size::new(50.0, 50.0), 1000, bg);
+        r.execute(&ctx);
+
+        assert_eq!(r.retained_layer_count(), 0);
+    }
+
+    #[test]
+    fn rounded_clip_layer_buffer_is_reused() {
+        let bg = Color::rgb(0, 0, 0);
+        let fill = Color::rgb(255, 0, 0);
+        let mut ctx = PaintContext::new();
+        ctx.push_rounded_clip(Rect::from_xywh(10.0, 10.0, 20.0, 20.0), 8.0);
+        ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 50.0, 50.0), fill);
+        ctx.pop_clip();
+
+        let mut r = CpuPaintRenderer::new(Size::new(50.0, 50.0), 1000, bg);
+        r.execute(&ctx);
+        assert_eq!(r.retained_layer_count(), 1);
+
+        r.execute(&ctx);
+        assert_eq!(r.retained_layer_count(), 1);
+    }
+
+    #[test]
     fn nested_clip_layers_intersect_during_composite() {
         let bg = Color::rgb(0, 0, 0);
         let fill = Color::rgb(255, 0, 0);
@@ -1190,6 +1503,31 @@ mod tests {
         assert_eq!(r.buffer().get_pixel(15, 15).unwrap(), bg_pixel);
         assert_eq!(r.buffer().get_pixel(45, 15).unwrap(), bg_pixel);
         assert_eq!(r.buffer().get_pixel(25, 5).unwrap(), bg_pixel);
+    }
+
+    #[test]
+    fn three_nested_rectangular_clips_intersect_without_layer_buffer() {
+        let bg = Color::rgb(0, 0, 0);
+        let fill = Color::rgb(255, 0, 0);
+        let mut ctx = PaintContext::new();
+        ctx.push_clip(Rect::from_xywh(5.0, 5.0, 40.0, 40.0));
+        ctx.push_clip(Rect::from_xywh(15.0, 0.0, 30.0, 50.0));
+        ctx.push_clip(Rect::from_xywh(0.0, 20.0, 50.0, 15.0));
+        ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 60.0, 60.0), fill);
+        ctx.pop_clip();
+        ctx.pop_clip();
+        ctx.pop_clip();
+
+        let mut r = CpuPaintRenderer::new(Size::new(60.0, 60.0), 1000, bg);
+        r.execute(&ctx);
+
+        let bg_pixel = bg.to_bgra();
+        assert_eq!(r.buffer().get_pixel(20, 25).unwrap(), fill.to_bgra());
+        assert_eq!(r.buffer().get_pixel(10, 25).unwrap(), bg_pixel);
+        assert_eq!(r.buffer().get_pixel(20, 15).unwrap(), bg_pixel);
+        assert_eq!(r.buffer().get_pixel(48, 25).unwrap(), bg_pixel);
+        assert_eq!(r.buffer().get_pixel(20, 38).unwrap(), bg_pixel);
+        assert_eq!(r.retained_layer_count(), 0);
     }
 
     #[test]
