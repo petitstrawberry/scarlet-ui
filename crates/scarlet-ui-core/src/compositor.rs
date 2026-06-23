@@ -17,8 +17,6 @@ use alloc::vec::Vec;
 pub type DamageRect = (u32, u32, u32, u32);
 
 const MAX_PRESENT_DAMAGE_RECTS: usize = 4;
-const PRESENT_DAMAGE_FULL_AREA_NUMERATOR: u64 = 3;
-const PRESENT_DAMAGE_FULL_AREA_DENOMINATOR: u64 = 5;
 
 #[derive(Clone, Copy, Debug)]
 struct ClipRegion {
@@ -722,9 +720,7 @@ impl Compositor {
         let damage_area = Self::damage_rects_area(&damage);
         let window_area =
             (self.window_buffer.width() as u64).saturating_mul(self.window_buffer.height() as u64);
-        if damage_area.saturating_mul(PRESENT_DAMAGE_FULL_AREA_DENOMINATOR)
-            >= window_area.saturating_mul(PRESENT_DAMAGE_FULL_AREA_NUMERATOR)
-        {
+        if damage_area >= window_area {
             return None;
         }
 

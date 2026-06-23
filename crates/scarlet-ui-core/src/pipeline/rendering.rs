@@ -20,8 +20,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 const MAX_PRESENT_DAMAGE_RECTS: usize = 4;
-const PRESENT_DAMAGE_FULL_AREA_NUMERATOR: u64 = 3;
-const PRESENT_DAMAGE_FULL_AREA_DENOMINATOR: u64 = 5;
 const SCROLL_LAYER_TILE_SIZE: f32 = 512.0;
 const MAX_SCROLL_LAYER_TILES: usize = 96;
 
@@ -393,11 +391,7 @@ impl RenderingPipeline {
             Some(rects) if rects.is_empty() => Some(Vec::new()),
             Some(rects) => {
                 Self::merge_overlapping_rects(rects);
-                let damage = Self::present_damage_rects(rects, size, scale);
-                if damage.is_none() {
-                    dirty_rects = None;
-                }
-                damage
+                Self::present_damage_rects(rects, size, scale)
             }
             None => None,
         };
@@ -670,9 +664,7 @@ impl RenderingPipeline {
 
         let damage_area = Self::damage_rects_area(&damage);
         let window_area = (physical_width as u64).saturating_mul(physical_height as u64);
-        if damage_area.saturating_mul(PRESENT_DAMAGE_FULL_AREA_DENOMINATOR)
-            >= window_area.saturating_mul(PRESENT_DAMAGE_FULL_AREA_NUMERATOR)
-        {
+        if damage_area >= window_area {
             return None;
         }
 
@@ -1067,41 +1059,46 @@ impl<'a> PaintWalker<'a> {
         };
 
         let mut painted = false;
-        for key in Self::visible_tile_keys(visible_content) {
-            let Some(tile_rect) = Self::tile_rect(key, info.content_size) else {
-                continue;
-            };
-            let Some(intersection) = Self::intersect_rects(tile_rect, visible_content) else {
-                continue;
-            };
-            let dst = Rect::from_xywh(
-                abs.x + intersection.origin.x - info.offset.x,
-                abs.y + intersection.origin.y - info.offset.y,
-                intersection.size.width,
-                intersection.size.height,
-            );
-            if damage_rects.is_some_and(|rects| !RenderingPipeline::overlaps_any(dst, rects)) {
-                continue;
+        let (start_x, start_y, end_x, end_y) = Self::visible_tile_range(visible_content);
+        for y in start_y..=end_y {
+            for x in start_x..=end_x {
+                let key = ScrollTileKey { x, y };
+                let Some(tile_rect) = Self::tile_rect(key, info.content_size) else {
+                    continue;
+                };
+                let Some(intersection) = Self::intersect_rects(tile_rect, visible_content) else {
+                    continue;
+                };
+                let dst = Rect::from_xywh(
+                    abs.x + intersection.origin.x - info.offset.x,
+                    abs.y + intersection.origin.y - info.offset.y,
+                    intersection.size.width,
+                    intersection.size.height,
+                );
+                if damage_rects.is_some_and(|rects| !RenderingPipeline::overlaps_any(dst, rects)) {
+                    continue;
+                }
+
+                let buffer = if let Some(buffer) = self.cached_scroll_tile(element.id(), key) {
+                    self.stats.scroll_tile_hits += 1;
+                    buffer
+                } else {
+                    self.stats.scroll_tile_misses += 1;
+                    let rendered =
+                        self.render_scroll_tile(element, info, tile_rect, ancestor_dirty);
+                    self.insert_scroll_tile(element.id(), key, tile_rect, rendered.clone());
+                    rendered
+                };
+
+                let src = Rect::from_xywh(
+                    intersection.origin.x - tile_rect.origin.x,
+                    intersection.origin.y - tile_rect.origin.y,
+                    intersection.size.width,
+                    intersection.size.height,
+                );
+                ctx.draw_buffer_rect_shared(dst, src, buffer, 1.0);
+                painted = true;
             }
-
-            let buffer = if let Some(buffer) = self.cached_scroll_tile(element.id(), key) {
-                self.stats.scroll_tile_hits += 1;
-                buffer
-            } else {
-                self.stats.scroll_tile_misses += 1;
-                let rendered = self.render_scroll_tile(element, info, tile_rect, ancestor_dirty);
-                self.insert_scroll_tile(element.id(), key, tile_rect, rendered.clone());
-                rendered
-            };
-
-            let src = Rect::from_xywh(
-                intersection.origin.x - tile_rect.origin.x,
-                intersection.origin.y - tile_rect.origin.y,
-                intersection.size.width,
-                intersection.size.height,
-            );
-            ctx.draw_buffer_rect_shared(dst, src, buffer, 1.0);
-            painted = true;
         }
         painted
     }
@@ -1125,18 +1122,12 @@ impl<'a> PaintWalker<'a> {
         })
     }
 
-    fn visible_tile_keys(rect: Rect) -> Vec<ScrollTileKey> {
+    fn visible_tile_range(rect: Rect) -> (i32, i32, i32, i32) {
         let start_x = libm::floorf(rect.left() / SCROLL_LAYER_TILE_SIZE) as i32;
         let start_y = libm::floorf(rect.top() / SCROLL_LAYER_TILE_SIZE) as i32;
         let end_x = libm::floorf((rect.right() - 0.001) / SCROLL_LAYER_TILE_SIZE) as i32;
         let end_y = libm::floorf((rect.bottom() - 0.001) / SCROLL_LAYER_TILE_SIZE) as i32;
-        let mut keys = Vec::new();
-        for y in start_y..=end_y {
-            for x in start_x..=end_x {
-                keys.push(ScrollTileKey { x, y });
-            }
-        }
-        keys
+        (start_x, start_y, end_x, end_y)
     }
 
     fn tile_rect(key: ScrollTileKey, content_size: Size) -> Option<Rect> {
@@ -1288,6 +1279,29 @@ mod tests {
         pipeline.set_root(root);
         pipeline.layout_initial();
         pipeline
+    }
+
+    #[test]
+    fn present_damage_keeps_large_partial_region() {
+        let damage = RenderingPipeline::present_damage_rects(
+            &[Rect::from_xywh(0.0, 0.0, 800.0, 400.0)],
+            Size::new(800.0, 600.0),
+            1000,
+        )
+        .expect("partial damage should not force full present");
+
+        assert_eq!(damage, vec![(0, 0, 800, 400)]);
+    }
+
+    #[test]
+    fn present_damage_uses_full_for_whole_window() {
+        let damage = RenderingPipeline::present_damage_rects(
+            &[Rect::from_xywh(0.0, 0.0, 800.0, 600.0)],
+            Size::new(800.0, 600.0),
+            1000,
+        );
+
+        assert_eq!(damage, None);
     }
 
     #[test]
