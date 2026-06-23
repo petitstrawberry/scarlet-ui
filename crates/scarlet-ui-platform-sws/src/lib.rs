@@ -14,10 +14,10 @@ use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::element::TextInputElementState;
 use scarlet_ui_core::error::Result;
-use scarlet_ui_core::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent};
+use scarlet_ui_core::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase};
 use scarlet_ui_core::geometry::{Point, Rect, Size};
 use scarlet_ui_core::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
-use sws::event::{Event as SwsEvent, abs_code, event_type, key_code};
+use sws::event::{Event as SwsEvent, abs_code, event_type, key_code, rel_code};
 use sws_client as sws;
 
 #[cfg(feature = "std")]
@@ -1232,6 +1232,26 @@ impl SWSPlatformWindow {
                             }
                             self.pending_move = false;
                         }
+                    }
+                    (event_type::EV_REL, rel_code::REL_WHEEL) => {
+                        self.push_event(Event::Mouse(MouseEvent::Wheel {
+                            delta_x: 0,
+                            delta_y: -input.value,
+                            x: self.pointer_x,
+                            y: self.pointer_y,
+                            phase: WheelPhase::Moved,
+                            source: ScrollSource::Wheel,
+                        }));
+                    }
+                    (event_type::EV_REL, rel_code::REL_HWHEEL) => {
+                        self.push_event(Event::Mouse(MouseEvent::Wheel {
+                            delta_x: -input.value,
+                            delta_y: 0,
+                            x: self.pointer_x,
+                            y: self.pointer_y,
+                            phase: WheelPhase::Moved,
+                            source: ScrollSource::Wheel,
+                        }));
                     }
                     (event_type::EV_KEY, key_code::BTN_LEFT) => {
                         let button = MouseButton::Left;
