@@ -133,8 +133,8 @@ pub use views::{
     ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabItem, TabView, Toggle,
 };
 pub use views::{
-    Button, HStack, Image, Rectangle, Spacer, SplitAxis, SplitView, Text, TextField, VStack,
-    Window, WindowContentLayout, ZStack,
+    Button, HStack, Image, LazyVStack, Rectangle, Spacer, SplitAxis, SplitView, Text, TextField,
+    VStack, Window, WindowContentLayout, ZStack,
 };
 pub use views::{
     EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView, TextViewRenderObject,
@@ -177,8 +177,8 @@ pub mod prelude {
         ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabItem, TabView, Toggle,
     };
     pub use crate::views::{
-        Button, Either, Either3, Either4, Either5, Either6, HStack, Image, Rectangle, Spacer,
-        SplitAxis, SplitView, Text, TextField, VStack, Window, WindowContentLayout, ZStack,
+        Button, Either, Either3, Either4, Either5, Either6, HStack, Image, LazyVStack, Rectangle,
+        Spacer, SplitAxis, SplitView, Text, TextField, VStack, Window, WindowContentLayout, ZStack,
     };
     pub use crate::views::{
         EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView,

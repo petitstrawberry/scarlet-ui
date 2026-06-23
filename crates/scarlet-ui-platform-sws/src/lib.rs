@@ -14,7 +14,9 @@ use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::element::TextInputElementState;
 use scarlet_ui_core::error::Result;
-use scarlet_ui_core::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase};
+use scarlet_ui_core::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
+};
 use scarlet_ui_core::geometry::{Point, Rect, Size};
 use scarlet_ui_core::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code, rel_code};

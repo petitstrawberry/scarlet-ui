@@ -8,6 +8,7 @@ pub mod containers;
 mod divider;
 mod either;
 mod image;
+mod lazy_vstack;
 pub mod menu;
 pub mod modifiers;
 pub mod navigation;
@@ -32,6 +33,7 @@ pub use canvas::{CanvasEventHandler, CanvasRenderCallback, CanvasRenderObject, C
 pub use divider::{Divider, DividerOrientation, DividerRenderObject};
 pub use either::{Either, Either3, Either4, Either5, Either6};
 pub use image::{BitmapImage, Image, ImageFit, ImageRenderObject, ImageSource};
+pub use lazy_vstack::LazyVStack;
 pub use menu::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};
 pub use navigation::{NavigationLink, NavigationView};
 pub use progress::{ProgressView, ProgressViewRenderObject};

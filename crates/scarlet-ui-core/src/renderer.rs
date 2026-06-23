@@ -1,4 +1,5 @@
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::buffer::Buffer;
@@ -136,6 +137,7 @@ pub struct BufferHandle(pub usize);
 /// one-frame buffer value.
 pub enum PaintBuffer<'a> {
     Borrowed(&'a Buffer),
+    Shared(Arc<Buffer>),
     Temporary(Buffer),
 }
 
@@ -143,6 +145,7 @@ impl<'a> PaintBuffer<'a> {
     pub fn as_buffer(&self) -> &Buffer {
         match self {
             Self::Borrowed(buffer) => buffer,
+            Self::Shared(buffer) => buffer.as_ref(),
             Self::Temporary(buffer) => buffer,
         }
     }
@@ -281,6 +284,24 @@ impl<'a> PaintContext<'a> {
     ) -> BufferHandle {
         let idx = self.buffers.len();
         self.buffers.push(PaintBuffer::Borrowed(buffer));
+        self.commands.push(PaintCommand::DrawBufferRect {
+            dst,
+            src,
+            buffer_idx: idx,
+            opacity,
+        });
+        BufferHandle(idx)
+    }
+
+    pub fn draw_buffer_rect_shared(
+        &mut self,
+        dst: Rect,
+        src: Rect,
+        buffer: Arc<Buffer>,
+        opacity: f32,
+    ) -> BufferHandle {
+        let idx = self.buffers.len();
+        self.buffers.push(PaintBuffer::Shared(buffer));
         self.commands.push(PaintCommand::DrawBufferRect {
             dst,
             src,
@@ -787,6 +808,10 @@ impl CpuPaintRenderer {
 
     pub fn buffer(&self) -> &Buffer {
         &self.buffer
+    }
+
+    pub fn into_buffer(self) -> Buffer {
+        self.buffer
     }
 
     pub fn set_background_color(&mut self, color: Color) {

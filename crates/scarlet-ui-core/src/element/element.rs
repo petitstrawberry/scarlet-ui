@@ -225,6 +225,14 @@ pub trait Element {
     /// Set the position of this Element
     fn set_position(&mut self, _position: Point) {}
 
+    /// Provide a content-local viewport hint to virtualized descendants.
+    ///
+    /// Scroll containers call this when the visible content rect changes so
+    /// lazy containers can materialize only the children near the viewport.
+    fn set_viewport_hint(&mut self, _viewport: Rect) -> bool {
+        false
+    }
+
     /// Get the current bounds of this Element
     fn bounds(&self) -> Rect {
         Rect {

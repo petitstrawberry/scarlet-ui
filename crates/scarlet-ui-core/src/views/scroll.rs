@@ -5,7 +5,9 @@
 //! elements, hit testing, and event behavior.
 
 use crate::color::{Color, ColorPalette};
-use crate::element::{Element, ElementRenderObject, LayoutConstraints, RenderElement};
+use crate::element::{
+    Element, ElementRenderObject, LayoutConstraints, RenderElement, ScrollLayerInfo,
+};
 use crate::event::{Event, MouseEvent, Phase, WheelPhase};
 use crate::geometry::{Point, Rect, Size};
 use crate::renderer::PaintContext;
@@ -763,6 +765,12 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         if let Some(child) = children.first_mut() {
             let child_constraints =
                 LayoutConstraints::tight(content_width.max(0.0), content_height.max(0.0));
+            child.set_viewport_hint(Rect::from_xywh(
+                self.offset_x,
+                self.offset_y,
+                self.viewport_size.width,
+                self.viewport_size.height,
+            ));
             self.content_size = child.layout(child_constraints);
             self.content_size.width = self.content_size.width.max(content_width);
             self.content_size.height = self.content_size.height.max(content_height);
@@ -844,6 +852,14 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         Some((Rect::new(origin, self.viewport_size), 0.0))
     }
 
+    fn scroll_layer_info(&self) -> Option<ScrollLayerInfo> {
+        Some(ScrollLayerInfo {
+            viewport_size: self.viewport_size,
+            content_size: self.content_size,
+            offset: Point::new(self.offset_x, self.offset_y),
+        })
+    }
+
     fn captures_wheel_event(&self, event: &MouseEvent) -> bool {
         let MouseEvent::Wheel {
             delta_x, delta_y, ..
@@ -918,6 +934,12 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
     fn apply_scroll_offset(&mut self, children: &mut [Box<dyn Element>]) -> bool {
         if let Some(child) = children.first_mut() {
             child.set_position(Point::new(-self.offset_x, -self.offset_y));
+            child.set_viewport_hint(Rect::from_xywh(
+                self.offset_x,
+                self.offset_y,
+                self.viewport_size.width,
+                self.viewport_size.height,
+            ));
         }
         true
     }

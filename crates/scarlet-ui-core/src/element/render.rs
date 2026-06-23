@@ -17,6 +17,14 @@ use crate::renderer::PaintContext;
 use crate::state::{InvalidationKind, SubscriptionId};
 use crate::view::View;
 
+/// Information needed to paint a scrollable render object as a retained layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollLayerInfo {
+    pub viewport_size: Size,
+    pub content_size: Size,
+    pub offset: Point,
+}
+
 /// RenderObject trait for leaf rendering nodes
 ///
 /// RenderObjects are responsible for:
@@ -144,6 +152,12 @@ pub trait RenderObject: Any {
     /// A clipping rectangle and corner radius when this render object clips its
     /// children.
     fn clip_bounds(&self, _origin: Point) -> Option<(Rect, f32)> {
+        None
+    }
+
+    /// Return scroll-layer geometry when this render object can retain its
+    /// child content separately from its viewport chrome.
+    fn scroll_layer_info(&self) -> Option<ScrollLayerInfo> {
         None
     }
 
@@ -577,6 +591,23 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
     fn set_position(&mut self, position: Point) {
         self.position = position;
+    }
+
+    fn set_viewport_hint(&mut self, viewport: Rect) -> bool {
+        let mut changed = false;
+        for child in self.children.iter_mut() {
+            let child_pos = child.position();
+            let child_viewport = Rect::from_xywh(
+                viewport.origin.x - child_pos.x,
+                viewport.origin.y - child_pos.y,
+                viewport.size.width,
+                viewport.size.height,
+            );
+            if child.set_viewport_hint(child_viewport) {
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn bounds(&self) -> Rect {
