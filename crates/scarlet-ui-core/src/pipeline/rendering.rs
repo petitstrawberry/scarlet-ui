@@ -57,6 +57,8 @@ pub(crate) struct PaintTestCounters {
     pub(crate) boundary_rebuilds: usize,
     pub(crate) retained_composites: usize,
     pub(crate) retained_sync_visits: usize,
+    pub(crate) localized_retained_syncs: usize,
+    pub(crate) retained_sync_fallbacks: usize,
 }
 
 /// RenderingPipeline integrates all components of the rendering system
@@ -538,6 +540,19 @@ impl RenderingPipeline {
                 }
             } else {
                 return false;
+            }
+            if Self::sync_retained_layer_offsets_for_path_target(
+                root,
+                &self.dirty_scratch.path,
+                &mut self.layer_store,
+                #[cfg(test)]
+                &mut self.paint_test_counters,
+            ) {
+                continue;
+            }
+            #[cfg(test)]
+            {
+                self.paint_test_counters.retained_sync_fallbacks += 1;
             }
             if !Self::sync_retained_layer_offsets_along_path(
                 root,
@@ -1439,6 +1454,123 @@ impl RenderingPipeline {
             layer_store,
         );
         true
+    }
+
+    fn sync_retained_layer_offsets_for_path_target(
+        mut element: &dyn Element,
+        path: &[ElementId],
+        layer_store: &mut LayerStore,
+        #[cfg(test)] paint_test_counters: &mut PaintTestCounters,
+    ) -> bool {
+        let mut origin = Point::ZERO;
+        let mut active_clip = None;
+        let mut parent_container = LayerId::Root;
+        let mut path_index = 0usize;
+
+        loop {
+            if path.get(path_index).copied() != Some(element.id()) {
+                return false;
+            }
+
+            let abs = Point::new(
+                origin.x + element.position().x,
+                origin.y + element.position().y,
+            );
+            let is_boundary = element
+                .render_object()
+                .and_then(|render_object| render_object.repaint_boundary_size())
+                .is_some();
+
+            if is_boundary {
+                if !Self::sync_retained_boundary_ref(
+                    element.id(),
+                    abs,
+                    active_clip,
+                    parent_container,
+                    layer_store,
+                    false,
+                ) {
+                    return false;
+                }
+                if path_index + 1 == path.len() {
+                    #[cfg(test)]
+                    {
+                        paint_test_counters.localized_retained_syncs += 1;
+                    }
+                    return true;
+                }
+                let Some(next_id) = path.get(path_index + 1).copied() else {
+                    return false;
+                };
+                let Some(child) = element
+                    .children()
+                    .iter()
+                    .find(|child| child.id() == next_id)
+                else {
+                    return false;
+                };
+                element = child.as_ref();
+                origin = Point::ZERO;
+                active_clip = None;
+                parent_container = LayerId::Boundary(path[path_index]);
+                path_index += 1;
+                continue;
+            }
+
+            let mut child_clip = active_clip;
+            if let Some((rect, radius)) = Self::clip_for_element(element, abs) {
+                child_clip = Some(LayerClip {
+                    rect,
+                    corner_radius: radius,
+                });
+            }
+
+            if path_index + 1 == path.len() {
+                for child in element.children() {
+                    if child
+                        .render_object()
+                        .and_then(|render_object| render_object.repaint_boundary_size())
+                        .is_some()
+                        && !Self::sync_retained_boundary_child(
+                            child.as_ref(),
+                            abs,
+                            child_clip,
+                            parent_container,
+                            layer_store,
+                        )
+                    {
+                        return false;
+                    }
+                }
+                Self::sync_retained_overlay_primitives(
+                    element,
+                    abs,
+                    child_clip,
+                    parent_container,
+                    layer_store,
+                );
+                #[cfg(test)]
+                {
+                    paint_test_counters.localized_retained_syncs += 1;
+                }
+                return true;
+            }
+
+            let Some(next_id) = path.get(path_index + 1).copied() else {
+                return false;
+            };
+            let Some(child) = element
+                .children()
+                .iter()
+                .find(|child| child.id() == next_id)
+            else {
+                return false;
+            };
+            element = child.as_ref();
+            origin = abs;
+            active_clip = child_clip;
+            path_index += 1;
+        }
     }
 
     fn sync_retained_boundary_ref(
@@ -2370,7 +2502,9 @@ mod tests {
         assert_eq!(counters.walk_and_paint_calls, 0);
         assert_eq!(counters.boundary_rebuilds, 0);
         assert_eq!(counters.retained_composites, 1);
-        assert!(counters.retained_sync_visits <= 4);
+        assert_eq!(counters.retained_sync_visits, 0);
+        assert_eq!(counters.localized_retained_syncs, 1);
+        assert_eq!(counters.retained_sync_fallbacks, 0);
     }
 
     #[test]
@@ -2386,7 +2520,9 @@ mod tests {
         assert_eq!(counters.walk_and_paint_calls, 0);
         assert_eq!(counters.boundary_rebuilds, 0);
         assert_eq!(counters.retained_composites, 1);
-        assert!(counters.retained_sync_visits <= 4);
+        assert_eq!(counters.retained_sync_visits, 0);
+        assert_eq!(counters.localized_retained_syncs, 1);
+        assert_eq!(counters.retained_sync_fallbacks, 0);
     }
 
     #[test]
@@ -2406,7 +2542,9 @@ mod tests {
         assert_eq!(counters.walk_and_paint_calls, 0);
         assert_eq!(counters.boundary_rebuilds, 0);
         assert_eq!(counters.retained_composites, 1);
-        assert!(counters.retained_sync_visits <= 4);
+        assert_eq!(counters.retained_sync_visits, 0);
+        assert_eq!(counters.localized_retained_syncs, 1);
+        assert_eq!(counters.retained_sync_fallbacks, 0);
     }
 
     #[test]
@@ -2477,7 +2615,9 @@ mod tests {
         assert_eq!(counters.walk_and_paint_calls, 0);
         assert_eq!(counters.boundary_rebuilds, 0);
         assert_eq!(counters.retained_composites, 1);
-        assert!(counters.retained_sync_visits <= 8);
+        assert_eq!(counters.retained_sync_visits, 0);
+        assert_eq!(counters.localized_retained_syncs, 1);
+        assert_eq!(counters.retained_sync_fallbacks, 0);
     }
 
     #[test]
@@ -2504,7 +2644,9 @@ mod tests {
         assert_eq!(counters.walk_and_paint_calls, 0);
         assert_eq!(counters.boundary_rebuilds, 0);
         assert_eq!(counters.retained_composites, 1);
-        assert!(counters.retained_sync_visits <= 4);
+        assert_eq!(counters.retained_sync_visits, 0);
+        assert_eq!(counters.localized_retained_syncs, 1);
+        assert_eq!(counters.retained_sync_fallbacks, 0);
     }
 
     #[test]
