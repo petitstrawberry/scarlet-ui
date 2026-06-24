@@ -746,11 +746,11 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn present(&mut self, buffer: &Buffer) {
-        let _ = self.present_buffer(buffer);
+        let _ = self.present_buffer(buffer, None);
     }
 
-    fn present_with_damage(&mut self, buffer: &Buffer, _damage: Option<&[DamageRect]>) {
-        let _ = self.present_buffer(buffer);
+    fn present_with_damage(&mut self, buffer: &Buffer, damage: Option<&[DamageRect]>) {
+        let _ = self.present_buffer(buffer, damage);
     }
 
     fn set_title(&mut self, title: &str) {
@@ -945,13 +945,13 @@ impl Drop for WinitPlatformWindow {
 }
 
 impl WinitPlatformWindow {
-    fn present_buffer(&mut self, buffer: &Buffer) -> Result<()> {
+    fn present_buffer(&mut self, buffer: &Buffer, damage: Option<&[DamageRect]>) -> Result<()> {
         let physical_size = self.window.inner_size();
         let width = physical_size.width.max(1);
         let height = physical_size.height.max(1);
         self.resize_surface(width, height)?;
         let mut surface_buffer = self.surface.buffer_mut().map_err(|_| Error::RenderError)?;
-        copy_scaled(buffer, &mut surface_buffer, width, height);
+        copy_scaled(buffer, &mut surface_buffer, width, height, damage);
         surface_buffer.present().map_err(|_| Error::RenderError)
     }
 }
@@ -990,19 +990,63 @@ fn next_surface_id() -> u32 {
     NEXT_SURFACE_ID.fetch_add(1, Ordering::Relaxed).max(1)
 }
 
-fn copy_scaled(buffer: &Buffer, dst: &mut [u32], dst_width: u32, dst_height: u32) {
+fn copy_scaled(
+    buffer: &Buffer,
+    dst: &mut [u32],
+    dst_width: u32,
+    dst_height: u32,
+    damage: Option<&[DamageRect]>,
+) {
     let src_width = buffer.width().max(1);
     let src_height = buffer.height().max(1);
     let src = buffer.as_slice();
-    if src_width == dst_width && src_height == dst_height {
-        let len = dst.len().min(src.len());
-        dst[..len].copy_from_slice(&src[..len]);
+    if let Some(damage) = damage {
+        for &(x, y, width, height) in damage {
+            let x0 = x.min(dst_width);
+            let y0 = y.min(dst_height);
+            let x1 = x.saturating_add(width).min(dst_width);
+            let y1 = y.saturating_add(height).min(dst_height);
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+            copy_scaled_region(src, src_width, src_height, dst, dst_width, dst_height, x0, y0, x1, y1);
+        }
         return;
     }
 
-    for y in 0..dst_height {
+    copy_scaled_region(src, src_width, src_height, dst, dst_width, dst_height, 0, 0, dst_width, dst_height);
+}
+
+fn copy_scaled_region(
+    src: &[u32],
+    src_width: u32,
+    src_height: u32,
+    dst: &mut [u32],
+    dst_width: u32,
+    dst_height: u32,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+) {
+    if src_width == dst_width && src_height == dst_height {
+        for y in y0..y1 {
+            let row_start = (y * dst_width + x0) as usize;
+            let row_end = (y * dst_width + x1) as usize;
+            let src_start = row_start.min(src.len());
+            let src_end = row_end.min(src.len());
+            let dst_start = row_start.min(dst.len());
+            let dst_end = row_end.min(dst.len());
+            if src_start < src_end && dst_start < dst_end {
+                dst[dst_start..dst_end].copy_from_slice(&src[src_start..src_end]);
+            }
+        }
+        return;
+    }
+
+    for y in y0..y1 {
         let src_y = (y as u64 * src_height as u64 / dst_height as u64) as u32;
-        for x in 0..dst_width {
+        for x in x0..x1 {
             let src_x = (x as u64 * src_width as u64 / dst_width as u64) as u32;
             let src_index = (src_y * src_width + src_x) as usize;
             let dst_index = (y * dst_width + x) as usize;
