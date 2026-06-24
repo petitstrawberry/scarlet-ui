@@ -112,6 +112,9 @@ pub struct EventDispatcher {
     /// so a parent scroll view does not lose capture to a nested child that
     /// slides under the cursor mid-gesture.
     wheel_target: Option<ElementId>,
+    wheel_path: Vec<ElementId>,
+    hit_path_scratch: Vec<ElementId>,
+    path_origins_scratch: Vec<Point>,
     /// Timestamp of the most recent wheel event, used to expire idle discrete
     /// (non-trackpad) wheel gestures via `WHEEL_GESTURE_IDLE`.
     wheel_last_event_at: Option<Instant>,
@@ -133,6 +136,9 @@ impl EventDispatcher {
             captured_path: Vec::new(),
             captured_point: None,
             wheel_target: None,
+            wheel_path: Vec::new(),
+            hit_path_scratch: Vec::new(),
+            path_origins_scratch: Vec::new(),
             wheel_last_event_at: None,
             left_button_down: false,
             focused_id: None,
@@ -257,7 +263,13 @@ impl EventDispatcher {
             // fresh target. Trackpad gestures are bound to finger contact, not
             // cursor position, so they skip this.
             let discrete_hit_path = if !uses_wheel_capture {
-                self.hit_test_with_path_ids(element_tree, point)
+                let mut hit_path = core::mem::take(&mut self.hit_path_scratch);
+                if self.hit_test_with_path_ids_into(element_tree, point, &mut hit_path) {
+                    Some(hit_path)
+                } else {
+                    self.hit_path_scratch = hit_path;
+                    None
+                }
             } else {
                 None
             };
@@ -276,27 +288,38 @@ impl EventDispatcher {
                     self.clear_wheel_target();
                     discrete_hit_path
                 } else {
+                    if let Some(hit_path) = discrete_hit_path {
+                        self.hit_path_scratch = hit_path;
+                    }
                     // Gesture in progress: route every wheel event to the
                     // locked target, ignoring pointer movement. This is what
                     // keeps a parent scroll view scrolling when a nested child
                     // slides under the cursor mid-gesture.
                     wheel_target_locked = true;
-                    match element_tree.find_path_ids(target_id) {
-                        Some(path) => {
-                            if crate::debug::wheel_log_enabled() {
-                                crate::logln!("[Wheel] reuse target={:?}", target_id);
-                            }
-                            Some(path)
+                    let cached_path = core::mem::take(&mut self.wheel_path);
+                    if cached_path.last().copied() == Some(target_id) {
+                        if crate::debug::wheel_log_enabled() {
+                            crate::logln!("[Wheel] reuse target={:?}", target_id);
                         }
-                        None => {
-                            if crate::debug::wheel_log_enabled() {
-                                crate::logln!(
-                                    "[Wheel] captured target vanished id={:?}",
-                                    target_id
-                                );
+                        Some(cached_path)
+                    } else {
+                        match element_tree.find_path_ids(target_id) {
+                            Some(path) => {
+                                if crate::debug::wheel_log_enabled() {
+                                    crate::logln!("[Wheel] reuse target={:?}", target_id);
+                                }
+                                Some(path)
                             }
-                            wheel_consumed_without_path = true;
-                            None
+                            None => {
+                                if crate::debug::wheel_log_enabled() {
+                                    crate::logln!(
+                                        "[Wheel] captured target vanished id={:?}",
+                                        target_id
+                                    );
+                                }
+                                wheel_consumed_without_path = true;
+                                None
+                            }
                         }
                     }
                 }
@@ -380,7 +403,8 @@ impl EventDispatcher {
         }
 
         if let Some(path) = path {
-            let path_origins = Self::path_origins(element_tree, &path);
+            let mut path_origins = core::mem::take(&mut self.path_origins_scratch);
+            Self::path_origins_into(element_tree, &path, &mut path_origins);
             let target_id = *path.last().unwrap();
             if crate::debug::is_enabled() {
                 crate::logln!(
@@ -581,7 +605,14 @@ impl EventDispatcher {
                 self.captured_path.clear();
                 self.captured_point = None;
             }
-            handled || wheel_target_locked
+            let result = handled || wheel_target_locked;
+            self.path_origins_scratch = path_origins;
+            if is_wheel && self.wheel_target.is_some() {
+                self.wheel_path = path;
+            } else {
+                self.hit_path_scratch = path;
+            }
+            result
         } else {
             if let crate::event::MouseEvent::Moved { x, y } = event {
                 if let Some(old_id) = self.hovered_id {
@@ -847,6 +878,47 @@ impl EventDispatcher {
         Some(path)
     }
 
+    fn hit_test_with_path_ids_into(
+        &self,
+        element_tree: &ElementTree,
+        point: Point,
+        path: &mut Vec<ElementId>,
+    ) -> bool {
+        path.clear();
+        let Some(root) = element_tree.root() else {
+            return false;
+        };
+        self.hit_test_recursive_ids_into(root, point, path)
+    }
+
+    fn hit_test_recursive_ids_into(
+        &self,
+        element: &dyn Element,
+        point: Point,
+        path: &mut Vec<ElementId>,
+    ) -> bool {
+        if !Self::point_inside_element_clip(element, point) {
+            return false;
+        }
+
+        path.push(element.id());
+        let local_point = Point {
+            x: point.x - element.position().x,
+            y: point.y - element.position().y,
+        };
+        for child in element.children().iter().rev() {
+            if self.hit_test_recursive_ids_into(child.as_ref(), local_point, path) {
+                return true;
+            }
+        }
+
+        if element.hit_test(point) {
+            return true;
+        }
+        path.pop();
+        false
+    }
+
     fn hit_test_recursive_ids(
         &self,
         element: &dyn Element,
@@ -1085,6 +1157,7 @@ impl EventDispatcher {
 
     fn clear_wheel_target(&mut self) {
         self.wheel_target = None;
+        self.wheel_path.clear();
         self.wheel_last_event_at = None;
     }
 
@@ -1164,6 +1237,16 @@ impl EventDispatcher {
 
     fn path_origins(element_tree: &mut ElementTree, path: &[ElementId]) -> Vec<Point> {
         let mut origins = Vec::with_capacity(path.len());
+        Self::path_origins_into(element_tree, path, &mut origins);
+        origins
+    }
+
+    fn path_origins_into(
+        element_tree: &mut ElementTree,
+        path: &[ElementId],
+        origins: &mut Vec<Point>,
+    ) {
+        origins.clear();
         let mut acc = Point::ZERO;
         for id in path {
             if let Some(element) = element_tree.find_element_mut(*id) {
@@ -1173,7 +1256,6 @@ impl EventDispatcher {
             }
             origins.push(acc);
         }
-        origins
     }
 
     fn path_origin_from_ids(element_tree: &mut ElementTree, path: &[ElementId]) -> Option<Point> {

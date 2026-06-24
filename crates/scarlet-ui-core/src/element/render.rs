@@ -12,10 +12,22 @@ use core::any::Any;
 
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
 use crate::geometry::{Point, Rect, Size};
+use crate::pipeline::layers::{LayerClip, LayerPrimitive};
 use crate::pipeline::{MountContext, PipelineId};
 use crate::renderer::PaintContext;
 use crate::state::{InvalidationKind, SubscriptionId};
 use crate::view::View;
+
+/// Result of syncing child positions after a scroll-like event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollOffsetUpdate {
+    /// No scroll-specific child position update was applied.
+    None,
+    /// Child positions changed and the element must repaint.
+    NeedsPaint,
+    /// Child positions changed and retained layers only need recomposition.
+    NeedsComposite,
+}
 
 /// RenderObject trait for leaf rendering nodes
 ///
@@ -75,6 +87,19 @@ pub trait RenderObject: Any {
         false
     }
 
+    /// Emit retained overlay primitives after this render object's children.
+    ///
+    /// Retained primitives are used by the layer compositor on composite-only
+    /// frames, so dynamic chrome can move without rebuilding paint commands.
+    fn retained_overlay_primitives(
+        &self,
+        _owner: ElementId,
+        _origin: Point,
+        _clip: Option<LayerClip>,
+        _out: &mut [Option<LayerPrimitive>; 2],
+    ) {
+    }
+
     /// Return the local bounds of a retained repaint boundary.
     ///
     /// The paint pipeline may rasterize this element's descendants into an
@@ -90,8 +115,12 @@ pub trait RenderObject: Any {
         None
     }
 
-    /// Return whether this repaint boundary should flatten descendant repaint
-    /// boundaries into its own cache.
+    /// Return whether this repaint boundary may flatten descendant repaint
+    /// boundaries into its own picture content.
+    ///
+    /// The retained paint pipeline preserves descendant repaint boundaries as
+    /// ordered child layers even when this returns `false`; `false` no longer
+    /// discards the parent boundary cache.
     fn repaint_boundary_cache_nested_boundaries(&self) -> bool {
         true
     }
@@ -235,12 +264,14 @@ pub trait RenderObject: Any {
     ///
     /// # Returns
     ///
-    /// `true` when the caller may skip layout and only request a repaint for
-    /// this event. The default implementation does nothing and returns
-    /// `false`, leaving the layout/paint decision to
+    /// [`ScrollOffsetUpdate::NeedsPaint`] when the caller may skip layout and
+    /// only request a repaint for this event, or
+    /// [`ScrollOffsetUpdate::NeedsComposite`] when retained layers only need
+    /// recomposition. The default implementation does nothing and returns
+    /// [`ScrollOffsetUpdate::None`], leaving the layout/paint decision to
     /// [`ElementRenderObject::update_needs_layout`].
-    fn apply_scroll_offset(&mut self, _children: &mut [Box<dyn Element>]) -> bool {
-        false
+    fn apply_scroll_offset(&mut self, _children: &mut [Box<dyn Element>]) -> ScrollOffsetUpdate {
+        ScrollOffsetUpdate::None
     }
 }
 
@@ -961,12 +992,20 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         }
 
         if self.render_object.handle_event(_event, _phase) {
-            if self.render_object.apply_scroll_offset(&mut self.children) {
-                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
-            } else if self.render_object.update_needs_layout() {
-                crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
-            } else {
-                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+            match self.render_object.apply_scroll_offset(&mut self.children) {
+                ScrollOffsetUpdate::NeedsPaint => {
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                }
+                ScrollOffsetUpdate::NeedsComposite => {
+                    crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id);
+                }
+                ScrollOffsetUpdate::None => {
+                    if self.render_object.update_needs_layout() {
+                        crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
+                    } else {
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                    }
+                }
             }
             return true;
         }
