@@ -37,6 +37,7 @@ type SoftbufferSurface =
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_DISTANCE: i32 = 5;
 const TRACKPAD_END_GRACE: Duration = Duration::from_millis(120);
+const TRACKPAD_MOVED_MIN_INTERVAL: Duration = Duration::from_millis(16);
 
 pub struct WinitBackend {
     shared: Rc<WinitSharedState>,
@@ -103,6 +104,8 @@ struct WinitEventState {
     modifiers: KeyModifiers,
     click_state: ClickState,
     pending_trackpad_end: Option<PendingTrackpadEnd>,
+    pending_trackpad_moved: Option<PendingTrackpadMoved>,
+    last_trackpad_moved_emit_at: Option<Instant>,
     queue: VecDeque<Event>,
 }
 
@@ -110,6 +113,11 @@ struct WinitEventState {
 struct PendingTrackpadEnd {
     event: Event,
     queued_at: Instant,
+}
+
+#[derive(Clone, Debug)]
+struct PendingTrackpadMoved {
+    event: Event,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -194,6 +202,8 @@ impl WinitEventState {
             modifiers: KeyModifiers::empty(),
             click_state: ClickState::default(),
             pending_trackpad_end: None,
+            pending_trackpad_moved: None,
+            last_trackpad_moved_emit_at: None,
             queue: VecDeque::new(),
         }
     }
@@ -202,6 +212,7 @@ impl WinitEventState {
         self.flush_expired_trackpad_end();
 
         if Self::is_trackpad_end(&event) {
+            self.flush_pending_trackpad_moved(true);
             self.pending_trackpad_end = Some(PendingTrackpadEnd {
                 event,
                 queued_at: Instant::now(),
@@ -229,14 +240,17 @@ impl WinitEventState {
         }
 
         if self.coalesce_trackpad_moved(&event) {
+            self.flush_pending_trackpad_moved(false);
             return;
         }
 
+        self.flush_pending_trackpad_moved(true);
         self.queue.push_back(event);
     }
 
     fn pop(&mut self) -> Option<Event> {
         self.flush_expired_trackpad_end();
+        self.flush_pending_trackpad_moved(false);
         self.queue.pop_front()
     }
 
@@ -280,34 +294,63 @@ impl WinitEventState {
             y,
             phase: WheelPhase::Moved,
             source: ScrollSource::Trackpad,
-        }) = event
+        }) = &event
         else {
             return false;
         };
 
-        let Some(Event::Mouse(MouseEvent::Wheel {
-            delta_x: queued_delta_x,
-            delta_y: queued_delta_y,
-            x: queued_x,
-            y: queued_y,
+        let pending = if let Some(pending) = self.pending_trackpad_moved.as_mut() {
+            pending
+        } else {
+            self.pending_trackpad_moved = Some(PendingTrackpadMoved {
+                event: Event::Mouse(MouseEvent::Wheel {
+                    delta_x: *delta_x,
+                    delta_y: *delta_y,
+                    x: *x,
+                    y: *y,
+                    phase: WheelPhase::Moved,
+                    source: ScrollSource::Trackpad,
+                }),
+            });
+            return true;
+        };
+        let Event::Mouse(MouseEvent::Wheel {
+            delta_x: pending_delta_x,
+            delta_y: pending_delta_y,
+            x: pending_x,
+            y: pending_y,
             phase: WheelPhase::Moved,
             source: ScrollSource::Trackpad,
-        })) = self.queue.back_mut()
+        }) = &mut pending.event
         else {
             return false;
         };
 
-        *queued_delta_x = queued_delta_x.saturating_add(*delta_x);
-        *queued_delta_y = queued_delta_y.saturating_add(*delta_y);
-        *queued_x = *x;
-        *queued_y = *y;
+        *pending_delta_x = pending_delta_x.saturating_add(*delta_x);
+        *pending_delta_y = pending_delta_y.saturating_add(*delta_y);
+        *pending_x = *x;
+        *pending_y = *y;
         if scarlet_ui_core::debug::wheel_log_enabled() {
             println!(
                 "[Wheel] coalesced trackpad moved delta=({}, {}) cursor=({}, {})",
-                *queued_delta_x, *queued_delta_y, *x, *y
+                *pending_delta_x, *pending_delta_y, *x, *y
             );
         }
         true
+    }
+
+    fn flush_pending_trackpad_moved(&mut self, force: bool) {
+        let should_flush = force
+            || self
+                .last_trackpad_moved_emit_at
+                .is_none_or(|last| last.elapsed() >= TRACKPAD_MOVED_MIN_INTERVAL);
+        if !should_flush {
+            return;
+        }
+        if let Some(pending) = self.pending_trackpad_moved.take() {
+            self.queue.push_back(pending.event);
+            self.last_trackpad_moved_emit_at = Some(Instant::now());
+        }
     }
 
     fn next_text_input_serial(&mut self) -> u32 {
@@ -1077,8 +1120,25 @@ mod tests {
         assert!(matches!(
             state.pop(),
             Some(Event::Mouse(MouseEvent::Wheel {
-                delta_x: 3,
-                delta_y: 9,
+                delta_x: 1,
+                delta_y: 4,
+                x: 10,
+                y: 20,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Trackpad,
+            }))
+        ));
+        assert!(state.pop().is_none());
+        state.last_trackpad_moved_emit_at = Some(
+            Instant::now()
+                .checked_sub(TRACKPAD_MOVED_MIN_INTERVAL + Duration::from_millis(1))
+                .unwrap(),
+        );
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Mouse(MouseEvent::Wheel {
+                delta_x: 2,
+                delta_y: 5,
                 x: 50,
                 y: 60,
                 phase: WheelPhase::Moved,
@@ -1086,6 +1146,40 @@ mod tests {
             }))
         ));
         assert!(state.pop().is_none());
+    }
+
+    #[test]
+    fn trackpad_moved_events_are_rate_limited() {
+        let mut state = WinitEventState::new(1.0);
+
+        state.push(trackpad_moved(4, 10, 20));
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Mouse(MouseEvent::Wheel {
+                delta_y: 4,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Trackpad,
+                ..
+            }))
+        ));
+
+        state.push(trackpad_moved(7, 30, 40));
+        assert!(state.pop().is_none());
+
+        state.last_trackpad_moved_emit_at = Some(
+            Instant::now()
+                .checked_sub(TRACKPAD_MOVED_MIN_INTERVAL + Duration::from_millis(1))
+                .unwrap(),
+        );
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Mouse(MouseEvent::Wheel {
+                delta_y: 7,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Trackpad,
+                ..
+            }))
+        ));
     }
 
     #[test]
