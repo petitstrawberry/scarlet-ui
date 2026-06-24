@@ -59,6 +59,8 @@ pub(crate) struct PaintTestCounters {
     pub(crate) retained_sync_visits: usize,
     pub(crate) localized_retained_syncs: usize,
     pub(crate) retained_sync_fallbacks: usize,
+    pub(crate) retained_primitive_slot_syncs: usize,
+    pub(crate) retained_primitive_scan_syncs: usize,
 }
 
 /// RenderingPipeline integrates all components of the rendering system
@@ -1452,6 +1454,8 @@ impl RenderingPipeline {
             child_clip,
             parent_container,
             layer_store,
+            #[cfg(test)]
+            paint_test_counters,
         );
         true
     }
@@ -1548,6 +1552,8 @@ impl RenderingPipeline {
                     child_clip,
                     parent_container,
                     layer_store,
+                    #[cfg(test)]
+                    paint_test_counters,
                 );
                 #[cfg(test)]
                 {
@@ -1718,6 +1724,7 @@ impl RenderingPipeline {
         active_clip: Option<LayerClip>,
         container_id: LayerId,
         layer_store: &mut LayerStore,
+        #[cfg(test)] paint_test_counters: &mut PaintTestCounters,
     ) {
         let Some(render_object) = element.render_object() else {
             return;
@@ -1729,6 +1736,17 @@ impl RenderingPipeline {
             active_clip,
             &mut primitives,
         );
+        if layer_store.replace_stable_primitive_range(container_id, element.id(), &primitives) {
+            #[cfg(test)]
+            {
+                paint_test_counters.retained_primitive_slot_syncs += 1;
+            }
+            return;
+        }
+        #[cfg(test)]
+        {
+            paint_test_counters.retained_primitive_scan_syncs += 1;
+        }
         let Some(container) = layer_store.container_mut(container_id) else {
             return;
         };
@@ -1755,6 +1773,7 @@ impl RenderingPipeline {
         for primitive in primitives.into_iter().flatten() {
             container.children.push(LayerChild::Primitive(primitive));
         }
+        layer_store.rebuild_primitive_ranges(container_id);
     }
 
     fn paint_layer_primitive(ctx: &mut PaintContext<'_>, primitive: LayerPrimitive, origin: Point) {
@@ -2523,6 +2542,8 @@ mod tests {
         assert_eq!(counters.retained_sync_visits, 0);
         assert_eq!(counters.localized_retained_syncs, 1);
         assert_eq!(counters.retained_sync_fallbacks, 0);
+        assert_eq!(counters.retained_primitive_slot_syncs, 1);
+        assert_eq!(counters.retained_primitive_scan_syncs, 0);
     }
 
     #[test]
@@ -2545,6 +2566,8 @@ mod tests {
         assert_eq!(counters.retained_sync_visits, 0);
         assert_eq!(counters.localized_retained_syncs, 1);
         assert_eq!(counters.retained_sync_fallbacks, 0);
+        assert_eq!(counters.retained_primitive_slot_syncs, 1);
+        assert_eq!(counters.retained_primitive_scan_syncs, 0);
     }
 
     #[test]

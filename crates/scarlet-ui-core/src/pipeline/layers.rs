@@ -53,6 +53,7 @@ pub(crate) struct LayerContainer {
     pub(crate) logical_size: Size,
     pub(crate) scale_milli: u32,
     pub(crate) children: Vec<LayerChild>,
+    primitive_ranges: BTreeMap<ElementId, (usize, usize)>,
     pub(crate) generation: u64,
     pub(crate) valid: bool,
     pub(crate) invalidated_by: Option<ElementId>,
@@ -84,6 +85,7 @@ impl LayerContainer {
             logical_size: Size::ZERO,
             scale_milli: 1000,
             children: Vec::new(),
+            primitive_ranges: BTreeMap::new(),
             generation: 0,
             valid: false,
             invalidated_by: None,
@@ -103,10 +105,70 @@ impl LayerContainer {
             logical_size,
             scale_milli,
             children: Vec::new(),
+            primitive_ranges: BTreeMap::new(),
             generation,
             valid: true,
             invalidated_by: None,
         }
+    }
+
+    fn note_appended_child(&mut self, child: LayerChild) {
+        let index = self.children.len();
+        self.children.push(child);
+        if let LayerChild::Primitive(primitive) = child {
+            self.note_primitive_at(primitive.owner, index);
+        }
+    }
+
+    fn note_primitive_at(&mut self, owner: ElementId, index: usize) {
+        if let Some((start, len)) = self.primitive_ranges.get_mut(&owner)
+            && start.saturating_add(*len) == index
+        {
+            *len = len.saturating_add(1);
+            return;
+        }
+        self.primitive_ranges.insert(owner, (index, 1));
+    }
+
+    fn rebuild_primitive_ranges(&mut self) {
+        self.primitive_ranges.clear();
+        let mut index = 0usize;
+        while index < self.children.len() {
+            if let LayerChild::Primitive(primitive) = self.children[index] {
+                self.note_primitive_at(primitive.owner, index);
+            }
+            index += 1;
+        }
+    }
+
+    fn replace_stable_primitive_range(
+        &mut self,
+        owner: ElementId,
+        primitives: &[Option<LayerPrimitive>; 2],
+    ) -> bool {
+        let replacement_count = primitives.iter().filter(|primitive| primitive.is_some()).count();
+        let Some((start, len)) = self.primitive_ranges.get(&owner).copied() else {
+            return false;
+        };
+        if replacement_count == 0 || replacement_count != len {
+            return false;
+        }
+        let end = start.saturating_add(len);
+        if end > self.children.len() {
+            return false;
+        }
+        if !self.children[start..end].iter().all(|child| {
+            matches!(*child, LayerChild::Primitive(LayerPrimitive { owner: child_owner, .. }) if child_owner == owner)
+        }) {
+            return false;
+        }
+
+        let mut index = start;
+        for primitive in primitives.iter().flatten().copied() {
+            self.children[index] = LayerChild::Primitive(primitive);
+            index += 1;
+        }
+        true
     }
 }
 
@@ -212,6 +274,7 @@ impl LayerStore {
             LayerChild::Chunk { id, .. } => self.chunks.contains_key(id),
             LayerChild::Primitive(_) => true,
         });
+        self.root.rebuild_primitive_ranges();
     }
 
     pub(crate) fn begin_container_rebuild(
@@ -236,6 +299,7 @@ impl LayerStore {
         container.logical_size = logical_size;
         container.scale_milli = scale_milli;
         container.children.clear();
+        container.primitive_ranges.clear();
         container.generation = generation;
         container.valid = false;
         container.invalidated_by = None;
@@ -270,7 +334,23 @@ impl LayerStore {
 
     pub(crate) fn append_child(&mut self, container: LayerId, child: LayerChild) {
         if let Some(container) = self.container_mut(container) {
-            container.children.push(child);
+            container.note_appended_child(child);
+        }
+    }
+
+    pub(crate) fn replace_stable_primitive_range(
+        &mut self,
+        container: LayerId,
+        owner: ElementId,
+        primitives: &[Option<LayerPrimitive>; 2],
+    ) -> bool {
+        self.container_mut(container)
+            .is_some_and(|container| container.replace_stable_primitive_range(owner, primitives))
+    }
+
+    pub(crate) fn rebuild_primitive_ranges(&mut self, container: LayerId) {
+        if let Some(container) = self.container_mut(container) {
+            container.rebuild_primitive_ranges();
         }
     }
 
