@@ -446,6 +446,41 @@ pub struct CpuPaintRenderer {
     layer_pool: Vec<Buffer>,
     clip_stack: Vec<ClipRegion>,
     clip_entries: Vec<ClipEntry>,
+    scratch: RasterScratch,
+}
+
+pub(crate) struct RasterScratch {
+    scaled_points: Vec<Point>,
+    crossings: Vec<f32>,
+    clip_rects: Vec<Rect>,
+    path_points: Vec<Point>,
+}
+
+impl RasterScratch {
+    fn new() -> Self {
+        Self {
+            scaled_points: Vec::new(),
+            crossings: Vec::new(),
+            clip_rects: Vec::new(),
+            path_points: Vec::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.scaled_points.clear();
+        self.crossings.clear();
+        self.clip_rects.clear();
+        self.path_points.clear();
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RasterScratchCapacity {
+    pub(crate) scaled_points: usize,
+    pub(crate) crossings: usize,
+    pub(crate) clip_rects: usize,
+    pub(crate) path_points: usize,
 }
 
 struct PaintLayer {
@@ -462,7 +497,7 @@ enum ClipEntry {
 enum EffectiveClipRects {
     Unclipped,
     Empty,
-    Rects(Vec<Rect>),
+    Rects,
 }
 
 impl CpuPaintRenderer {
@@ -479,9 +514,14 @@ impl CpuPaintRenderer {
             layer_pool: Vec::new(),
             clip_stack: Vec::new(),
             clip_entries: Vec::new(),
+            scratch: RasterScratch::new(),
         }
     }
 
+    #[deprecated(
+        since = "0.1.0",
+        note = "use execute_into_external_buffer on a retained CpuPaintRenderer to reuse raster scratch"
+    )]
     pub fn execute_into_buffer(
         buffer: &mut Buffer,
         background_color: Color,
@@ -497,9 +537,31 @@ impl CpuPaintRenderer {
             layer_pool: Vec::new(),
             clip_stack: Vec::new(),
             clip_entries: Vec::new(),
+            scratch: RasterScratch::new(),
         };
         renderer.execute_with_damage(ctx, damage_rects);
         *buffer = renderer.into_buffer();
+    }
+
+    pub fn execute_into_external_buffer(
+        &mut self,
+        buffer: &mut Buffer,
+        background_color: Color,
+        ctx: &PaintContext<'_>,
+        damage_rects: Option<&[Rect]>,
+    ) {
+        let window_buffer = core::mem::replace(
+            &mut self.buffer,
+            core::mem::replace(buffer, Buffer::empty()),
+        );
+        let window_background = self.background_color;
+        let window_scale = self.scale_milli;
+        self.background_color = background_color;
+        self.scale_milli = self.buffer.scale_milli();
+        self.execute_with_damage(ctx, damage_rects);
+        *buffer = core::mem::replace(&mut self.buffer, window_buffer);
+        self.background_color = window_background;
+        self.scale_milli = window_scale;
     }
 
     pub fn resize(&mut self, size: Size, scale_milli: u32) {
@@ -507,12 +569,34 @@ impl CpuPaintRenderer {
         self.layer_pool.clear();
         self.clip_stack.clear();
         self.clip_entries.clear();
+        self.scratch.clear();
         self.buffer = Buffer::from_logical_dimensions_with_scale(
             size.width as u32,
             size.height as u32,
             scale_milli,
         );
         self.scale_milli = scale_milli;
+    }
+
+    pub fn reserve_scratch_for_path(&mut self, points: usize) {
+        self.scratch.scaled_points.reserve(points);
+        self.scratch.path_points.reserve(points.max(4));
+        self.scratch.crossings.reserve(points);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scratch_capacity_for_test(&self) -> RasterScratchCapacity {
+        RasterScratchCapacity {
+            scaled_points: self.scratch.scaled_points.capacity(),
+            crossings: self.scratch.crossings.capacity(),
+            clip_rects: self.scratch.clip_rects.capacity(),
+            path_points: self.scratch.path_points.capacity(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_boundary_scratch_capacity_for_test(&self) -> RasterScratchCapacity {
+        self.scratch_capacity_for_test()
     }
 
     fn scale_f32(&self, value: f32) -> f32 {
@@ -572,15 +656,16 @@ impl CpuPaintRenderer {
             return;
         };
         let clip = self.scale_clip_region(layer.clip);
-        let effective_clips = self.effective_clip_rects(damage_rects);
+        let effective_clips = self.rebuild_effective_clip_rects(damage_rects);
 
         match effective_clips {
             EffectiveClipRects::Unclipped => {
                 composite_layer_clipped(self.current_buffer_mut(), &layer.buffer, clip, None);
             }
             EffectiveClipRects::Empty => {}
-            EffectiveClipRects::Rects(rects) => {
-                for rect in rects {
+            EffectiveClipRects::Rects => {
+                for index in 0..self.scratch.clip_rects.len() {
+                    let rect = self.scratch.clip_rects[index];
                     let scaled_rect = self.scale_rect(rect);
                     composite_layer_clipped(
                         self.current_buffer_mut(),
@@ -627,7 +712,11 @@ impl CpuPaintRenderer {
         active
     }
 
-    fn effective_clip_rects(&self, damage_rects: Option<&[Rect]>) -> EffectiveClipRects {
+    fn rebuild_effective_clip_rects(
+        &mut self,
+        damage_rects: Option<&[Rect]>,
+    ) -> EffectiveClipRects {
+        self.scratch.clip_rects.clear();
         let active_clip = self.active_clip_rect();
         if !self.clip_stack.is_empty() && active_clip.is_none() {
             return EffectiveClipRects::Empty;
@@ -635,20 +724,95 @@ impl CpuPaintRenderer {
 
         match (active_clip, damage_rects) {
             (Some(active), Some(damage)) => {
-                let rects: Vec<Rect> = damage
-                    .iter()
-                    .filter_map(|rect| intersect_rect(active, *rect))
-                    .collect();
-                if rects.is_empty() {
+                for rect in damage {
+                    if let Some(rect) = intersect_rect(active, *rect) {
+                        self.scratch.clip_rects.push(rect);
+                    }
+                }
+                if self.scratch.clip_rects.is_empty() {
                     EffectiveClipRects::Empty
                 } else {
-                    EffectiveClipRects::Rects(rects)
+                    EffectiveClipRects::Rects
                 }
             }
-            (Some(active), None) => EffectiveClipRects::Rects(alloc::vec![active]),
+            (Some(active), None) => {
+                self.scratch.clip_rects.push(active);
+                EffectiveClipRects::Rects
+            }
             (None, Some(damage)) if damage.is_empty() => EffectiveClipRects::Empty,
-            (None, Some(damage)) => EffectiveClipRects::Rects(damage.to_vec()),
+            (None, Some(damage)) => {
+                self.scratch.clip_rects.extend_from_slice(damage);
+                EffectiveClipRects::Rects
+            }
             (None, None) => EffectiveClipRects::Unclipped,
+        }
+    }
+
+    fn rebuild_scaled_points(&mut self, path: &[Point]) {
+        self.scratch.scaled_points.clear();
+        let scale_milli = self.scale_milli as f32;
+        self.scratch.scaled_points.extend(
+            path.iter()
+                .map(|p| Point::new(p.x * scale_milli / 1000.0, p.y * scale_milli / 1000.0)),
+        );
+    }
+
+    fn fill_scaled_path(&mut self, color: Color, clip: Option<ClipRegion>) {
+        let scratch = &mut self.scratch;
+        let path = &scratch.scaled_points;
+        let crossings = &mut scratch.crossings;
+        if let Some(layer) = self.layer_stack.last_mut() {
+            fill_polygon(&mut layer.buffer, path, color, clip, crossings);
+        } else {
+            fill_polygon(&mut self.buffer, path, color, clip, crossings);
+        }
+    }
+
+    fn draw_scaled_path_stroke(&mut self, stroke_width: f32, color: Color, clip: Option<Rect>) {
+        let point_count = self.scratch.scaled_points.len();
+        for index in 0..point_count.saturating_sub(1) {
+            let from = self.scratch.scaled_points[index];
+            let to = self.scratch.scaled_points[index + 1];
+            self.draw_thick_line(stroke_width, color, from, to, clip);
+        }
+        if point_count > 2 {
+            let from = self.scratch.scaled_points[point_count - 1];
+            let to = self.scratch.scaled_points[0];
+            self.draw_thick_line(stroke_width, color, from, to, clip);
+        }
+    }
+
+    fn draw_thick_line(
+        &mut self,
+        width: f32,
+        color: Color,
+        from: Point,
+        to: Point,
+        clip: Option<Rect>,
+    ) {
+        let scratch = &mut self.scratch;
+        if let Some(layer) = self.layer_stack.last_mut() {
+            draw_thick_line_clipped(
+                &mut layer.buffer,
+                from,
+                to,
+                width,
+                color,
+                clip,
+                &mut scratch.path_points,
+                &mut scratch.crossings,
+            );
+        } else {
+            draw_thick_line_clipped(
+                &mut self.buffer,
+                from,
+                to,
+                width,
+                color,
+                clip,
+                &mut scratch.path_points,
+                &mut scratch.crossings,
+            );
         }
     }
 
@@ -685,25 +849,20 @@ impl CpuPaintRenderer {
         for cmd in ctx.commands() {
             match cmd {
                 PaintCommand::FillPath { path, color } => {
-                    let scaled: Vec<Point> =
-                        path.iter().copied().map(|p| self.scale_point(p)).collect();
-                    match self.effective_clip_rects(damage_rects) {
+                    self.rebuild_scaled_points(path);
+                    match self.rebuild_effective_clip_rects(damage_rects) {
                         EffectiveClipRects::Unclipped => {
-                            fill_polygon(self.current_buffer_mut(), &scaled, *color, None);
+                            self.fill_scaled_path(*color, None);
                         }
                         EffectiveClipRects::Empty => {}
-                        EffectiveClipRects::Rects(rects) => {
-                            for rect in rects {
+                        EffectiveClipRects::Rects => {
+                            for index in 0..self.scratch.clip_rects.len() {
+                                let rect = self.scratch.clip_rects[index];
                                 let clip = ClipRegion {
                                     rect: self.scale_rect(rect),
                                     corner_radius: 0.0,
                                 };
-                                fill_polygon(
-                                    self.current_buffer_mut(),
-                                    &scaled,
-                                    *color,
-                                    Some(clip),
-                                );
+                                self.fill_scaled_path(*color, Some(clip));
                             }
                         }
                     }
@@ -715,7 +874,7 @@ impl CpuPaintRenderer {
                 } => {
                     let rect = self.scale_rect(*rect);
                     let stroke_width = self.scale_f32(stroke_width.max(1.0));
-                    match self.effective_clip_rects(damage_rects) {
+                    match self.rebuild_effective_clip_rects(damage_rects) {
                         EffectiveClipRects::Unclipped => stroke_rounded_rect(
                             self.current_buffer_mut(),
                             rect,
@@ -725,8 +884,9 @@ impl CpuPaintRenderer {
                             None,
                         ),
                         EffectiveClipRects::Empty => {}
-                        EffectiveClipRects::Rects(rects) => {
-                            for clip_rect in rects {
+                        EffectiveClipRects::Rects => {
+                            for index in 0..self.scratch.clip_rects.len() {
+                                let clip_rect = self.scratch.clip_rects[index];
                                 let clip = ClipRegion {
                                     rect: self.scale_rect(clip_rect),
                                     corner_radius: 0.0,
@@ -752,7 +912,7 @@ impl CpuPaintRenderer {
                     let rect = self.scale_rect(*rect);
                     let radius = self.scale_f32(*corner_radius);
                     let stroke_width = self.scale_f32(stroke_width.max(1.0));
-                    match self.effective_clip_rects(damage_rects) {
+                    match self.rebuild_effective_clip_rects(damage_rects) {
                         EffectiveClipRects::Unclipped => stroke_rounded_rect(
                             self.current_buffer_mut(),
                             rect,
@@ -762,8 +922,9 @@ impl CpuPaintRenderer {
                             None,
                         ),
                         EffectiveClipRects::Empty => {}
-                        EffectiveClipRects::Rects(rects) => {
-                            for clip_rect in rects {
+                        EffectiveClipRects::Rects => {
+                            for index in 0..self.scratch.clip_rects.len() {
+                                let clip_rect = self.scratch.clip_rects[index];
                                 let clip = ClipRegion {
                                     rect: self.scale_rect(clip_rect),
                                     corner_radius: 0.0,
@@ -786,55 +947,17 @@ impl CpuPaintRenderer {
                     color,
                 } => {
                     let scaled_width = self.scale_f32(stroke_width.max(1.0));
-                    let scaled: Vec<Point> =
-                        path.iter().copied().map(|p| self.scale_point(p)).collect();
-                    match self.effective_clip_rects(damage_rects) {
+                    self.rebuild_scaled_points(path);
+                    match self.rebuild_effective_clip_rects(damage_rects) {
                         EffectiveClipRects::Unclipped => {
-                            for window in scaled.windows(2) {
-                                draw_thick_line_clipped(
-                                    self.current_buffer_mut(),
-                                    window[0],
-                                    window[1],
-                                    scaled_width,
-                                    *color,
-                                    None,
-                                );
-                            }
-                            if scaled.len() > 2 {
-                                draw_thick_line_clipped(
-                                    self.current_buffer_mut(),
-                                    scaled[scaled.len() - 1],
-                                    scaled[0],
-                                    scaled_width,
-                                    *color,
-                                    None,
-                                );
-                            }
+                            self.draw_scaled_path_stroke(scaled_width, *color, None);
                         }
                         EffectiveClipRects::Empty => {}
-                        EffectiveClipRects::Rects(rects) => {
-                            for clip_rect in rects {
+                        EffectiveClipRects::Rects => {
+                            for index in 0..self.scratch.clip_rects.len() {
+                                let clip_rect = self.scratch.clip_rects[index];
                                 let clip = self.scale_rect(clip_rect);
-                                for window in scaled.windows(2) {
-                                    draw_thick_line_clipped(
-                                        self.current_buffer_mut(),
-                                        window[0],
-                                        window[1],
-                                        scaled_width,
-                                        *color,
-                                        Some(clip),
-                                    );
-                                }
-                                if scaled.len() > 2 {
-                                    draw_thick_line_clipped(
-                                        self.current_buffer_mut(),
-                                        scaled[scaled.len() - 1],
-                                        scaled[0],
-                                        scaled_width,
-                                        *color,
-                                        Some(clip),
-                                    );
-                                }
+                                self.draw_scaled_path_stroke(scaled_width, *color, Some(clip));
                             }
                         }
                     }
@@ -844,7 +967,7 @@ impl CpuPaintRenderer {
                     text,
                     color,
                     font_size_px,
-                } => match self.effective_clip_rects(damage_rects) {
+                } => match self.rebuild_effective_clip_rects(damage_rects) {
                     EffectiveClipRects::Unclipped => {
                         let mut canvas =
                             crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
@@ -857,8 +980,9 @@ impl CpuPaintRenderer {
                         );
                     }
                     EffectiveClipRects::Empty => {}
-                    EffectiveClipRects::Rects(rects) => {
-                        for rect in rects {
+                    EffectiveClipRects::Rects => {
+                        for index in 0..self.scratch.clip_rects.len() {
+                            let rect = self.scratch.clip_rects[index];
                             let mut canvas =
                                 crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
                             canvas.draw_text_sized_clipped(
@@ -878,13 +1002,14 @@ impl CpuPaintRenderer {
                         let dst = self.scale_rect(*dst);
                         let dst_x = dst.origin.x as i32;
                         let dst_y = dst.origin.y as i32;
-                        match self.effective_clip_rects(damage_rects) {
+                        match self.rebuild_effective_clip_rects(damage_rects) {
                             EffectiveClipRects::Unclipped => {
                                 self.current_buffer_mut().composite(src, dst_x, dst_y, 1.0);
                             }
                             EffectiveClipRects::Empty => {}
-                            EffectiveClipRects::Rects(rects) => {
-                                for rect in rects {
+                            EffectiveClipRects::Rects => {
+                                for index in 0..self.scratch.clip_rects.len() {
+                                    let rect = self.scratch.clip_rects[index];
                                     let clip = self.scale_rect(rect);
                                     self.current_buffer_mut().composite_clipped(
                                         src,
@@ -916,15 +1041,16 @@ impl CpuPaintRenderer {
                         let src_y = src.origin.y as i32;
                         let src_w = src.size.width as i32;
                         let src_h = src.size.height as i32;
-                        match self.effective_clip_rects(damage_rects) {
+                        match self.rebuild_effective_clip_rects(damage_rects) {
                             EffectiveClipRects::Unclipped => {
                                 self.current_buffer_mut().composite_rect(
                                     buf, src_x, src_y, src_w, src_h, dst_x, dst_y, *opacity,
                                 );
                             }
                             EffectiveClipRects::Empty => {}
-                            EffectiveClipRects::Rects(rects) => {
-                                for rect in rects {
+                            EffectiveClipRects::Rects => {
+                                for index in 0..self.scratch.clip_rects.len() {
+                                    let rect = self.scratch.clip_rects[index];
                                     let clip = self.scale_rect(rect);
                                     self.current_buffer_mut().composite_rect_clipped(
                                         buf,
@@ -966,6 +1092,148 @@ impl CpuPaintRenderer {
         }
     }
 
+    pub(crate) fn begin_retained_composite(&mut self, damage_rects: Option<&[Rect]>) {
+        match damage_rects {
+            Some(rects) => {
+                for rect in rects {
+                    let (x, y, width, height) = self.rect_to_u32(*rect);
+                    self.buffer
+                        .clear_rect(x, y, width, height, self.background_color);
+                }
+            }
+            None => self.buffer.clear(self.background_color),
+        }
+        self.recycle_active_layers();
+    }
+
+    pub(crate) fn composite_buffer_rect_with_clip(
+        &mut self,
+        buffer: &Buffer,
+        dst: Rect,
+        src: Rect,
+        clip: Option<ClipRegion>,
+        damage_rects: Option<&[Rect]>,
+    ) {
+        self.scratch.clip_rects.clear();
+        match (clip, damage_rects) {
+            (Some(clip), Some(damage)) => {
+                for rect in damage {
+                    if let Some(rect) = intersect_rect(clip.rect, *rect) {
+                        self.scratch.clip_rects.push(rect);
+                    }
+                }
+            }
+            (Some(clip), None) => self.scratch.clip_rects.push(clip.rect),
+            (None, Some(damage)) => self.scratch.clip_rects.extend_from_slice(damage),
+            (None, None) => {}
+        }
+
+        let dst = self.scale_rect(dst);
+        let src = self.scale_rect(src);
+        let dst_x = dst.origin.x as i32;
+        let dst_y = dst.origin.y as i32;
+        let src_x = src.origin.x as i32;
+        let src_y = src.origin.y as i32;
+        let src_w = src.size.width as i32;
+        let src_h = src.size.height as i32;
+
+        if clip.is_none() && damage_rects.is_none() {
+            self.buffer
+                .composite_rect(buffer, src_x, src_y, src_w, src_h, dst_x, dst_y, 1.0);
+            return;
+        }
+
+        for index in 0..self.scratch.clip_rects.len() {
+            let clip = self.scale_rect(self.scratch.clip_rects[index]);
+            self.buffer.composite_rect_clipped(
+                buffer,
+                src_x,
+                src_y,
+                src_w,
+                src_h,
+                dst_x,
+                dst_y,
+                1.0,
+                clip.origin.x as i32,
+                clip.origin.y as i32,
+                clip.size.width as i32,
+                clip.size.height as i32,
+            );
+        }
+    }
+
+    pub(crate) fn fill_rounded_rect_with_clip(
+        &mut self,
+        rect: Rect,
+        corner_radius: f32,
+        color: Color,
+        clip: Option<ClipRegion>,
+        damage_rects: Option<&[Rect]>,
+    ) {
+        self.scratch.clip_rects.clear();
+        match (clip, damage_rects) {
+            (Some(clip), Some(damage)) => {
+                for rect in damage {
+                    if let Some(rect) = intersect_rect(clip.rect, *rect) {
+                        self.scratch.clip_rects.push(rect);
+                    }
+                }
+            }
+            (Some(clip), None) => self.scratch.clip_rects.push(clip.rect),
+            (None, Some(damage)) => self.scratch.clip_rects.extend_from_slice(damage),
+            (None, None) => self.scratch.clip_rects.push(Rect::from_xywh(
+                0.0,
+                0.0,
+                self.buffer.logical_width() as f32,
+                self.buffer.logical_height() as f32,
+            )),
+        }
+
+        if self.scratch.clip_rects.is_empty() {
+            return;
+        }
+
+        let rect = self.scale_rect(rect);
+        let radius = self.scale_f32(corner_radius);
+        let bgra = color.to_bgra();
+        let is_opaque = color.a >= 1.0;
+        let buffer_width = self.buffer.width() as i32;
+        let buffer_height = self.buffer.height() as i32;
+
+        for index in 0..self.scratch.clip_rects.len() {
+            let clip = self.scale_rect(self.scratch.clip_rects[index]);
+            let left = libm::floorf(rect.origin.x.max(clip.origin.x)).max(0.0) as i32;
+            let top = libm::floorf(rect.origin.y.max(clip.origin.y)).max(0.0) as i32;
+            let right =
+                libm::ceilf((rect.origin.x + rect.size.width).min(clip.origin.x + clip.size.width))
+                    .min(buffer_width as f32) as i32;
+            let bottom = libm::ceilf(
+                (rect.origin.y + rect.size.height).min(clip.origin.y + clip.size.height),
+            )
+            .min(buffer_height as f32) as i32;
+            if right <= left || bottom <= top {
+                continue;
+            }
+            let width = self.buffer.width() as usize;
+            let data = self.buffer.as_mut_slice();
+            for y in top..bottom {
+                for x in left..right {
+                    if radius > 0.0
+                        && !contains_rounded_rect(rect, radius, x as f32 + 0.5, y as f32 + 0.5)
+                    {
+                        continue;
+                    }
+                    let idx = y as usize * width + x as usize;
+                    if is_opaque {
+                        data[idx] = bgra;
+                    } else {
+                        data[idx] = Buffer::blend_pixels(data[idx], bgra, 1.0);
+                    }
+                }
+            }
+        }
+    }
+
     fn rect_to_u32(&self, rect: Rect) -> (u32, u32, u32, u32) {
         let x0 = libm::floorf(rect.origin.x * self.scale_milli as f32 / 1000.0).max(0.0);
         let y0 = libm::floorf(rect.origin.y * self.scale_milli as f32 / 1000.0).max(0.0);
@@ -991,7 +1259,16 @@ impl CpuPaintRenderer {
     }
 }
 
-fn fill_polygon(buffer: &mut Buffer, path: &[Point], color: Color, clip: Option<ClipRegion>) {
+// Phase 2 keeps `fill_polygon` as a free function and threads caller-owned
+// crossings scratch through it because both fill paths and thick-line strokes
+// need the same scanline rasterizer without allocating per scanline.
+fn fill_polygon(
+    buffer: &mut Buffer,
+    path: &[Point],
+    color: Color,
+    clip: Option<ClipRegion>,
+    crossings: &mut Vec<f32>,
+) {
     if path.len() < 3 || color.a <= 0.0 {
         return;
     }
@@ -1019,7 +1296,7 @@ fn fill_polygon(buffer: &mut Buffer, path: &[Point], color: Color, clip: Option<
             continue;
         }
         let yc = y as f32 + 0.5;
-        let mut crossings: Vec<f32> = Vec::new();
+        crossings.clear();
         for i in 0..n {
             let p0 = path[i];
             let p1 = path[(i + 1) % n];
@@ -1188,6 +1465,8 @@ fn draw_thick_line_clipped(
     width: f32,
     color: Color,
     clip: Option<Rect>,
+    path_points: &mut Vec<Point>,
+    crossings: &mut Vec<f32>,
 ) {
     if color.a <= 0.0 || width <= 0.0 {
         return;
@@ -1208,13 +1487,12 @@ fn draw_thick_line_clipped(
     let len = libm::sqrtf(dx * dx + dy * dy);
 
     if len < 0.001 {
-        let quad = [
-            Point::new(from.x - half_w, from.y - half_w),
-            Point::new(from.x + half_w, from.y - half_w),
-            Point::new(from.x + half_w, from.y + half_w),
-            Point::new(from.x - half_w, from.y + half_w),
-        ];
-        fill_polygon(buffer, &quad, color, clip_region);
+        path_points.clear();
+        path_points.push(Point::new(from.x - half_w, from.y - half_w));
+        path_points.push(Point::new(from.x + half_w, from.y - half_w));
+        path_points.push(Point::new(from.x + half_w, from.y + half_w));
+        path_points.push(Point::new(from.x - half_w, from.y + half_w));
+        fill_polygon(buffer, path_points, color, clip_region, crossings);
         return;
     }
 
@@ -1229,13 +1507,12 @@ fn draw_thick_line_clipped(
     let end_x = to.x + dirx * half_w;
     let end_y = to.y + diry * half_w;
 
-    let quad = [
-        Point::new(start_x + nx * half_w, start_y + ny * half_w),
-        Point::new(end_x + nx * half_w, end_y + ny * half_w),
-        Point::new(end_x - nx * half_w, end_y - ny * half_w),
-        Point::new(start_x - nx * half_w, start_y - ny * half_w),
-    ];
-    fill_polygon(buffer, &quad, color, clip_region);
+    path_points.clear();
+    path_points.push(Point::new(start_x + nx * half_w, start_y + ny * half_w));
+    path_points.push(Point::new(end_x + nx * half_w, end_y + ny * half_w));
+    path_points.push(Point::new(end_x - nx * half_w, end_y - ny * half_w));
+    path_points.push(Point::new(start_x - nx * half_w, start_y - ny * half_w));
+    fill_polygon(buffer, path_points, color, clip_region, crossings);
 }
 
 fn blend_pixel(buffer: &mut Buffer, x: i32, y: i32, color: Color) {
@@ -1378,6 +1655,7 @@ fn inset_rect(rect: Rect, inset: f32) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::alloc_counter::measure_allocations;
 
     #[test]
     fn path_helpers() {
@@ -1486,6 +1764,46 @@ mod tests {
         let mut r = CpuPaintRenderer::new(Size::new(100.0, 100.0), 1000, Color::rgb(0, 0, 0));
         r.execute(&ctx);
         assert!(r.buffer().get_pixel(50, 50).unwrap() > 0);
+    }
+
+    #[test]
+    fn cpu_paint_renderer_reuses_scaled_point_scratch() {
+        let mut ctx = PaintContext::new();
+        ctx.fill_circle(Point::new(50.0, 50.0), 20.0, Color::rgb(0, 255, 0));
+        let mut renderer =
+            CpuPaintRenderer::new(Size::new(100.0, 100.0), 1000, Color::rgb(0, 0, 0));
+
+        renderer.execute(&ctx);
+        let first = renderer.scratch_capacity_for_test();
+        assert!(first.scaled_points >= 48);
+
+        renderer.execute(&ctx);
+        let second = renderer.scratch_capacity_for_test();
+        assert_eq!(first.scaled_points, second.scaled_points);
+    }
+
+    #[test]
+    fn cpu_paint_renderer_reuses_scanline_crossings_scratch() {
+        let mut ctx = PaintContext::new();
+        ctx.fill_rounded_rect(
+            Rect::new(Point::new(10.0, 10.0), Size::new(80.0, 80.0)),
+            10.0,
+            Color::rgb(255, 255, 0),
+        );
+        let mut renderer =
+            CpuPaintRenderer::new(Size::new(100.0, 100.0), 1000, Color::rgb(0, 0, 0));
+
+        renderer.execute(&ctx);
+        let first = renderer.scratch_capacity_for_test();
+        assert!(first.crossings > 0);
+
+        let snapshot = measure_allocations(|| {
+            renderer.execute(&ctx);
+        });
+        let second = renderer.scratch_capacity_for_test();
+
+        assert_eq!(first.crossings, second.crossings);
+        assert_eq!(snapshot.allocations, 0);
     }
 
     #[test]

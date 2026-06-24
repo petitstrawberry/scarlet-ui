@@ -10,11 +10,14 @@ use crate::compositor::DamageRect;
 use crate::element::{Element, ElementId, ElementTree, LayoutConstraints};
 use crate::event::EventDispatcher;
 use crate::geometry::{Point, Rect, Size};
+use crate::pipeline::layers::{
+    LayerChild, LayerClip, LayerId, LayerPrimitive, LayerPrimitiveKind, LayerStore, PictureChunk,
+};
 use crate::pipeline::{PipelineId, PipelineOwner};
-use crate::renderer::{CpuPaintRenderer, CpuRenderer, FrameSize, PaintContext};
+use crate::renderer::{ClipRegion, CpuPaintRenderer, CpuRenderer, FrameSize, PaintContext};
 use crate::views::WindowInfo;
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -27,6 +30,33 @@ struct PaintCache {
     scale_milli: u32,
     valid: bool,
     invalidated_by: Option<ElementId>,
+}
+
+#[derive(Default)]
+struct DirtyScratch {
+    ids: Vec<ElementId>,
+    path: Vec<ElementId>,
+    rects: Vec<Rect>,
+    damage: Vec<DamageRect>,
+}
+
+impl DirtyScratch {
+    fn clear_for_frame(&mut self) {
+        self.ids.clear();
+        self.path.clear();
+        self.rects.clear();
+        self.damage.clear();
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PaintTestCounters {
+    pub(crate) paint_context_news: usize,
+    pub(crate) walk_and_paint_calls: usize,
+    pub(crate) boundary_rebuilds: usize,
+    pub(crate) retained_composites: usize,
+    pub(crate) retained_sync_visits: usize,
 }
 
 /// RenderingPipeline integrates all components of the rendering system
@@ -44,6 +74,10 @@ pub struct RenderingPipeline {
     paint_background_color: Option<crate::color::Color>,
     paint_enabled: bool,
     paint_caches: BTreeMap<ElementId, PaintCache>,
+    layer_store: LayerStore,
+    dirty_scratch: DirtyScratch,
+    #[cfg(test)]
+    paint_test_counters: PaintTestCounters,
 }
 
 impl RenderingPipeline {
@@ -68,6 +102,10 @@ impl RenderingPipeline {
             paint_background_color: None,
             paint_enabled: true,
             paint_caches: BTreeMap::new(),
+            layer_store: LayerStore::new(),
+            dirty_scratch: DirtyScratch::default(),
+            #[cfg(test)]
+            paint_test_counters: PaintTestCounters::default(),
         }
     }
 
@@ -78,6 +116,25 @@ impl RenderingPipeline {
     /// Return this pipeline's owner ID.
     pub const fn pipeline_id(&self) -> PipelineId {
         self.element_tree.pipeline_id()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_paint_test_counters(&mut self) {
+        self.paint_test_counters = PaintTestCounters::default();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn paint_test_counters(&self) -> PaintTestCounters {
+        self.paint_test_counters
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_boundary_scratch_capacity_for_test(
+        &self,
+    ) -> Option<crate::renderer::RasterScratchCapacity> {
+        self.paint_renderer
+            .as_ref()
+            .map(CpuPaintRenderer::retained_boundary_scratch_capacity_for_test)
     }
 
     /// Unmount the element tree and discard pending global dirty work.
@@ -91,6 +148,7 @@ impl RenderingPipeline {
         self.paint_needs_full = true;
         self.paint_background_color = None;
         self.paint_caches.clear();
+        self.layer_store.clear();
     }
 
     /// Set the output scale in milli-units.
@@ -111,6 +169,7 @@ impl RenderingPipeline {
         self.paint_damage = None;
         self.paint_needs_full = true;
         self.paint_caches.clear();
+        self.layer_store.clear();
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
         }
@@ -128,6 +187,7 @@ impl RenderingPipeline {
     pub fn set_root(&mut self, root_element: Box<dyn Element>) {
         self.element_tree.set_root(root_element);
         self.paint_caches.clear();
+        self.layer_store.clear();
         if let Some(root) = self.element_tree.root() {
             self.event_dispatcher.set_root(root.id());
         }
@@ -175,8 +235,15 @@ impl RenderingPipeline {
     ///
     /// Returns window information or defaults if no Window is found.
     fn extract_window_info(&self) -> WindowInfo {
+        // Try to find a Window View in the element tree
+        if let Some(root) = self.element_tree.root() {
+            if let Some(window_info) = self.find_window_view(root) {
+                return window_info;
+            }
+        }
+
         // Default values
-        let default_info = WindowInfo::new(
+        WindowInfo::new(
             alloc::string::String::from("com.example.scarletui"),
             alloc::string::String::from("ScarletUI Application"),
             Size::new(800.0, 600.0),
@@ -186,16 +253,7 @@ impl RenderingPipeline {
             true,
             crate::color::ColorPalette::light().window_background(),
             true,
-        );
-
-        // Try to find a Window View in the element tree
-        if let Some(root) = self.element_tree.root() {
-            if let Some(window_info) = self.find_window_view(root) {
-                return window_info;
-            }
-        }
-
-        default_info
+        )
     }
 
     /// Recursively search for a Window View in the element tree
@@ -213,6 +271,15 @@ impl RenderingPipeline {
         }
 
         None
+    }
+
+    fn extract_background_color(&self) -> crate::color::Color {
+        if let Some(root) = self.element_tree.root()
+            && let Some(window_info) = self.find_window_view(root)
+        {
+            return window_info.background_color;
+        }
+        crate::color::ColorPalette::light().window_background()
     }
 
     /// Perform initial layout
@@ -268,6 +335,7 @@ impl RenderingPipeline {
         self.paint_damage = None;
         self.paint_needs_full = true;
         self.paint_caches.clear();
+        self.layer_store.clear();
 
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
@@ -298,7 +366,7 @@ impl RenderingPipeline {
             crate::logln!("[RenderingPipeline] flush() completed");
         }
 
-        let background_color = self.extract_window_info().background_color;
+        let background_color = self.extract_background_color();
 
         if self.paint_enabled {
             return self.render_paint_path(background_color);
@@ -326,39 +394,80 @@ impl RenderingPipeline {
             self.paint_renderer = Some(CpuPaintRenderer::new(size, scale, background_color));
         }
 
-        let force_full = self.paint_needs_full
+        let mut force_full = self.paint_needs_full
             || creating_renderer
-            || self.paint_background_color != Some(background_color);
+            || self.paint_background_color != Some(background_color)
+            || self.last_paint_ids_require_full_refresh();
 
-        let dirty_ids = self.pipeline_owner.last_paint_ids().to_vec();
-        let mut dirty_rects = if force_full {
-            None
-        } else {
-            Some(self.paint_dirty_rects(&dirty_ids))
-        };
-
-        let present_damage = match dirty_rects.as_mut() {
-            Some(rects) if rects.is_empty() => Some(Vec::new()),
-            Some(rects) => {
-                Self::merge_overlapping_rects(rects);
-                Self::present_damage_rects(rects, size, scale)
+        if !force_full
+            && self.pipeline_owner.last_paint_ids().is_empty()
+            && !self.pipeline_owner.last_composite_ids().is_empty()
+        {
+            if self.layer_store.root_graph_valid_for(size, scale) {
+                if self.render_retained_composite_path(background_color) {
+                    return self.paint_renderer.as_ref().map(CpuPaintRenderer::buffer);
+                }
             }
-            None => None,
-        };
+            force_full = true;
+            self.paint_needs_full = true;
+        }
 
-        self.paint_damage = present_damage;
-        self.invalidate_repaint_boundary_caches(&dirty_ids);
+        self.dirty_scratch.clear_for_frame();
+        self.dirty_scratch
+            .ids
+            .extend_from_slice(self.pipeline_owner.last_paint_ids());
+        self.dirty_scratch.ids.sort_unstable();
+        self.dirty_scratch.ids.dedup();
 
+        let has_dirty_rects = !force_full;
+        if has_dirty_rects {
+            Self::paint_dirty_rects_into(
+                &self.element_tree,
+                &self.last_paint_bounds,
+                &self.dirty_scratch.ids,
+                &mut self.dirty_scratch.path,
+                &mut self.dirty_scratch.rects,
+            );
+            if !self.dirty_scratch.rects.is_empty() {
+                Self::merge_overlapping_rects(&mut self.dirty_scratch.rects);
+                let partial = Self::present_damage_rects_into(
+                    &self.dirty_scratch.rects,
+                    size,
+                    scale,
+                    &mut self.dirty_scratch.damage,
+                );
+                self.store_paint_damage(partial);
+            } else {
+                self.dirty_scratch.damage.clear();
+                self.store_paint_damage(true);
+            }
+        } else {
+            self.paint_damage = None;
+        }
+
+        self.invalidate_repaint_boundary_caches();
+        let layer_generation = self.layer_store.begin_rebuild();
+
+        #[cfg(test)]
+        {
+            self.paint_test_counters.paint_context_news += 1;
+        }
         let mut ctx = PaintContext::new();
-        let damage_clip = dirty_rects.as_deref();
+        let damage_clip = has_dirty_rects.then_some(self.dirty_scratch.rects.as_slice());
         let any_painted = if let Some(root) = self.element_tree.root() {
+            let paint_renderer = self.paint_renderer.as_mut().unwrap();
             let base_painted = Self::walk_and_paint(
                 &mut ctx,
                 root,
                 Point::ZERO,
                 damage_clip,
                 &mut self.paint_caches,
+                &mut self.layer_store,
+                paint_renderer,
                 self.scale_milli,
+                layer_generation,
+                #[cfg(test)]
+                &mut self.paint_test_counters,
             );
             let overlay_painted =
                 Self::paint_select_overlays(&mut ctx, root, Point::ZERO, damage_clip);
@@ -366,6 +475,18 @@ impl RenderingPipeline {
         } else {
             false
         };
+        if damage_clip.is_none() {
+            if let Some(root) = self.element_tree.root() {
+                Self::rebuild_root_layer_refs(
+                    root,
+                    self.window_size,
+                    self.scale_milli,
+                    layer_generation,
+                    &mut self.layer_store,
+                );
+            }
+            self.layer_store.prune_unmarked(layer_generation);
+        }
 
         if force_full || any_painted {
             let pr = self.paint_renderer.as_mut().unwrap();
@@ -384,14 +505,140 @@ impl RenderingPipeline {
         Some(pr.buffer())
     }
 
+    fn render_retained_composite_path(&mut self, background_color: crate::color::Color) -> bool {
+        self.dirty_scratch.clear_for_frame();
+        self.dirty_scratch
+            .ids
+            .extend_from_slice(self.pipeline_owner.last_composite_ids());
+        self.dirty_scratch.ids.sort_unstable();
+        self.dirty_scratch.ids.dedup();
+
+        let Some(root) = self.element_tree.root() else {
+            return false;
+        };
+        self.dirty_scratch.rects.clear();
+        for index in 0..self.dirty_scratch.ids.len() {
+            self.dirty_scratch.path.clear();
+            let dirty_id = self.dirty_scratch.ids[index];
+            if !self
+                .element_tree
+                .find_path_ids_into(dirty_id, &mut self.dirty_scratch.path)
+            {
+                return false;
+            }
+            if let Some((element, absolute_origin)) = self
+                .element_tree
+                .element_and_absolute_origin_for_path(&self.dirty_scratch.path)
+            {
+                self.dirty_scratch
+                    .rects
+                    .push(Self::element_paint_bounds(element, absolute_origin));
+                if let Some(old_bounds) = self.last_paint_bounds.get(&dirty_id) {
+                    self.dirty_scratch.rects.push(*old_bounds);
+                }
+            } else {
+                return false;
+            }
+            if !Self::sync_retained_layer_offsets_along_path(
+                root,
+                Point::ZERO,
+                None,
+                LayerId::Root,
+                &self.dirty_scratch.path,
+                0,
+                &mut self.layer_store,
+                #[cfg(test)]
+                &mut self.paint_test_counters,
+            ) {
+                return false;
+            }
+        }
+        if self.dirty_scratch.rects.is_empty() {
+            return false;
+        }
+        Self::merge_overlapping_rects(&mut self.dirty_scratch.rects);
+        let partial = Self::present_damage_rects_into(
+            &self.dirty_scratch.rects,
+            self.window_size,
+            self.scale_milli,
+            &mut self.dirty_scratch.damage,
+        );
+        self.store_paint_damage(partial);
+
+        let damage_clip = partial.then_some(self.dirty_scratch.rects.as_slice());
+        let Some(renderer) = self.paint_renderer.as_mut() else {
+            return false;
+        };
+        renderer.set_background_color(background_color);
+        renderer.begin_retained_composite(damage_clip);
+        if !Self::direct_composite_layer_container(
+            renderer,
+            &self.layer_store,
+            LayerId::Root,
+            Point::ZERO,
+            None,
+            damage_clip,
+        ) {
+            return false;
+        }
+
+        #[cfg(test)]
+        {
+            self.paint_test_counters.retained_composites += 1;
+        }
+
+        self.paint_needs_full = false;
+        self.paint_background_color = Some(background_color);
+        Self::update_paint_bounds_for_ids(
+            &self.element_tree,
+            &self.dirty_scratch.ids,
+            &mut self.dirty_scratch.path,
+            &mut self.last_paint_bounds,
+        );
+        true
+    }
+
+    fn last_paint_ids_require_full_refresh(&self) -> bool {
+        self.pipeline_owner.last_paint_ids().iter().any(|id| {
+            let Some(element) = self.element_tree.find_element(*id) else {
+                return true;
+            };
+            !self.last_paint_bounds.contains_key(&element.id())
+                || Self::subtree_has_untracked_retained_boundary(element, &self.last_paint_bounds)
+        })
+    }
+
+    fn subtree_has_untracked_retained_boundary(
+        element: &dyn Element,
+        last_paint_bounds: &BTreeMap<ElementId, Rect>,
+    ) -> bool {
+        element.children().iter().any(|child| {
+            let child = child.as_ref();
+            let is_retained_boundary = child
+                .render_object()
+                .and_then(|render_object| render_object.repaint_boundary_size())
+                .is_some();
+            (is_retained_boundary && !last_paint_bounds.contains_key(&child.id()))
+                || Self::subtree_has_untracked_retained_boundary(child, last_paint_bounds)
+        })
+    }
+
     fn walk_and_paint<'a>(
         ctx: &mut PaintContext<'a>,
         element: &'a dyn Element,
         origin: Point,
         damage_rects: Option<&[Rect]>,
         paint_caches: &mut BTreeMap<ElementId, PaintCache>,
+        layer_store: &mut LayerStore,
+        paint_renderer: &mut CpuPaintRenderer,
         scale_milli: u32,
+        layer_generation: u64,
+        #[cfg(test)] paint_test_counters: &mut PaintTestCounters,
     ) -> bool {
+        #[cfg(test)]
+        {
+            paint_test_counters.walk_and_paint_calls += 1;
+        }
         let abs = Point::new(
             origin.x + element.position().x,
             origin.y + element.position().y,
@@ -409,8 +656,18 @@ impl RenderingPipeline {
         }
 
         if should_paint_self {
-            painted_boundary =
-                Self::paint_repaint_boundary(ctx, element, abs, paint_caches, scale_milli);
+            painted_boundary = Self::paint_repaint_boundary(
+                ctx,
+                element,
+                abs,
+                paint_caches,
+                layer_store,
+                paint_renderer,
+                scale_milli,
+                layer_generation,
+                #[cfg(test)]
+                paint_test_counters,
+            );
             if painted_boundary {
                 painted = true;
             }
@@ -424,7 +681,12 @@ impl RenderingPipeline {
                     abs,
                     damage_rects,
                     paint_caches,
+                    layer_store,
+                    paint_renderer,
                     scale_milli,
+                    layer_generation,
+                    #[cfg(test)]
+                    paint_test_counters,
                 ) {
                     painted = true;
                 }
@@ -447,7 +709,11 @@ impl RenderingPipeline {
         element: &'a dyn Element,
         abs: Point,
         paint_caches: &mut BTreeMap<ElementId, PaintCache>,
+        layer_store: &mut LayerStore,
+        paint_renderer: &mut CpuPaintRenderer,
         scale_milli: u32,
+        layer_generation: u64,
+        #[cfg(test)] paint_test_counters: &mut PaintTestCounters,
     ) -> bool {
         let Some(render_object) = element.render_object() else {
             return false;
@@ -458,21 +724,6 @@ impl RenderingPipeline {
         let max_cache_pixels = render_object
             .repaint_boundary_max_cache_pixels()
             .unwrap_or(MAX_REPAINT_BOUNDARY_CACHE_PIXELS);
-
-        if !render_object.repaint_boundary_cache_nested_boundaries()
-            && Self::has_descendant_repaint_boundary(element)
-        {
-            if crate::debug::repaint_boundary_log_enabled() {
-                crate::logln!(
-                    "[RepaintBoundary] skip id={} reason=nested-boundary logical={}x{}",
-                    element.id().get(),
-                    size.width,
-                    size.height
-                );
-            }
-            paint_caches.remove(&element.id());
-            return false;
-        }
 
         let Some((physical_width, physical_height, physical_pixels)) =
             Self::repaint_boundary_physical_size(size, scale_milli)
@@ -506,15 +757,24 @@ impl RenderingPipeline {
             return false;
         }
 
-        let rebuild_reason = match paint_caches.get(&element.id()) {
-            None => Some("miss"),
-            Some(cache) if cache.logical_size != size => Some("size-changed"),
-            Some(cache) if cache.scale_milli != scale_milli => Some("scale-changed"),
-            Some(cache) if !cache.valid => Some("dirty"),
-            Some(_) => None,
+        let layer_id = LayerId::Boundary(element.id());
+        let rebuild_reason = if !layer_store.is_valid_for(layer_id, size, scale_milli) {
+            match layer_store.container(layer_id) {
+                None => Some("miss"),
+                Some(container) if container.logical_size != size => Some("size-changed"),
+                Some(container) if container.scale_milli != scale_milli => Some("scale-changed"),
+                Some(container) if !container.valid => Some("dirty"),
+                Some(_) => Some("chunk-dirty"),
+            }
+        } else {
+            None
         };
 
         if let Some(reason) = rebuild_reason {
+            #[cfg(test)]
+            {
+                paint_test_counters.boundary_rebuilds += 1;
+            }
             if crate::debug::repaint_boundary_log_enabled() {
                 crate::logln!(
                     "[RepaintBoundary] rebuild id={} reason={} logical={}x{} physical={}x{} pixels={}",
@@ -527,14 +787,16 @@ impl RenderingPipeline {
                     physical_pixels
                 );
             }
-            let mut cache_ctx = PaintContext::new();
-            let painted = Self::build_repaint_boundary_context(
-                &mut cache_ctx,
+            if !Self::rebuild_boundary_layer(
                 element,
-                paint_caches,
+                size,
+                layer_store,
+                paint_renderer,
                 scale_milli,
-            );
-            if !painted {
+                layer_generation,
+                #[cfg(test)]
+                paint_test_counters,
+            ) {
                 if crate::debug::repaint_boundary_log_enabled() {
                     crate::logln!(
                         "[RepaintBoundary] skip id={} reason=empty",
@@ -543,80 +805,38 @@ impl RenderingPipeline {
                 }
                 paint_caches.remove(&element.id());
                 return false;
-            };
-
-            let reused = if let Some(cache) = paint_caches.get_mut(&element.id()) {
-                if let Some(buffer) = Arc::get_mut(&mut cache.buffer) {
-                    if cache.logical_size != size || cache.scale_milli != scale_milli {
-                        buffer.resize_logical_dimensions_with_scale(
-                            libm::ceilf(size.width) as u32,
-                            libm::ceilf(size.height) as u32,
-                            scale_milli,
-                        );
-                    }
-                    CpuPaintRenderer::execute_into_buffer(
-                        buffer,
-                        crate::color::Color::TRANSPARENT,
-                        &cache_ctx,
-                        None,
-                    );
-                    cache.logical_size = size;
-                    cache.scale_milli = scale_milli;
-                    cache.valid = true;
-                    cache.invalidated_by = None;
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            if !reused {
-                let mut buffer = Buffer::from_logical_dimensions_with_scale(
-                    libm::ceilf(size.width) as u32,
-                    libm::ceilf(size.height) as u32,
-                    scale_milli,
-                );
-                CpuPaintRenderer::execute_into_buffer(
-                    &mut buffer,
-                    crate::color::Color::TRANSPARENT,
-                    &cache_ctx,
-                    None,
-                );
-                paint_caches.insert(
-                    element.id(),
-                    PaintCache {
-                        buffer: Arc::new(buffer),
-                        logical_size: size,
-                        scale_milli,
-                        valid: true,
-                        invalidated_by: None,
-                    },
+            }
+        } else {
+            // Keep composite_layer_container as the single z-order compositor for
+            // this retained subtree. On a parent cache hit, child boundary layers
+            // still need an independent cache-check/rebuild pass, but they must
+            // not emit their own draw commands here or they would be composited
+            // twice. Non-boundary descendants remain part of this boundary's
+            // retained picture chunks and are intentionally skipped.
+            Self::ensure_descendant_boundary_layers(
+                element,
+                layer_store,
+                paint_renderer,
+                scale_milli,
+                layer_generation,
+                #[cfg(test)]
+                paint_test_counters,
+            );
+            layer_store.mark_container_subtree(layer_id, layer_generation);
+            if crate::debug::repaint_boundary_log_enabled() {
+                crate::logln!(
+                    "[RepaintBoundary] hit id={} logical={}x{} physical={}x{} pixels={}",
+                    element.id().get(),
+                    size.width,
+                    size.height,
+                    physical_width,
+                    physical_height,
+                    physical_pixels
                 );
             }
-        } else if crate::debug::repaint_boundary_log_enabled() {
-            crate::logln!(
-                "[RepaintBoundary] hit id={} logical={}x{} physical={}x{} pixels={}",
-                element.id().get(),
-                size.width,
-                size.height,
-                physical_width,
-                physical_height,
-                physical_pixels
-            );
         }
 
-        let Some(cache) = paint_caches.get(&element.id()) else {
-            return false;
-        };
-        ctx.draw_buffer_rect_shared(
-            Rect::new(abs, size),
-            Rect::new(Point::ZERO, size),
-            cache.buffer.clone(),
-            1.0,
-        );
-        true
+        Self::composite_layer_container(ctx, layer_store, layer_id, abs)
     }
 
     fn repaint_boundary_physical_size(size: Size, scale_milli: u32) -> Option<(u32, u32, u64)> {
@@ -634,35 +854,855 @@ impl RenderingPipeline {
         Some((width, height, pixels))
     }
 
-    fn build_repaint_boundary_context<'a>(
-        ctx: &mut PaintContext<'a>,
+    fn rebuild_boundary_layer<'a>(
         element: &'a dyn Element,
-        paint_caches: &mut BTreeMap<ElementId, PaintCache>,
+        size: Size,
+        layer_store: &mut LayerStore,
+        paint_renderer: &mut CpuPaintRenderer,
         scale_milli: u32,
+        layer_generation: u64,
+        #[cfg(test)] paint_test_counters: &mut PaintTestCounters,
     ) -> bool {
+        let owner = element.id();
+        let container_id = LayerId::Boundary(owner);
+        layer_store.begin_container_rebuild(
+            container_id,
+            Some(owner),
+            size,
+            scale_milli,
+            layer_generation,
+        );
+        let mut chunk_ctx = PaintContext::new();
+        #[cfg(test)]
+        {
+            paint_test_counters.paint_context_news += 1;
+        }
+        let mut next_ordinal = 0u16;
         let mut painted = false;
+
         for child in element.children() {
-            if Self::walk_and_paint(
-                ctx,
+            if Self::build_boundary_walk(
+                &mut chunk_ctx,
                 child.as_ref(),
                 Point::ZERO,
                 None,
-                paint_caches,
+                owner,
+                container_id,
+                size,
+                layer_store,
+                paint_renderer,
                 scale_milli,
+                layer_generation,
+                &mut next_ordinal,
+                #[cfg(test)]
+                paint_test_counters,
             ) {
                 painted = true;
+            }
+        }
+
+        if Self::flush_picture_chunk(
+            &mut chunk_ctx,
+            owner,
+            container_id,
+            size,
+            layer_store,
+            paint_renderer,
+            scale_milli,
+            layer_generation,
+            &mut next_ordinal,
+        ) {
+            painted = true;
+        }
+
+        if painted {
+            layer_store.finish_container_rebuild(container_id);
+            layer_store.mark_container_subtree(container_id, layer_generation);
+        }
+        painted
+    }
+
+    fn build_boundary_walk<'a>(
+        chunk_ctx: &mut PaintContext<'a>,
+        element: &'a dyn Element,
+        origin: Point,
+        active_clip: Option<LayerClip>,
+        owner: ElementId,
+        container_id: LayerId,
+        container_size: Size,
+        layer_store: &mut LayerStore,
+        paint_renderer: &mut CpuPaintRenderer,
+        scale_milli: u32,
+        layer_generation: u64,
+        next_ordinal: &mut u16,
+        #[cfg(test)] paint_test_counters: &mut PaintTestCounters,
+    ) -> bool {
+        let abs = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+
+        if element
+            .render_object()
+            .and_then(|render_object| render_object.repaint_boundary_size())
+            .is_some()
+        {
+            let flushed = Self::flush_picture_chunk(
+                chunk_ctx,
+                owner,
+                container_id,
+                container_size,
+                layer_store,
+                paint_renderer,
+                scale_milli,
+                layer_generation,
+                next_ordinal,
+            );
+            let nested_painted = Self::ensure_boundary_layer(
+                element,
+                layer_store,
+                paint_renderer,
+                scale_milli,
+                layer_generation,
+                #[cfg(test)]
+                paint_test_counters,
+            );
+            if nested_painted {
+                let nested_id = LayerId::Boundary(element.id());
+                layer_store.append_child(
+                    container_id,
+                    LayerChild::Boundary {
+                        id: nested_id,
+                        offset: abs,
+                        clip: active_clip,
+                    },
+                );
+            }
+            return flushed || nested_painted;
+        }
+
+        let mut painted = Self::paint_element_self(chunk_ctx, element, abs);
+        let clip = Self::clip_for_element(element, abs);
+        let mut child_clip = active_clip;
+        if let Some((rect, radius)) = clip {
+            chunk_ctx.push_rounded_clip(rect, radius);
+            child_clip = Some(LayerClip {
+                rect,
+                corner_radius: radius,
+            });
+        }
+
+        for child in element.children() {
+            if Self::build_boundary_walk(
+                chunk_ctx,
+                child.as_ref(),
+                abs,
+                child_clip,
+                owner,
+                container_id,
+                container_size,
+                layer_store,
+                paint_renderer,
+                scale_milli,
+                layer_generation,
+                next_ordinal,
+                #[cfg(test)]
+                paint_test_counters,
+            ) {
+                painted = true;
+            }
+        }
+
+        if Self::append_retained_overlay_primitives(
+            element,
+            abs,
+            child_clip,
+            container_id,
+            layer_store,
+        ) {
+            painted = true;
+        } else if Self::paint_element_overlay(chunk_ctx, element, abs) {
+            painted = true;
+        }
+        if clip.is_some() {
+            chunk_ctx.pop_clip();
+        }
+        painted
+    }
+
+    fn ensure_boundary_layer<'a>(
+        element: &'a dyn Element,
+        layer_store: &mut LayerStore,
+        paint_renderer: &mut CpuPaintRenderer,
+        scale_milli: u32,
+        layer_generation: u64,
+        #[cfg(test)] paint_test_counters: &mut PaintTestCounters,
+    ) -> bool {
+        let Some(render_object) = element.render_object() else {
+            return false;
+        };
+        let Some(size) = render_object.repaint_boundary_size() else {
+            return false;
+        };
+        let layer_id = LayerId::Boundary(element.id());
+        if layer_store.is_valid_for(layer_id, size, scale_milli) {
+            layer_store.mark_container_subtree(layer_id, layer_generation);
+            return true;
+        }
+        #[cfg(test)]
+        {
+            paint_test_counters.boundary_rebuilds += 1;
+        }
+        Self::rebuild_boundary_layer(
+            element,
+            size,
+            layer_store,
+            paint_renderer,
+            scale_milli,
+            layer_generation,
+            #[cfg(test)]
+            paint_test_counters,
+        )
+    }
+
+    fn ensure_descendant_boundary_layers<'a>(
+        element: &'a dyn Element,
+        layer_store: &mut LayerStore,
+        paint_renderer: &mut CpuPaintRenderer,
+        scale_milli: u32,
+        layer_generation: u64,
+        #[cfg(test)] paint_test_counters: &mut PaintTestCounters,
+    ) -> bool {
+        let mut rebuilt = false;
+        for child in element.children() {
+            let is_boundary = child
+                .render_object()
+                .and_then(|render_object| render_object.repaint_boundary_size())
+                .is_some();
+            if is_boundary {
+                if Self::ensure_boundary_layer(
+                    child.as_ref(),
+                    layer_store,
+                    paint_renderer,
+                    scale_milli,
+                    layer_generation,
+                    #[cfg(test)]
+                    paint_test_counters,
+                ) {
+                    rebuilt = true;
+                }
+            }
+            if Self::ensure_descendant_boundary_layers(
+                child.as_ref(),
+                layer_store,
+                paint_renderer,
+                scale_milli,
+                layer_generation,
+                #[cfg(test)]
+                paint_test_counters,
+            ) {
+                rebuilt = true;
+            }
+        }
+        rebuilt
+    }
+
+    fn flush_picture_chunk(
+        chunk_ctx: &mut PaintContext<'_>,
+        owner: ElementId,
+        container_id: LayerId,
+        container_size: Size,
+        layer_store: &mut LayerStore,
+        paint_renderer: &mut CpuPaintRenderer,
+        scale_milli: u32,
+        layer_generation: u64,
+        next_ordinal: &mut u16,
+    ) -> bool {
+        if chunk_ctx.is_empty() {
+            return false;
+        }
+        let ordinal = *next_ordinal;
+        *next_ordinal = (*next_ordinal).saturating_add(1);
+        let chunk_id = LayerId::Chunk { owner, ordinal };
+        let logical_bounds = Rect::new(Point::ZERO, container_size);
+        if let Some(chunk) = layer_store.chunk_mut(chunk_id)
+            && let Some(buffer) = Arc::get_mut(&mut chunk.buffer)
+        {
+            if chunk.logical_bounds.size != container_size || buffer.scale_milli() != scale_milli {
+                buffer.resize_logical_dimensions_with_scale(
+                    libm::ceilf(container_size.width) as u32,
+                    libm::ceilf(container_size.height) as u32,
+                    scale_milli,
+                );
+            }
+            paint_renderer.execute_into_external_buffer(
+                buffer,
+                crate::color::Color::TRANSPARENT,
+                chunk_ctx,
+                None,
+            );
+            chunk.logical_bounds = logical_bounds;
+            chunk.generation = layer_generation;
+            layer_store.mark_chunk(chunk_id, layer_generation);
+            layer_store.finish_chunk_rebuild(chunk_id);
+            layer_store.append_child(
+                container_id,
+                LayerChild::Chunk {
+                    id: chunk_id,
+                    offset: Point::ZERO,
+                    clip: None,
+                },
+            );
+            chunk_ctx.clear();
+            return true;
+        }
+
+        let mut buffer = Buffer::from_logical_dimensions_with_scale(
+            libm::ceilf(container_size.width) as u32,
+            libm::ceilf(container_size.height) as u32,
+            scale_milli,
+        );
+        paint_renderer.execute_into_external_buffer(
+            &mut buffer,
+            crate::color::Color::TRANSPARENT,
+            chunk_ctx,
+            None,
+        );
+        if let Some(chunk) = layer_store.chunk_mut(chunk_id) {
+            chunk.buffer = Arc::new(buffer);
+            chunk.logical_bounds = logical_bounds;
+            chunk.generation = layer_generation;
+            layer_store.finish_chunk_rebuild(chunk_id);
+        } else {
+            layer_store.insert_chunk(PictureChunk::new(
+                owner,
+                ordinal,
+                logical_bounds,
+                buffer,
+                layer_generation,
+            ));
+        }
+        layer_store.mark_chunk(chunk_id, layer_generation);
+        layer_store.append_child(
+            container_id,
+            LayerChild::Chunk {
+                id: chunk_id,
+                offset: Point::ZERO,
+                clip: None,
+            },
+        );
+        chunk_ctx.clear();
+        true
+    }
+
+    fn composite_layer_container<'a>(
+        ctx: &mut PaintContext<'a>,
+        layer_store: &LayerStore,
+        container_id: LayerId,
+        origin: Point,
+    ) -> bool {
+        let Some(container) = layer_store.container(container_id) else {
+            return false;
+        };
+        let mut painted = false;
+        for child in &container.children {
+            match *child {
+                LayerChild::Chunk { id, offset, .. } => {
+                    if let Some(chunk) = layer_store.chunk(id) {
+                        let dst = Rect::new(
+                            Point::new(
+                                origin.x + offset.x + chunk.logical_bounds.origin.x,
+                                origin.y + offset.y + chunk.logical_bounds.origin.y,
+                            ),
+                            chunk.logical_bounds.size,
+                        );
+                        ctx.draw_buffer_rect_shared(
+                            dst,
+                            chunk.logical_bounds,
+                            chunk.buffer.clone(),
+                            1.0,
+                        );
+                        painted = true;
+                    }
+                }
+                LayerChild::Boundary { id, offset, clip } => {
+                    if let Some(clip) = clip {
+                        ctx.push_rounded_clip(
+                            Rect::new(
+                                Point::new(
+                                    origin.x + clip.rect.origin.x,
+                                    origin.y + clip.rect.origin.y,
+                                ),
+                                clip.rect.size,
+                            ),
+                            clip.corner_radius,
+                        );
+                    }
+                    if Self::composite_layer_container(
+                        ctx,
+                        layer_store,
+                        id,
+                        Point::new(origin.x + offset.x, origin.y + offset.y),
+                    ) {
+                        painted = true;
+                    }
+                    if clip.is_some() {
+                        ctx.pop_clip();
+                    }
+                }
+                LayerChild::Primitive(primitive) => {
+                    Self::paint_layer_primitive(ctx, primitive, origin);
+                    painted = true;
+                }
             }
         }
         painted
     }
 
-    fn has_descendant_repaint_boundary(element: &dyn Element) -> bool {
-        element.children().iter().any(|child| {
-            child
+    fn rebuild_root_layer_refs(
+        root: &dyn Element,
+        window_size: Size,
+        scale_milli: u32,
+        layer_generation: u64,
+        layer_store: &mut LayerStore,
+    ) {
+        layer_store.begin_container_rebuild(
+            LayerId::Root,
+            None,
+            window_size,
+            scale_milli,
+            layer_generation,
+        );
+        Self::append_root_layer_refs(root, Point::ZERO, None, layer_store);
+        layer_store.finish_container_rebuild(LayerId::Root);
+    }
+
+    fn append_root_layer_refs(
+        element: &dyn Element,
+        origin: Point,
+        active_clip: Option<LayerClip>,
+        layer_store: &mut LayerStore,
+    ) {
+        let abs = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+        if element
+            .render_object()
+            .and_then(|render_object| render_object.repaint_boundary_size())
+            .is_some()
+        {
+            let id = LayerId::Boundary(element.id());
+            if layer_store.container(id).is_some() {
+                layer_store.append_child(
+                    LayerId::Root,
+                    LayerChild::Boundary {
+                        id,
+                        offset: abs,
+                        clip: active_clip,
+                    },
+                );
+            }
+            return;
+        }
+
+        let mut child_clip = active_clip;
+        if let Some((rect, radius)) = Self::clip_for_element(element, abs) {
+            child_clip = Some(LayerClip {
+                rect,
+                corner_radius: radius,
+            });
+        }
+        for child in element.children() {
+            Self::append_root_layer_refs(child.as_ref(), abs, child_clip, layer_store);
+        }
+        Self::append_retained_overlay_primitives(
+            element,
+            abs,
+            child_clip,
+            LayerId::Root,
+            layer_store,
+        );
+    }
+
+    fn sync_retained_layer_offsets_along_path(
+        element: &dyn Element,
+        origin: Point,
+        active_clip: Option<LayerClip>,
+        parent_container: LayerId,
+        path: &[ElementId],
+        path_index: usize,
+        layer_store: &mut LayerStore,
+        #[cfg(test)] paint_test_counters: &mut PaintTestCounters,
+    ) -> bool {
+        #[cfg(test)]
+        {
+            paint_test_counters.retained_sync_visits += 1;
+        }
+        if path.get(path_index).copied() != Some(element.id()) {
+            return false;
+        }
+
+        let abs = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+        let is_boundary = element
+            .render_object()
+            .and_then(|render_object| render_object.repaint_boundary_size())
+            .is_some();
+        if is_boundary {
+            if !Self::sync_retained_boundary_ref(
+                element.id(),
+                abs,
+                active_clip,
+                parent_container,
+                layer_store,
+                false,
+            ) {
+                return false;
+            }
+            let id = LayerId::Boundary(element.id());
+            if let Some(next_id) = path.get(path_index + 1).copied() {
+                let Some(child) = element
+                    .children()
+                    .iter()
+                    .find(|child| child.id() == next_id)
+                else {
+                    return false;
+                };
+                return Self::sync_retained_layer_offsets_along_path(
+                    child.as_ref(),
+                    Point::ZERO,
+                    None,
+                    id,
+                    path,
+                    path_index + 1,
+                    layer_store,
+                    #[cfg(test)]
+                    paint_test_counters,
+                );
+            }
+            return true;
+        }
+
+        let mut child_clip = active_clip;
+        if let Some((rect, radius)) = Self::clip_for_element(element, abs) {
+            child_clip = Some(LayerClip {
+                rect,
+                corner_radius: radius,
+            });
+        }
+        if let Some(next_id) = path.get(path_index + 1).copied() {
+            let Some(child) = element
+                .children()
+                .iter()
+                .find(|child| child.id() == next_id)
+            else {
+                return false;
+            };
+            return Self::sync_retained_layer_offsets_along_path(
+                child.as_ref(),
+                abs,
+                child_clip,
+                parent_container,
+                path,
+                path_index + 1,
+                layer_store,
+                #[cfg(test)]
+                paint_test_counters,
+            );
+        }
+
+        for child in element.children() {
+            if child
                 .render_object()
                 .and_then(|render_object| render_object.repaint_boundary_size())
                 .is_some()
-                || Self::has_descendant_repaint_boundary(child.as_ref())
+            {
+                if !Self::sync_retained_boundary_child(
+                    child.as_ref(),
+                    abs,
+                    child_clip,
+                    parent_container,
+                    layer_store,
+                ) {
+                    return false;
+                }
+            }
+        }
+        Self::sync_retained_overlay_primitives(
+            element,
+            abs,
+            child_clip,
+            parent_container,
+            layer_store,
+        );
+        true
+    }
+
+    fn sync_retained_boundary_ref(
+        element_id: ElementId,
+        offset: Point,
+        active_clip: Option<LayerClip>,
+        parent_container: LayerId,
+        layer_store: &mut LayerStore,
+        allow_missing_non_retained: bool,
+    ) -> bool {
+        let id = LayerId::Boundary(element_id);
+        let retained_container_exists = layer_store.container(id).is_some();
+        let Some(container) = layer_store.container_mut(parent_container) else {
+            return false;
+        };
+        if let Some(child) = container
+            .children
+            .iter_mut()
+            .find(|child| matches!(child, LayerChild::Boundary { id: child_id, .. } if *child_id == id))
+        {
+            if !retained_container_exists {
+                return false;
+            }
+            *child = LayerChild::Boundary {
+                id,
+                offset,
+                clip: active_clip,
+            };
+            return true;
+        }
+        allow_missing_non_retained && !retained_container_exists
+    }
+
+    fn sync_retained_boundary_child(
+        element: &dyn Element,
+        origin: Point,
+        active_clip: Option<LayerClip>,
+        parent_container: LayerId,
+        layer_store: &mut LayerStore,
+    ) -> bool {
+        let offset = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+        Self::sync_retained_boundary_ref(
+            element.id(),
+            offset,
+            active_clip,
+            parent_container,
+            layer_store,
+            true,
+        )
+    }
+
+    fn direct_composite_layer_container(
+        renderer: &mut CpuPaintRenderer,
+        layer_store: &LayerStore,
+        container_id: LayerId,
+        origin: Point,
+        active_clip: Option<ClipRegion>,
+        damage_rects: Option<&[Rect]>,
+    ) -> bool {
+        let Some(container) = layer_store.container(container_id) else {
+            return false;
+        };
+        let mut painted = false;
+        for child in &container.children {
+            match *child {
+                LayerChild::Chunk { id, offset, .. } => {
+                    if let Some(chunk) = layer_store.chunk(id) {
+                        let dst = Rect::new(
+                            Point::new(
+                                origin.x + offset.x + chunk.logical_bounds.origin.x,
+                                origin.y + offset.y + chunk.logical_bounds.origin.y,
+                            ),
+                            chunk.logical_bounds.size,
+                        );
+                        renderer.composite_buffer_rect_with_clip(
+                            &chunk.buffer,
+                            dst,
+                            chunk.logical_bounds,
+                            active_clip,
+                            damage_rects,
+                        );
+                        painted = true;
+                    }
+                }
+                LayerChild::Boundary { id, offset, clip } => {
+                    let next_origin = Point::new(origin.x + offset.x, origin.y + offset.y);
+                    let next_clip = Self::combine_layer_clip(origin, active_clip, clip);
+                    if Self::direct_composite_layer_container(
+                        renderer,
+                        layer_store,
+                        id,
+                        next_origin,
+                        next_clip,
+                        damage_rects,
+                    ) {
+                        painted = true;
+                    }
+                }
+                LayerChild::Primitive(primitive) => {
+                    Self::direct_paint_layer_primitive(
+                        renderer,
+                        primitive,
+                        origin,
+                        active_clip,
+                        damage_rects,
+                    );
+                    painted = true;
+                }
+            }
+        }
+        painted
+    }
+
+    fn append_retained_overlay_primitives(
+        element: &dyn Element,
+        origin: Point,
+        active_clip: Option<LayerClip>,
+        container_id: LayerId,
+        layer_store: &mut LayerStore,
+    ) -> bool {
+        let Some(render_object) = element.render_object() else {
+            return false;
+        };
+        let mut primitives = [None, None];
+        render_object.retained_overlay_primitives(
+            element.id(),
+            origin,
+            active_clip,
+            &mut primitives,
+        );
+        let mut appended = false;
+        for primitive in primitives.into_iter().flatten() {
+            layer_store.append_child(container_id, LayerChild::Primitive(primitive));
+            appended = true;
+        }
+        appended
+    }
+
+    fn sync_retained_overlay_primitives(
+        element: &dyn Element,
+        origin: Point,
+        active_clip: Option<LayerClip>,
+        container_id: LayerId,
+        layer_store: &mut LayerStore,
+    ) {
+        let Some(render_object) = element.render_object() else {
+            return;
+        };
+        let mut primitives = [None, None];
+        render_object.retained_overlay_primitives(
+            element.id(),
+            origin,
+            active_clip,
+            &mut primitives,
+        );
+        let Some(container) = layer_store.container_mut(container_id) else {
+            return;
+        };
+        let mut primitive_index = 0usize;
+        let mut child_index = 0usize;
+        while child_index < container.children.len() {
+            let matches_owner = matches!(
+                container.children[child_index],
+                LayerChild::Primitive(LayerPrimitive { owner, .. }) if owner == element.id()
+            );
+            if matches_owner {
+                if let Some(primitive) = primitives.get_mut(primitive_index).and_then(Option::take)
+                {
+                    container.children[child_index] = LayerChild::Primitive(primitive);
+                    primitive_index += 1;
+                    child_index += 1;
+                } else {
+                    container.children.remove(child_index);
+                }
+            } else {
+                child_index += 1;
+            }
+        }
+        for primitive in primitives.into_iter().flatten() {
+            container.children.push(LayerChild::Primitive(primitive));
+        }
+    }
+
+    fn paint_layer_primitive(ctx: &mut PaintContext<'_>, primitive: LayerPrimitive, origin: Point) {
+        match primitive.kind {
+            LayerPrimitiveKind::RoundedRect {
+                mut rect,
+                corner_radius,
+            } => {
+                rect.origin.x += origin.x;
+                rect.origin.y += origin.y;
+                if let Some(clip) = primitive.clip {
+                    ctx.push_rounded_clip(
+                        Rect::new(
+                            Point::new(
+                                origin.x + clip.rect.origin.x,
+                                origin.y + clip.rect.origin.y,
+                            ),
+                            clip.rect.size,
+                        ),
+                        clip.corner_radius,
+                    );
+                    ctx.fill_rounded_rect(rect, corner_radius, primitive.color);
+                    ctx.pop_clip();
+                } else {
+                    ctx.fill_rounded_rect(rect, corner_radius, primitive.color);
+                }
+            }
+        }
+    }
+
+    fn direct_paint_layer_primitive(
+        renderer: &mut CpuPaintRenderer,
+        primitive: LayerPrimitive,
+        origin: Point,
+        active_clip: Option<ClipRegion>,
+        damage_rects: Option<&[Rect]>,
+    ) {
+        match primitive.kind {
+            LayerPrimitiveKind::RoundedRect {
+                mut rect,
+                corner_radius,
+            } => {
+                rect.origin.x += origin.x;
+                rect.origin.y += origin.y;
+                let clip = Self::combine_layer_clip(origin, active_clip, primitive.clip);
+                renderer.fill_rounded_rect_with_clip(
+                    rect,
+                    corner_radius,
+                    primitive.color,
+                    clip,
+                    damage_rects,
+                );
+            }
+        }
+    }
+
+    fn combine_layer_clip(
+        origin: Point,
+        active_clip: Option<ClipRegion>,
+        child_clip: Option<LayerClip>,
+    ) -> Option<ClipRegion> {
+        let Some(child_clip) = child_clip else {
+            return active_clip;
+        };
+        let rect = Rect::new(
+            Point::new(
+                origin.x + child_clip.rect.origin.x,
+                origin.y + child_clip.rect.origin.y,
+            ),
+            child_clip.rect.size,
+        );
+        let rect = if let Some(active_clip) = active_clip {
+            intersect_logical_rect(active_clip.rect, rect)
+                .unwrap_or(Rect::new(rect.origin, Size::ZERO))
+        } else {
+            rect
+        };
+        Some(ClipRegion {
+            rect,
+            corner_radius: child_clip.corner_radius,
         })
     }
 
@@ -763,47 +1803,52 @@ impl RenderingPipeline {
         ro.paint_overlay(ctx, abs) || ctx.commands().len() > before
     }
 
-    fn invalidate_repaint_boundary_caches(&mut self, dirty_ids: &[ElementId]) {
-        if dirty_ids.is_empty() || self.paint_caches.is_empty() {
+    fn invalidate_repaint_boundary_caches(&mut self) {
+        if self.dirty_scratch.ids.is_empty() {
             return;
         }
 
-        let cached_ids: Vec<ElementId> = self.paint_caches.keys().copied().collect();
-        let mut invalidated = Vec::new();
-        for boundary_id in cached_ids {
-            if let Some(dirty_id) = dirty_ids
-                .iter()
-                .copied()
-                .find(|dirty_id| self.dirty_id_invalidates_repaint_boundary(boundary_id, *dirty_id))
+        for index in 0..self.dirty_scratch.ids.len() {
+            let dirty_id = self.dirty_scratch.ids[index];
+            self.dirty_scratch.path.clear();
+            if !self
+                .element_tree
+                .find_path_ids_into(dirty_id, &mut self.dirty_scratch.path)
             {
-                invalidated.push((boundary_id, dirty_id));
+                continue;
             }
-        }
 
-        for (id, dirty_id) in invalidated {
+            let layer_id = self
+                .element_tree
+                .find_nearest_repaint_boundary_in_path(&self.dirty_scratch.path)
+                .map(LayerId::Boundary)
+                .unwrap_or(LayerId::Root);
+
+            let legacy_id = match layer_id {
+                LayerId::Boundary(id) => Some(id),
+                LayerId::Root | LayerId::Chunk { .. } => None,
+            };
             if crate::debug::repaint_boundary_log_enabled() {
                 crate::logln!(
                     "[RepaintBoundary] invalidate id={} dirty_id={}",
-                    id.get(),
+                    legacy_id.map_or(0, ElementId::get),
                     dirty_id.get()
                 );
             }
-            if let Some(cache) = self.paint_caches.get_mut(&id) {
+
+            // Phase 4 stores nested repaint boundaries as child layers, not as
+            // pixels flattened into the ancestor picture chunk. Therefore only
+            // the nearest owning boundary must be invalidated for descendant
+            // content changes. Ancestor overlay/chrome retention (for example,
+            // scrollbars painted over child boundaries) remains a Phase 7 item.
+            self.layer_store.invalidate_layer(layer_id, dirty_id);
+            if let Some(id) = legacy_id
+                && let Some(cache) = self.paint_caches.get_mut(&id)
+            {
                 cache.valid = false;
                 cache.invalidated_by = Some(dirty_id);
             }
         }
-    }
-
-    fn dirty_id_invalidates_repaint_boundary(
-        &self,
-        boundary_id: ElementId,
-        dirty_id: ElementId,
-    ) -> bool {
-        self.element_tree
-            .find_path_ids(dirty_id)
-            .map(|path| path.contains(&boundary_id))
-            .unwrap_or(true)
     }
 
     fn element_paint_bounds(element: &dyn Element, absolute_origin: Point) -> Rect {
@@ -824,42 +1869,32 @@ impl RenderingPipeline {
         Rect::from_xywh(absolute_origin.x, absolute_origin.y, width, height)
     }
 
-    fn paint_dirty_rects(&self, dirty_ids: &[ElementId]) -> Vec<Rect> {
-        if dirty_ids.is_empty() {
-            return Vec::new();
-        }
-
-        let Some(root) = self.element_tree.root() else {
-            return Vec::new();
-        };
-
-        let dirty_set: BTreeSet<ElementId> = dirty_ids.iter().copied().collect();
-        let mut rects = Vec::new();
-        self.collect_dirty_rects(root, Point::ZERO, &dirty_set, &mut rects);
-        rects
-    }
-
-    fn collect_dirty_rects(
-        &self,
-        element: &dyn Element,
-        origin: Point,
-        dirty_ids: &BTreeSet<ElementId>,
+    fn paint_dirty_rects_into(
+        element_tree: &crate::element::ElementTree,
+        last_paint_bounds: &BTreeMap<ElementId, Rect>,
+        dirty_ids: &[ElementId],
+        path_scratch: &mut Vec<ElementId>,
         rects: &mut Vec<Rect>,
     ) {
-        let abs = Point::new(
-            origin.x + element.position().x,
-            origin.y + element.position().y,
-        );
-
-        if dirty_ids.contains(&element.id()) {
-            rects.push(Self::element_paint_bounds(element, abs));
-            if let Some(old_bounds) = self.last_paint_bounds.get(&element.id()) {
-                rects.push(*old_bounds);
-            }
+        rects.clear();
+        if dirty_ids.is_empty() {
+            return;
         }
 
-        for child in element.children() {
-            self.collect_dirty_rects(child.as_ref(), abs, dirty_ids, rects);
+        for dirty_id in dirty_ids {
+            path_scratch.clear();
+            if !element_tree.find_path_ids_into(*dirty_id, path_scratch) {
+                continue;
+            }
+            let Some((element, absolute_origin)) =
+                element_tree.element_and_absolute_origin_for_path(path_scratch)
+            else {
+                continue;
+            };
+            rects.push(Self::element_paint_bounds(element, absolute_origin));
+            if let Some(old_bounds) = last_paint_bounds.get(dirty_id) {
+                rects.push(*old_bounds);
+            }
         }
     }
 
@@ -879,26 +1914,47 @@ impl RenderingPipeline {
         }
     }
 
+    fn update_paint_bounds_for_ids(
+        element_tree: &crate::element::ElementTree,
+        ids: &[ElementId],
+        path_scratch: &mut Vec<ElementId>,
+        bounds: &mut BTreeMap<ElementId, Rect>,
+    ) {
+        for id in ids {
+            path_scratch.clear();
+            if !element_tree.find_path_ids_into(*id, path_scratch) {
+                continue;
+            }
+            if let Some((element, absolute_origin)) =
+                element_tree.element_and_absolute_origin_for_path(path_scratch)
+            {
+                bounds.insert(*id, Self::element_paint_bounds(element, absolute_origin));
+            }
+        }
+    }
+
     fn overlaps_any(rect: Rect, rects: &[Rect]) -> bool {
         rects.iter().any(|r| rect.overlaps(r))
     }
 
     fn merge_overlapping_rects(rects: &mut Vec<Rect>) {
-        let mut merged: Vec<Rect> = Vec::new();
-        'outer: for rect in rects.drain(..) {
-            for existing in merged.iter_mut() {
-                if existing.overlaps(&rect) {
-                    let left = existing.left().min(rect.left());
-                    let top = existing.top().min(rect.top());
-                    let right = existing.right().max(rect.right());
-                    let bottom = existing.bottom().max(rect.bottom());
-                    *existing = Rect::from_xywh(left, top, right - left, bottom - top);
-                    continue 'outer;
+        let mut index = 0;
+        while index < rects.len() {
+            let mut other = index + 1;
+            while other < rects.len() {
+                if rects[index].overlaps(&rects[other]) {
+                    let left = rects[index].left().min(rects[other].left());
+                    let top = rects[index].top().min(rects[other].top());
+                    let right = rects[index].right().max(rects[other].right());
+                    let bottom = rects[index].bottom().max(rects[other].bottom());
+                    rects[index] = Rect::from_xywh(left, top, right - left, bottom - top);
+                    rects.remove(other);
+                } else {
+                    other += 1;
                 }
             }
-            merged.push(rect);
+            index += 1;
         }
-        *rects = merged;
     }
 
     fn present_damage_rects(
@@ -906,23 +1962,51 @@ impl RenderingPipeline {
         window_size: Size,
         scale_milli: u32,
     ) -> Option<Vec<DamageRect>> {
+        let mut damage = Vec::new();
+        if Self::present_damage_rects_into(rects, window_size, scale_milli, &mut damage) {
+            Some(damage)
+        } else {
+            None
+        }
+    }
+
+    fn present_damage_rects_into(
+        rects: &[Rect],
+        window_size: Size,
+        scale_milli: u32,
+        damage: &mut Vec<DamageRect>,
+    ) -> bool {
+        damage.clear();
         let physical_width = Self::scale_len(window_size.width as u32, scale_milli);
         let physical_height = Self::scale_len(window_size.height as u32, scale_milli);
-        let mut damage: Vec<DamageRect> = rects
-            .iter()
-            .map(|rect| Self::rect_to_damage(*rect, scale_milli, physical_width, physical_height))
-            .filter(|(_, _, width, height)| *width > 0 && *height > 0)
-            .collect();
-
-        Self::coalesce_damage_rects(&mut damage);
-
-        let damage_area = Self::damage_rects_area(&damage);
-        let window_area = (physical_width as u64).saturating_mul(physical_height as u64);
-        if damage_area >= window_area {
-            return None;
+        for rect in rects {
+            let damage_rect =
+                Self::rect_to_damage(*rect, scale_milli, physical_width, physical_height);
+            if damage_rect.2 > 0 && damage_rect.3 > 0 {
+                damage.push(damage_rect);
+            }
         }
 
-        Some(damage)
+        Self::coalesce_damage_rects(damage);
+
+        let damage_area = Self::damage_rects_area(damage);
+        let window_area = (physical_width as u64).saturating_mul(physical_height as u64);
+        if damage_area >= window_area {
+            damage.clear();
+            return false;
+        }
+
+        true
+    }
+
+    fn store_paint_damage(&mut self, partial: bool) {
+        if partial {
+            let damage = self.paint_damage.get_or_insert_with(Vec::new);
+            damage.clear();
+            damage.extend_from_slice(&self.dirty_scratch.damage);
+        } else {
+            self.paint_damage = None;
+        }
     }
 
     fn scale_len(value: u32, scale_milli: u32) -> u32 {
@@ -1039,7 +2123,7 @@ impl RenderingPipeline {
                 self.window_size,
                 false,
             );
-            self.render_paint_path(self.extract_window_info().background_color)?;
+            self.render_paint_path(self.extract_background_color())?;
             let pr = self.paint_renderer.as_ref().unwrap();
             return Some((pr.buffer(), self.paint_damage.as_deref()));
         }
@@ -1080,6 +2164,17 @@ impl RenderingPipeline {
     }
 }
 
+fn intersect_logical_rect(a: Rect, b: Rect) -> Option<Rect> {
+    let left = a.origin.x.max(b.origin.x);
+    let top = a.origin.y.max(b.origin.y);
+    let right = (a.origin.x + a.size.width).min(b.origin.x + b.size.width);
+    let bottom = (a.origin.y + a.size.height).min(b.origin.y + b.size.height);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(Rect::from_xywh(left, top, right - left, bottom - top))
+}
+
 impl Drop for RenderingPipeline {
     fn drop(&mut self) {
         self.teardown();
@@ -1095,9 +2190,724 @@ impl Default for RenderingPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{Event, MouseEvent, ScrollSource, WheelPhase};
+    use crate::event::{Event, MouseButton, MouseEvent, ScrollSource, WheelPhase};
+    use crate::testing::alloc_counter::{
+        allocation_snapshot, measure_allocations, reset_allocation_counts,
+    };
     use crate::view::{View, ViewExt};
-    use crate::views::{LazyVStack, Rectangle, ScrollView, Text};
+    use crate::views::{
+        LazyVStack, NavigationLink, NavigationView, Rectangle, ScrollView, ScrollbarVisibility,
+        Text,
+    };
+
+    /// Phase 1 warm-scroll allocation baseline measured on this machine.
+    /// This is the Phase 2 max budget and Phase 7's target is zero.
+    const PHASE_1_WARM_SCROLL_ALLOCS: usize = 22;
+    /// Phase 2 retained-scratch warm-scroll allocation baseline measured on this machine.
+    const PHASE_2_WARM_SCROLL_ALLOCS: usize = 21;
+    /// Phase 3 shadow LayerStore warm-scroll allocation baseline measured on this machine.
+    const PHASE_3_WARM_SCROLL_ALLOCS: usize = 21;
+    /// Phase 4 nested retained-boundary warm-scroll allocation baseline measured on this machine.
+    const PHASE_4_WARM_SCROLL_ALLOCS: usize = 21;
+    /// Phase 5 nearest-invalidation warm-scroll allocation baseline measured on this machine.
+    const PHASE_5_WARM_SCROLL_ALLOCS: usize = 13;
+    /// Phase 6a cascade-fix warm-scroll allocation baseline measured on this machine.
+    const PHASE_6A_WARM_SCROLL_ALLOCS: usize = 13;
+    /// Phase 6b retained-composite fast-path warm-scroll allocation baseline.
+    const PHASE_6B_WARM_SCROLL_ALLOCS: usize = 0;
+    /// Phase 7 retained-scrollbar visible warm-scroll allocation baseline.
+    const PHASE_7_WARM_SCROLL_ALLOCS: usize = 0;
+
+    fn warm_scroll_event() -> Event {
+        Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: 40,
+            x: 10,
+            y: 10,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Wheel,
+        })
+    }
+
+    fn build_warm_scroll_pipeline() -> RenderingPipeline {
+        build_warm_scroll_pipeline_with_visibility(ScrollbarVisibility::Never)
+    }
+
+    fn build_warm_scroll_pipeline_with_visibility(
+        visibility: ScrollbarVisibility,
+    ) -> RenderingPipeline {
+        let mut pipeline = RenderingPipeline::new();
+        let root = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(220, 40, 40))
+                .frame(100.0, 2_000.0),
+        )
+        .content_size(100.0, 2_000.0)
+        .wheel_sensitivity(1.0)
+        .scrollbar_visibility(visibility)
+        .frame(100.0, 100.0)
+        .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        for _ in 0..4 {
+            drive_warm_scroll_frame(&mut pipeline);
+        }
+
+        pipeline
+    }
+
+    fn drive_warm_scroll_frame(pipeline: &mut RenderingPipeline) {
+        assert!(pipeline.handle_event(&warm_scroll_event()));
+        pipeline
+            .render_with_damage()
+            .expect("warm scroll frame should render");
+    }
+
+    fn first_any_scrollbar_primitive_rect(pipeline: &RenderingPipeline) -> Option<Rect> {
+        fn in_container(pipeline: &RenderingPipeline, container_id: LayerId) -> Option<Rect> {
+            let container = pipeline.layer_store.container(container_id)?;
+            for child in &container.children {
+                match *child {
+                    LayerChild::Primitive(primitive) => {
+                        let LayerPrimitiveKind::RoundedRect { rect, .. } = primitive.kind;
+                        return Some(rect);
+                    }
+                    LayerChild::Boundary { id, .. } => {
+                        if let Some(rect) = in_container(pipeline, id) {
+                            return Some(rect);
+                        }
+                    }
+                    LayerChild::Chunk { .. } => {}
+                }
+            }
+            None
+        }
+        in_container(pipeline, LayerId::Root)
+    }
+
+    fn damage_contains_rect(damage: Option<&[DamageRect]>, rect: Rect) -> bool {
+        let Some(damage) = damage else {
+            return true;
+        };
+        let target = RenderingPipeline::rect_to_damage(rect, 1000, 800, 600);
+        damage.iter().any(|damage| {
+            damage.0 <= target.0
+                && damage.1 <= target.1
+                && damage.0.saturating_add(damage.2) >= target.0.saturating_add(target.2)
+                && damage.1.saturating_add(damage.3) >= target.1.saturating_add(target.3)
+        })
+    }
+
+    #[test]
+    fn warm_scroll_allocation_baseline_is_measured() {
+        let mut pipeline = build_warm_scroll_pipeline();
+
+        let snapshot = measure_allocations(|| {
+            drive_warm_scroll_frame(&mut pipeline);
+        });
+
+        println!(
+            "PHASE_6B_WARM_SCROLL_ALLOCS={} PHASE_6A_WARM_SCROLL_ALLOCS={} PHASE_5_WARM_SCROLL_ALLOCS={} PHASE_4_WARM_SCROLL_ALLOCS={} PHASE_3_WARM_SCROLL_ALLOCS={} PHASE_2_WARM_SCROLL_ALLOCS={} PHASE_1_WARM_SCROLL_ALLOCS={} allocated_bytes={} deallocations={}",
+            snapshot.allocations,
+            PHASE_6A_WARM_SCROLL_ALLOCS,
+            PHASE_5_WARM_SCROLL_ALLOCS,
+            PHASE_4_WARM_SCROLL_ALLOCS,
+            PHASE_3_WARM_SCROLL_ALLOCS,
+            PHASE_2_WARM_SCROLL_ALLOCS,
+            PHASE_1_WARM_SCROLL_ALLOCS,
+            snapshot.allocated_bytes,
+            snapshot.deallocations
+        );
+        assert!(snapshot.allocations <= PHASE_1_WARM_SCROLL_ALLOCS);
+        assert!(snapshot.allocations <= PHASE_2_WARM_SCROLL_ALLOCS);
+        assert!(snapshot.allocations <= PHASE_3_WARM_SCROLL_ALLOCS);
+        assert!(snapshot.allocations <= PHASE_4_WARM_SCROLL_ALLOCS);
+        assert!(snapshot.allocations <= PHASE_5_WARM_SCROLL_ALLOCS);
+        assert!(snapshot.allocations <= PHASE_6A_WARM_SCROLL_ALLOCS);
+        assert_eq!(snapshot.allocations, PHASE_6B_WARM_SCROLL_ALLOCS);
+        assert_eq!(snapshot.deallocations, 0);
+        assert_eq!(snapshot.allocated_bytes, 0);
+    }
+
+    #[test]
+    fn warm_scroll_without_dynamic_overlay_allocates_zero_after_warmup() {
+        let mut pipeline = build_warm_scroll_pipeline();
+
+        let snapshot = measure_allocations(|| {
+            drive_warm_scroll_frame(&mut pipeline);
+        });
+
+        assert_eq!(snapshot.allocations, PHASE_6B_WARM_SCROLL_ALLOCS);
+        assert_eq!(snapshot.deallocations, 0);
+        assert_eq!(snapshot.allocated_bytes, 0);
+    }
+
+    #[test]
+    fn default_scroll_view_warm_scroll_allocates_zero_after_warmup() {
+        let mut pipeline =
+            build_warm_scroll_pipeline_with_visibility(ScrollbarVisibility::Automatic);
+
+        let snapshot = measure_allocations(|| {
+            drive_warm_scroll_frame(&mut pipeline);
+        });
+
+        assert_eq!(snapshot.allocations, PHASE_7_WARM_SCROLL_ALLOCS);
+        assert_eq!(snapshot.deallocations, 0);
+        assert_eq!(snapshot.allocated_bytes, 0);
+    }
+
+    #[test]
+    fn warm_scroll_path_counter_baseline_is_measured() {
+        let mut pipeline = build_warm_scroll_pipeline();
+        pipeline.reset_paint_test_counters();
+
+        drive_warm_scroll_frame(&mut pipeline);
+
+        let counters = pipeline.paint_test_counters();
+        assert_eq!(counters.paint_context_news, 0);
+        assert_eq!(counters.walk_and_paint_calls, 0);
+        assert_eq!(counters.boundary_rebuilds, 0);
+        assert_eq!(counters.retained_composites, 1);
+        assert!(counters.retained_sync_visits <= 4);
+    }
+
+    #[test]
+    fn default_scroll_view_warm_scroll_skips_paint_context_and_walk() {
+        let mut pipeline =
+            build_warm_scroll_pipeline_with_visibility(ScrollbarVisibility::Automatic);
+        pipeline.reset_paint_test_counters();
+
+        drive_warm_scroll_frame(&mut pipeline);
+
+        let counters = pipeline.paint_test_counters();
+        assert_eq!(counters.paint_context_news, 0);
+        assert_eq!(counters.walk_and_paint_calls, 0);
+        assert_eq!(counters.boundary_rebuilds, 0);
+        assert_eq!(counters.retained_composites, 1);
+        assert!(counters.retained_sync_visits <= 4);
+    }
+
+    #[test]
+    fn scrollbar_overlay_retained_composite_updates_position_on_scroll() {
+        let mut pipeline = build_warm_scroll_pipeline_with_visibility(ScrollbarVisibility::Always);
+        let before = first_any_scrollbar_primitive_rect(&pipeline)
+            .expect("always-visible scrollbar should be retained");
+        pipeline.reset_paint_test_counters();
+
+        drive_warm_scroll_frame(&mut pipeline);
+
+        let after = first_any_scrollbar_primitive_rect(&pipeline)
+            .expect("scrollbar primitive should remain retained");
+        assert!(after.origin.y > before.origin.y);
+        let counters = pipeline.paint_test_counters();
+        assert_eq!(counters.paint_context_news, 0);
+        assert_eq!(counters.walk_and_paint_calls, 0);
+        assert_eq!(counters.boundary_rebuilds, 0);
+        assert_eq!(counters.retained_composites, 1);
+        assert!(counters.retained_sync_visits <= 4);
+    }
+
+    #[test]
+    fn scrollbar_overlay_damage_includes_old_and_new_thumb() {
+        let mut pipeline = build_warm_scroll_pipeline_with_visibility(ScrollbarVisibility::Always);
+        let old_thumb = first_any_scrollbar_primitive_rect(&pipeline)
+            .expect("always-visible scrollbar should be retained");
+
+        assert!(pipeline.handle_event(&warm_scroll_event()));
+        let (_, damage) = pipeline
+            .render_with_damage()
+            .expect("scroll frame should render with damage");
+        let damage = damage.map(|damage| damage.to_vec());
+        let new_thumb = first_any_scrollbar_primitive_rect(&pipeline)
+            .expect("scrollbar primitive should update");
+
+        assert!(damage_contains_rect(damage.as_deref(), old_thumb));
+        assert!(damage_contains_rect(damage.as_deref(), new_thumb));
+    }
+
+    #[test]
+    fn overlay_chunk_order_is_after_child_layers() {
+        let pipeline = build_warm_scroll_pipeline_with_visibility(ScrollbarVisibility::Always);
+        let root = pipeline.layer_store.root();
+        let boundary_index = root
+            .children
+            .iter()
+            .position(|child| matches!(child, LayerChild::Boundary { .. }))
+            .expect("root should contain retained child content");
+        let primitive_index = root
+            .children
+            .iter()
+            .position(|child| matches!(child, LayerChild::Primitive(_)))
+            .expect("root should contain retained scrollbar overlay");
+
+        assert!(primitive_index > boundary_index);
+    }
+
+    #[test]
+    fn real_app_like_nested_default_and_always_scroll_stays_retained() {
+        let inner = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(80, 140, 220))
+                .frame(520.0, 360.0),
+        )
+        .both_axes()
+        .content_size(520.0, 360.0)
+        .scrollbar_visibility(ScrollbarVisibility::Always)
+        .frame(320.0, 160.0);
+        let mut pipeline = RenderingPipeline::new();
+        let root = ScrollView::new(inner)
+            .vertical()
+            .content_size(320.0, 520.0)
+            .frame(320.0, 180.0)
+            .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+        for _ in 0..4 {
+            drive_warm_scroll_frame(&mut pipeline);
+        }
+        pipeline.reset_paint_test_counters();
+
+        drive_warm_scroll_frame(&mut pipeline);
+
+        let counters = pipeline.paint_test_counters();
+        assert_eq!(counters.paint_context_news, 0);
+        assert_eq!(counters.walk_and_paint_calls, 0);
+        assert_eq!(counters.boundary_rebuilds, 0);
+        assert_eq!(counters.retained_composites, 1);
+        assert!(counters.retained_sync_visits <= 8);
+    }
+
+    #[test]
+    fn retained_composite_sync_does_not_walk_cached_scroll_content() {
+        let mut pipeline = RenderingPipeline::new();
+        let root = ScrollView::new(LazyVStack::new(1_000, 20.0, |index| {
+            Text::new(format!("Item {index}"))
+        }))
+        .wheel_sensitivity(1.0)
+        .scrollbar_visibility(ScrollbarVisibility::Always)
+        .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+        for _ in 0..4 {
+            drive_warm_scroll_frame(&mut pipeline);
+        }
+        pipeline.reset_paint_test_counters();
+
+        drive_warm_scroll_frame(&mut pipeline);
+
+        let counters = pipeline.paint_test_counters();
+        assert_eq!(counters.paint_context_news, 0);
+        assert_eq!(counters.walk_and_paint_calls, 0);
+        assert_eq!(counters.boundary_rebuilds, 0);
+        assert_eq!(counters.retained_composites, 1);
+        assert!(counters.retained_sync_visits <= 4);
+    }
+
+    #[test]
+    fn navigation_page_switch_then_scroll_visibly_updates_without_hover_damage() {
+        let even_color = crate::color::Color::rgb(20, 180, 80);
+        let odd_color = crate::color::Color::rgb(40, 80, 220);
+        let page = move || {
+            ScrollView::new(LazyVStack::new(30, 30.0, move |index| {
+                let color = if index % 2 == 0 {
+                    even_color
+                } else {
+                    odd_color
+                };
+                Rectangle::new().fill(color).frame(600.0, 30.0)
+            }))
+            .content_size(600.0, 900.0)
+            .wheel_sensitivity(1.0)
+            .scrollbar_visibility(ScrollbarVisibility::Always)
+        };
+        let mut pipeline = RenderingPipeline::new();
+        let root = NavigationView::new((
+            NavigationLink::new("First", crate::Icon::Home, || Text::new("first page")),
+            NavigationLink::new("Second", crate::Icon::Settings, page),
+        ))
+        .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        assert!(
+            pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 10,
+                y: 45,
+                click_count: 1,
+            }))
+        );
+        pipeline
+            .render_with_damage()
+            .expect("page switch should render");
+
+        let before_scroll = pipeline
+            .paint_renderer
+            .as_ref()
+            .and_then(|renderer| renderer.buffer().get_pixel(220, 10))
+            .expect("content pixel should be available after switch");
+        assert_eq!(before_scroll, even_color.to_bgra());
+        pipeline.reset_paint_test_counters();
+
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: 40,
+            x: 220,
+            y: 10,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Wheel,
+        })));
+        pipeline
+            .render_with_damage()
+            .expect("scroll after page switch should render");
+
+        let after_scroll = pipeline
+            .paint_renderer
+            .as_ref()
+            .and_then(|renderer| renderer.buffer().get_pixel(220, 10))
+            .expect("content pixel should be available after scroll");
+        assert_eq!(after_scroll, odd_color.to_bgra());
+        assert_ne!(before_scroll, after_scroll);
+    }
+
+    #[test]
+    fn navigation_factory_like_page_switch_refreshes_retained_state_before_scroll() {
+        let top_color = crate::color::Color::rgb(210, 40, 40);
+        let inner_color = crate::color::Color::rgb(40, 80, 220);
+        let page = move || {
+            let inner_scroll = ScrollView::new(LazyVStack::new(30, 30.0, move |_| {
+                Rectangle::new().fill(inner_color).frame(520.0, 30.0)
+            }))
+            .both_axes()
+            .content_size(520.0, 900.0)
+            .scrollbar_visibility(ScrollbarVisibility::Always)
+            .frame(320.0, 160.0);
+            let content = crate::vstack! {
+                Rectangle::new().fill(top_color).frame(600.0, 30.0),
+                inner_scroll,
+                Rectangle::new().fill(top_color).frame(600.0, 30.0),
+                Rectangle::new().fill(top_color).frame(600.0, 700.0),
+            }
+            .spacing(0.0);
+            ScrollView::new(content)
+                .vertical()
+                .content_size(600.0, 920.0)
+                .wheel_sensitivity(1.0)
+        };
+        let mut pipeline = RenderingPipeline::new();
+        let root = NavigationView::new((
+            NavigationLink::new("First", crate::Icon::Home, || Text::new("first page")),
+            NavigationLink::new("Factory", crate::Icon::Settings, page),
+        ))
+        .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        assert!(
+            pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 10,
+                y: 45,
+                click_count: 1,
+            }))
+        );
+        pipeline.reset_paint_test_counters();
+        pipeline
+            .render_with_damage()
+            .expect("page switch should render");
+        let switch_counters = pipeline.paint_test_counters();
+        assert!(switch_counters.paint_context_news > 0);
+        assert_eq!(switch_counters.retained_composites, 0);
+
+        let before_scroll = pipeline
+            .paint_renderer
+            .as_ref()
+            .and_then(|renderer| renderer.buffer().get_pixel(220, 10))
+            .expect("content pixel should be available after switch");
+        assert_eq!(before_scroll, top_color.to_bgra());
+        pipeline.reset_paint_test_counters();
+
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: 40,
+            x: 220,
+            y: 10,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Wheel,
+        })));
+        pipeline
+            .render_with_damage()
+            .expect("scroll after page switch should render");
+
+        let after_scroll = pipeline
+            .paint_renderer
+            .as_ref()
+            .and_then(|renderer| renderer.buffer().get_pixel(220, 10))
+            .expect("content pixel should be available after scroll");
+        assert_ne!(before_scroll, after_scroll);
+        let scroll_counters = pipeline.paint_test_counters();
+        assert_eq!(scroll_counters.paint_context_news, 0);
+        assert_eq!(scroll_counters.walk_and_paint_calls, 0);
+        assert_eq!(scroll_counters.boundary_rebuilds, 0);
+        assert_eq!(scroll_counters.retained_composites, 1);
+    }
+
+    #[test]
+    fn navigation_widget_factory_like_invalid_retained_graph_repaints_on_scroll() {
+        let top_color = crate::color::Color::rgb(210, 40, 40);
+        let next_color = crate::color::Color::rgb(40, 80, 220);
+        let inner_color = crate::color::Color::rgb(80, 160, 90);
+        let overview = move || {
+            let inner_scroll = ScrollView::new(
+                crate::vstack! {
+                    Rectangle::new().fill(inner_color).frame(520.0, 30.0),
+                    Rectangle::new().fill(inner_color).frame(520.0, 30.0),
+                    Rectangle::new().fill(inner_color).frame(520.0, 30.0),
+                    Rectangle::new().fill(inner_color).frame(520.0, 30.0),
+                    Rectangle::new().fill(inner_color).frame(520.0, 30.0),
+                    Rectangle::new().fill(inner_color).frame(520.0, 30.0),
+                }
+                .spacing(8.0)
+                .padding(12.0),
+            )
+            .both_axes()
+            .content_size(520.0, 360.0)
+            .scrollbar_visibility(ScrollbarVisibility::Always)
+            .frame(320.0, 160.0);
+            let content = crate::vstack! {
+                Rectangle::new().fill(top_color).frame(600.0, 30.0),
+                inner_scroll,
+                Rectangle::new().fill(next_color).frame(600.0, 30.0),
+                Rectangle::new().fill(next_color).frame(600.0, 700.0),
+            }
+            .spacing(16.0)
+            .padding(24.0);
+            ScrollView::new(content).vertical().content_size(0.0, 760.0)
+        };
+        let controls = || {
+            ScrollView::new(
+                crate::vstack! {
+                    Text::new("Controls").font_size(24.0),
+                    Rectangle::new().fill(crate::color::Color::rgb(230, 230, 230)).frame(600.0, 320.0),
+                }
+                .spacing(16.0)
+                .padding(24.0),
+            )
+            .vertical()
+            .content_size(0.0, 360.0)
+        };
+        let inputs = || {
+            ScrollView::new(
+                crate::vstack! {
+                    Text::new("Inputs").font_size(24.0),
+                    Rectangle::new().fill(crate::color::Color::rgb(230, 230, 230)).frame(600.0, 520.0),
+                }
+                .spacing(16.0)
+                .padding(24.0),
+            )
+            .vertical()
+            .content_size(0.0, 560.0)
+        };
+        let display = move || {
+            let both_scroll = ScrollView::new(
+                crate::vstack! {
+                    Rectangle::new().fill(inner_color).frame(520.0, 30.0),
+                    Rectangle::new().fill(inner_color).frame(520.0, 30.0),
+                    Rectangle::new().fill(inner_color).frame(520.0, 30.0),
+                    Rectangle::new().fill(inner_color).frame(520.0, 30.0),
+                    Rectangle::new().fill(inner_color).frame(520.0, 30.0),
+                    Rectangle::new().fill(inner_color).frame(520.0, 30.0),
+                }
+                .spacing(8.0)
+                .padding(12.0),
+            )
+            .both_axes()
+            .content_size(520.0, 360.0)
+            .scrollbar_visibility(ScrollbarVisibility::Always)
+            .frame(320.0, 160.0);
+            let x_scroll = ScrollView::new(
+                crate::hstack! {
+                    Rectangle::new().fill(inner_color).frame(120.0, 40.0),
+                    Rectangle::new().fill(inner_color).frame(120.0, 40.0),
+                    Rectangle::new().fill(inner_color).frame(120.0, 40.0),
+                    Rectangle::new().fill(inner_color).frame(120.0, 40.0),
+                }
+                .spacing(8.0)
+                .padding(8.0),
+            )
+            .horizontal()
+            .content_size(560.0, 64.0)
+            .frame(240.0, 64.0);
+            let y_scroll = ScrollView::new(
+                crate::vstack! {
+                    Rectangle::new().fill(inner_color).frame(160.0, 24.0),
+                    Rectangle::new().fill(inner_color).frame(160.0, 24.0),
+                    Rectangle::new().fill(inner_color).frame(160.0, 24.0),
+                    Rectangle::new().fill(inner_color).frame(160.0, 24.0),
+                    Rectangle::new().fill(inner_color).frame(160.0, 24.0),
+                    Rectangle::new().fill(inner_color).frame(160.0, 24.0),
+                    Rectangle::new().fill(inner_color).frame(160.0, 24.0),
+                    Rectangle::new().fill(inner_color).frame(160.0, 24.0),
+                }
+                .spacing(8.0)
+                .padding(8.0),
+            )
+            .vertical()
+            .content_size(160.0, 240.0)
+            .scrollbar_visibility(ScrollbarVisibility::Always)
+            .frame(160.0, 96.0);
+            let content = crate::vstack! {
+                Rectangle::new().fill(top_color).frame(600.0, 30.0),
+                both_scroll,
+                x_scroll,
+                y_scroll,
+                Rectangle::new().fill(next_color).frame(600.0, 700.0),
+            }
+            .spacing(16.0)
+            .padding(24.0);
+            ScrollView::new(content).vertical().content_size(0.0, 940.0)
+        };
+        let mut pipeline = RenderingPipeline::new();
+        let root = crate::navigation! {
+            NavigationLink::new("Overview", crate::Icon::Home, overview),
+            NavigationLink::new("Controls", crate::Icon::Settings, controls),
+            NavigationLink::new("Inputs", crate::Icon::Search, inputs),
+            NavigationLink::new("Display", crate::Icon::Info, display),
+        }
+        .sidebar_width(190.0)
+        .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+            button: MouseButton::Left,
+            x: 10,
+            y: 125,
+            click_count: 1,
+        })));
+        pipeline
+            .render_with_damage()
+            .expect("display page switch should render");
+        let before_scroll = pipeline
+            .paint_renderer
+            .as_ref()
+            .and_then(|renderer| renderer.buffer().get_pixel(220, 30))
+            .expect("display page pixel should be available");
+        assert_eq!(before_scroll, top_color.to_bgra());
+        let invalidated_by = pipeline
+            .element_tree
+            .root()
+            .map(|root| root.id())
+            .expect("root should exist");
+        pipeline
+            .layer_store
+            .invalidate_layer(LayerId::Root, invalidated_by);
+        pipeline.reset_paint_test_counters();
+
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: 240,
+            x: 220,
+            y: 30,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Wheel,
+        })));
+        pipeline
+            .render_with_damage()
+            .expect("scroll after display switch should render");
+        let after_scroll = pipeline
+            .paint_renderer
+            .as_ref()
+            .and_then(|renderer| renderer.buffer().get_pixel(220, 30))
+            .expect("display page pixel should be available after scroll");
+        assert_ne!(before_scroll, after_scroll);
+        let counters = pipeline.paint_test_counters();
+        assert!(counters.paint_context_news > 0);
+        assert_eq!(counters.retained_composites, 0);
+    }
+
+    #[test]
+    fn allocation_counter_measurement_does_not_allocate_while_reading_counts() {
+        reset_allocation_counts();
+        let _ = allocation_snapshot();
+
+        let snapshot = measure_allocations(|| {
+            let _ = allocation_snapshot();
+            let _ = allocation_snapshot();
+        });
+
+        assert_eq!(snapshot.allocations, 0);
+        assert_eq!(snapshot.deallocations, 0);
+        assert_eq!(snapshot.allocated_bytes, 0);
+    }
+
+    fn scroll_content_boundary_id(pipeline: &RenderingPipeline) -> ElementId {
+        pipeline
+            .layer_store
+            .boundary_ids()
+            .into_iter()
+            .next()
+            .expect("scroll content should be a retained repaint boundary")
+    }
+
+    fn nested_scroll_boundary_ids(pipeline: &RenderingPipeline) -> (ElementId, ElementId) {
+        let mut outer = None;
+        let mut inner = None;
+        for id in pipeline.layer_store.boundary_ids() {
+            let container = pipeline
+                .layer_store
+                .container(LayerId::Boundary(id))
+                .expect("boundary id should resolve to a container");
+            if container
+                .children
+                .iter()
+                .any(|child| matches!(child, LayerChild::Boundary { .. }))
+            {
+                outer = Some(id);
+            } else {
+                inner = Some(id);
+            }
+        }
+        (
+            outer.expect("outer scroll content should be retained"),
+            inner.expect("inner scroll content should be retained"),
+        )
+    }
+
+    fn first_chunk_id(pipeline: &RenderingPipeline, boundary_id: ElementId) -> LayerId {
+        pipeline
+            .layer_store
+            .container(LayerId::Boundary(boundary_id))
+            .and_then(|container| {
+                container.children.iter().find_map(|child| match child {
+                    LayerChild::Chunk { id, .. } => Some(*id),
+                    LayerChild::Boundary { .. } | LayerChild::Primitive(_) => None,
+                })
+            })
+            .expect("retained boundary should contain a picture chunk")
+    }
+
+    fn first_child_id(pipeline: &RenderingPipeline, id: ElementId) -> ElementId {
+        pipeline
+            .element_tree()
+            .find_element(id)
+            .and_then(|element| element.children().first())
+            .map(|child| child.id())
+            .expect("element should have a child")
+    }
+
+    fn invalidate_for_test(pipeline: &mut RenderingPipeline, dirty_id: ElementId) {
+        pipeline.dirty_scratch.clear_for_frame();
+        pipeline.dirty_scratch.ids.push(dirty_id);
+        pipeline.invalidate_repaint_boundary_caches();
+    }
 
     #[test]
     fn present_damage_keeps_large_partial_region() {
@@ -1178,9 +2988,10 @@ mod tests {
         pipeline.layout_initial();
         pipeline.render_with_damage();
 
-        assert_eq!(pipeline.paint_caches.len(), 1);
-        let cache_id = *pipeline.paint_caches.keys().next().unwrap();
-        let before = Arc::as_ptr(&pipeline.paint_caches[&cache_id].buffer);
+        let boundary_id = scroll_content_boundary_id(&pipeline);
+        let layer_id = LayerId::Boundary(boundary_id);
+        let chunk_id = first_chunk_id(&pipeline, boundary_id);
+        let before = Arc::as_ptr(&pipeline.layer_store.chunk(chunk_id).unwrap().buffer);
 
         assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
             delta_x: 0,
@@ -1192,8 +3003,50 @@ mod tests {
         })));
         pipeline.render_with_damage();
 
-        let after = Arc::as_ptr(&pipeline.paint_caches[&cache_id].buffer);
+        assert!(pipeline.layer_store.container(layer_id).unwrap().valid);
+        let after = Arc::as_ptr(&pipeline.layer_store.chunk(chunk_id).unwrap().buffer);
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn boundary_rebuild_uses_pipeline_renderer_scratch() {
+        let mut pipeline = RenderingPipeline::new();
+        let root = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(40, 120, 220))
+                .frame(100.0, 300.0),
+        )
+        .content_size(100.0, 300.0)
+        .frame(100.0, 100.0)
+        .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        let boundary = pipeline
+            .element_tree()
+            .root()
+            .and_then(|root| root.children().first())
+            .expect("scroll content should be a repaint boundary");
+        let descendant_id = boundary
+            .children()
+            .first()
+            .expect("boundary should have a child")
+            .id();
+        let first_capacity = pipeline
+            .retained_boundary_scratch_capacity_for_test()
+            .expect("paint renderer should exist after initial render");
+        assert!(first_capacity.scaled_points > 0);
+        assert!(first_capacity.crossings > 0);
+
+        pipeline.pipeline_owner.mark_needs_paint(descendant_id);
+        pipeline.render_with_damage();
+        let second_capacity = pipeline
+            .retained_boundary_scratch_capacity_for_test()
+            .expect("paint renderer should be retained after rebuild");
+
+        assert_eq!(first_capacity.scaled_points, second_capacity.scaled_points);
+        assert_eq!(first_capacity.crossings, second_capacity.crossings);
     }
 
     #[test]
@@ -1215,23 +3068,216 @@ mod tests {
             .element_tree()
             .root()
             .and_then(|root| root.children().first())
-            .and_then(|scroll| scroll.children().first())
             .expect("scroll content should be a repaint boundary");
         let descendant_id = boundary
             .children()
             .first()
             .expect("boundary should have a child")
             .id();
-        assert_eq!(pipeline.paint_caches.len(), 1);
-        let cache_id = *pipeline.paint_caches.keys().next().unwrap();
-        let before = Arc::as_ptr(&pipeline.paint_caches[&cache_id].buffer);
+        let boundary_id = scroll_content_boundary_id(&pipeline);
+        let layer_id = LayerId::Boundary(boundary_id);
+        let chunk_id = first_chunk_id(&pipeline, boundary_id);
+        let before = Arc::as_ptr(&pipeline.layer_store.chunk(chunk_id).unwrap().buffer);
+
+        invalidate_for_test(&mut pipeline, descendant_id);
+        let container = pipeline.layer_store.container(layer_id).unwrap();
+        assert!(!container.valid);
+        assert_eq!(container.invalidated_by, Some(descendant_id));
 
         pipeline.pipeline_owner.mark_needs_paint(descendant_id);
         pipeline.render_with_damage();
-        assert_eq!(pipeline.paint_caches.len(), 1);
-        let after = Arc::as_ptr(&pipeline.paint_caches[&cache_id].buffer);
+        let after = Arc::as_ptr(&pipeline.layer_store.chunk(chunk_id).unwrap().buffer);
         assert_eq!(before, after);
-        assert!(pipeline.paint_caches[&cache_id].valid);
+        assert!(pipeline.layer_store.container(layer_id).unwrap().valid);
+    }
+
+    #[test]
+    fn nested_repaint_boundary_dirty_descendant_invalidates_inner_only() {
+        let mut pipeline = RenderingPipeline::new();
+        let inner = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(80, 180, 120))
+                .frame(100.0, 300.0),
+        )
+        .content_size(100.0, 300.0)
+        .frame(100.0, 100.0);
+        let root = ScrollView::new(inner)
+            .content_size(100.0, 200.0)
+            .frame(100.0, 100.0)
+            .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        let (outer_id, inner_id) = nested_scroll_boundary_ids(&pipeline);
+        let dirty_id = first_child_id(&pipeline, inner_id);
+
+        invalidate_for_test(&mut pipeline, dirty_id);
+
+        let outer = pipeline
+            .layer_store
+            .container(LayerId::Boundary(outer_id))
+            .expect("outer boundary should exist");
+        let inner = pipeline
+            .layer_store
+            .container(LayerId::Boundary(inner_id))
+            .expect("inner boundary should exist");
+        assert!(outer.valid);
+        assert_eq!(outer.invalidated_by, None);
+        assert!(!inner.valid);
+        assert_eq!(inner.invalidated_by, Some(dirty_id));
+    }
+
+    #[test]
+    fn nested_repaint_boundary_inner_dirty_does_not_rebuild_outer() {
+        let mut pipeline = RenderingPipeline::new();
+        let inner = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(80, 180, 120))
+                .frame(100.0, 300.0),
+        )
+        .content_size(100.0, 300.0)
+        .frame(100.0, 100.0);
+        let root = ScrollView::new(inner)
+            .content_size(100.0, 200.0)
+            .frame(100.0, 100.0)
+            .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        let (outer_id, inner_id) = nested_scroll_boundary_ids(&pipeline);
+        let dirty_id = first_child_id(&pipeline, inner_id);
+
+        pipeline.reset_paint_test_counters();
+        pipeline.pipeline_owner.mark_needs_paint(dirty_id);
+        pipeline.render_with_damage();
+
+        let counters = pipeline.paint_test_counters();
+        assert_eq!(counters.boundary_rebuilds, 1);
+        assert!(
+            pipeline
+                .layer_store
+                .container(LayerId::Boundary(outer_id))
+                .expect("outer boundary should still exist")
+                .valid
+        );
+        assert!(
+            pipeline
+                .layer_store
+                .container(LayerId::Boundary(inner_id))
+                .expect("inner boundary should still exist")
+                .valid
+        );
+    }
+
+    #[test]
+    fn dirty_root_invalidates_root_layer_only() {
+        let mut pipeline = RenderingPipeline::new();
+        let root = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(40, 120, 220))
+                .frame(100.0, 300.0),
+        )
+        .content_size(100.0, 300.0)
+        .frame(100.0, 100.0)
+        .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        let root_id = pipeline.element_tree().root().unwrap().id();
+        let boundary_id = scroll_content_boundary_id(&pipeline);
+
+        invalidate_for_test(&mut pipeline, root_id);
+
+        assert_eq!(pipeline.layer_store.root().invalidated_by, Some(root_id));
+        assert!(
+            pipeline
+                .layer_store
+                .container(LayerId::Boundary(boundary_id))
+                .unwrap()
+                .valid
+        );
+    }
+
+    #[test]
+    fn find_path_ids_into_reuses_capacity() {
+        let mut pipeline = RenderingPipeline::new();
+        let root = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(40, 120, 220))
+                .frame(100.0, 300.0),
+        )
+        .content_size(100.0, 300.0)
+        .frame(100.0, 100.0)
+        .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        let boundary_id = scroll_content_boundary_id(&pipeline);
+        let dirty_id = first_child_id(&pipeline, boundary_id);
+        let mut path = Vec::new();
+        assert!(
+            pipeline
+                .element_tree()
+                .find_path_ids_into(dirty_id, &mut path)
+        );
+        let warmed_capacity = path.capacity();
+        assert!(
+            pipeline
+                .element_tree()
+                .find_path_ids_into(boundary_id, &mut path)
+        );
+        assert!(path.capacity() <= warmed_capacity);
+        assert_eq!(
+            pipeline
+                .element_tree()
+                .find_nearest_repaint_boundary_in_path(&path),
+            Some(boundary_id)
+        );
+    }
+
+    #[test]
+    fn paint_dirty_rects_does_not_allocate_after_capacity_warmup() {
+        let mut pipeline = RenderingPipeline::new();
+        let root = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(40, 120, 220))
+                .frame(100.0, 300.0),
+        )
+        .content_size(100.0, 300.0)
+        .frame(100.0, 100.0)
+        .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        let boundary_id = scroll_content_boundary_id(&pipeline);
+        let dirty_id = first_child_id(&pipeline, boundary_id);
+        pipeline.dirty_scratch.ids.clear();
+        pipeline.dirty_scratch.ids.push(dirty_id);
+        RenderingPipeline::paint_dirty_rects_into(
+            &pipeline.element_tree,
+            &pipeline.last_paint_bounds,
+            &pipeline.dirty_scratch.ids,
+            &mut pipeline.dirty_scratch.path,
+            &mut pipeline.dirty_scratch.rects,
+        );
+
+        let snapshot = measure_allocations(|| {
+            RenderingPipeline::paint_dirty_rects_into(
+                &pipeline.element_tree,
+                &pipeline.last_paint_bounds,
+                &pipeline.dirty_scratch.ids,
+                &mut pipeline.dirty_scratch.path,
+                &mut pipeline.dirty_scratch.rects,
+            );
+        });
+
+        assert_eq!(snapshot.allocations, 0);
+        assert_eq!(snapshot.deallocations, 0);
     }
 
     #[test]
@@ -1249,13 +3295,19 @@ mod tests {
             let (buffer, _) = pipeline.render_with_damage().expect("frame should render");
             (buffer.get_pixel(5, 5), buffer.get_pixel(15, 5))
         };
-        assert_eq!(pipeline.paint_caches.len(), 1);
+        let boundary_id = scroll_content_boundary_id(&pipeline);
+        assert!(
+            pipeline
+                .layer_store
+                .container(LayerId::Boundary(boundary_id))
+                .is_some()
+        );
         assert_eq!(inside, Some(red.to_bgra()));
         assert_ne!(outside, Some(red.to_bgra()));
     }
 
     #[test]
-    fn scroll_view_auto_boundary_skips_nested_boundaries() {
+    fn nested_repaint_boundary_rebuild_preserves_parent_and_child_layers() {
         let mut pipeline = RenderingPipeline::new();
         let inner = ScrollView::new(
             Rectangle::new()
@@ -1272,8 +3324,86 @@ mod tests {
         pipeline.layout_initial();
         pipeline.render_with_damage();
 
-        assert_eq!(pipeline.paint_caches.len(), 1);
-        let cache = pipeline.paint_caches.values().next().unwrap();
-        assert_eq!(cache.logical_size, Size::new(100.0, 300.0));
+        let (outer_id, inner_id) = nested_scroll_boundary_ids(&pipeline);
+        assert!(
+            pipeline
+                .layer_store
+                .container(LayerId::Boundary(outer_id))
+                .is_some()
+        );
+        assert!(
+            pipeline
+                .layer_store
+                .container(LayerId::Boundary(inner_id))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn nested_repaint_boundary_child_is_composited_through_parent_order() {
+        let mut pipeline = RenderingPipeline::new();
+        let inner = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(80, 180, 120))
+                .frame(100.0, 300.0),
+        )
+        .content_size(100.0, 300.0)
+        .frame(100.0, 100.0);
+        let root = ScrollView::new(inner)
+            .content_size(100.0, 200.0)
+            .frame(100.0, 100.0)
+            .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        let (outer_id, inner_id) = nested_scroll_boundary_ids(&pipeline);
+        let outer = pipeline
+            .layer_store
+            .container(LayerId::Boundary(outer_id))
+            .expect("outer boundary should be retained");
+        assert!(matches!(
+            outer.children.first(),
+            Some(LayerChild::Chunk { .. })
+        ));
+        assert!(outer.children.iter().any(|child| matches!(
+            child,
+            LayerChild::Boundary { id, .. } if *id == LayerId::Boundary(inner_id)
+        )));
+        assert!(matches!(
+            outer.children.last(),
+            Some(LayerChild::Chunk { .. })
+        ));
+    }
+
+    #[test]
+    fn scroll_view_auto_boundary_retains_nested_boundaries() {
+        let mut pipeline = RenderingPipeline::new();
+        let inner = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(80, 180, 120))
+                .frame(100.0, 300.0),
+        )
+        .content_size(100.0, 300.0)
+        .frame(100.0, 100.0);
+        let root = ScrollView::new(inner)
+            .content_size(100.0, 200.0)
+            .frame(100.0, 100.0)
+            .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        let (outer_id, inner_id) = nested_scroll_boundary_ids(&pipeline);
+        let outer = pipeline
+            .layer_store
+            .container(LayerId::Boundary(outer_id))
+            .expect("outer boundary should be retained");
+        let inner = pipeline
+            .layer_store
+            .container(LayerId::Boundary(inner_id))
+            .expect("inner boundary should be retained");
+        assert_eq!(outer.logical_size, Size::new(100.0, 100.0));
+        assert_eq!(inner.logical_size, Size::new(100.0, 300.0));
     }
 }
