@@ -695,11 +695,6 @@ impl WinitPlatformWindow {
         self.current_size = size;
     }
 
-    fn observed_logical_size(&self) -> Size {
-        let scale_factor = self.window.scale_factor();
-        let inner_size = self.window.inner_size();
-        physical_to_logical_size(inner_size.width, inner_size.height, scale_factor)
-    }
 }
 
 impl PlatformWindow for WinitPlatformWindow {

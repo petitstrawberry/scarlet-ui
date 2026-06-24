@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::command::{self, ApplicationCommand};
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult, WindowSizeLimits};
 use crate::error::{Error, Result};
-use crate::event::Event;
+use crate::event::{Event, MouseEvent, ScrollSource, WheelPhase};
 use crate::geometry::{Point, Rect, Size};
 use crate::menu_model;
 use crate::pipeline::{MountContext, PipelineId, RenderingPipeline};
@@ -264,9 +264,22 @@ impl ApplicationRunner {
 
             for slot in slots.iter_mut() {
                 slot.presented_this_cycle = false;
+                let mut pending_trackpad_moved = None;
                 while let Some(event) = slot.window.poll_event() {
                     any_event = true;
+                    let Some(event) = coalesce_trackpad_moved_for_batch(
+                        &mut pending_trackpad_moved,
+                        event,
+                    ) else {
+                        continue;
+                    };
+                    if let Some(pending) = pending_trackpad_moved.take() {
+                        handle_window_event(app, slot, pending, &mut close_ids)?;
+                    }
                     handle_window_event(app, slot, event, &mut close_ids)?;
+                }
+                if let Some(pending) = pending_trackpad_moved.take() {
+                    handle_window_event(app, slot, pending, &mut close_ids)?;
                 }
             }
 
@@ -401,6 +414,55 @@ fn wait_for_next_event<A: Application>(slots: &mut [WindowSlot<A>], timeout: Dur
     } else {
         std::thread::sleep(timeout);
     }
+}
+
+fn coalesce_trackpad_moved_for_batch(pending: &mut Option<Event>, event: Event) -> Option<Event> {
+    let Event::Mouse(MouseEvent::Wheel {
+        delta_x,
+        delta_y,
+        x,
+        y,
+        phase: WheelPhase::Moved,
+        source: ScrollSource::Trackpad,
+    }) = event
+    else {
+        return Some(event);
+    };
+
+    if let Some(Event::Mouse(MouseEvent::Wheel {
+        delta_x: pending_delta_x,
+        delta_y: pending_delta_y,
+        x: pending_x,
+        y: pending_y,
+        phase: WheelPhase::Moved,
+        source: ScrollSource::Trackpad,
+    })) = pending.as_mut()
+    {
+        *pending_delta_x = pending_delta_x.saturating_add(delta_x);
+        *pending_delta_y = pending_delta_y.saturating_add(delta_y);
+        *pending_x = x;
+        *pending_y = y;
+        if crate::debug::wheel_log_enabled() {
+            crate::logln!(
+                "[Wheel] app coalesced trackpad moved delta=({}, {}) cursor=({}, {})",
+                *pending_delta_x,
+                *pending_delta_y,
+                x,
+                y
+            );
+        }
+    } else {
+        *pending = Some(Event::Mouse(MouseEvent::Wheel {
+            delta_x,
+            delta_y,
+            x,
+            y,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
+        }));
+    }
+
+    None
 }
 
 fn sync_output_scale(pipeline: &mut RenderingPipeline, window: &dyn PlatformWindow) {
@@ -821,5 +883,92 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
         self.child
             .as_mut()
             .and_then(|child| child.take_window_action())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wheel(delta_y: i32, phase: WheelPhase, source: ScrollSource) -> Event {
+        Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y,
+            x: 10,
+            y: 20,
+            phase,
+            source,
+        })
+    }
+
+    fn trackpad_moved(delta_x: i32, delta_y: i32, x: i32, y: i32) -> Event {
+        Event::Mouse(MouseEvent::Wheel {
+            delta_x,
+            delta_y,
+            x,
+            y,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
+        })
+    }
+
+    #[test]
+    fn app_loop_coalesces_consecutive_trackpad_moved_events() {
+        let mut pending = None;
+
+        assert!(coalesce_trackpad_moved_for_batch(
+            &mut pending,
+            trackpad_moved(1, 4, 10, 20),
+        )
+        .is_none());
+        assert!(coalesce_trackpad_moved_for_batch(
+            &mut pending,
+            trackpad_moved(2, 7, 30, 40),
+        )
+        .is_none());
+
+        assert!(matches!(
+            pending.take(),
+            Some(Event::Mouse(MouseEvent::Wheel {
+                delta_x: 3,
+                delta_y: 11,
+                x: 30,
+                y: 40,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Trackpad,
+            }))
+        ));
+    }
+
+    #[test]
+    fn app_loop_does_not_coalesce_started_ended_or_discrete_wheel() {
+        let mut pending = None;
+
+        assert!(coalesce_trackpad_moved_for_batch(
+            &mut pending,
+            wheel(4, WheelPhase::Started, ScrollSource::Trackpad),
+        )
+        .is_some());
+        assert!(pending.is_none());
+
+        assert!(coalesce_trackpad_moved_for_batch(
+            &mut pending,
+            trackpad_moved(0, 5, 10, 20),
+        )
+        .is_none());
+        assert!(coalesce_trackpad_moved_for_batch(
+            &mut pending,
+            wheel(0, WheelPhase::Ended, ScrollSource::Trackpad),
+        )
+        .is_some());
+        assert!(pending.is_some());
+
+        pending = None;
+        assert!(coalesce_trackpad_moved_for_batch(
+            &mut pending,
+            wheel(7, WheelPhase::Moved, ScrollSource::Wheel),
+        )
+        .is_some());
+        assert!(pending.is_none());
     }
 }
