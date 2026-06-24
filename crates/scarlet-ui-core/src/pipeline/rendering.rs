@@ -2045,9 +2045,11 @@ impl RenderingPipeline {
             };
             if crate::debug::repaint_boundary_log_enabled() {
                 crate::logln!(
-                    "[RepaintBoundary] invalidate id={} dirty_id={}",
+                    "[RepaintBoundary] invalidate id={} dirty_id={} retained_layer={:?} path_len={}",
                     legacy_id.map_or(0, ElementId::get),
-                    dirty_id.get()
+                    dirty_id.get(),
+                    layer_id,
+                    self.dirty_scratch.path.len(),
                 );
             }
 
