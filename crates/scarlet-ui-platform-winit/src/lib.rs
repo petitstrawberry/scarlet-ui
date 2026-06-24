@@ -228,6 +228,10 @@ impl WinitEventState {
             }
         }
 
+        if self.coalesce_trackpad_moved(&event) {
+            return;
+        }
+
         self.queue.push_back(event);
     }
 
@@ -266,6 +270,44 @@ impl WinitEventState {
                 ..
             })
         )
+    }
+
+    fn coalesce_trackpad_moved(&mut self, event: &Event) -> bool {
+        let Event::Mouse(MouseEvent::Wheel {
+            delta_x,
+            delta_y,
+            x,
+            y,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
+        }) = event
+        else {
+            return false;
+        };
+
+        let Some(Event::Mouse(MouseEvent::Wheel {
+            delta_x: queued_delta_x,
+            delta_y: queued_delta_y,
+            x: queued_x,
+            y: queued_y,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
+        })) = self.queue.back_mut()
+        else {
+            return false;
+        };
+
+        *queued_delta_x = queued_delta_x.saturating_add(*delta_x);
+        *queued_delta_y = queued_delta_y.saturating_add(*delta_y);
+        *queued_x = *x;
+        *queued_y = *y;
+        if scarlet_ui_core::debug::wheel_log_enabled() {
+            println!(
+                "[Wheel] coalesced trackpad moved delta=({}, {}) cursor=({}, {})",
+                *queued_delta_x, *queued_delta_y, *x, *y
+            );
+        }
+        true
     }
 
     fn next_text_input_serial(&mut self) -> u32 {
@@ -991,6 +1033,92 @@ fn map_wheel_phase(phase: TouchPhase) -> WheelPhase {
         TouchPhase::Moved => WheelPhase::Moved,
         TouchPhase::Ended => WheelPhase::Ended,
         TouchPhase::Cancelled => WheelPhase::Cancelled,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wheel(delta_y: i32, phase: WheelPhase, source: ScrollSource) -> Event {
+        Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y,
+            x: 10,
+            y: 20,
+            phase,
+            source,
+        })
+    }
+
+    fn trackpad_moved(delta_y: i32, x: i32, y: i32) -> Event {
+        Event::Mouse(MouseEvent::Wheel {
+            delta_x: 1,
+            delta_y,
+            x,
+            y,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
+        })
+    }
+
+    #[test]
+    fn consecutive_trackpad_moved_events_are_coalesced() {
+        let mut state = WinitEventState::new(1.0);
+
+        state.push(wheel(0, WheelPhase::Started, ScrollSource::Trackpad));
+        state.push(trackpad_moved(4, 10, 20));
+        state.push(trackpad_moved(7, 30, 40));
+        state.push(trackpad_moved(-2, 50, 60));
+
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Mouse(MouseEvent::Wheel {
+                phase: WheelPhase::Started,
+                source: ScrollSource::Trackpad,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Mouse(MouseEvent::Wheel {
+                delta_x: 3,
+                delta_y: 9,
+                x: 50,
+                y: 60,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Trackpad,
+            }))
+        ));
+        assert!(state.pop().is_none());
+    }
+
+    #[test]
+    fn discrete_wheel_moved_events_are_not_coalesced() {
+        let mut state = WinitEventState::new(1.0);
+
+        state.push(wheel(4, WheelPhase::Moved, ScrollSource::Wheel));
+        state.push(wheel(7, WheelPhase::Moved, ScrollSource::Wheel));
+
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Mouse(MouseEvent::Wheel {
+                delta_y: 4,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Wheel,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Mouse(MouseEvent::Wheel {
+                delta_y: 7,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Wheel,
+                ..
+            }))
+        ));
+        assert!(state.pop().is_none());
     }
 }
 
