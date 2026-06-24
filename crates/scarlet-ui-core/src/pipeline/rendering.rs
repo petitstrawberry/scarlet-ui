@@ -407,10 +407,29 @@ impl RenderingPipeline {
             && self.pipeline_owner.last_paint_ids().is_empty()
             && !self.pipeline_owner.last_composite_ids().is_empty()
         {
+            if crate::debug::repaint_boundary_log_enabled() {
+                crate::logln!(
+                    "[RetainedComposite] candidate composite_ids={} root_valid={} paint_needs_full={}",
+                    self.pipeline_owner.last_composite_ids().len(),
+                    self.layer_store.root_graph_valid_for(size, scale),
+                    self.paint_needs_full,
+                );
+            }
             if self.layer_store.root_graph_valid_for(size, scale) {
                 if self.render_retained_composite_path(background_color) {
                     return self.paint_renderer.as_ref().map(CpuPaintRenderer::buffer);
                 }
+                if crate::debug::repaint_boundary_log_enabled() {
+                    crate::logln!(
+                        "[RetainedComposite] fallback reason=retained-path-failed composite_ids={}",
+                        self.pipeline_owner.last_composite_ids().len(),
+                    );
+                }
+            } else if crate::debug::repaint_boundary_log_enabled() {
+                crate::logln!(
+                    "[RetainedComposite] fallback reason=root-invalid composite_ids={}",
+                    self.pipeline_owner.last_composite_ids().len(),
+                );
             }
             force_full = true;
             self.paint_needs_full = true;
@@ -518,6 +537,9 @@ impl RenderingPipeline {
         self.dirty_scratch.ids.dedup();
 
         let Some(root) = self.element_tree.root() else {
+            if crate::debug::repaint_boundary_log_enabled() {
+                crate::logln!("[RetainedComposite] fail reason=no-root");
+            }
             return false;
         };
         self.dirty_scratch.rects.clear();
@@ -528,6 +550,12 @@ impl RenderingPipeline {
                 .element_tree
                 .find_path_ids_into(dirty_id, &mut self.dirty_scratch.path)
             {
+                if crate::debug::repaint_boundary_log_enabled() {
+                    crate::logln!(
+                        "[RetainedComposite] fail reason=path-not-found dirty_id={}",
+                        dirty_id.get(),
+                    );
+                }
                 return false;
             }
             if let Some((element, absolute_origin)) = self
@@ -541,6 +569,12 @@ impl RenderingPipeline {
                     self.dirty_scratch.rects.push(*old_bounds);
                 }
             } else {
+                if crate::debug::repaint_boundary_log_enabled() {
+                    crate::logln!(
+                        "[RetainedComposite] fail reason=origin-resolution dirty_id={}",
+                        dirty_id.get(),
+                    );
+                }
                 return false;
             }
             if Self::sync_retained_layer_offsets_for_path_target(
@@ -556,6 +590,12 @@ impl RenderingPipeline {
             {
                 self.paint_test_counters.retained_sync_fallbacks += 1;
             }
+            if crate::debug::repaint_boundary_log_enabled() {
+                crate::logln!(
+                    "[RetainedComposite] fallback reason=localized-sync-failed dirty_id={}",
+                    dirty_id.get(),
+                );
+            }
             if !Self::sync_retained_layer_offsets_along_path(
                 root,
                 Point::ZERO,
@@ -567,10 +607,19 @@ impl RenderingPipeline {
                 #[cfg(test)]
                 &mut self.paint_test_counters,
             ) {
+                if crate::debug::repaint_boundary_log_enabled() {
+                    crate::logln!(
+                        "[RetainedComposite] fail reason=recursive-sync dirty_id={}",
+                        dirty_id.get(),
+                    );
+                }
                 return false;
             }
         }
         if self.dirty_scratch.rects.is_empty() {
+            if crate::debug::repaint_boundary_log_enabled() {
+                crate::logln!("[RetainedComposite] fail reason=empty-dirty-rects");
+            }
             return false;
         }
         Self::merge_overlapping_rects(&mut self.dirty_scratch.rects);
@@ -584,6 +633,9 @@ impl RenderingPipeline {
 
         let damage_clip = partial.then_some(self.dirty_scratch.rects.as_slice());
         let Some(renderer) = self.paint_renderer.as_mut() else {
+            if crate::debug::repaint_boundary_log_enabled() {
+                crate::logln!("[RetainedComposite] fail reason=no-renderer");
+            }
             return false;
         };
         renderer.set_background_color(background_color);
@@ -596,12 +648,24 @@ impl RenderingPipeline {
             None,
             damage_clip,
         ) {
+            if crate::debug::repaint_boundary_log_enabled() {
+                crate::logln!("[RetainedComposite] fail reason=direct-composite");
+            }
             return false;
         }
 
         #[cfg(test)]
         {
             self.paint_test_counters.retained_composites += 1;
+        }
+
+        if crate::debug::repaint_boundary_log_enabled() {
+            crate::logln!(
+                "[RetainedComposite] success composite_ids={} dirty_rects={} partial_damage={}",
+                self.dirty_scratch.ids.len(),
+                self.dirty_scratch.rects.len(),
+                partial,
+            );
         }
 
         self.paint_needs_full = false;
