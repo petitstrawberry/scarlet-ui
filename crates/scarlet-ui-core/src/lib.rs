@@ -63,6 +63,8 @@ pub mod render;
 pub mod renderer;
 pub mod scene;
 pub mod state;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod view;
 pub mod views;
 
