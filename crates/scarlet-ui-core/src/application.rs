@@ -30,8 +30,7 @@ fn wheel_log_env_enabled() -> bool {
 
 #[cfg(feature = "std")]
 fn app_wheel_coalesce_env_enabled() -> bool {
-    std::env::var("SCARLET_UI_APP_WHEEL_COALESCE")
-        .is_ok_and(|value| env_flag_enabled(&value))
+    std::env::var("SCARLET_UI_APP_WHEEL_COALESCE").is_ok_and(|value| env_flag_enabled(&value))
 }
 
 #[cfg(not(feature = "std"))]
@@ -942,18 +941,14 @@ mod tests {
     fn app_loop_coalesces_consecutive_trackpad_moved_events() {
         let mut pending = None;
 
-        assert!(coalesce_trackpad_moved_for_batch(
-            &mut pending,
-            trackpad_moved(1, 4, 10, 20),
-            true,
-        )
-        .is_none());
-        assert!(coalesce_trackpad_moved_for_batch(
-            &mut pending,
-            trackpad_moved(2, 7, 30, 40),
-            true,
-        )
-        .is_none());
+        assert!(
+            coalesce_trackpad_moved_for_batch(&mut pending, trackpad_moved(1, 4, 10, 20), true,)
+                .is_none()
+        );
+        assert!(
+            coalesce_trackpad_moved_for_batch(&mut pending, trackpad_moved(2, 7, 30, 40), true,)
+                .is_none()
+        );
 
         assert!(matches!(
             pending.take(),
@@ -972,35 +967,39 @@ mod tests {
     fn app_loop_does_not_coalesce_started_ended_or_discrete_wheel() {
         let mut pending = None;
 
-        assert!(coalesce_trackpad_moved_for_batch(
-            &mut pending,
-            wheel(4, WheelPhase::Started, ScrollSource::Trackpad),
-            true,
-        )
-        .is_some());
+        assert!(
+            coalesce_trackpad_moved_for_batch(
+                &mut pending,
+                wheel(4, WheelPhase::Started, ScrollSource::Trackpad),
+                true,
+            )
+            .is_some()
+        );
         assert!(pending.is_none());
 
-        assert!(coalesce_trackpad_moved_for_batch(
-            &mut pending,
-            trackpad_moved(0, 5, 10, 20),
-            true,
-        )
-        .is_none());
-        assert!(coalesce_trackpad_moved_for_batch(
-            &mut pending,
-            wheel(0, WheelPhase::Ended, ScrollSource::Trackpad),
-            true,
-        )
-        .is_some());
+        assert!(
+            coalesce_trackpad_moved_for_batch(&mut pending, trackpad_moved(0, 5, 10, 20), true,)
+                .is_none()
+        );
+        assert!(
+            coalesce_trackpad_moved_for_batch(
+                &mut pending,
+                wheel(0, WheelPhase::Ended, ScrollSource::Trackpad),
+                true,
+            )
+            .is_some()
+        );
         assert!(pending.is_some());
 
         pending = None;
-        assert!(coalesce_trackpad_moved_for_batch(
-            &mut pending,
-            wheel(7, WheelPhase::Moved, ScrollSource::Wheel),
-            true,
-        )
-        .is_some());
+        assert!(
+            coalesce_trackpad_moved_for_batch(
+                &mut pending,
+                wheel(7, WheelPhase::Moved, ScrollSource::Wheel),
+                true,
+            )
+            .is_some()
+        );
         assert!(pending.is_none());
     }
 
@@ -1009,11 +1008,7 @@ mod tests {
         let mut pending = None;
 
         assert!(matches!(
-            coalesce_trackpad_moved_for_batch(
-                &mut pending,
-                trackpad_moved(1, 4, 10, 20),
-                false,
-            ),
+            coalesce_trackpad_moved_for_batch(&mut pending, trackpad_moved(1, 4, 10, 20), false,),
             Some(Event::Mouse(MouseEvent::Wheel {
                 delta_x: 1,
                 delta_y: 4,

@@ -1656,11 +1656,9 @@ impl RenderingPipeline {
         let Some(container) = layer_store.container_mut(parent_container) else {
             return false;
         };
-        if let Some(child) = container
-            .children
-            .iter_mut()
-            .find(|child| matches!(child, LayerChild::Boundary { id: child_id, .. } if *child_id == id))
-        {
+        if let Some(child) = container.children.iter_mut().find(
+            |child| matches!(child, LayerChild::Boundary { id: child_id, .. } if *child_id == id),
+        ) {
             if !retained_container_exists {
                 return false;
             }
@@ -3017,12 +3015,14 @@ mod tests {
         pipeline.layout_initial();
         pipeline.render_with_damage();
 
-        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
-            button: MouseButton::Left,
-            x: 10,
-            y: 125,
-            click_count: 1,
-        })));
+        assert!(
+            pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 10,
+                y: 125,
+                click_count: 1,
+            }))
+        );
         pipeline
             .render_with_damage()
             .expect("display page switch should render");

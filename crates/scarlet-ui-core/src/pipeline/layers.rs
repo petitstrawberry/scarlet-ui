@@ -146,7 +146,10 @@ impl LayerContainer {
         owner: ElementId,
         primitives: &[Option<LayerPrimitive>; 2],
     ) -> bool {
-        let replacement_count = primitives.iter().filter(|primitive| primitive.is_some()).count();
+        let replacement_count = primitives
+            .iter()
+            .filter(|primitive| primitive.is_some())
+            .count();
         let Some((start, len)) = self.primitive_ranges.get(&owner).copied() else {
             return false;
         };

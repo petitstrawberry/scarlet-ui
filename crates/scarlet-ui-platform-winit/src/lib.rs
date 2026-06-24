@@ -67,8 +67,7 @@ fn wheel_log_env_enabled() -> bool {
 }
 
 fn winit_wheel_coalesce_env_enabled() -> bool {
-    std::env::var("SCARLET_UI_WINIT_WHEEL_COALESCE")
-        .is_ok_and(|value| env_flag_enabled(&value))
+    std::env::var("SCARLET_UI_WINIT_WHEEL_COALESCE").is_ok_and(|value| env_flag_enabled(&value))
 }
 
 fn env_flag_enabled(value: &str) -> bool {
@@ -756,7 +755,6 @@ impl WinitPlatformWindow {
     pub(crate) fn set_observed_logical_size(&mut self, size: Size) {
         self.current_size = size;
     }
-
 }
 
 impl PlatformWindow for WinitPlatformWindow {
