@@ -28,9 +28,25 @@ fn wheel_log_env_enabled() -> bool {
         .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
+#[cfg(feature = "std")]
+fn app_wheel_coalesce_env_enabled() -> bool {
+    std::env::var("SCARLET_UI_APP_WHEEL_COALESCE")
+        .is_ok_and(|value| env_flag_enabled(&value))
+}
+
 #[cfg(not(feature = "std"))]
 fn wheel_log_env_enabled() -> bool {
     false
+}
+
+#[cfg(not(feature = "std"))]
+fn app_wheel_coalesce_env_enabled() -> bool {
+    false
+}
+
+#[cfg(feature = "std")]
+fn env_flag_enabled(value: &str) -> bool {
+    matches!(value, "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
 }
 
 /// Application trait - main entry point for ScarletUI apps.
@@ -257,6 +273,7 @@ impl ApplicationRunner {
         app: &mut A,
         slots: &mut Vec<WindowSlot<A>>,
     ) -> Result<()> {
+        let app_wheel_coalesce_enabled = app_wheel_coalesce_env_enabled();
         loop {
             let mut any_event = false;
             let mut any_presented = false;
@@ -270,6 +287,7 @@ impl ApplicationRunner {
                     let Some(event) = coalesce_trackpad_moved_for_batch(
                         &mut pending_trackpad_moved,
                         event,
+                        app_wheel_coalesce_enabled,
                     ) else {
                         continue;
                     };
@@ -416,7 +434,15 @@ fn wait_for_next_event<A: Application>(slots: &mut [WindowSlot<A>], timeout: Dur
     }
 }
 
-fn coalesce_trackpad_moved_for_batch(pending: &mut Option<Event>, event: Event) -> Option<Event> {
+fn coalesce_trackpad_moved_for_batch(
+    pending: &mut Option<Event>,
+    event: Event,
+    enabled: bool,
+) -> Option<Event> {
+    if !enabled {
+        return Some(event);
+    }
+
     let Event::Mouse(MouseEvent::Wheel {
         delta_x,
         delta_y,
@@ -919,11 +945,13 @@ mod tests {
         assert!(coalesce_trackpad_moved_for_batch(
             &mut pending,
             trackpad_moved(1, 4, 10, 20),
+            true,
         )
         .is_none());
         assert!(coalesce_trackpad_moved_for_batch(
             &mut pending,
             trackpad_moved(2, 7, 30, 40),
+            true,
         )
         .is_none());
 
@@ -947,6 +975,7 @@ mod tests {
         assert!(coalesce_trackpad_moved_for_batch(
             &mut pending,
             wheel(4, WheelPhase::Started, ScrollSource::Trackpad),
+            true,
         )
         .is_some());
         assert!(pending.is_none());
@@ -954,11 +983,13 @@ mod tests {
         assert!(coalesce_trackpad_moved_for_batch(
             &mut pending,
             trackpad_moved(0, 5, 10, 20),
+            true,
         )
         .is_none());
         assert!(coalesce_trackpad_moved_for_batch(
             &mut pending,
             wheel(0, WheelPhase::Ended, ScrollSource::Trackpad),
+            true,
         )
         .is_some());
         assert!(pending.is_some());
@@ -967,8 +998,42 @@ mod tests {
         assert!(coalesce_trackpad_moved_for_batch(
             &mut pending,
             wheel(7, WheelPhase::Moved, ScrollSource::Wheel),
+            true,
         )
         .is_some());
         assert!(pending.is_none());
+    }
+
+    #[test]
+    fn app_loop_wheel_coalescing_can_be_disabled() {
+        let mut pending = None;
+
+        assert!(matches!(
+            coalesce_trackpad_moved_for_batch(
+                &mut pending,
+                trackpad_moved(1, 4, 10, 20),
+                false,
+            ),
+            Some(Event::Mouse(MouseEvent::Wheel {
+                delta_x: 1,
+                delta_y: 4,
+                x: 10,
+                y: 20,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Trackpad,
+            }))
+        ));
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn app_wheel_coalesce_env_flag_defaults_off_and_one_enables() {
+        assert!(env_flag_enabled("1"));
+        assert!(env_flag_enabled("true"));
+        assert!(env_flag_enabled("on"));
+        assert!(!env_flag_enabled(""));
+        assert!(!env_flag_enabled("0"));
+        assert!(!env_flag_enabled("false"));
+        assert!(!env_flag_enabled("off"));
     }
 }

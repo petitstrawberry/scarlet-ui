@@ -66,6 +66,15 @@ fn wheel_log_env_enabled() -> bool {
         .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
+fn winit_wheel_coalesce_env_enabled() -> bool {
+    std::env::var("SCARLET_UI_WINIT_WHEEL_COALESCE")
+        .is_ok_and(|value| env_flag_enabled(&value))
+}
+
+fn env_flag_enabled(value: &str) -> bool {
+    matches!(value, "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+}
+
 impl PlatformBackend for WinitBackend {
     fn output_scale_milli(&mut self) -> u32 {
         1000
@@ -106,6 +115,7 @@ struct WinitEventState {
     pending_trackpad_end: Option<PendingTrackpadEnd>,
     pending_trackpad_moved: Option<PendingTrackpadMoved>,
     last_trackpad_moved_emit_at: Option<Instant>,
+    wheel_coalesce_enabled: bool,
     queue: VecDeque<Event>,
 }
 
@@ -183,6 +193,10 @@ impl ClickState {
 
 impl WinitEventState {
     fn new(scale_factor: f64) -> Self {
+        Self::new_with_wheel_coalesce(scale_factor, winit_wheel_coalesce_env_enabled())
+    }
+
+    fn new_with_wheel_coalesce(scale_factor: f64, wheel_coalesce_enabled: bool) -> Self {
         Self {
             scale_factor,
             cursor_physical_x: 0.0,
@@ -204,6 +218,7 @@ impl WinitEventState {
             pending_trackpad_end: None,
             pending_trackpad_moved: None,
             last_trackpad_moved_emit_at: None,
+            wheel_coalesce_enabled,
             queue: VecDeque::new(),
         }
     }
@@ -287,6 +302,10 @@ impl WinitEventState {
     }
 
     fn coalesce_trackpad_moved(&mut self, event: &Event) -> bool {
+        if !self.wheel_coalesce_enabled {
+            return false;
+        }
+
         let Event::Mouse(MouseEvent::Wheel {
             delta_x,
             delta_y,
@@ -1102,7 +1121,7 @@ mod tests {
 
     #[test]
     fn consecutive_trackpad_moved_events_are_coalesced() {
-        let mut state = WinitEventState::new(1.0);
+        let mut state = WinitEventState::new_with_wheel_coalesce(1.0, true);
 
         state.push(wheel(0, WheelPhase::Started, ScrollSource::Trackpad));
         state.push(trackpad_moved(4, 10, 20));
@@ -1150,7 +1169,7 @@ mod tests {
 
     #[test]
     fn trackpad_moved_events_are_rate_limited() {
-        let mut state = WinitEventState::new(1.0);
+        let mut state = WinitEventState::new_with_wheel_coalesce(1.0, true);
 
         state.push(trackpad_moved(4, 10, 20));
         assert!(matches!(
@@ -1184,7 +1203,7 @@ mod tests {
 
     #[test]
     fn discrete_wheel_moved_events_are_not_coalesced() {
-        let mut state = WinitEventState::new(1.0);
+        let mut state = WinitEventState::new_with_wheel_coalesce(1.0, true);
 
         state.push(wheel(4, WheelPhase::Moved, ScrollSource::Wheel));
         state.push(wheel(7, WheelPhase::Moved, ScrollSource::Wheel));
@@ -1208,6 +1227,49 @@ mod tests {
             }))
         ));
         assert!(state.pop().is_none());
+    }
+
+    #[test]
+    fn winit_trackpad_moved_coalescing_can_be_disabled() {
+        let mut state = WinitEventState::new_with_wheel_coalesce(1.0, false);
+
+        state.push(trackpad_moved(4, 10, 20));
+        state.push(trackpad_moved(7, 30, 40));
+
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Mouse(MouseEvent::Wheel {
+                delta_x: 1,
+                delta_y: 4,
+                x: 10,
+                y: 20,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Trackpad,
+            }))
+        ));
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Mouse(MouseEvent::Wheel {
+                delta_x: 1,
+                delta_y: 7,
+                x: 30,
+                y: 40,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Trackpad,
+            }))
+        ));
+        assert!(state.pop().is_none());
+    }
+
+    #[test]
+    fn winit_wheel_coalesce_env_flag_defaults_off_and_one_enables() {
+        assert!(env_flag_enabled("1"));
+        assert!(env_flag_enabled("true"));
+        assert!(env_flag_enabled("on"));
+        assert!(!env_flag_enabled(""));
+        assert!(!env_flag_enabled("0"));
+        assert!(!env_flag_enabled("false"));
+        assert!(!env_flag_enabled("off"));
     }
 }
 
