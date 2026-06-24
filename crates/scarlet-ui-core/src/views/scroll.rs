@@ -5,9 +5,12 @@
 //! elements, hit testing, and event behavior.
 
 use crate::color::{Color, ColorPalette};
-use crate::element::{Element, ElementRenderObject, LayoutConstraints, RenderElement};
+use crate::element::{
+    Element, ElementRenderObject, LayoutConstraints, RenderElement, ScrollOffsetUpdate,
+};
 use crate::event::{Event, MouseEvent, Phase, WheelPhase};
 use crate::geometry::{Point, Rect, Size};
+use crate::pipeline::layers::{LayerClip, LayerPrimitive, LayerPrimitiveKind};
 use crate::renderer::PaintContext;
 use crate::view::View;
 use crate::views::modifiers::RepaintBoundary;
@@ -653,6 +656,45 @@ impl<V: View> ScrollViewRenderObject<V> {
         })
     }
 
+    pub(crate) fn scrollbar_primitives(
+        &self,
+        owner: crate::element::ElementId,
+        origin: Point,
+        clip: Option<LayerClip>,
+    ) -> [Option<LayerPrimitive>; 2] {
+        let horizontal_scrollable = self.axes.allows_x() && self.max_offset_x() > 0.0;
+        let vertical_scrollable = self.axes.allows_y() && self.max_offset_y() > 0.0;
+        let show_horizontal = self.should_show_scrollbar(horizontal_scrollable);
+        let show_vertical = self.should_show_scrollbar(vertical_scrollable);
+        let color = self.scrollbar_color();
+        let radius = DEFAULT_SCROLLBAR_THICKNESS * 0.5;
+        let horizontal = show_horizontal
+            .then(|| self.horizontal_scrollbar_rect(origin, show_vertical))
+            .flatten()
+            .map(|rect| LayerPrimitive {
+                owner,
+                kind: LayerPrimitiveKind::RoundedRect {
+                    rect,
+                    corner_radius: radius,
+                },
+                color,
+                clip,
+            });
+        let vertical = show_vertical
+            .then(|| self.vertical_scrollbar_rect(origin, show_horizontal))
+            .flatten()
+            .map(|rect| LayerPrimitive {
+                owner,
+                kind: LayerPrimitiveKind::RoundedRect {
+                    rect,
+                    corner_radius: radius,
+                },
+                color,
+                clip,
+            });
+        [horizontal, vertical]
+    }
+
     fn should_show_scrollbar(&self, scrollable: bool) -> bool {
         if !scrollable {
             return false;
@@ -928,7 +970,17 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         true
     }
 
-    fn apply_scroll_offset(&mut self, children: &mut [Box<dyn Element>]) -> bool {
+    fn retained_overlay_primitives(
+        &self,
+        owner: crate::element::ElementId,
+        origin: Point,
+        clip: Option<LayerClip>,
+        out: &mut [Option<LayerPrimitive>; 2],
+    ) {
+        *out = self.scrollbar_primitives(owner, origin, clip);
+    }
+
+    fn apply_scroll_offset(&mut self, children: &mut [Box<dyn Element>]) -> ScrollOffsetUpdate {
         if let Some(child) = children.first_mut() {
             child.set_position(Point::new(-self.offset_x, -self.offset_y));
             child.set_viewport_hint(Rect::from_xywh(
@@ -938,7 +990,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
                 self.viewport_size.height,
             ));
         }
-        true
+        ScrollOffsetUpdate::NeedsComposite
     }
 
     fn as_any(&self) -> &dyn Any {

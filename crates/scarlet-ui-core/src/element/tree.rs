@@ -112,6 +112,75 @@ impl ElementTree {
         }
     }
 
+    /// Fill `out` with the path of Element IDs from root to `target`.
+    ///
+    /// The caller owns the vector so repeated frame-path queries can reuse its
+    /// allocation. `out` is always cleared before the search starts.
+    pub fn find_path_ids_into(&self, target: ElementId, out: &mut Vec<ElementId>) -> bool {
+        out.clear();
+        let Some(root) = self.root.as_deref() else {
+            return false;
+        };
+        Self::find_path_recursive(root, target, out)
+    }
+
+    /// Find an element by its ID.
+    pub fn find_element(&self, id: ElementId) -> Option<&dyn Element> {
+        Self::find_element_recursive(self.root.as_deref()?, id)
+    }
+
+    /// Resolve a root-to-element path and return the target plus absolute origin.
+    ///
+    /// This follows only the supplied path, so callers that already have a dirty
+    /// element path can avoid walking unrelated subtrees just to compute bounds.
+    pub(crate) fn element_and_absolute_origin_for_path(
+        &self,
+        path: &[ElementId],
+    ) -> Option<(&dyn Element, Point)> {
+        let mut element = self.root.as_deref()?;
+        let mut absolute_origin = Point::ZERO;
+        for (index, id) in path.iter().copied().enumerate() {
+            if element.id() != id {
+                return None;
+            }
+            absolute_origin = Point::new(
+                absolute_origin.x + element.position().x,
+                absolute_origin.y + element.position().y,
+            );
+            if index + 1 == path.len() {
+                return Some((element, absolute_origin));
+            }
+            let next_id = path[index + 1];
+            element = element
+                .children()
+                .iter()
+                .find(|child| child.id() == next_id)?
+                .as_ref();
+        }
+        None
+    }
+
+    /// Return the deepest repaint boundary in a root-to-target path.
+    pub fn find_nearest_repaint_boundary_in_path(&self, path: &[ElementId]) -> Option<ElementId> {
+        path.iter().rev().copied().find(|id| {
+            self.find_element(*id)
+                .and_then(|element| element.render_object())
+                .and_then(|render_object| render_object.repaint_boundary_size())
+                .is_some()
+        })
+    }
+
+    /// Fill `path` and return the deepest repaint-boundary ancestor of `target`.
+    pub fn find_nearest_repaint_boundary_ancestor_into(
+        &self,
+        target: ElementId,
+        path: &mut Vec<ElementId>,
+    ) -> Option<ElementId> {
+        self.find_path_ids_into(target, path)
+            .then(|| self.find_nearest_repaint_boundary_in_path(path))
+            .flatten()
+    }
+
     /// Find the path to the element that currently wants keyboard focus.
     pub fn find_keyboard_focus_path_ids(&self) -> Option<Vec<ElementId>> {
         let root = self.root.as_deref()?;
@@ -173,6 +242,20 @@ impl ElementTree {
         // Search children
         for child in element.children_mut().iter_mut() {
             if let Some(found) = Self::find_element_recursive_helper(child, target_id) {
+                return Some(found);
+            }
+        }
+
+        None
+    }
+
+    fn find_element_recursive(element: &dyn Element, target_id: ElementId) -> Option<&dyn Element> {
+        if element.id() == target_id {
+            return Some(element);
+        }
+
+        for child in element.children() {
+            if let Some(found) = Self::find_element_recursive(child.as_ref(), target_id) {
                 return Some(found);
             }
         }
