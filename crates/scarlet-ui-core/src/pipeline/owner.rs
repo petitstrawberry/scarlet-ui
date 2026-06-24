@@ -70,6 +70,7 @@ struct DirtyQueues {
     layout: BTreeSet<ElementId>,
     paint: BTreeSet<ElementId>,
     self_paint: BTreeSet<ElementId>,
+    composite: alloc::vec::Vec<ElementId>,
 }
 
 /// Global dirty element IDs for State change callbacks, partitioned by pipeline.
@@ -101,6 +102,15 @@ pub fn mark_element_needs_paint(owner: PipelineId, id: ElementId) {
     queues.entry(owner).or_default().paint.insert(id);
 }
 
+/// Mark an element as needing retained recomposition only.
+pub fn mark_element_needs_composite(owner: PipelineId, id: ElementId) {
+    let mut queues = GLOBAL_DIRTY.lock();
+    let composite = &mut queues.entry(owner).or_default().composite;
+    if !composite.contains(&id) {
+        composite.push(id);
+    }
+}
+
 /// Mark an element as needing layout and paint.
 pub fn mark_element_needs_layout(owner: PipelineId, id: ElementId) {
     let mut queues = GLOBAL_DIRTY.lock();
@@ -116,10 +126,6 @@ pub fn mark_element_needs_self_paint(owner: PipelineId, id: ElementId) {
     queues.entry(owner).or_default().self_paint.insert(id);
 }
 
-fn take_dirty_for(owner: PipelineId) -> DirtyQueues {
-    GLOBAL_DIRTY.lock().remove(&owner).unwrap_or_default()
-}
-
 pub(crate) fn clear_global_dirty(owner: PipelineId) {
     GLOBAL_DIRTY.lock().remove(&owner);
 }
@@ -130,6 +136,7 @@ pub(crate) fn has_global_dirty(owner: PipelineId) -> bool {
             || !queue.layout.is_empty()
             || !queue.paint.is_empty()
             || !queue.self_paint.is_empty()
+            || !queue.composite.is_empty()
     })
 }
 
@@ -159,8 +166,12 @@ pub struct PipelineOwner {
     dirty_paint: BTreeSet<ElementId>,
     /// Elements whose own buffers need repainting without repainting descendants
     dirty_self_paint: BTreeSet<ElementId>,
+    /// Elements whose retained layers only need recomposition.
+    dirty_composite: alloc::vec::Vec<ElementId>,
     /// Elements repainted in the last flush
     last_paint_ids: alloc::vec::Vec<ElementId>,
+    /// Elements recomposited in the last flush
+    last_composite_ids: alloc::vec::Vec<ElementId>,
     /// State registry for managing State instances
     state_registry: StateRegistry,
 }
@@ -179,7 +190,9 @@ impl PipelineOwner {
             dirty_layout: BTreeSet::new(),
             dirty_paint: BTreeSet::new(),
             dirty_self_paint: BTreeSet::new(),
+            dirty_composite: alloc::vec::Vec::new(),
             last_paint_ids: alloc::vec::Vec::new(),
+            last_composite_ids: alloc::vec::Vec::new(),
             state_registry: StateRegistry::new(),
         }
     }
@@ -216,6 +229,13 @@ impl PipelineOwner {
         self.mark_dirty(id, DirtyPhase::Paint);
     }
 
+    /// Mark an element as needing retained recomposition only.
+    pub fn mark_needs_composite(&mut self, id: ElementId) {
+        if !self.dirty_composite.contains(&id) {
+            self.dirty_composite.push(id);
+        }
+    }
+
     /// Mark an element as needing only its own buffer repainted.
     pub fn mark_needs_self_paint(&mut self, id: ElementId) {
         self.dirty_self_paint.insert(id);
@@ -228,6 +248,7 @@ impl PipelineOwner {
             || !self.dirty_layout.is_empty()
             || !self.dirty_paint.is_empty()
             || !self.dirty_self_paint.is_empty()
+            || !self.dirty_composite.is_empty()
     }
 
     /// Flush all dirty phases
@@ -258,18 +279,27 @@ impl PipelineOwner {
     }
 
     fn collect_global_dirty(&mut self) {
-        let dirty = take_dirty_for(self.pipeline_id);
-        for id in dirty.build {
+        let mut queues = GLOBAL_DIRTY.lock();
+        let queue = queues.entry(self.pipeline_id).or_default();
+        let dirty_build = core::mem::take(&mut queue.build);
+        let dirty_layout = core::mem::take(&mut queue.layout);
+        let dirty_paint = core::mem::take(&mut queue.paint);
+        let dirty_self_paint = core::mem::take(&mut queue.self_paint);
+
+        for id in dirty_build {
             self.mark_needs_build(id);
         }
-        for id in dirty.layout {
+        for id in dirty_layout {
             self.mark_needs_layout(id);
         }
-        for id in dirty.paint {
+        for id in dirty_paint {
             self.mark_needs_paint(id);
         }
-        for id in dirty.self_paint {
+        for id in dirty_self_paint {
             self.mark_needs_self_paint(id);
+        }
+        for id in queue.composite.drain(..) {
+            self.mark_needs_composite(id);
         }
     }
 
@@ -392,8 +422,16 @@ impl PipelineOwner {
         let dirty_paint = core::mem::take(&mut self.dirty_paint);
         let dirty_self_paint = core::mem::take(&mut self.dirty_self_paint);
         self.last_paint_ids.clear();
+        self.last_composite_ids.clear();
         self.last_paint_ids.extend(dirty_paint.iter().copied());
         self.last_paint_ids.extend(dirty_self_paint.iter().copied());
+        self.last_composite_ids.extend(
+            self.dirty_composite
+                .iter()
+                .copied()
+                .filter(|id| !dirty_paint.contains(id) && !dirty_self_paint.contains(id)),
+        );
+        self.dirty_composite.clear();
 
         if !render_legacy_paint {
             for id in dirty_paint.iter().copied() {
@@ -523,9 +561,19 @@ impl PipelineOwner {
         !self.dirty_paint.is_empty() || !self.dirty_self_paint.is_empty()
     }
 
+    /// Check if there are any composite-only dirty elements.
+    pub fn has_dirty_composite(&self) -> bool {
+        !self.dirty_composite.is_empty()
+    }
+
     /// Get the IDs repainted in the last flush.
     pub fn last_paint_ids(&self) -> &[ElementId] {
         &self.last_paint_ids
+    }
+
+    /// Get the IDs recomposited in the last flush.
+    pub fn last_composite_ids(&self) -> &[ElementId] {
+        &self.last_composite_ids
     }
 
     /// Register a State instance
