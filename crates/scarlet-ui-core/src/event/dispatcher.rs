@@ -225,7 +225,8 @@ impl EventDispatcher {
         let is_wheel = matches!(event, crate::event::MouseEvent::Wheel { .. });
         let uses_wheel_capture = Self::wheel_uses_transaction_capture(event);
         let mut wheel_target_locked = false;
-        let mut wheel_consumed_without_path = false;
+        let mut wheel_target_reused = false;
+        let wheel_consumed_without_path = false;
         if crate::debug::wheel_log_enabled()
             && let crate::event::MouseEvent::Wheel {
                 delta_x,
@@ -296,6 +297,7 @@ impl EventDispatcher {
                     // keeps a parent scroll view scrolling when a nested child
                     // slides under the cursor mid-gesture.
                     wheel_target_locked = true;
+                    wheel_target_reused = true;
                     let cached_path = core::mem::take(&mut self.wheel_path);
                     if cached_path.last().copied() == Some(target_id) {
                         if crate::debug::wheel_log_enabled() {
@@ -317,7 +319,7 @@ impl EventDispatcher {
                                         target_id
                                     );
                                 }
-                                wheel_consumed_without_path = true;
+                                self.clear_wheel_target();
                                 None
                             }
                         }
@@ -573,6 +575,16 @@ impl EventDispatcher {
             }
             if is_wheel && self.wheel_target.is_some() {
                 self.wheel_last_event_at = Some(Instant::now());
+            }
+
+            if uses_wheel_capture && wheel_target_reused && !handled {
+                if crate::debug::wheel_log_enabled() {
+                    crate::logln!("[Wheel] release stale-unhandled target={:?}", target_id);
+                }
+                self.clear_wheel_target();
+                self.path_origins_scratch = path_origins;
+                self.hit_path_scratch = path;
+                return self.dispatch_mouse(element_tree, event);
             }
 
             if uses_wheel_capture && self.wheel_phase_finished(event) {
@@ -1693,7 +1705,7 @@ mod tests {
     }
 
     #[test]
-    fn wheel_capture_does_not_retarget_when_captured_element_disappears_mid_gesture() {
+    fn wheel_capture_clears_target_when_captured_element_disappears_mid_gesture() {
         let old_outer_count = Rc::new(Cell::new(0));
         let old_inner_count = Rc::new(Cell::new(0));
         let mut tree = nested_wheel_tree_with_ids(
@@ -1723,15 +1735,40 @@ mod tests {
 
         assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Moved)));
         assert_eq!(new_outer_count.get(), 0);
-        assert_eq!(new_inner_count.get(), 0);
+        assert_eq!(new_inner_count.get(), 1);
+        assert_eq!(dispatcher.wheel_target, Some(ElementId::new(30)));
 
         assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Ended)));
         assert_eq!(new_outer_count.get(), 0);
-        assert_eq!(new_inner_count.get(), 0);
+        assert_eq!(new_inner_count.get(), 2);
 
         assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Started)));
         assert_eq!(new_outer_count.get(), 0);
-        assert_eq!(new_inner_count.get(), 1);
+        assert_eq!(new_inner_count.get(), 3);
+    }
+
+    #[test]
+    fn wheel_capture_reacquires_when_reused_target_stops_handling() {
+        let outer_count = Rc::new(Cell::new(0));
+        let inner_count = Rc::new(Cell::new(0));
+        let mut tree = nested_wheel_tree(outer_count.clone(), inner_count.clone());
+        let mut dispatcher = EventDispatcher::new();
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Started)));
+        assert_eq!(outer_count.get(), 0);
+        assert_eq!(inner_count.get(), 1);
+        assert_eq!(dispatcher.wheel_target, Some(ElementId::new(3)));
+
+        let inner = tree
+            .find_element_mut(ElementId::new(3))
+            .and_then(|element| element.as_any_mut().downcast_mut::<WheelTestElement>())
+            .expect("inner test element should exist");
+        inner.handles_wheel = false;
+
+        assert!(dispatcher.dispatch(&mut tree, &wheel_event(10, WheelPhase::Moved)));
+        assert_eq!(outer_count.get(), 1);
+        assert_eq!(inner_count.get(), 1);
+        assert_eq!(dispatcher.wheel_target, Some(ElementId::new(2)));
     }
 
     #[test]
