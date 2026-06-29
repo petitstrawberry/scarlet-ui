@@ -1265,6 +1265,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     }
                     if commit && (state_value - new_value).abs() > 0.001 {
                         slider.get_value().set(new_value);
+                        slider.invoke_on_change(new_value);
                         changed = true;
                     }
                     changed

@@ -13,6 +13,7 @@ use crate::state::State;
 use crate::view::View;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 
@@ -37,6 +38,7 @@ pub struct Slider {
     min: f32,
     max: f32,
     dragging: State<bool>,
+    on_change: Option<Arc<dyn Fn(f32) + 'static>>,
 }
 
 impl Slider {
@@ -48,6 +50,7 @@ impl Slider {
             min: 0.0,
             max: 1.0,
             dragging,
+            on_change: None,
         }
     }
 
@@ -69,6 +72,35 @@ impl Slider {
         self
     }
 
+    /// Set the change callback.
+    ///
+    /// # Arguments
+    ///
+    /// * `callback` - Function called with the updated slider value.
+    ///
+    /// # Returns
+    ///
+    /// The updated Slider view.
+    pub fn on_change(mut self, callback: impl Fn(f32) + 'static) -> Self {
+        self.on_change = Some(Arc::new(callback));
+        self
+    }
+
+    /// Set the change callback.
+    ///
+    /// This is an alias for [`Slider::on_change`].
+    ///
+    /// # Arguments
+    ///
+    /// * `callback` - Function called with the updated slider value.
+    ///
+    /// # Returns
+    ///
+    /// The updated Slider view.
+    pub fn on_changed(self, callback: impl Fn(f32) + 'static) -> Self {
+        self.on_change(callback)
+    }
+
     /// Get value state
     pub fn get_value(&self) -> &State<f32> {
         &self.value
@@ -87,6 +119,17 @@ impl Slider {
     /// Get dragging state
     pub fn get_dragging(&self) -> &State<bool> {
         &self.dragging
+    }
+
+    /// Invoke the change callback if present.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Updated slider value.
+    pub fn invoke_on_change(&self, value: f32) {
+        if let Some(callback) = self.on_change.as_ref() {
+            callback(value);
+        }
     }
 }
 
