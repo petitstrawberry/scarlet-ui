@@ -52,6 +52,7 @@ const KEY_RIGHTCTRL: u16 = 0x61;
 const KEY_RIGHTALT: u16 = 0x64;
 const KEY_LEFTMETA: u16 = 0x7d;
 const KEY_RIGHTMETA: u16 = 0x7e;
+const KEY_GRAVE: u16 = 0x29;
 
 #[cfg(feature = "std")]
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
@@ -776,6 +777,7 @@ impl SWSPlatformWindow {
             key_code::KEY_SLASH => Some('/'),
             key_code::KEY_SEMICOLON => Some(';'),
             key_code::KEY_APOSTROPHE => Some('\''),
+            KEY_GRAVE => Some('`'),
             key_code::KEY_LEFTBRACE => Some('['),
             key_code::KEY_RIGHTBRACE => Some(']'),
             key_code::KEY_BACKSLASH => Some('\\'),
@@ -907,6 +909,7 @@ impl SWSPlatformWindow {
                 '\\' => Some('|'),
                 ';' => Some(':'),
                 '\'' => Some('"'),
+                '`' => Some('~'),
                 ',' => Some('<'),
                 '.' => Some('>'),
                 '/' => Some('?'),
