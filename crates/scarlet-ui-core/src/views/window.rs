@@ -733,36 +733,30 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
         );
 
         let titlebar_border = Color::rgb(180u8, 180u8, 185u8);
-        ctx.draw_line(
-            Point::new(origin.x, origin.y + TITLEBAR_HEIGHT as f32 - 1.0),
-            Point::new(
-                origin.x + width - 1.0,
+        // Chrome lines are pixel strips, not centered strokes. This keeps the
+        // retained paint path aligned with the Canvas-backed window renderer.
+        ctx.fill_rect(
+            Rect::from_xywh(
+                origin.x,
                 origin.y + TITLEBAR_HEIGHT as f32 - 1.0,
+                width,
+                1.0,
             ),
-            1.0,
             titlebar_border,
         );
         if width > 0.0 {
             let outer_border_color = Color::rgb(100u8, 100u8, 105u8);
-            ctx.draw_line(
-                Point::new(origin.x, origin.y),
-                Point::new(origin.x + width - 1.0, origin.y),
-                1.0,
+            let titlebar_height = TITLEBAR_HEIGHT as f32;
+            ctx.fill_rect(
+                Rect::from_xywh(origin.x, origin.y, width, 1.0),
                 outer_border_color,
             );
-            ctx.draw_line(
-                Point::new(origin.x, origin.y),
-                Point::new(origin.x, origin.y + TITLEBAR_HEIGHT as f32 - 1.0),
-                1.0,
+            ctx.fill_rect(
+                Rect::from_xywh(origin.x, origin.y, 1.0, titlebar_height),
                 outer_border_color,
             );
-            ctx.draw_line(
-                Point::new(origin.x + width - 1.0, origin.y),
-                Point::new(
-                    origin.x + width - 1.0,
-                    origin.y + TITLEBAR_HEIGHT as f32 - 1.0,
-                ),
-                1.0,
+            ctx.fill_rect(
+                Rect::from_xywh(origin.x + width - 1.0, origin.y, 1.0, titlebar_height),
                 outer_border_color,
             );
         }
@@ -1739,28 +1733,20 @@ impl ElementRenderObject for WindowRenderObject {
         ctx.fill_rect(rect, self.background_color);
         if self.decorated && width > 0.0 && height > 0.0 {
             let border_color = Color::rgb(100u8, 100u8, 105u8);
-            ctx.draw_line(
-                Point::new(origin.x, origin.y),
-                Point::new(origin.x + width - 1.0, origin.y),
-                1.0,
+            ctx.fill_rect(
+                Rect::from_xywh(origin.x, origin.y, width, 1.0),
                 border_color,
             );
-            ctx.draw_line(
-                Point::new(origin.x, origin.y + height - 1.0),
-                Point::new(origin.x + width - 1.0, origin.y + height - 1.0),
-                1.0,
+            ctx.fill_rect(
+                Rect::from_xywh(origin.x, origin.y + height - 1.0, width, 1.0),
                 border_color,
             );
-            ctx.draw_line(
-                Point::new(origin.x, origin.y),
-                Point::new(origin.x, origin.y + height - 1.0),
-                1.0,
+            ctx.fill_rect(
+                Rect::from_xywh(origin.x, origin.y, 1.0, height),
                 border_color,
             );
-            ctx.draw_line(
-                Point::new(origin.x + width - 1.0, origin.y),
-                Point::new(origin.x + width - 1.0, origin.y + height - 1.0),
-                1.0,
+            ctx.fill_rect(
+                Rect::from_xywh(origin.x + width - 1.0, origin.y, 1.0, height),
                 border_color,
             );
         }
