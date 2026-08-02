@@ -6,6 +6,24 @@ use crate::color::Color;
 use crate::geometry::Size;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+const INITIAL_BUFFER_REVISION: u64 = 1;
+static NEXT_BUFFER_IDENTITY: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_buffer_identity() -> u64 {
+    loop {
+        let current = NEXT_BUFFER_IDENTITY.load(Ordering::Relaxed);
+        let identity = current.max(1);
+        let next = identity.wrapping_add(1).max(1);
+        if NEXT_BUFFER_IDENTITY
+            .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return identity;
+        }
+    }
+}
 
 /// Pixel buffer in BGRA format
 ///
@@ -14,8 +32,9 @@ use alloc::vec::Vec;
 /// - Byte 1: Green
 /// - Byte 2: Red
 /// - Byte 3: Alpha
-#[derive(Clone)]
 pub struct Buffer {
+    identity: u64,
+    revision: u64,
     width: u32,
     height: u32,
     logical_width: u32,
@@ -24,9 +43,26 @@ pub struct Buffer {
     data: Vec<u32>,
 }
 
+impl Clone for Buffer {
+    fn clone(&self) -> Self {
+        Self {
+            identity: allocate_buffer_identity(),
+            revision: INITIAL_BUFFER_REVISION,
+            width: self.width,
+            height: self.height,
+            logical_width: self.logical_width,
+            logical_height: self.logical_height,
+            scale_milli: self.scale_milli,
+            data: self.data.clone(),
+        }
+    }
+}
+
 impl Buffer {
     pub(crate) fn empty() -> Self {
         Self {
+            identity: allocate_buffer_identity(),
+            revision: INITIAL_BUFFER_REVISION,
             width: 0,
             height: 0,
             logical_width: 0,
@@ -41,6 +77,8 @@ impl Buffer {
         let width = size.width as u32;
         let height = size.height as u32;
         Self {
+            identity: allocate_buffer_identity(),
+            revision: INITIAL_BUFFER_REVISION,
             width,
             height,
             logical_width: width,
@@ -53,6 +91,8 @@ impl Buffer {
     /// Create a buffer with explicit dimensions
     pub fn from_dimensions(width: u32, height: u32) -> Self {
         Self {
+            identity: allocate_buffer_identity(),
+            revision: INITIAL_BUFFER_REVISION,
             width,
             height,
             logical_width: width,
@@ -81,6 +121,8 @@ impl Buffer {
         let width = Self::scale_len(logical_width, scale_milli);
         let height = Self::scale_len(logical_height, scale_milli);
         Self {
+            identity: allocate_buffer_identity(),
+            revision: INITIAL_BUFFER_REVISION,
             width,
             height,
             logical_width,
@@ -96,6 +138,7 @@ impl Buffer {
         logical_height: u32,
         scale_milli: u32,
     ) {
+        self.bump_revision();
         let scale_milli = scale_milli.max(1);
         let width = Self::scale_len(logical_width, scale_milli);
         let height = Self::scale_len(logical_height, scale_milli);
@@ -113,6 +156,34 @@ impl Buffer {
             .saturating_add(999)
             / 1000)
             .max(1) as u32
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1).max(1);
+    }
+
+    /// Get the stable identity of this buffer allocation.
+    ///
+    /// Cloning a buffer allocates a different identity for the clone, even
+    /// though its pixel contents are copied from the source buffer.
+    ///
+    /// # Returns
+    ///
+    /// A nonzero identity that remains unchanged for this buffer's lifetime.
+    pub fn identity(&self) -> u64 {
+        self.identity
+    }
+
+    /// Get the current pixel-content revision of this buffer.
+    ///
+    /// The revision changes whenever mutable pixel access is requested or a
+    /// buffer operation modifies its contents or dimensions.
+    ///
+    /// # Returns
+    ///
+    /// A nonzero revision scoped to this buffer's identity.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Get the buffer width
@@ -155,11 +226,13 @@ impl Buffer {
 
     /// Get the pixel data as a mutable slice
     pub fn as_mut_slice(&mut self) -> &mut [u32] {
+        self.bump_revision();
         &mut self.data
     }
 
     /// Clear the buffer with a color
     pub fn clear(&mut self, color: Color) {
+        self.bump_revision();
         self.data.fill(color.to_bgra());
     }
 
@@ -168,6 +241,7 @@ impl Buffer {
         if width == 0 || height == 0 {
             return;
         }
+        self.bump_revision();
         let pixel = color.to_bgra();
         let x_end = (x + width).min(self.width);
         let y_end = (y + height).min(self.height);
@@ -199,6 +273,8 @@ impl Buffer {
         if dst_right <= dst_left || dst_bottom <= dst_top {
             return;
         }
+
+        self.bump_revision();
 
         let fully_opaque = opacity >= 1.0;
 
@@ -293,6 +369,8 @@ impl Buffer {
             return;
         }
 
+        self.bump_revision();
+
         let fully_opaque = opacity >= 1.0;
 
         for target_y in dst_top..dst_bottom {
@@ -351,6 +429,8 @@ impl Buffer {
         if dst_right <= dst_left || dst_bottom <= dst_top {
             return;
         }
+
+        self.bump_revision();
 
         let fully_opaque = opacity >= 1.0;
 
@@ -415,6 +495,8 @@ impl Buffer {
         if dst_right <= dst_left || dst_bottom <= dst_top {
             return;
         }
+
+        self.bump_revision();
 
         let max_radius = (clip_w.min(clip_h) as f32) / 2.0;
         let radius = radius.max(0.0).min(max_radius);
@@ -504,6 +586,8 @@ impl Buffer {
             return;
         }
 
+        self.bump_revision();
+
         let max_radius = (clip_w.min(clip_h) as f32) / 2.0;
         let radius = radius.max(0.0).min(max_radius);
         let radius_sq = radius * radius;
@@ -585,6 +669,7 @@ impl Buffer {
     /// * `pixel` - Pixel value in BGRA format
     pub fn set_pixel(&mut self, x: u32, y: u32, pixel: u32) {
         if x < self.width && y < self.height {
+            self.bump_revision();
             self.data[(y * self.width + x) as usize] = pixel;
         }
     }
@@ -602,6 +687,7 @@ impl Buffer {
 
     /// Fill a rectangle with a color
     pub fn fill_rect(&mut self, x: u32, y: u32, width: u32, height: u32, color: Color) {
+        self.bump_revision();
         let pixel = color.to_bgra();
         for dy in 0..height {
             for dx in 0..width {
@@ -627,6 +713,7 @@ impl Buffer {
     /// This converts the internal u32 slice to a u8 slice for compatibility
     /// with drawing APIs that expect byte-level access.
     pub fn data_mut(&mut self) -> &mut [u8] {
+        self.bump_revision();
         unsafe {
             core::slice::from_raw_parts_mut(self.data.as_mut_ptr() as *mut u8, self.data.len() * 4)
         }

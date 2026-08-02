@@ -590,6 +590,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
+name = "framebuffer"
+version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f7bfb9e12b9e2fd6ae6750954cfd7a1a5b968863"
+dependencies = [
+ "scarlet-os",
+ "scarlet-std",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -716,6 +725,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fdf242682df893b86f33a73828fb09ca4b2d3bb6cc95249707fc684d27484b91"
 dependencies = [
  "bitflags 2.13.0",
+]
+
+[[package]]
+name = "gpu-raw"
+version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f7bfb9e12b9e2fd6ae6750954cfd7a1a5b968863"
+dependencies = [
+ "scarlet-os",
+ "scarlet-std",
 ]
 
 [[package]]
@@ -1664,12 +1682,12 @@ dependencies = [
 [[package]]
 name = "scarlet-abi"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f55f40eb01d2ba346331f4b718feddd36a3d95bf"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f7bfb9e12b9e2fd6ae6750954cfd7a1a5b968863"
 
 [[package]]
 name = "scarlet-os"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f55f40eb01d2ba346331f4b718feddd36a3d95bf"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f7bfb9e12b9e2fd6ae6750954cfd7a1a5b968863"
 dependencies = [
  "scarlet-abi",
  "scarlet-rt",
@@ -1679,7 +1697,7 @@ dependencies = [
 [[package]]
 name = "scarlet-rt"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f55f40eb01d2ba346331f4b718feddd36a3d95bf"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f7bfb9e12b9e2fd6ae6750954cfd7a1a5b968863"
 dependencies = [
  "lock_api",
  "scarlet-sys",
@@ -1690,7 +1708,7 @@ dependencies = [
 [[package]]
 name = "scarlet-std"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f55f40eb01d2ba346331f4b718feddd36a3d95bf"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f7bfb9e12b9e2fd6ae6750954cfd7a1a5b968863"
 dependencies = [
  "hashbrown 0.15.5",
  "scarlet-abi",
@@ -1703,7 +1721,7 @@ dependencies = [
 [[package]]
 name = "scarlet-sys"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f55f40eb01d2ba346331f4b718feddd36a3d95bf"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f7bfb9e12b9e2fd6ae6750954cfd7a1a5b968863"
 dependencies = [
  "scarlet-abi",
 ]
@@ -1754,6 +1772,7 @@ version = "0.1.0"
 dependencies = [
  "scarlet-std",
  "scarlet-ui-core",
+ "scarlet-ui-renderer-sgfx",
  "sws-client",
  "sws-protocol",
 ]
@@ -1785,6 +1804,15 @@ version = "0.1.0"
 dependencies = [
  "scarlet-ui",
  "scarlet-ui-macros",
+]
+
+[[package]]
+name = "scarlet-ui-renderer-sgfx"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "scarlet-ui-core",
+ "sgfx",
 ]
 
 [[package]]
@@ -1878,6 +1906,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "sgfx"
+version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f7bfb9e12b9e2fd6ae6750954cfd7a1a5b968863"
+dependencies = [
+ "framebuffer",
+ "gpu-raw",
+ "scarlet-os",
+ "scarlet-std",
 ]
 
 [[package]]
@@ -2050,7 +2089,7 @@ dependencies = [
 [[package]]
 name = "sws-client"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f55f40eb01d2ba346331f4b718feddd36a3d95bf"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f7bfb9e12b9e2fd6ae6750954cfd7a1a5b968863"
 dependencies = [
  "scarlet-os",
  "scarlet-std",
@@ -2060,7 +2099,7 @@ dependencies = [
 [[package]]
 name = "sws-protocol"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f55f40eb01d2ba346331f4b718feddd36a3d95bf"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#f7bfb9e12b9e2fd6ae6750954cfd7a1a5b968863"
 dependencies = [
  "scarlet-std",
 ]

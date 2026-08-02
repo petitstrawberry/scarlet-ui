@@ -16,6 +16,7 @@ use crate::geometry::{Point, Rect, Size};
 use crate::menu_model;
 use crate::pipeline::{MountContext, PipelineId, RenderingPipeline};
 use crate::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
+use crate::renderer::PresentedFrame;
 use crate::scene::{
     Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowDeclaration, WindowId,
 };
@@ -235,6 +236,9 @@ impl ApplicationRunner {
 
         let mut window = self.backend.create_window(request)?;
         sync_output_scale(&mut pipeline, window.as_ref());
+        if let Some(paint_backend) = window.take_paint_backend()? {
+            pipeline.set_paint_backend(paint_backend);
+        }
 
         if let Some(menu_bar) = window_info.menu_bar {
             if !menu_json.is_empty() {
@@ -316,7 +320,7 @@ impl ApplicationRunner {
                 sync_text_input(slot.window.as_mut(), &slot.pipeline);
                 if slot.pipeline.has_dirty()
                     && !slot.presented_this_cycle
-                    && present_pipeline(&mut slot.pipeline, slot.window.as_mut())
+                    && present_pipeline(&mut slot.pipeline, slot.window.as_mut())?
                 {
                     slot.presented_this_cycle = true;
                     any_presented = true;
@@ -416,12 +420,17 @@ fn sync_text_input(window: &mut dyn PlatformWindow, pipeline: &RenderingPipeline
     window.sync_text_input(state.as_ref());
 }
 
-fn present_pipeline(pipeline: &mut RenderingPipeline, window: &mut dyn PlatformWindow) -> bool {
-    if let Some((buffer, damage)) = pipeline.render_with_damage() {
-        window.present_with_damage(buffer, damage);
-        true
-    } else {
-        false
+fn present_pipeline(
+    pipeline: &mut RenderingPipeline,
+    window: &mut dyn PlatformWindow,
+) -> Result<bool> {
+    match pipeline.render_for_present()? {
+        PresentedFrame::Cpu { buffer, damage } => {
+            window.present_with_damage(buffer, damage);
+            Ok(true)
+        }
+        PresentedFrame::External => Ok(true),
+        PresentedFrame::Idle => Ok(false),
     }
 }
 
@@ -515,7 +524,7 @@ fn handle_window_event<A: Application>(
                 slot.pipeline.resize(new_size);
                 app.on_window_resize(&slot.context, width, height);
                 sync_text_input(slot.window.as_mut(), &slot.pipeline);
-                if present_pipeline(&mut slot.pipeline, slot.window.as_mut()) {
+                if present_pipeline(&mut slot.pipeline, slot.window.as_mut())? {
                     slot.presented_this_cycle = true;
                 }
             }
@@ -532,7 +541,7 @@ fn handle_window_event<A: Application>(
                 }
             }
             if resize_to.is_some() || slot.pipeline.has_dirty() {
-                if present_pipeline(&mut slot.pipeline, slot.window.as_mut()) {
+                if present_pipeline(&mut slot.pipeline, slot.window.as_mut())? {
                     slot.presented_this_cycle = true;
                 }
             }
@@ -562,7 +571,7 @@ fn handle_window_event<A: Application>(
             {
                 app.on_text_input_commit(&slot.context, *context_id, *serial, text);
             }
-            sync_after_event(slot);
+            sync_after_event(slot)?;
         }
         Event::TextInputPreedit {
             context_id,
@@ -600,7 +609,7 @@ fn handle_window_event<A: Application>(
                     spans,
                 );
             }
-            sync_after_event(slot);
+            sync_after_event(slot)?;
         }
         Event::TextInputDeleteSurroundingText {
             context_id,
@@ -630,7 +639,7 @@ fn handle_window_event<A: Application>(
                     after_bytes,
                 );
             }
-            sync_after_event(slot);
+            sync_after_event(slot)?;
         }
         Event::TextInputDone { context_id, serial } => {
             let event = Event::TextInputDone { context_id, serial };
@@ -644,23 +653,24 @@ fn handle_window_event<A: Application>(
         Event::Custom { event_type, data } if event_type == 0xF0C0A => {
             if let Some((window_id, app_name, menu_titles)) = decode_app_change_payload(&data) {
                 app.on_active_app_changed(window_id, &app_name, &menu_titles);
-                sync_after_event(slot);
+                sync_after_event(slot)?;
             }
         }
         _ => {
             let _ = slot.pipeline.handle_event(&event);
             handle_emitted_window_events(slot, close_ids)?;
-            sync_after_event(slot);
+            sync_after_event(slot)?;
         }
     }
     Ok(())
 }
 
-fn sync_after_event<A: Application>(slot: &mut WindowSlot<A>) {
+fn sync_after_event<A: Application>(slot: &mut WindowSlot<A>) -> Result<()> {
     sync_text_input(slot.window.as_mut(), &slot.pipeline);
-    if slot.pipeline.has_dirty() && present_pipeline(&mut slot.pipeline, slot.window.as_mut()) {
+    if slot.pipeline.has_dirty() && present_pipeline(&mut slot.pipeline, slot.window.as_mut())? {
         slot.presented_this_cycle = true;
     }
+    Ok(())
 }
 
 fn handle_emitted_window_events<A: Application>(

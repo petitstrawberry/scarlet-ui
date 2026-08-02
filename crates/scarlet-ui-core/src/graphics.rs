@@ -3,6 +3,7 @@
 //! Provides Canvas for drawing text, shapes, and managing glyph caches.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -28,23 +29,45 @@ pub fn set_current_scale_milli(scale_milli: u32) {
     CURRENT_SCALE_MILLI.store(scale_milli.max(1), Ordering::Relaxed);
 }
 
-/// Glyph cache key
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct GlyphKey {
-    codepoint: u32,
-    size_px: u16,
-    font_stack_id: usize,
-    font_slot: u8,
+/// Stable cache key for a rasterized glyph mask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GlyphRasterKey {
+    /// Unicode scalar value selected after font fallback.
+    pub codepoint: u32,
+    /// Physical font size used for rasterization.
+    pub size_px: u16,
+    /// Identity of the primary and fallback font sequence.
+    pub font_stack_id: usize,
+    /// Selected font index, where zero identifies the primary font.
+    pub font_slot: u8,
 }
 
 /// Rasterized glyph mask
+#[derive(Clone)]
 struct GlyphMask {
-    key: GlyphKey,
+    key: GlyphRasterKey,
     width: u32,
     height: u32,
     origin_x: i32,
     origin_y: i32,
-    mask: Box<[u8]>,
+    mask: Arc<[u8]>,
+}
+
+/// Positioned rasterized glyph owned independently of the global glyph cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RasterizedGlyph {
+    /// Stable identity for texture-cache reuse.
+    pub key: GlyphRasterKey,
+    /// Physical x offset from the text origin.
+    pub x: i32,
+    /// Physical y offset from the text origin.
+    pub y: i32,
+    /// Mask width in physical pixels.
+    pub width: u32,
+    /// Mask height in physical pixels.
+    pub height: u32,
+    /// Row-major 8-bit glyph coverage mask.
+    pub mask: Arc<[u8]>,
 }
 
 /// Glyph cache state
@@ -161,8 +184,8 @@ fn glyph_cache_get_or_rasterize(
     ch: char,
     font_stack_id: usize,
     font_slot: u8,
-) -> Option<(i32, i32, u32, u32, *const u8)> {
-    let key = GlyphKey {
+) -> Option<GlyphMask> {
+    let key = GlyphRasterKey {
         codepoint: ch as u32,
         size_px: scaled.scale.y as u16,
         font_stack_id,
@@ -171,13 +194,7 @@ fn glyph_cache_get_or_rasterize(
 
     let mut cache = GLYPH_CACHE.lock();
     if let Some(found) = cache.entries.iter().find(|e| e.key == key) {
-        return Some((
-            found.origin_x,
-            found.origin_y,
-            found.width,
-            found.height,
-            found.mask.as_ptr(),
-        ));
+        return Some(found.clone());
     }
 
     let glyph_id = scaled.glyph_id(ch);
@@ -213,26 +230,17 @@ fn glyph_cache_get_or_rasterize(
         height,
         origin_x: min_x,
         origin_y: min_y,
-        mask: mask.into_boxed_slice(),
+        mask: Arc::from(mask.into_boxed_slice()),
     };
 
     if cache.entries.len() < GLYPH_CACHE_CAP {
-        cache.entries.push(entry);
-        let last = cache.entries.last().unwrap();
-        Some((
-            last.origin_x,
-            last.origin_y,
-            last.width,
-            last.height,
-            last.mask.as_ptr(),
-        ))
+        cache.entries.push(entry.clone());
     } else {
         let idx = cache.next_evict % GLYPH_CACHE_CAP;
         cache.next_evict = cache.next_evict.wrapping_add(1);
-        cache.entries[idx] = entry;
-        let e = &cache.entries[idx];
-        Some((e.origin_x, e.origin_y, e.width, e.height, e.mask.as_ptr()))
+        cache.entries[idx] = entry.clone();
     }
+    Some(entry)
 }
 
 #[cfg(any(not(feature = "std"), all(feature = "std", target_os = "scarlet")))]
@@ -610,6 +618,88 @@ fn select_font_for_char(ch: char, font_stack: &FontStack) -> (FontRef<'static>, 
     }
 
     (font_stack.primary.clone(), 0, ch)
+}
+
+/// Rasterize text with the global default font stack.
+///
+/// Glyph positions and mask dimensions are expressed in physical pixels
+/// relative to the top-left text origin. Missing default fonts produce an
+/// empty layout.
+///
+/// # Arguments
+///
+/// * `text` - Text to lay out and rasterize.
+/// * `font_size_px` - Logical font size in pixels.
+/// * `scale_milli` - Physical output scale in milli-units.
+///
+/// # Returns
+///
+/// Owned positioned glyph masks in drawing order.
+pub fn rasterize_text(
+    text: &str,
+    font_size_px: f32,
+    scale_milli: u32,
+) -> Vec<RasterizedGlyph> {
+    let Some(font_stack) = default_font_stack() else {
+        return Vec::new();
+    };
+    rasterize_text_with_font_stack(text, font_size_px, scale_milli, &font_stack)
+}
+
+/// Rasterize text with an explicit font stack.
+///
+/// Glyph positions and mask dimensions are expressed in physical pixels
+/// relative to the top-left text origin.
+///
+/// # Arguments
+///
+/// * `text` - Text to lay out and rasterize.
+/// * `font_size_px` - Logical font size in pixels.
+/// * `scale_milli` - Physical output scale in milli-units.
+/// * `font_stack` - Primary and fallback fonts used for glyph selection.
+///
+/// # Returns
+///
+/// Owned positioned glyph masks in drawing order.
+pub fn rasterize_text_with_font_stack(
+    text: &str,
+    font_size_px: f32,
+    scale_milli: u32,
+    font_stack: &FontStack,
+) -> Vec<RasterizedGlyph> {
+    let ui_scale = scale_milli.max(1) as f32 / 1000.0;
+    let scale = PxScale::from(font_size_px * ui_scale);
+    let base_scaled = font_stack.primary.as_scaled(scale);
+    let mut caret_x = 0.0;
+    let mut caret_y = base_scaled.ascent();
+    let mut glyphs = Vec::new();
+
+    for ch in text.chars() {
+        if ch == '\n' {
+            caret_x = 0.0;
+            caret_y += base_scaled.height() + base_scaled.line_gap();
+            continue;
+        }
+
+        let (selected_font, font_slot, render_ch) = select_font_for_char(ch, font_stack);
+        let scaled = selected_font.as_scaled(scale);
+        let glyph_id = scaled.glyph_id(render_ch);
+        if let Some(glyph) =
+            glyph_cache_get_or_rasterize(&scaled, render_ch, font_stack.cache_id(), font_slot)
+        {
+            glyphs.push(RasterizedGlyph {
+                key: glyph.key,
+                x: caret_x as i32 + glyph.origin_x,
+                y: caret_y as i32 + glyph.origin_y,
+                width: glyph.width,
+                height: glyph.height,
+                mask: glyph.mask,
+            });
+        }
+        caret_x += scaled.h_advance(glyph_id);
+    }
+
+    glyphs
 }
 
 /// Measure text using the global default vector font
@@ -1024,56 +1114,37 @@ impl<'a> Canvas<'a> {
         font_stack: &FontStack,
         clip: Option<PhysicalClip>,
     ) {
-        let ui_scale = (self.scale_milli as f32) / 1000.0;
-        let scale = PxScale::from(font_size_px * ui_scale);
-        let base_scaled = font_stack.primary.as_scaled(scale);
+        let origin_x = self.scale_floor_i32(x);
+        let origin_y = self.scale_floor_i32(y);
+        let glyphs =
+            rasterize_text_with_font_stack(text, font_size_px, self.scale_milli, font_stack);
 
-        let origin_x = self.scale_floor_i32(x) as f32;
-        let mut caret_x = origin_x;
-        let mut caret_y = self.scale_floor_i32(y) as f32 + base_scaled.ascent();
-
-        for ch in text.chars() {
-            if ch == '\n' {
-                caret_x = origin_x;
-                caret_y += base_scaled.height() + base_scaled.line_gap();
-                continue;
-            }
-
-            let (selected_font, font_slot, render_ch) = select_font_for_char(ch, font_stack);
-            let scaled = selected_font.as_scaled(scale);
-            let glyph_id = scaled.glyph_id(render_ch);
-            if let Some((ox, oy, w, h, ptr)) =
-                glyph_cache_get_or_rasterize(&scaled, render_ch, font_stack.cache_id(), font_slot)
-            {
-                let base_x = caret_x as i32;
-                let base_y = caret_y as i32;
-                let mask = unsafe { core::slice::from_raw_parts(ptr, (w as usize) * (h as usize)) };
-                for gy in 0..h {
-                    let row = (gy as usize) * (w as usize);
-                    for gx in 0..w {
-                        let a = mask[row + gx as usize];
-                        if a == 0 {
-                            continue;
-                        }
-                        let alpha = (a as f32) / 255.0;
-                        let px = base_x + ox + gx as i32;
-                        let py = base_y + oy + gy as i32;
-                        if let Some(clip) = clip
-                            && !contains_rounded_rect(
-                                clip.rect,
-                                clip.corner_radius,
-                                px as f32 + 0.5,
-                                py as f32 + 0.5,
-                            )
-                        {
-                            continue;
-                        }
-                        self.put_pixel_physical_alpha(px, py, color, alpha);
+        for glyph in glyphs {
+            let base_x = origin_x + glyph.x;
+            let base_y = origin_y + glyph.y;
+            for gy in 0..glyph.height {
+                let row = (gy as usize) * (glyph.width as usize);
+                for gx in 0..glyph.width {
+                    let a = glyph.mask[row + gx as usize];
+                    if a == 0 {
+                        continue;
                     }
+                    let alpha = (a as f32) / 255.0;
+                    let px = base_x + gx as i32;
+                    let py = base_y + gy as i32;
+                    if let Some(clip) = clip
+                        && !contains_rounded_rect(
+                            clip.rect,
+                            clip.corner_radius,
+                            px as f32 + 0.5,
+                            py as f32 + 0.5,
+                        )
+                    {
+                        continue;
+                    }
+                    self.put_pixel_physical_alpha(px, py, color, alpha);
                 }
             }
-
-            caret_x += scaled.h_advance(glyph_id);
         }
     }
 

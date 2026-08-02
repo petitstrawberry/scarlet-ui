@@ -1,5 +1,6 @@
 //! Error types for ScarletUI
 
+use alloc::string::String;
 use core::fmt;
 
 /// ScarletUI error types
@@ -29,6 +30,9 @@ pub enum Error {
     /// Rendering error
     RenderError,
 
+    /// Unknown renderer backend requested through configuration.
+    InvalidRendererBackend { value: String },
+
     /// Event dispatch error
     EventDispatchError,
 
@@ -49,6 +53,9 @@ impl fmt::Display for Error {
             Error::InvalidStateId => write!(f, "Invalid state ID"),
             Error::LayoutConstraintViolation => write!(f, "Layout constraint violation"),
             Error::RenderError => write!(f, "Rendering error"),
+            Error::InvalidRendererBackend { value } => {
+                write!(f, "Invalid renderer backend: {}", value)
+            }
             Error::EventDispatchError => write!(f, "Event dispatch error"),
             Error::DuplicateSceneWindowKey => write!(f, "Duplicate scene window key"),
         }

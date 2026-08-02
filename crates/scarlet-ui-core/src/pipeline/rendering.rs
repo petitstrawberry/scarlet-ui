@@ -14,7 +14,10 @@ use crate::pipeline::layers::{
     LayerChild, LayerClip, LayerId, LayerPrimitive, LayerPrimitiveKind, LayerStore, PictureChunk,
 };
 use crate::pipeline::{PipelineId, PipelineOwner};
-use crate::renderer::{ClipRegion, CpuPaintRenderer, CpuRenderer, FrameSize, PaintContext};
+use crate::renderer::{
+    BackendFrame, CpuPaintBackend, CpuPaintRenderer, CpuRenderer, FrameSize, PaintBackend,
+    PaintContext, PresentedFrame,
+};
 use crate::views::WindowInfo;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -72,6 +75,7 @@ pub struct RenderingPipeline {
     scale_milli: u32,
     event_dispatcher: EventDispatcher,
     paint_renderer: Option<CpuPaintRenderer>,
+    paint_backend: Box<dyn PaintBackend>,
     last_paint_bounds: BTreeMap<ElementId, Rect>,
     paint_damage: Option<Vec<DamageRect>>,
     paint_needs_full: bool,
@@ -79,6 +83,7 @@ pub struct RenderingPipeline {
     paint_enabled: bool,
     paint_caches: BTreeMap<ElementId, PaintCache>,
     layer_store: LayerStore,
+    retained_ctx: PaintContext<'static>,
     dirty_scratch: DirtyScratch,
     #[cfg(test)]
     paint_test_counters: PaintTestCounters,
@@ -100,6 +105,11 @@ impl RenderingPipeline {
             scale_milli: 1000,
             event_dispatcher: EventDispatcher::new(),
             paint_renderer: None,
+            paint_backend: Box::new(CpuPaintBackend::new(
+                Size::new(800.0, 600.0),
+                1000,
+                crate::color::Color::TRANSPARENT,
+            )),
             last_paint_bounds: BTreeMap::new(),
             paint_damage: None,
             paint_needs_full: true,
@@ -107,6 +117,7 @@ impl RenderingPipeline {
             paint_enabled: true,
             paint_caches: BTreeMap::new(),
             layer_store: LayerStore::new(),
+            retained_ctx: PaintContext::new(),
             dirty_scratch: DirtyScratch::default(),
             #[cfg(test)]
             paint_test_counters: PaintTestCounters::default(),
@@ -115,6 +126,31 @@ impl RenderingPipeline {
 
     pub fn set_paint_enabled(&mut self, enabled: bool) {
         self.paint_enabled = enabled;
+    }
+
+    /// Install a paint backend.
+    ///
+    /// The backend is resized to the pipeline's current target before its first
+    /// frame. Installing a backend invalidates retained output state so the
+    /// first frame redraws the complete window.
+    ///
+    /// # Arguments
+    ///
+    /// * `paint_backend` - Backend used to execute paint commands.
+    ///
+    /// # Returns
+    ///
+    /// Nothing.
+    pub fn set_paint_backend(&mut self, mut paint_backend: Box<dyn PaintBackend>) {
+        paint_backend.resize(self.window_size, self.scale_milli);
+        self.paint_backend = paint_backend;
+        self.last_paint_bounds.clear();
+        self.paint_damage = None;
+        self.paint_needs_full = true;
+        self.paint_background_color = None;
+        self.paint_caches.clear();
+        self.layer_store.clear();
+        self.retained_ctx.clear();
     }
 
     /// Return this pipeline's owner ID.
@@ -153,6 +189,7 @@ impl RenderingPipeline {
         self.paint_background_color = None;
         self.paint_caches.clear();
         self.layer_store.clear();
+        self.retained_ctx.clear();
     }
 
     /// Set the output scale in milli-units.
@@ -169,11 +206,14 @@ impl RenderingPipeline {
         if let Some(ref mut paint_renderer) = self.paint_renderer {
             paint_renderer.resize(self.window_size, self.scale_milli);
         }
+        self.paint_backend
+            .resize(self.window_size, self.scale_milli);
         self.last_paint_bounds.clear();
         self.paint_damage = None;
         self.paint_needs_full = true;
         self.paint_caches.clear();
         self.layer_store.clear();
+        self.retained_ctx.clear();
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
         }
@@ -311,6 +351,7 @@ impl RenderingPipeline {
             window_info.background_color,
         )));
         self.window_size = window_size;
+        self.paint_backend.resize(window_size, self.scale_milli);
         self.paint_needs_full = true;
 
         // Mark root as dirty for initial paint
@@ -335,11 +376,13 @@ impl RenderingPipeline {
         if let Some(ref mut paint_renderer) = self.paint_renderer {
             paint_renderer.resize(new_size, self.scale_milli);
         }
+        self.paint_backend.resize(new_size, self.scale_milli);
         self.last_paint_bounds.clear();
         self.paint_damage = None;
         self.paint_needs_full = true;
         self.paint_caches.clear();
         self.layer_store.clear();
+        self.retained_ctx.clear();
 
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
@@ -373,7 +416,10 @@ impl RenderingPipeline {
         let background_color = self.extract_background_color();
 
         if self.paint_enabled {
-            return self.render_paint_path(background_color);
+            return match self.render_paint_path(background_color).ok()? {
+                PresentedFrame::Cpu { buffer, .. } => Some(buffer),
+                PresentedFrame::External | PresentedFrame::Idle => None,
+            };
         }
 
         if let Some(ref mut renderer) = self.renderer {
@@ -389,7 +435,10 @@ impl RenderingPipeline {
         }
     }
 
-    fn render_paint_path(&mut self, background_color: crate::color::Color) -> Option<&Buffer> {
+    fn render_paint_path(
+        &mut self,
+        background_color: crate::color::Color,
+    ) -> crate::error::Result<PresentedFrame<'_>> {
         let size = self.window_size;
         let scale = self.scale_milli;
         let creating_renderer = self.paint_renderer.is_none();
@@ -416,8 +465,8 @@ impl RenderingPipeline {
                 );
             }
             if self.layer_store.root_graph_valid_for(size, scale) {
-                if self.render_retained_composite_path(background_color) {
-                    return self.paint_renderer.as_ref().map(CpuPaintRenderer::buffer);
+                if self.prepare_retained_composite_path(background_color) {
+                    return self.render_prepared_retained_composite(background_color);
                 }
                 if crate::debug::repaint_boundary_log_enabled() {
                     crate::logln!(
@@ -478,7 +527,9 @@ impl RenderingPipeline {
         let mut ctx = PaintContext::new();
         let damage_clip = has_dirty_rects.then_some(self.dirty_scratch.rects.as_slice());
         let any_painted = if let Some(root) = self.element_tree.root() {
-            let paint_renderer = self.paint_renderer.as_mut().unwrap();
+            let Some(paint_renderer) = self.paint_renderer.as_mut() else {
+                return Err(crate::error::Error::RenderError);
+            };
             let base_painted = Self::walk_and_paint(
                 &mut ctx,
                 root,
@@ -511,11 +562,7 @@ impl RenderingPipeline {
             self.layer_store.prune_unmarked(layer_generation);
         }
 
-        if force_full || any_painted {
-            let pr = self.paint_renderer.as_mut().unwrap();
-            pr.set_background_color(background_color);
-            pr.execute_with_damage(&ctx, damage_clip);
-        }
+        let should_render = force_full || any_painted;
 
         self.paint_needs_full = false;
         self.paint_background_color = Some(background_color);
@@ -524,11 +571,36 @@ impl RenderingPipeline {
             Self::collect_paint_bounds(root, Point::ZERO, &mut self.last_paint_bounds);
         }
 
-        let pr = self.paint_renderer.as_ref().unwrap();
-        Some(pr.buffer())
+        if !should_render {
+            return Ok(PresentedFrame::Idle);
+        }
+
+        let physical_damage = self.paint_damage.as_deref();
+        let backend_frame = match self.paint_backend.render(
+            &ctx,
+            background_color,
+            damage_clip,
+            physical_damage,
+        ) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.paint_needs_full = true;
+                return Err(error);
+            }
+        };
+        match backend_frame {
+            BackendFrame::Cpu { buffer } => Ok(PresentedFrame::Cpu {
+                buffer,
+                damage: physical_damage,
+            }),
+            BackendFrame::External => Ok(PresentedFrame::External),
+        }
     }
 
-    fn render_retained_composite_path(&mut self, background_color: crate::color::Color) -> bool {
+    fn prepare_retained_composite_path(
+        &mut self,
+        background_color: crate::color::Color,
+    ) -> bool {
         self.dirty_scratch.clear_for_frame();
         self.dirty_scratch
             .ids
@@ -631,25 +703,15 @@ impl RenderingPipeline {
         );
         self.store_paint_damage(partial);
 
-        let damage_clip = partial.then_some(self.dirty_scratch.rects.as_slice());
-        let Some(renderer) = self.paint_renderer.as_mut() else {
-            if crate::debug::repaint_boundary_log_enabled() {
-                crate::logln!("[RetainedComposite] fail reason=no-renderer");
-            }
-            return false;
-        };
-        renderer.set_background_color(background_color);
-        renderer.begin_retained_composite(damage_clip);
-        if !Self::direct_composite_layer_container(
-            renderer,
+        self.retained_ctx.clear();
+        if !Self::composite_layer_container(
+            &mut self.retained_ctx,
             &self.layer_store,
             LayerId::Root,
             Point::ZERO,
-            None,
-            damage_clip,
         ) {
             if crate::debug::repaint_boundary_log_enabled() {
-                crate::logln!("[RetainedComposite] fail reason=direct-composite");
+                crate::logln!("[RetainedComposite] fail reason=command-composite");
             }
             return false;
         }
@@ -676,7 +738,39 @@ impl RenderingPipeline {
             &mut self.dirty_scratch.path,
             &mut self.last_paint_bounds,
         );
+
         true
+    }
+
+    fn render_prepared_retained_composite(
+        &mut self,
+        background_color: crate::color::Color,
+    ) -> crate::error::Result<PresentedFrame<'_>> {
+        let partial = self.paint_damage.is_some();
+        let damage_clip = partial.then_some(self.dirty_scratch.rects.as_slice());
+        let physical_damage = self.paint_damage.as_deref();
+        let backend_frame = match self.paint_backend.render(
+            &self.retained_ctx,
+            background_color,
+            damage_clip,
+            physical_damage,
+        ) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.retained_ctx.clear();
+                self.paint_needs_full = true;
+                return Err(error);
+            }
+        };
+        self.retained_ctx.clear();
+        let frame = match backend_frame {
+            BackendFrame::Cpu { buffer } => PresentedFrame::Cpu {
+                buffer,
+                damage: physical_damage,
+            },
+            BackendFrame::External => PresentedFrame::External,
+        };
+        Ok(frame)
     }
 
     fn last_paint_ids_require_full_refresh(&self) -> bool {
@@ -1693,68 +1787,6 @@ impl RenderingPipeline {
         )
     }
 
-    fn direct_composite_layer_container(
-        renderer: &mut CpuPaintRenderer,
-        layer_store: &LayerStore,
-        container_id: LayerId,
-        origin: Point,
-        active_clip: Option<ClipRegion>,
-        damage_rects: Option<&[Rect]>,
-    ) -> bool {
-        let Some(container) = layer_store.container(container_id) else {
-            return false;
-        };
-        let mut painted = false;
-        for child in &container.children {
-            match *child {
-                LayerChild::Chunk { id, offset, .. } => {
-                    if let Some(chunk) = layer_store.chunk(id) {
-                        let dst = Rect::new(
-                            Point::new(
-                                origin.x + offset.x + chunk.logical_bounds.origin.x,
-                                origin.y + offset.y + chunk.logical_bounds.origin.y,
-                            ),
-                            chunk.logical_bounds.size,
-                        );
-                        renderer.composite_buffer_rect_with_clip(
-                            &chunk.buffer,
-                            dst,
-                            chunk.logical_bounds,
-                            active_clip,
-                            damage_rects,
-                        );
-                        painted = true;
-                    }
-                }
-                LayerChild::Boundary { id, offset, clip } => {
-                    let next_origin = Point::new(origin.x + offset.x, origin.y + offset.y);
-                    let next_clip = Self::combine_layer_clip(origin, active_clip, clip);
-                    if Self::direct_composite_layer_container(
-                        renderer,
-                        layer_store,
-                        id,
-                        next_origin,
-                        next_clip,
-                        damage_rects,
-                    ) {
-                        painted = true;
-                    }
-                }
-                LayerChild::Primitive(primitive) => {
-                    Self::direct_paint_layer_primitive(
-                        renderer,
-                        primitive,
-                        origin,
-                        active_clip,
-                        damage_rects,
-                    );
-                    painted = true;
-                }
-            }
-        }
-        painted
-    }
-
     fn append_retained_overlay_primitives(
         element: &dyn Element,
         origin: Point,
@@ -1864,59 +1896,6 @@ impl RenderingPipeline {
                 }
             }
         }
-    }
-
-    fn direct_paint_layer_primitive(
-        renderer: &mut CpuPaintRenderer,
-        primitive: LayerPrimitive,
-        origin: Point,
-        active_clip: Option<ClipRegion>,
-        damage_rects: Option<&[Rect]>,
-    ) {
-        match primitive.kind {
-            LayerPrimitiveKind::RoundedRect {
-                mut rect,
-                corner_radius,
-            } => {
-                rect.origin.x += origin.x;
-                rect.origin.y += origin.y;
-                let clip = Self::combine_layer_clip(origin, active_clip, primitive.clip);
-                renderer.fill_rounded_rect_with_clip(
-                    rect,
-                    corner_radius,
-                    primitive.color,
-                    clip,
-                    damage_rects,
-                );
-            }
-        }
-    }
-
-    fn combine_layer_clip(
-        origin: Point,
-        active_clip: Option<ClipRegion>,
-        child_clip: Option<LayerClip>,
-    ) -> Option<ClipRegion> {
-        let Some(child_clip) = child_clip else {
-            return active_clip;
-        };
-        let rect = Rect::new(
-            Point::new(
-                origin.x + child_clip.rect.origin.x,
-                origin.y + child_clip.rect.origin.y,
-            ),
-            child_clip.rect.size,
-        );
-        let rect = if let Some(active_clip) = active_clip {
-            intersect_logical_rect(active_clip.rect, rect)
-                .unwrap_or(Rect::new(rect.origin, Size::ZERO))
-        } else {
-            rect
-        };
-        Some(ClipRegion {
-            rect,
-            corner_radius: child_clip.corner_radius,
-        })
     }
 
     fn paint_select_overlays<'a>(
@@ -2331,20 +2310,40 @@ impl RenderingPipeline {
     ///
     /// The damage is `None` when the whole window should be presented.
     pub fn render_with_damage(&mut self) -> Option<(&Buffer, Option<&[DamageRect]>)> {
-        if self.paint_enabled {
-            crate::graphics::set_current_scale_milli(self.scale_milli);
-            self.pipeline_owner.flush_with_legacy_paint(
-                &mut self.element_tree,
-                self.window_size,
-                false,
-            );
-            self.render_paint_path(self.extract_background_color())?;
-            let pr = self.paint_renderer.as_ref().unwrap();
-            return Some((pr.buffer(), self.paint_damage.as_deref()));
+        match self.render_for_present().ok()? {
+            PresentedFrame::Cpu { buffer, damage } => Some((buffer, damage)),
+            PresentedFrame::External | PresentedFrame::Idle => None,
         }
-        self.render()?;
-        let renderer = self.renderer.as_ref()?;
-        Some((renderer.buffer(), renderer.damage()))
+    }
+
+    /// Render a frame using the configured paint backend.
+    ///
+    /// CPU frames still need to be passed to the platform window. External
+    /// frames have already been presented by their backend.
+    ///
+    /// # Returns
+    ///
+    /// The frame presentation state, or a backend rendering error.
+    pub fn render_for_present(&mut self) -> crate::error::Result<PresentedFrame<'_>> {
+        if !self.paint_enabled {
+            let _ = self.render();
+            let Some(renderer) = self.renderer.as_ref() else {
+                return Ok(PresentedFrame::Idle);
+            };
+            return Ok(PresentedFrame::Cpu {
+                buffer: renderer.buffer(),
+                damage: renderer.damage(),
+            });
+        }
+
+        crate::graphics::set_current_scale_milli(self.scale_milli);
+        self.pipeline_owner.flush_with_legacy_paint(
+            &mut self.element_tree,
+            self.window_size,
+            false,
+        );
+        let background_color = self.extract_background_color();
+        self.render_paint_path(background_color)
     }
 
     pub fn window_buffer(&self) -> Option<&Buffer> {
@@ -2377,17 +2376,6 @@ impl RenderingPipeline {
     pub fn focused_text_input_state(&self) -> Option<crate::element::TextInputElementState> {
         self.element_tree.focused_text_input_state()
     }
-}
-
-fn intersect_logical_rect(a: Rect, b: Rect) -> Option<Rect> {
-    let left = a.origin.x.max(b.origin.x);
-    let top = a.origin.y.max(b.origin.y);
-    let right = (a.origin.x + a.size.width).min(b.origin.x + b.size.width);
-    let bottom = (a.origin.y + a.size.height).min(b.origin.y + b.size.height);
-    if right <= left || bottom <= top {
-        return None;
-    }
-    Some(Rect::from_xywh(left, top, right - left, bottom - top))
 }
 
 impl Drop for RenderingPipeline {
@@ -2771,14 +2759,9 @@ mod tests {
                 click_count: 1,
             }))
         );
-        pipeline
-            .render_with_damage()
-            .expect("page switch should render");
-
         let before_scroll = pipeline
-            .paint_renderer
-            .as_ref()
-            .and_then(|renderer| renderer.buffer().get_pixel(220, 10))
+            .render_with_damage()
+            .and_then(|(buffer, _)| buffer.get_pixel(220, 10))
             .expect("content pixel should be available after switch");
         assert_eq!(before_scroll, even_color.to_bgra());
         pipeline.reset_paint_test_counters();
@@ -2791,14 +2774,9 @@ mod tests {
             phase: WheelPhase::Moved,
             source: ScrollSource::Wheel,
         })));
-        pipeline
-            .render_with_damage()
-            .expect("scroll after page switch should render");
-
         let after_scroll = pipeline
-            .paint_renderer
-            .as_ref()
-            .and_then(|renderer| renderer.buffer().get_pixel(220, 10))
+            .render_with_damage()
+            .and_then(|(buffer, _)| buffer.get_pixel(220, 10))
             .expect("content pixel should be available after scroll");
         assert_eq!(after_scroll, odd_color.to_bgra());
         assert_ne!(before_scroll, after_scroll);
@@ -2847,18 +2825,13 @@ mod tests {
             }))
         );
         pipeline.reset_paint_test_counters();
-        pipeline
+        let before_scroll = pipeline
             .render_with_damage()
-            .expect("page switch should render");
+            .and_then(|(buffer, _)| buffer.get_pixel(220, 10))
+            .expect("content pixel should be available after switch");
         let switch_counters = pipeline.paint_test_counters();
         assert!(switch_counters.paint_context_news > 0);
         assert_eq!(switch_counters.retained_composites, 0);
-
-        let before_scroll = pipeline
-            .paint_renderer
-            .as_ref()
-            .and_then(|renderer| renderer.buffer().get_pixel(220, 10))
-            .expect("content pixel should be available after switch");
         assert_eq!(before_scroll, top_color.to_bgra());
         pipeline.reset_paint_test_counters();
 
@@ -2870,14 +2843,9 @@ mod tests {
             phase: WheelPhase::Moved,
             source: ScrollSource::Wheel,
         })));
-        pipeline
-            .render_with_damage()
-            .expect("scroll after page switch should render");
-
         let after_scroll = pipeline
-            .paint_renderer
-            .as_ref()
-            .and_then(|renderer| renderer.buffer().get_pixel(220, 10))
+            .render_with_damage()
+            .and_then(|(buffer, _)| buffer.get_pixel(220, 10))
             .expect("content pixel should be available after scroll");
         assert_ne!(before_scroll, after_scroll);
         let scroll_counters = pipeline.paint_test_counters();
@@ -3023,13 +2991,9 @@ mod tests {
                 click_count: 1,
             }))
         );
-        pipeline
-            .render_with_damage()
-            .expect("display page switch should render");
         let before_scroll = pipeline
-            .paint_renderer
-            .as_ref()
-            .and_then(|renderer| renderer.buffer().get_pixel(220, 30))
+            .render_with_damage()
+            .and_then(|(buffer, _)| buffer.get_pixel(220, 30))
             .expect("display page pixel should be available");
         assert_eq!(before_scroll, top_color.to_bgra());
         let invalidated_by = pipeline
@@ -3050,13 +3014,9 @@ mod tests {
             phase: WheelPhase::Moved,
             source: ScrollSource::Wheel,
         })));
-        pipeline
-            .render_with_damage()
-            .expect("scroll after display switch should render");
         let after_scroll = pipeline
-            .paint_renderer
-            .as_ref()
-            .and_then(|renderer| renderer.buffer().get_pixel(220, 30))
+            .render_with_damage()
+            .and_then(|(buffer, _)| buffer.get_pixel(220, 30))
             .expect("display page pixel should be available after scroll");
         assert_ne!(before_scroll, after_scroll);
         let counters = pipeline.paint_test_counters();

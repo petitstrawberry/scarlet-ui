@@ -113,9 +113,10 @@ pub use event::{
 };
 pub use geometry::{Alignment, EdgeInsets, Offset, Point, Rect, Size};
 pub use graphics::{
-    Canvas, FontStack, add_default_font_fallback, clear_default_font_fallbacks, default_font_stack,
-    measure_text_sized, measure_text_sized_with_font_stack, set_default_font,
-    set_default_font_stack,
+    Canvas, FontStack, GlyphRasterKey, RasterizedGlyph, add_default_font_fallback,
+    clear_default_font_fallbacks, default_font_stack, measure_text_sized,
+    measure_text_sized_with_font_stack, rasterize_text, rasterize_text_with_font_stack,
+    set_default_font, set_default_font_stack,
 };
 pub use menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
 pub use pipeline::{
@@ -123,6 +124,10 @@ pub use pipeline::{
 };
 pub use platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
 pub use render::{RenderNode, RenderTree};
+pub use renderer::{
+    BackendFrame, CompositorBackendKind, CpuPaintBackend, PaintBackend, PresentedFrame,
+    RendererBackendKind,
+};
 pub use scene::{Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowGroup, WindowId};
 pub use state::{InvalidationKind, Listenable, State, StateId, SubscriptionId, generate_state_id};
 pub use view::{View, ViewExt};
@@ -164,10 +169,12 @@ pub mod prelude {
     };
     pub use crate::geometry::*;
     pub use crate::graphics::{
-        FontStack, add_default_font_fallback, clear_default_font_fallbacks, default_font_stack,
-        measure_text_sized_with_font_stack, set_default_font_stack,
+        FontStack, GlyphRasterKey, RasterizedGlyph, add_default_font_fallback,
+        clear_default_font_fallbacks, default_font_stack, measure_text_sized_with_font_stack,
+        rasterize_text, rasterize_text_with_font_stack, set_default_font_stack,
     };
     pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
+    pub use crate::renderer::{CompositorBackendKind, RendererBackendKind};
     pub use crate::scene::{
         Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowGroup, WindowId,
     };

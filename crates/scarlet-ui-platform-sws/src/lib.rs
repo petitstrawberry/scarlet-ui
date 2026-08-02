@@ -9,8 +9,11 @@ extern crate alloc;
 extern crate scarlet_std as std;
 
 use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use scarlet_ui_core::buffer::Buffer;
+use scarlet_ui_core::color::Color;
 use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::element::TextInputElementState;
 use scarlet_ui_core::error::Result;
@@ -19,6 +22,13 @@ use scarlet_ui_core::event::{
 };
 use scarlet_ui_core::geometry::{Point, Rect, Size};
 use scarlet_ui_core::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
+use scarlet_ui_core::renderer::{
+    BackendFrame, CompositorBackendKind, PaintBackend, PaintContext, RendererBackendKind,
+};
+use scarlet_ui_renderer_sgfx::{
+    SgfxBufferIdentity as RendererSgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxImage,
+    SgfxPaintBackend, SgfxSinkError, SgfxSinkResult, SgfxSinkStatus,
+};
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code, rel_code};
 use sws_client as sws;
 
@@ -59,6 +69,404 @@ const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 #[cfg(not(feature = "std"))]
 const DOUBLE_CLICK_EVENT_THRESHOLD: u64 = 20;
 const DOUBLE_CLICK_DISTANCE: i32 = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestedRendererBackend {
+    Auto,
+    Cpu,
+    Sgfx,
+}
+
+impl RequestedRendererBackend {
+    fn from_environment() -> Result<Self> {
+        let Some(value) = renderer_backend_environment_value() else {
+            return Ok(Self::Auto);
+        };
+
+        match value.as_str() {
+            "auto" => Ok(Self::Auto),
+            "cpu" => Ok(Self::Cpu),
+            "sgfx" => Ok(Self::Sgfx),
+            _ => Err(scarlet_ui_core::error::Error::InvalidRendererBackend {
+                value: value.clone(),
+            }),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+fn renderer_backend_environment_value() -> Option<String> {
+    std::env::var("SCARLET_UI_BACKEND").ok()
+}
+
+#[cfg(not(feature = "std"))]
+fn renderer_backend_environment_value() -> Option<String> {
+    std::env::var("SCARLET_UI_BACKEND")
+}
+
+struct SwsSgfxFrameSink {
+    conn: sws::Connection,
+    events: sws::EventReceiver,
+    window_id: u32,
+    compositor_epoch: u32,
+    backend_lost: Option<u32>,
+    retained: Vec<SgfxCommitToken>,
+    rejected: Vec<(SgfxCommitToken, SgfxSinkError)>,
+    next_commit_serial: u64,
+    lifecycle_error: Option<SgfxSinkError>,
+}
+
+impl SwsSgfxFrameSink {
+    fn new(conn: sws::Connection, window_id: u32, compositor_epoch: u32) -> Self {
+        let events = conn.subscribe_sgfx_events(window_id);
+        Self {
+            conn,
+            events,
+            window_id,
+            compositor_epoch,
+            backend_lost: None,
+            retained: Vec::new(),
+            rejected: Vec::new(),
+            next_commit_serial: 1,
+            lifecycle_error: None,
+        }
+    }
+
+    fn validate_identity(
+        &self,
+        identity: RendererSgfxBufferIdentity,
+    ) -> SgfxSinkResult<()> {
+        if identity.window_id != self.window_id
+            || identity.compositor_epoch != self.compositor_epoch
+        {
+            return Err(SgfxSinkError::InvalidIdentity);
+        }
+        if let Some(compositor_epoch) = self.backend_lost {
+            return Err(SgfxSinkError::BackendLost { compositor_epoch });
+        }
+        Ok(())
+    }
+
+    fn client_identity(identity: RendererSgfxBufferIdentity) -> sws::SgfxBufferIdentity {
+        sws::SgfxBufferIdentity {
+            window_id: identity.window_id,
+            buffer_id: identity.buffer_id,
+            generation: identity.generation,
+            compositor_epoch: identity.compositor_epoch,
+        }
+    }
+
+    fn map_error(error: sws::Error) -> SgfxSinkError {
+        match error {
+            sws::Error::ServerError(code) => Self::map_error_code(code),
+            _ => SgfxSinkError::Protocol,
+        }
+    }
+
+    fn map_error_code(code: u32) -> SgfxSinkError {
+        match code {
+            sws_protocol::error_codes::SGFX_UNAVAILABLE => SgfxSinkError::Unavailable,
+            sws_protocol::error_codes::SGFX_BUFFER_BUSY => SgfxSinkError::BufferBusy,
+            sws_protocol::error_codes::SGFX_IMPORT_FAILED => SgfxSinkError::ImportFailed,
+            sws_protocol::error_codes::WINDOW_NOT_OWNED
+            | sws_protocol::error_codes::INVALID_SGFX_BUFFER
+            | sws_protocol::error_codes::STALE_SGFX_GENERATION => {
+                SgfxSinkError::InvalidIdentity
+            }
+            _ => SgfxSinkError::Protocol,
+        }
+    }
+
+    fn event_is_stale(&self, compositor_epoch: u32) -> bool {
+        self.backend_lost
+            .is_some_and(|lost_epoch| compositor_epoch < lost_epoch)
+    }
+
+    fn next_commit_token(
+        &mut self,
+        identity: RendererSgfxBufferIdentity,
+    ) -> SgfxSinkResult<SgfxCommitToken> {
+        let commit_serial = self.next_commit_serial;
+        self.next_commit_serial = commit_serial
+            .checked_add(1)
+            .ok_or(SgfxSinkError::Protocol)?;
+        Ok(SgfxCommitToken {
+            identity,
+            commit_serial,
+        })
+    }
+
+    fn take_rejection(&mut self, token: SgfxCommitToken) -> Option<SgfxSinkError> {
+        let index = self
+            .rejected
+            .iter()
+            .position(|(candidate, _)| *candidate == token)?;
+        Some(self.rejected.remove(index).1)
+    }
+
+    fn handle_lifecycle_event(&mut self, event: SwsEvent) {
+        match event {
+            SwsEvent::SgfxFrameRejected {
+                window_id,
+                buffer_id,
+                generation,
+                compositor_epoch,
+                commit_serial,
+                code,
+            } => {
+                if self.event_is_stale(compositor_epoch) {
+                    return;
+                }
+                let token = SgfxCommitToken {
+                    identity: RendererSgfxBufferIdentity {
+                        window_id,
+                        buffer_id,
+                        generation,
+                        compositor_epoch,
+                    },
+                    commit_serial,
+                };
+                if let Some(index) = self
+                    .retained
+                    .iter()
+                    .position(|candidate| *candidate == token)
+                {
+                    self.retained.remove(index);
+                    self.rejected.push((token, Self::map_error_code(code)));
+                } else {
+                    self.lifecycle_error = Some(SgfxSinkError::Protocol);
+                }
+            }
+            SwsEvent::SgfxBufferReleased {
+                window_id,
+                buffer_id,
+                generation,
+                compositor_epoch,
+                commit_serial,
+            } => {
+                if self.event_is_stale(compositor_epoch) {
+                    return;
+                }
+                let token = SgfxCommitToken {
+                    identity: RendererSgfxBufferIdentity {
+                        window_id,
+                        buffer_id,
+                        generation,
+                        compositor_epoch,
+                    },
+                    commit_serial,
+                };
+                if let Some(index) = self
+                    .retained
+                    .iter()
+                    .position(|candidate| *candidate == token)
+                {
+                    self.retained.remove(index);
+                } else {
+                    self.lifecycle_error = Some(SgfxSinkError::Protocol);
+                }
+            }
+            SwsEvent::SgfxBackendLost { compositor_epoch } => {
+                if compositor_epoch > self.compositor_epoch {
+                    self.backend_lost = Some(compositor_epoch);
+                    self.retained.clear();
+                    self.rejected.clear();
+                    self.lifecycle_error = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn pump_lifecycle(&mut self) -> SgfxSinkResult<()> {
+        self.conn.dispatch().map_err(Self::map_error)?;
+        while let Some(event) = self.events.poll_event() {
+            self.handle_lifecycle_event(event);
+        }
+        if let Some(error) = self.lifecycle_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn damage_rects(damage: &[DamageRect]) -> SgfxSinkResult<Vec<sws::SgfxDamageRect>> {
+        let mut nonempty = damage
+            .iter()
+            .copied()
+            .filter(|(_, _, width, height)| *width > 0 && *height > 0);
+        let Some(first) = nonempty.next() else {
+            return Ok(Vec::new());
+        };
+
+        if damage.len() <= sws_protocol::SGFX_MAX_DAMAGE_RECTS {
+            let mut rects = Vec::new();
+            rects
+                .try_reserve(damage.len())
+                .map_err(|_| SgfxSinkError::Protocol)?;
+            for (x, y, width, height) in core::iter::once(first).chain(nonempty) {
+                rects.push(sws::SgfxDamageRect::new(
+                    i32::try_from(x).map_err(|_| SgfxSinkError::Protocol)?,
+                    i32::try_from(y).map_err(|_| SgfxSinkError::Protocol)?,
+                    width,
+                    height,
+                ));
+            }
+            return Ok(rects);
+        }
+
+        let (mut left, mut top, first_width, first_height) = first;
+        let mut right = left.saturating_add(first_width);
+        let mut bottom = top.saturating_add(first_height);
+        for (x, y, width, height) in nonempty {
+            left = left.min(x);
+            top = top.min(y);
+            right = right.max(x.saturating_add(width));
+            bottom = bottom.max(y.saturating_add(height));
+        }
+        Ok(vec![sws::SgfxDamageRect::new(
+            i32::try_from(left).map_err(|_| SgfxSinkError::Protocol)?,
+            i32::try_from(top).map_err(|_| SgfxSinkError::Protocol)?,
+            right.saturating_sub(left),
+            bottom.saturating_sub(top),
+        )])
+    }
+}
+
+impl SgfxFrameSink for SwsSgfxFrameSink {
+    fn window_id(&self) -> u32 {
+        self.window_id
+    }
+
+    fn status(&mut self) -> SgfxSinkResult<SgfxSinkStatus> {
+        self.pump_lifecycle()?;
+        if let Some(compositor_epoch) = self.backend_lost {
+            Ok(SgfxSinkStatus::BackendLost { compositor_epoch })
+        } else {
+            Ok(SgfxSinkStatus::Ready {
+                compositor_epoch: self.compositor_epoch,
+            })
+        }
+    }
+
+    fn register_shared_image(
+        &mut self,
+        identity: RendererSgfxBufferIdentity,
+        image: &SgfxImage,
+    ) -> SgfxSinkResult<()> {
+        self.pump_lifecycle()?;
+        self.validate_identity(identity)?;
+        self.conn
+            .register_sgfx_buffer(
+                Self::client_identity(identity),
+                image.width(),
+                image.height(),
+                image.shared_handle(),
+            )
+            .map_err(Self::map_error)
+    }
+
+    fn wait_until_released(
+        &mut self,
+        token: SgfxCommitToken,
+    ) -> SgfxSinkResult<()> {
+        self.validate_identity(token.identity)?;
+        loop {
+            self.pump_lifecycle()?;
+            if let Some(compositor_epoch) = self.backend_lost {
+                return Err(SgfxSinkError::BackendLost { compositor_epoch });
+            }
+            if let Some(error) = self.take_rejection(token) {
+                return Err(error);
+            }
+            if !self.retained.contains(&token) {
+                return Ok(());
+            }
+            let _ = std::thread::sleep(core::time::Duration::from_millis(1));
+        }
+    }
+
+    fn commit_shared_image(
+        &mut self,
+        identity: RendererSgfxBufferIdentity,
+        damage: &[DamageRect],
+    ) -> SgfxSinkResult<SgfxCommitToken> {
+        self.pump_lifecycle()?;
+        self.validate_identity(identity)?;
+        let damage = Self::damage_rects(damage)?;
+        if damage.is_empty() {
+            return Err(SgfxSinkError::Protocol);
+        }
+        if self
+            .retained
+            .iter()
+            .any(|token| token.identity == identity)
+        {
+            return Err(SgfxSinkError::BufferBusy);
+        }
+        let token = self.next_commit_token(identity)?;
+        self.retained.push(token);
+        if let Err(error) = self.conn.commit_sgfx_frame(
+            Self::client_identity(identity),
+            token.commit_serial,
+            &damage,
+        ) {
+            self.retained.retain(|candidate| *candidate != token);
+            return Err(Self::map_error(error));
+        }
+        Ok(token)
+    }
+
+    fn destroy_shared_image(
+        &mut self,
+        identity: RendererSgfxBufferIdentity,
+    ) -> SgfxSinkResult<()> {
+        self.pump_lifecycle()?;
+        self.validate_identity(identity)?;
+        if self
+            .retained
+            .iter()
+            .any(|token| token.identity == identity)
+        {
+            return Err(SgfxSinkError::BufferBusy);
+        }
+        self.conn
+            .destroy_sgfx_buffer(Self::client_identity(identity))
+            .map_err(Self::map_error)?;
+        self.rejected
+            .retain(|(token, _)| token.identity != identity);
+        Ok(())
+    }
+}
+
+struct SwsSgfxPaintBackend {
+    backend: SgfxPaintBackend<SwsSgfxFrameSink>,
+}
+
+impl PaintBackend for SwsSgfxPaintBackend {
+    fn resize(&mut self, size: Size, scale_milli: u32) {
+        self.backend.resize(size, scale_milli);
+    }
+
+    fn render<'a>(
+        &'a mut self,
+        context: &PaintContext<'_>,
+        background_color: Color,
+        _logical_damage: Option<&[Rect]>,
+        physical_damage: Option<&[DamageRect]>,
+    ) -> Result<BackendFrame<'a>> {
+        match self.backend.render_and_commit(
+            context,
+            background_color,
+            physical_damage,
+        ) {
+            Ok(()) => Ok(BackendFrame::External),
+            Err(error) => {
+                logln!("[ScarletUI SGFX] render failed: {}", error);
+                Err(scarlet_ui_core::error::Error::RenderError)
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct ClickState {
@@ -213,7 +621,11 @@ impl PendingWheelDelta {
 /// SWS platform window implementation
 pub struct SWSPlatformWindow {
     conn: sws::Connection,
+    event_receiver: sws::EventReceiver,
     surface_id: u32,
+    requested_renderer_backend: RequestedRendererBackend,
+    renderer_backend: RendererBackendKind,
+    compositor_backend: CompositorBackendKind,
     scale_milli: u32,
     current_size: Size,
     pending_events: Vec<Event>,
@@ -283,8 +695,15 @@ fn saturate_i64_to_i32(value: i64) -> i32 {
 }
 
 /// Scarlet Window Server backend.
-#[derive(Default)]
-pub struct SwsBackend;
+pub struct SwsBackend {
+    connection: Option<sws::Connection>,
+}
+
+impl Default for SwsBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl SwsBackend {
     /// Create an SWS backend.
@@ -293,18 +712,38 @@ impl SwsBackend {
     ///
     /// A backend that creates SWS platform windows.
     pub fn new() -> Self {
-        Self
+        Self { connection: None }
+    }
+
+    fn connection(&mut self) -> Result<sws::Connection> {
+        if self.connection.is_none() {
+            self.connection = Some(
+                sws::Connection::connect("/tmp/sws.sock")
+                    .map_err(|_| scarlet_ui_core::error::Error::ConnectionFailed)?,
+            );
+        }
+        self.connection
+            .as_ref()
+            .cloned()
+            .ok_or(scarlet_ui_core::error::Error::ConnectionFailed)
     }
 }
 
 impl PlatformBackend for SwsBackend {
     fn output_scale_milli(&mut self) -> u32 {
-        SWSPlatformWindow::query_output_scale()
+        let Ok(conn) = self.connection() else {
+            return DEFAULT_SCALE_MILLI;
+        };
+        conn.get_output_scale()
+            .map(SWSPlatformWindow::sanitize_scale)
+            .unwrap_or(DEFAULT_SCALE_MILLI)
     }
 
     fn create_window(&mut self, request: WindowCreateRequest) -> Result<Box<dyn PlatformWindow>> {
+        let conn = self.connection()?;
         Ok(Box::new(
-            SWSPlatformWindow::create_with_type_and_menu_and_policies(
+            SWSPlatformWindow::create_with_connection_and_policies(
+                conn,
                 &request.app_id,
                 &request.title,
                 request.size,
@@ -324,7 +763,7 @@ impl SWSPlatformWindow {
     }
 
     pub fn query_output_scale() -> u32 {
-        let Ok(mut conn) = sws::Connection::connect("/tmp/sws.sock") else {
+        let Ok(conn) = sws::Connection::connect("/tmp/sws.sock") else {
             return DEFAULT_SCALE_MILLI;
         };
         conn.get_output_scale()
@@ -420,9 +859,33 @@ impl SWSPlatformWindow {
         active_on_focus: bool,
         opaque: bool,
     ) -> Result<Self> {
-        // Connect to SWS
-        let mut conn = sws::Connection::connect("/tmp/sws.sock")
+        let conn = sws::Connection::connect("/tmp/sws.sock")
             .map_err(|_| scarlet_ui_core::error::Error::ConnectionFailed)?;
+        Self::create_with_connection_and_policies(
+            conn,
+            app_id,
+            title,
+            size,
+            window_type,
+            menu_titles,
+            focus_on_create,
+            active_on_focus,
+            opaque,
+        )
+    }
+
+    fn create_with_connection_and_policies(
+        conn: sws::Connection,
+        app_id: &str,
+        title: &str,
+        size: Size,
+        window_type: u32,
+        menu_titles: &str,
+        focus_on_create: bool,
+        active_on_focus: bool,
+        opaque: bool,
+    ) -> Result<Self> {
+        let requested_renderer_backend = RequestedRendererBackend::from_environment()?;
         let scale_milli = conn
             .get_output_scale()
             .map(Self::sanitize_scale)
@@ -451,10 +914,15 @@ impl SWSPlatformWindow {
             conn.set_window_has_alpha_content(surface_id, true)
                 .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
         }
+        let event_receiver = conn.subscribe_window_events(surface_id);
 
         Ok(Self {
             conn,
+            event_receiver,
             surface_id,
+            requested_renderer_backend,
+            renderer_backend: RendererBackendKind::Cpu,
+            compositor_backend: CompositorBackendKind::Unknown,
             scale_milli,
             current_size: size,
             pending_events: Vec::new(),
@@ -923,46 +1391,16 @@ impl SWSPlatformWindow {
 
 impl PlatformWindow for SWSPlatformWindow {
     fn new(app_id: &str, title: &str, size: Size) -> Result<Self> {
-        // Connect to SWS
-        let mut conn = sws::Connection::connect("/tmp/sws.sock")
-            .map_err(|_| scarlet_ui_core::error::Error::ConnectionFailed)?;
-        let scale_milli = conn
-            .get_output_scale()
-            .map(Self::sanitize_scale)
-            .unwrap_or(DEFAULT_SCALE_MILLI);
-        let physical_width =
-            Self::logical_to_physical_len_with_scale(size.width.max(1.0) as u32, scale_milli);
-        let physical_height =
-            Self::logical_to_physical_len_with_scale(size.height.max(1.0) as u32, scale_milli);
-
-        // Create surface
-        let surface_id = conn
-            .create_surface(app_id, title, "", physical_width, physical_height)
-            .map_err(|_| scarlet_ui_core::error::Error::SurfaceCreationFailed)?;
-
-        Ok(Self {
-            conn,
-            surface_id,
-            scale_milli,
-            current_size: size,
-            pending_events: Vec::new(),
-            pending_head: 0,
-            pointer_x: 0,
-            pointer_y: 0,
-            pending_move: false,
-            left_shift_pressed: false,
-            right_shift_pressed: false,
-            left_control_pressed: false,
-            right_control_pressed: false,
-            left_alt_pressed: false,
-            right_alt_pressed: false,
-            left_super_pressed: false,
-            right_super_pressed: false,
-            click_state: ClickState::default(),
-            text_input: None,
-            pending_wheel: PendingWheelDelta::default(),
-            needs_full_present: false,
-        })
+        Self::create_with_type_and_menu_and_policies(
+            app_id,
+            title,
+            size,
+            sws_protocol::window_types::NORMAL,
+            "",
+            true,
+            true,
+            true,
+        )
     }
 
     fn poll_event(&mut self) -> Option<Event> {
@@ -974,7 +1412,7 @@ impl PlatformWindow for SWSPlatformWindow {
 
         let _ = self.conn.dispatch().ok();
 
-        while let Some(ev) = self.conn.poll_event() {
+        while let Some(ev) = self.event_receiver.poll_event() {
             self.handle_sws_event(ev);
         }
 
@@ -998,6 +1436,77 @@ impl PlatformWindow for SWSPlatformWindow {
         self.scale_milli
     }
 
+    fn renderer_backend(&self) -> RendererBackendKind {
+        self.renderer_backend
+    }
+
+    fn compositor_backend(&self) -> CompositorBackendKind {
+        self.compositor_backend
+    }
+
+    fn take_paint_backend(&mut self) -> Result<Option<Box<dyn PaintBackend>>> {
+        let capabilities = match self.conn.get_capabilities() {
+            Ok(capabilities) => {
+                self.compositor_backend = match capabilities.compositor_backend {
+                    sws_protocol::compositor_backends::CPU => CompositorBackendKind::Cpu,
+                    sws_protocol::compositor_backends::SGFX => CompositorBackendKind::Sgfx,
+                    _ => CompositorBackendKind::Unknown,
+                };
+                Some(capabilities)
+            }
+            Err(_) => {
+                self.compositor_backend = CompositorBackendKind::Unknown;
+                None
+            }
+        };
+
+        if self.requested_renderer_backend == RequestedRendererBackend::Cpu {
+            self.renderer_backend = RendererBackendKind::Cpu;
+            return Ok(None);
+        }
+
+        let shared_sgfx_available = capabilities.is_some_and(|capabilities| {
+            capabilities.protocol_version == sws_protocol::SWS_PROTOCOL_VERSION
+                && capabilities.capabilities & sws_protocol::capabilities::SGFX_SHARED_IMAGE != 0
+                && capabilities.compositor_backend == sws_protocol::compositor_backends::SGFX
+                && capabilities.compositor_epoch != 0
+        });
+        if !shared_sgfx_available {
+            self.renderer_backend = RendererBackendKind::Cpu;
+            return match self.requested_renderer_backend {
+                RequestedRendererBackend::Auto => Ok(None),
+                RequestedRendererBackend::Sgfx => {
+                    Err(scarlet_ui_core::error::Error::RenderError)
+                }
+                RequestedRendererBackend::Cpu => Ok(None),
+            };
+        }
+
+        let Some(capabilities) = capabilities else {
+            return Err(scarlet_ui_core::error::Error::RenderError);
+        };
+        let sink = SwsSgfxFrameSink::new(
+            self.conn.clone(),
+            self.surface_id,
+            capabilities.compositor_epoch,
+        );
+        match SgfxPaintBackend::new(sink, self.current_size, self.scale_milli) {
+            Ok(backend) => {
+                self.renderer_backend = RendererBackendKind::Sgfx;
+                Ok(Some(Box::new(SwsSgfxPaintBackend { backend })))
+            }
+            Err(error) if self.requested_renderer_backend == RequestedRendererBackend::Auto => {
+                logln!("[ScarletUI SGFX] initialization failed: {}", error);
+                self.renderer_backend = RendererBackendKind::Cpu;
+                Ok(None)
+            }
+            Err(error) => {
+                logln!("[ScarletUI SGFX] initialization failed: {}", error);
+                Err(scarlet_ui_core::error::Error::RenderError)
+            }
+        }
+    }
+
     fn present(&mut self, buffer: &Buffer) {
         self.present_with_damage(buffer, None);
     }
@@ -1014,7 +1523,7 @@ impl PlatformWindow for SWSPlatformWindow {
         }
 
         // Get the surface and copy pixels
-        if let Some(surface) = self.conn.surface_mut(self.surface_id) {
+        let _ = self.conn.with_surface_mut(self.surface_id, |surface| {
             // Get the shared memory buffer
             surface.with_buffer(|shm_buf, width, height| {
                 let full_damage = [(0, 0, width, height)];
@@ -1023,7 +1532,7 @@ impl PlatformWindow for SWSPlatformWindow {
                     let _ = Self::copy_buffer_region(buffer, shm_buf, width, height, *region);
                 }
             });
-        }
+        });
 
         match damage {
             Some(rects) => {
@@ -1066,11 +1575,13 @@ impl PlatformWindow for SWSPlatformWindow {
 
         let physical_width = self.logical_to_physical_len(width);
         let physical_height = self.logical_to_physical_len(height);
-        if self.current_size == new_size
-            && let Some(surface) = self.conn.surface(self.surface_id)
-            && surface.width() == physical_width
-            && surface.height() == physical_height
-        {
+        let surface_is_current = self
+            .conn
+            .with_surface(self.surface_id, |surface| {
+                surface.width() == physical_width && surface.height() == physical_height
+            })
+            .unwrap_or(false);
+        if self.current_size == new_size && surface_is_current {
             return Ok(());
         }
 
@@ -1172,51 +1683,17 @@ impl PlatformWindow for SWSPlatformWindow {
     where
         Self: Sized,
     {
-        let mut conn = sws::Connection::connect("/tmp/sws.sock")
-            .map_err(|_| scarlet_ui_core::error::Error::ConnectionFailed)?;
-        let scale_milli = conn
-            .get_output_scale()
-            .map(Self::sanitize_scale)
-            .unwrap_or(DEFAULT_SCALE_MILLI);
-        let physical_width =
-            Self::logical_to_physical_len_with_scale(size.width.max(1.0) as u32, scale_milli);
-        let physical_height =
-            Self::logical_to_physical_len_with_scale(size.height.max(1.0) as u32, scale_milli);
-
-        let surface_id = conn
-            .create_surface_with_type(
-                app_id,
-                title,
-                "",
-                physical_width,
-                physical_height,
-                window_type,
-            )
-            .map_err(|_| scarlet_ui_core::error::Error::SurfaceCreationFailed)?;
-
-        Ok(Self {
-            conn,
-            surface_id,
-            scale_milli,
-            current_size: size,
-            pending_events: Vec::new(),
-            pending_head: 0,
-            pointer_x: 0,
-            pointer_y: 0,
-            pending_move: false,
-            left_shift_pressed: false,
-            right_shift_pressed: false,
-            left_control_pressed: false,
-            right_control_pressed: false,
-            left_alt_pressed: false,
-            right_alt_pressed: false,
-            left_super_pressed: false,
-            right_super_pressed: false,
-            click_state: ClickState::default(),
-            text_input: None,
-            pending_wheel: PendingWheelDelta::default(),
-            needs_full_present: false,
-        })
+        Self::create_with_connection_and_policies(
+            self.conn.clone(),
+            app_id,
+            title,
+            size,
+            window_type,
+            "",
+            true,
+            window_type == sws_protocol::window_types::NORMAL,
+            true,
+        )
     }
 
     fn move_window(&mut self, x: i32, y: i32) -> Result<()> {

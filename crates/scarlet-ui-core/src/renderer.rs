@@ -6,6 +6,7 @@ use crate::buffer::Buffer;
 use crate::color::Color;
 use crate::compositor::{Compositor, DamageRect};
 use crate::element::{Element, ElementId};
+use crate::error::Result;
 use crate::geometry::{Point, Rect, Size};
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
@@ -378,6 +379,136 @@ impl<'a> PaintContext<'a> {
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }
+}
+
+/// Renderer selected for a platform window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RendererBackendKind {
+    /// CPU rasterization into a platform pixel buffer.
+    Cpu,
+    /// Native SGFX rendering and presentation.
+    Sgfx,
+}
+
+/// Compositor selected by the platform window server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompositorBackendKind {
+    /// CPU window composition.
+    Cpu,
+    /// Native SGFX window composition.
+    Sgfx,
+    /// Platform compositor could not be determined.
+    Unknown,
+}
+
+/// Frame produced by a paint backend.
+pub enum BackendFrame<'a> {
+    /// CPU pixel buffer that still needs platform presentation.
+    Cpu {
+        /// Rendered pixel buffer.
+        buffer: &'a Buffer,
+    },
+    /// Frame already presented by an external backend.
+    External,
+}
+
+/// Backend that renders a paint command list.
+///
+/// CPU backends return a pixel buffer for the platform to present. External
+/// backends own the presentation lifecycle and return [`BackendFrame::External`]
+/// only after the frame has been submitted successfully.
+pub trait PaintBackend {
+    /// Resize the backend render target.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - New logical render-target size.
+    /// * `scale_milli` - Physical output scale in milli-units.
+    ///
+    /// # Returns
+    ///
+    /// Nothing.
+    fn resize(&mut self, size: Size, scale_milli: u32);
+
+    /// Render one paint command list.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - Paint commands and their frame-local buffer resources.
+    /// * `background_color` - Color used to clear damaged target regions.
+    /// * `logical_damage` - Logical regions to redraw, or `None` for the full target.
+    /// * `physical_damage` - Physical regions to present, or `None` for the full target.
+    ///
+    /// # Returns
+    ///
+    /// A CPU buffer to present or confirmation that an external frame has
+    /// already been presented.
+    fn render<'a>(
+        &'a mut self,
+        context: &PaintContext<'_>,
+        background_color: Color,
+        logical_damage: Option<&[Rect]>,
+        physical_damage: Option<&[DamageRect]>,
+    ) -> Result<BackendFrame<'a>>;
+}
+
+/// CPU implementation of the backend-neutral paint interface.
+pub struct CpuPaintBackend {
+    renderer: CpuPaintRenderer,
+}
+
+impl CpuPaintBackend {
+    /// Create a CPU paint backend.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Initial logical render-target size.
+    /// * `scale_milli` - Physical output scale in milli-units.
+    /// * `background_color` - Initial target clear color.
+    ///
+    /// # Returns
+    ///
+    /// A CPU paint backend ready to render frames.
+    pub fn new(size: Size, scale_milli: u32, background_color: Color) -> Self {
+        Self {
+            renderer: CpuPaintRenderer::new(size, scale_milli, background_color),
+        }
+    }
+}
+
+impl PaintBackend for CpuPaintBackend {
+    fn resize(&mut self, size: Size, scale_milli: u32) {
+        self.renderer.resize(size, scale_milli);
+    }
+
+    fn render<'a>(
+        &'a mut self,
+        context: &PaintContext<'_>,
+        background_color: Color,
+        logical_damage: Option<&[Rect]>,
+        _physical_damage: Option<&[DamageRect]>,
+    ) -> Result<BackendFrame<'a>> {
+        self.renderer.set_background_color(background_color);
+        self.renderer.execute_with_damage(context, logical_damage);
+        Ok(BackendFrame::Cpu {
+            buffer: self.renderer.buffer(),
+        })
+    }
+}
+
+/// Result of preparing a frame for platform presentation.
+pub enum PresentedFrame<'a> {
+    /// CPU-rendered frame that still needs platform presentation.
+    Cpu {
+        /// Pixel buffer containing the rendered frame.
+        buffer: &'a Buffer,
+        /// Physical regions to present, or `None` for the full buffer.
+        damage: Option<&'a [DamageRect]>,
+    },
+    /// Frame already rendered and presented by an external backend.
+    External,
+    /// No pixels changed and no presentation was submitted.
+    Idle,
 }
 
 pub struct Frame<'a> {
@@ -1089,148 +1220,6 @@ impl CpuPaintRenderer {
 
         while !self.clip_entries.is_empty() {
             self.pop_clip(damage_rects);
-        }
-    }
-
-    pub(crate) fn begin_retained_composite(&mut self, damage_rects: Option<&[Rect]>) {
-        match damage_rects {
-            Some(rects) => {
-                for rect in rects {
-                    let (x, y, width, height) = self.rect_to_u32(*rect);
-                    self.buffer
-                        .clear_rect(x, y, width, height, self.background_color);
-                }
-            }
-            None => self.buffer.clear(self.background_color),
-        }
-        self.recycle_active_layers();
-    }
-
-    pub(crate) fn composite_buffer_rect_with_clip(
-        &mut self,
-        buffer: &Buffer,
-        dst: Rect,
-        src: Rect,
-        clip: Option<ClipRegion>,
-        damage_rects: Option<&[Rect]>,
-    ) {
-        self.scratch.clip_rects.clear();
-        match (clip, damage_rects) {
-            (Some(clip), Some(damage)) => {
-                for rect in damage {
-                    if let Some(rect) = intersect_rect(clip.rect, *rect) {
-                        self.scratch.clip_rects.push(rect);
-                    }
-                }
-            }
-            (Some(clip), None) => self.scratch.clip_rects.push(clip.rect),
-            (None, Some(damage)) => self.scratch.clip_rects.extend_from_slice(damage),
-            (None, None) => {}
-        }
-
-        let dst = self.scale_rect(dst);
-        let src = self.scale_rect(src);
-        let dst_x = dst.origin.x as i32;
-        let dst_y = dst.origin.y as i32;
-        let src_x = src.origin.x as i32;
-        let src_y = src.origin.y as i32;
-        let src_w = src.size.width as i32;
-        let src_h = src.size.height as i32;
-
-        if clip.is_none() && damage_rects.is_none() {
-            self.buffer
-                .composite_rect(buffer, src_x, src_y, src_w, src_h, dst_x, dst_y, 1.0);
-            return;
-        }
-
-        for index in 0..self.scratch.clip_rects.len() {
-            let clip = self.scale_rect(self.scratch.clip_rects[index]);
-            self.buffer.composite_rect_clipped(
-                buffer,
-                src_x,
-                src_y,
-                src_w,
-                src_h,
-                dst_x,
-                dst_y,
-                1.0,
-                clip.origin.x as i32,
-                clip.origin.y as i32,
-                clip.size.width as i32,
-                clip.size.height as i32,
-            );
-        }
-    }
-
-    pub(crate) fn fill_rounded_rect_with_clip(
-        &mut self,
-        rect: Rect,
-        corner_radius: f32,
-        color: Color,
-        clip: Option<ClipRegion>,
-        damage_rects: Option<&[Rect]>,
-    ) {
-        self.scratch.clip_rects.clear();
-        match (clip, damage_rects) {
-            (Some(clip), Some(damage)) => {
-                for rect in damage {
-                    if let Some(rect) = intersect_rect(clip.rect, *rect) {
-                        self.scratch.clip_rects.push(rect);
-                    }
-                }
-            }
-            (Some(clip), None) => self.scratch.clip_rects.push(clip.rect),
-            (None, Some(damage)) => self.scratch.clip_rects.extend_from_slice(damage),
-            (None, None) => self.scratch.clip_rects.push(Rect::from_xywh(
-                0.0,
-                0.0,
-                self.buffer.logical_width() as f32,
-                self.buffer.logical_height() as f32,
-            )),
-        }
-
-        if self.scratch.clip_rects.is_empty() {
-            return;
-        }
-
-        let rect = self.scale_rect(rect);
-        let radius = self.scale_f32(corner_radius);
-        let bgra = color.to_bgra();
-        let is_opaque = color.a >= 1.0;
-        let buffer_width = self.buffer.width() as i32;
-        let buffer_height = self.buffer.height() as i32;
-
-        for index in 0..self.scratch.clip_rects.len() {
-            let clip = self.scale_rect(self.scratch.clip_rects[index]);
-            let left = libm::floorf(rect.origin.x.max(clip.origin.x)).max(0.0) as i32;
-            let top = libm::floorf(rect.origin.y.max(clip.origin.y)).max(0.0) as i32;
-            let right =
-                libm::ceilf((rect.origin.x + rect.size.width).min(clip.origin.x + clip.size.width))
-                    .min(buffer_width as f32) as i32;
-            let bottom = libm::ceilf(
-                (rect.origin.y + rect.size.height).min(clip.origin.y + clip.size.height),
-            )
-            .min(buffer_height as f32) as i32;
-            if right <= left || bottom <= top {
-                continue;
-            }
-            let width = self.buffer.width() as usize;
-            let data = self.buffer.as_mut_slice();
-            for y in top..bottom {
-                for x in left..right {
-                    if radius > 0.0
-                        && !contains_rounded_rect(rect, radius, x as f32 + 0.5, y as f32 + 0.5)
-                    {
-                        continue;
-                    }
-                    let idx = y as usize * width + x as usize;
-                    if is_opaque {
-                        data[idx] = bgra;
-                    } else {
-                        data[idx] = Buffer::blend_pixels(data[idx], bgra, 1.0);
-                    }
-                }
-            }
         }
     }
 

@@ -6,6 +6,7 @@ use crate::element::TextInputElementState;
 use crate::error::Result;
 use crate::event::Event;
 use crate::geometry::{Point, Size};
+use crate::renderer::{CompositorBackendKind, PaintBackend, RendererBackendKind};
 use alloc::boxed::Box;
 use alloc::string::String;
 use core::any::Any;
@@ -61,6 +62,36 @@ pub trait PlatformWindow: Any {
     /// Return the window output scale in milli-units.
     fn output_scale_milli(&self) -> u32 {
         1000
+    }
+
+    /// Return the renderer selected for this window.
+    ///
+    /// # Returns
+    ///
+    /// The renderer backend used for frames presented to this window.
+    fn renderer_backend(&self) -> RendererBackendKind {
+        RendererBackendKind::Cpu
+    }
+
+    /// Return the compositor selected by the platform window server.
+    ///
+    /// # Returns
+    ///
+    /// The reported compositor backend, or `Unknown` when unavailable.
+    fn compositor_backend(&self) -> CompositorBackendKind {
+        CompositorBackendKind::Unknown
+    }
+
+    /// Take the platform-owned external paint backend, when one is available.
+    ///
+    /// This method is called once during window setup. Returning an error keeps
+    /// strict backend selection failures visible to the application runner.
+    ///
+    /// # Returns
+    ///
+    /// An external backend, `None` for CPU rendering, or an initialization error.
+    fn take_paint_backend(&mut self) -> Result<Option<Box<dyn PaintBackend>>> {
+        Ok(None)
     }
 
     /// Present a buffer to the screen

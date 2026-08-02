@@ -1,0 +1,24 @@
+[package]
+name = "scarlet-ui-renderer-sgfx"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["std"]
+legacy-scarlet-std = [
+    "scarlet-ui-core/legacy-scarlet-std",
+    "sgfx/scarlet-std",
+]
+std = [
+    "scarlet-ui-core/std",
+    "sgfx/std",
+]
+
+[dependencies]
+libm = { version = "0.2", default-features = false }
+scarlet-ui-core = { path = "../scarlet-ui-core", default-features = false }
+sgfx = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "sgfx", default-features = false }
+
+[lib]
+name = "scarlet_ui_renderer_sgfx"
+path = "src/lib.rs"
