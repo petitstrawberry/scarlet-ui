@@ -285,6 +285,7 @@ impl ApplicationRunner {
             for slot in slots.iter_mut() {
                 slot.presented_this_cycle = false;
                 let mut pending_trackpad_moved = None;
+                let mut slot_closing = false;
                 while let Some(event) = slot.window.poll_event() {
                     any_event = true;
                     let Some(event) = coalesce_trackpad_moved_for_batch(
@@ -295,12 +296,20 @@ impl ApplicationRunner {
                         continue;
                     };
                     if let Some(pending) = pending_trackpad_moved.take() {
-                        handle_window_event(app, slot, pending, &mut close_ids)?;
+                        if handle_window_event(app, slot, pending, &mut close_ids)? {
+                            slot_closing = true;
+                            break;
+                        }
                     }
-                    handle_window_event(app, slot, event, &mut close_ids)?;
+                    if handle_window_event(app, slot, event, &mut close_ids)? {
+                        slot_closing = true;
+                        break;
+                    }
                 }
-                if let Some(pending) = pending_trackpad_moved.take() {
-                    handle_window_event(app, slot, pending, &mut close_ids)?;
+                if !slot_closing
+                    && let Some(pending) = pending_trackpad_moved.take()
+                {
+                    let _ = handle_window_event(app, slot, pending, &mut close_ids)?;
                 }
             }
 
@@ -511,11 +520,12 @@ fn handle_window_event<A: Application>(
     slot: &mut WindowSlot<A>,
     event: Event,
     close_ids: &mut Vec<WindowId>,
-) -> Result<()> {
+) -> Result<bool> {
     match event {
         Event::Quit => {
             let _ = slot.window.close();
             close_ids.push(slot.context.window_id);
+            return Ok(true);
         }
         Event::Resize { width, height } => {
             let new_size = Size::new(width as f32, height as f32);
@@ -658,11 +668,14 @@ fn handle_window_event<A: Application>(
         }
         _ => {
             let _ = slot.pipeline.handle_event(&event);
-            handle_emitted_window_events(slot, close_ids)?;
+            let closing = handle_emitted_window_events(slot, close_ids)?;
+            if closing {
+                return Ok(true);
+            }
             sync_after_event(slot)?;
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 fn sync_after_event<A: Application>(slot: &mut WindowSlot<A>) -> Result<()> {
@@ -676,12 +689,13 @@ fn sync_after_event<A: Application>(slot: &mut WindowSlot<A>) -> Result<()> {
 fn handle_emitted_window_events<A: Application>(
     slot: &mut WindowSlot<A>,
     close_ids: &mut Vec<WindowId>,
-) -> Result<()> {
+) -> Result<bool> {
     for emitted_event in slot.pipeline.take_emitted_events() {
         match emitted_event {
             Event::Window(crate::event::WindowEvent::CloseRequested) => {
                 let _ = slot.window.close();
                 close_ids.push(slot.context.window_id);
+                return Ok(true);
             }
             Event::Window(crate::event::WindowEvent::MaximizeRequested) => {
                 let _ = slot.window.maximize();
@@ -698,7 +712,7 @@ fn handle_emitted_window_events<A: Application>(
             _ => {}
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 fn remove_closed_slots<A: Application>(slots: &mut Vec<WindowSlot<A>>, close_ids: &[WindowId]) {

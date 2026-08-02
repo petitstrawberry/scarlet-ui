@@ -50,11 +50,14 @@ struct RetiredImage {
 /// epoch)` identity.
 pub struct SgfxPaintBackend<S> {
     sink: S,
-    context: Context,
-    queue: Queue,
+    // Rust drops fields in declaration order. Keep every object owned by the
+    // SGFX context ahead of the queue and the context itself so closing and
+    // reopening a window cannot tear down the context before its images.
     session: Option<RenderSession>,
     slots: Vec<SlotState>,
     retired: Vec<RetiredImage>,
+    queue: Queue,
+    context: Context,
     scale_milli: u32,
     physical_width: u32,
     physical_height: u32,

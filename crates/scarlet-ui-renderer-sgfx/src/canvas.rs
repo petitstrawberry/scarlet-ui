@@ -231,6 +231,7 @@ impl SgfxCanvasDraw {
 pub struct SgfxCanvasFrame {
     pub(crate) revision: u64,
     pub(crate) clear_color: Color,
+    pub(crate) reference_aspect: f32,
     pub(crate) draws: Vec<SgfxCanvasDraw>,
 }
 
@@ -249,8 +250,27 @@ impl SgfxCanvasFrame {
         Self {
             revision,
             clear_color,
+            reference_aspect: 1.0,
             draws: Vec::new(),
         }
+    }
+
+    /// Set the aspect ratio used when the frame transforms were constructed.
+    ///
+    /// The renderer corrects the horizontal clip-space scale when the canvas
+    /// is laid out at a different aspect ratio. This keeps perspective content
+    /// proportional while its containing window is resized.
+    ///
+    /// # Arguments
+    ///
+    /// * `aspect` - Positive finite reference width divided by height.
+    ///
+    /// # Returns
+    ///
+    /// This frame with the requested reference aspect ratio.
+    pub fn reference_aspect(mut self, aspect: f32) -> Self {
+        self.reference_aspect = aspect;
+        self
     }
 
     /// Append a retained mesh draw.

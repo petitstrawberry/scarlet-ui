@@ -599,8 +599,13 @@ impl RenderSession {
                     let Some(canvas) = payload.as_any().downcast_ref::<SgfxCanvasPaint>() else {
                         continue;
                     };
+                    let canvas_width = physical_canvas_extent(rect.size.width, scale)?;
+                    let canvas_height = physical_canvas_extent(rect.size.height, scale)?;
                     let Some(texture) = self.canvas_targets.iter().find(|target| {
-                        target.handle_id == canvas.handle.id() && target.initialized
+                        target.handle_id == canvas.handle.id()
+                            && target.width == canvas_width
+                            && target.height == canvas_height
+                            && target.initialized
                     }) else {
                         continue;
                     };
@@ -972,7 +977,12 @@ impl RenderSession {
                     let buffer = table
                         .buffer_ref(cached.buffer)
                         .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                    let transform = Transform::from_columns(draw.transform)
+                    let transform = Transform::from_columns(canvas_transform(
+                        draw.transform,
+                        frame.reference_aspect,
+                        target_state.width,
+                        target_state.height,
+                    )?)
                         .map_err(|_| Error::InvalidFrame)?;
                     let tint = ir_color(ui_color(draw.tint, 1.0)?)?;
                     if let Some(texture_index) = texture_index {
@@ -1634,6 +1644,29 @@ fn physical_canvas_extent(logical: f32, scale: f32) -> Result<u32> {
         return Err(Error::InvalidFrame);
     }
     Ok(physical as u32)
+}
+
+fn canvas_transform(
+    mut transform: [f32; 16],
+    reference_aspect: f32,
+    width: u32,
+    height: u32,
+) -> Result<[f32; 16]> {
+    if !reference_aspect.is_finite() || reference_aspect <= 0.0 || width == 0 || height == 0 {
+        return Err(Error::InvalidFrame);
+    }
+    let target_aspect = width as f32 / height as f32;
+    let horizontal_scale = reference_aspect / target_aspect;
+    if !horizontal_scale.is_finite() || horizontal_scale <= 0.0 {
+        return Err(Error::InvalidFrame);
+    }
+    for index in [0usize, 4, 8, 12] {
+        transform[index] *= horizontal_scale;
+    }
+    if !transform.iter().all(|component| component.is_finite()) {
+        return Err(Error::InvalidFrame);
+    }
+    Ok(transform)
 }
 
 fn ui_color(color: UiColor, opacity: f32) -> Result<[f32; 4]> {
