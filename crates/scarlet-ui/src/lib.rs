@@ -32,7 +32,10 @@ compile_error!("scarlet-ui requires either the `std` or `legacy-scarlet-std` fea
 pub use scarlet_ui_core::*;
 
 #[cfg(feature = "platform-sws")]
-pub use scarlet_ui_platform_sws::{SWSPlatformWindow, SwsBackend};
+pub use scarlet_ui_platform_sws::{
+    SWSPlatformWindow, SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle,
+    SgfxCanvasRenderObject, SgfxCanvasVertex, SgfxMesh, SgfxTexture, SwsBackend,
+};
 #[cfg(feature = "platform-winit")]
 pub use scarlet_ui_platform_winit::{WinitBackend, WinitPlatformWindow};
 
@@ -83,4 +86,9 @@ pub mod prelude {
     pub use scarlet_ui_core::prelude::*;
 
     pub use crate::ApplicationRunExt;
+    #[cfg(feature = "platform-sws")]
+    pub use crate::{
+        SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh,
+        SgfxTexture,
+    };
 }

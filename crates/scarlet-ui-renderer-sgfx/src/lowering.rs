@@ -18,6 +18,7 @@ use sgfx::ir::{
 };
 use sgfx::{Context, Image, IrResources, Queue};
 
+use crate::canvas::{SgfxCanvasFrame, SgfxCanvasPaint, SgfxMesh, SgfxTexture};
 use crate::error::{Error, Result, Stage};
 use crate::geometry::{
     FloatRect, GeometryRange, MAX_FRAME_VERTICES, PixelBounds, Tessellator, Vertex,
@@ -38,6 +39,11 @@ const GLYPH_ATLAS_SIZE: u32 = 2_048;
 const GLYPH_ATLAS_PADDING: u32 = 1;
 const MAX_GLYPH_ENTRIES: usize = 512;
 const MAX_BUFFER_TEXTURES: usize = 128;
+const CANVAS_VERTEX_STRIDE: u32 = 40;
+const MAX_CANVASES: usize = 32;
+const MAX_CANVAS_MESHES: usize = 256;
+const MAX_CANVAS_TEXTURES: usize = 128;
+const MAX_CANVAS_DRAWS: usize = 240;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DrawSource {
@@ -108,6 +114,29 @@ struct GlyphAtlas {
     row_height: u32,
 }
 
+struct CanvasTarget {
+    handle_id: u64,
+    texture: TextureId,
+    width: u32,
+    height: u32,
+    revision: u64,
+    initialized: bool,
+}
+
+struct CanvasMesh {
+    mesh_id: u64,
+    buffer: BufferId,
+    vertex_count: u32,
+    uploaded: bool,
+}
+
+struct CanvasTexture {
+    texture_id: u64,
+    texture: TextureId,
+    source: Arc<SgfxTexture>,
+    uploaded: bool,
+}
+
 /// Persistent resources for one two-image allocation generation.
 pub(crate) struct RenderSession {
     table: Rc<ResourceTable>,
@@ -121,6 +150,12 @@ pub(crate) struct RenderSession {
     sampler: SamplerId,
     buffer_textures: Vec<BufferTexture>,
     glyph_atlas: GlyphAtlas,
+    canvas_pipeline: RenderPipelineId,
+    canvas_texture_pipeline: RenderPipelineId,
+    canvas_dummy_buffer: BufferId,
+    canvas_targets: Vec<CanvasTarget>,
+    canvas_meshes: Vec<CanvasMesh>,
+    canvas_textures: Vec<CanvasTexture>,
     frame_serial: u64,
     width: u32,
     height: u32,
@@ -208,6 +243,18 @@ impl RenderSession {
             cursor_y: 0,
             row_height: 0,
         };
+        let canvas_pipeline = define_canvas_pipeline(&table)?.id();
+        let canvas_texture_pipeline = define_canvas_texture_pipeline(&table)?.id();
+        let canvas_dummy_buffer = table
+            .define_buffer(
+                BufferDesc::new(
+                    u64::from(CANVAS_VERTEX_STRIDE) * 3,
+                    BufferUsage::VERTEX | BufferUsage::COPY_DST,
+                )
+                .map_err(|_| Error::sgfx(Stage::DefineResources))?,
+            )
+            .map_err(|_| Error::sgfx(Stage::DefineResources))?
+            .id();
 
         let mut cache = context
             .create_ir_resources(Rc::clone(&table))
@@ -230,6 +277,12 @@ impl RenderSession {
             sampler,
             buffer_textures: Vec::new(),
             glyph_atlas,
+            canvas_pipeline,
+            canvas_texture_pipeline,
+            canvas_dummy_buffer,
+            canvas_targets: Vec::new(),
+            canvas_meshes: Vec::new(),
+            canvas_textures: Vec::new(),
             frame_serial: 0,
             width,
             height,
@@ -253,6 +306,12 @@ impl RenderSession {
             sampler: _,
             buffer_textures: _,
             glyph_atlas: _,
+            canvas_pipeline: _,
+            canvas_texture_pipeline: _,
+            canvas_dummy_buffer: _,
+            canvas_targets: _,
+            canvas_meshes: _,
+            canvas_textures: _,
             frame_serial: _,
             width: _,
             height: _,
@@ -279,6 +338,7 @@ impl RenderSession {
         }
         let render_bounds = bounding_area(render_areas).ok_or(Error::InvalidFrame)?;
         self.advance_frame_serial();
+        self.prepare_canvases(context, queue, paint, scale_milli)?;
         let lowered = self.lower(paint, scale_milli, render_bounds)?;
         self.submit(context, queue, target, background, render_areas, &lowered)
     }
@@ -535,6 +595,33 @@ impl RenderSession {
                 } => tessellator.push_clip(*rect, *corner_radius)?,
                 PaintCommand::PopClip => tessellator.pop_clip(),
                 PaintCommand::SetOpacity { opacity: _ } => {}
+                PaintCommand::Extension { rect, payload } => {
+                    let Some(canvas) = payload.as_any().downcast_ref::<SgfxCanvasPaint>() else {
+                        continue;
+                    };
+                    let Some(texture) = self.canvas_targets.iter().find(|target| {
+                        target.handle_id == canvas.handle.id() && target.initialized
+                    }) else {
+                        continue;
+                    };
+                    let destination = FloatRect::new(
+                        truncated_scaled(rect.origin.x, scale),
+                        truncated_scaled(rect.origin.y, scale),
+                        truncated_scaled(rect.size.width, scale),
+                        truncated_scaled(rect.size.height, scale),
+                    );
+                    let tex_coords = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+                    if let Some(geometry) =
+                        tessellator.textured_rect(destination, tex_coords)?
+                    {
+                        push_draw(
+                            &mut draws,
+                            geometry,
+                            [1.0, 1.0, 1.0, opacity],
+                            DrawSource::Texture(texture.texture),
+                        )?;
+                    }
+                }
             }
         }
 
@@ -556,6 +643,390 @@ impl RenderSession {
             draws,
             uploads,
         })
+    }
+
+    fn prepare_canvases(
+        &mut self,
+        context: &Context,
+        queue: &Queue,
+        paint: &PaintContext<'_>,
+        scale_milli: u32,
+    ) -> Result<()> {
+        let scale = scale_milli.max(1) as f32 / 1000.0;
+        for command in paint.commands() {
+            let PaintCommand::Extension { rect, payload } = command else {
+                continue;
+            };
+            let Some(canvas) = payload.as_any().downcast_ref::<SgfxCanvasPaint>() else {
+                continue;
+            };
+            let width = physical_canvas_extent(rect.size.width, scale)?;
+            let height = physical_canvas_extent(rect.size.height, scale)?;
+            let target_index = self.canvas_target(canvas.handle.id(), width, height)?;
+            let unchanged = {
+                let target = &self.canvas_targets[target_index];
+                target.initialized && target.revision == canvas.frame.revision
+            };
+            if unchanged {
+                continue;
+            }
+            self.render_canvas(context, queue, target_index, &canvas.frame)?;
+            let target = &mut self.canvas_targets[target_index];
+            target.revision = canvas.frame.revision;
+            target.initialized = true;
+        }
+        Ok(())
+    }
+
+    fn canvas_target(&mut self, handle_id: u64, width: u32, height: u32) -> Result<usize> {
+        if let Some(index) = self.canvas_targets.iter().position(|target| {
+            target.handle_id == handle_id && target.width == width && target.height == height
+        }) {
+            return Ok(index);
+        }
+        if self.canvas_targets.len() >= MAX_CANVASES {
+            return Err(Error::FrameTooComplex);
+        }
+        let extent = Extent2D::new(width, height).map_err(|_| Error::InvalidFrame)?;
+        let texture = self
+            .table
+            .define_texture(
+                TextureDesc::new(
+                    TextureFormat::Bgra8Unorm,
+                    extent,
+                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::SAMPLED,
+                )
+                .map_err(|_| Error::sgfx(Stage::DefineResources))?,
+            )
+            .map_err(|_| Error::sgfx(Stage::DefineResources))?
+            .id();
+        self.canvas_targets.push(CanvasTarget {
+            handle_id,
+            texture,
+            width,
+            height,
+            revision: 0,
+            initialized: false,
+        });
+        Ok(self.canvas_targets.len() - 1)
+    }
+
+    fn canvas_mesh(&mut self, mesh: &SgfxMesh) -> Result<usize> {
+        if let Some(index) = self
+            .canvas_meshes
+            .iter()
+            .position(|cached| cached.mesh_id == mesh.id)
+        {
+            return Ok(index);
+        }
+        if self.canvas_meshes.len() >= MAX_CANVAS_MESHES
+            || mesh.vertices.is_empty()
+            || mesh.vertices.len() % 3 != 0
+        {
+            return Err(Error::FrameTooComplex);
+        }
+        if !mesh.vertices.iter().all(|vertex| {
+            vertex.position.iter().all(|value| value.is_finite())
+                && vertex.color.iter().all(|value| value.is_finite())
+                && vertex.tex_coord.iter().all(|value| value.is_finite())
+        }) {
+            return Err(Error::InvalidFrame);
+        }
+        let vertex_count = u32::try_from(mesh.vertices.len()).map_err(|_| Error::FrameTooComplex)?;
+        let byte_size = u64::from(vertex_count)
+            .checked_mul(u64::from(CANVAS_VERTEX_STRIDE))
+            .ok_or(Error::FrameTooComplex)?;
+        let buffer = self
+            .table
+            .define_buffer(
+                BufferDesc::new(byte_size, BufferUsage::VERTEX | BufferUsage::COPY_DST)
+                    .map_err(|_| Error::sgfx(Stage::DefineResources))?,
+            )
+            .map_err(|_| Error::sgfx(Stage::DefineResources))?
+            .id();
+        self.canvas_meshes.push(CanvasMesh {
+            mesh_id: mesh.id,
+            buffer,
+            vertex_count,
+            uploaded: false,
+        });
+        Ok(self.canvas_meshes.len() - 1)
+    }
+
+    fn canvas_texture(&mut self, texture: &Arc<SgfxTexture>) -> Result<usize> {
+        if let Some(index) = self
+            .canvas_textures
+            .iter()
+            .position(|cached| cached.texture_id == texture.id)
+        {
+            return Ok(index);
+        }
+        let expected_len = usize::try_from(texture.width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(texture.height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(Error::FrameTooComplex)?;
+        if self.canvas_textures.len() >= MAX_CANVAS_TEXTURES
+            || texture.width == 0
+            || texture.height == 0
+            || texture.pixels.len() != expected_len
+        {
+            return Err(Error::InvalidFrame);
+        }
+        let texture_id = define_sampled_texture(
+            &self.table,
+            TextureFormat::Rgba8Unorm,
+            texture.width,
+            texture.height,
+        )?;
+        self.canvas_textures.push(CanvasTexture {
+            texture_id: texture.id,
+            texture: texture_id,
+            source: Arc::clone(texture),
+            uploaded: false,
+        });
+        Ok(self.canvas_textures.len() - 1)
+    }
+
+    fn render_canvas(
+        &mut self,
+        context: &Context,
+        queue: &Queue,
+        target_index: usize,
+        frame: &SgfxCanvasFrame,
+    ) -> Result<()> {
+        if frame.draws.len() > MAX_CANVAS_DRAWS {
+            return Err(Error::FrameTooComplex);
+        }
+        let mut mesh_indices = Vec::new();
+        let mut texture_indices = Vec::new();
+        mesh_indices
+            .try_reserve_exact(frame.draws.len())
+            .map_err(|_| Error::FrameTooComplex)?;
+        texture_indices
+            .try_reserve_exact(frame.draws.len())
+            .map_err(|_| Error::FrameTooComplex)?;
+        for draw in &frame.draws {
+            mesh_indices.push(self.canvas_mesh(&draw.mesh)?);
+            texture_indices.push(
+                draw.texture
+                    .as_ref()
+                    .map(|texture| self.canvas_texture(texture))
+                    .transpose()?,
+            );
+        }
+
+        let table = Rc::clone(&self.table);
+        let target_state = self
+            .canvas_targets
+            .get(target_index)
+            .ok_or(Error::InvalidFrame)?;
+        let target = table
+            .texture_ref(target_state.texture)
+            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+        let area = PixelRect::new(0, 0, target_state.width, target_state.height)
+            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+        let color_pipeline = table
+            .render_pipeline_ref(self.canvas_pipeline)
+            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+        let texture_pipeline = table
+            .render_pipeline_ref(self.canvas_texture_pipeline)
+            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+        let sampler = table
+            .sampler_ref(self.sampler)
+            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+        let mut uploads: Vec<(usize, Vec<u8>)> = Vec::new();
+        for (draw, mesh_index) in frame.draws.iter().zip(mesh_indices.iter().copied()) {
+            let cached = &self.canvas_meshes[mesh_index];
+            if cached.uploaded || uploads.iter().any(|(index, _)| *index == mesh_index) {
+                continue;
+            }
+            let bytes = encode_canvas_vertices(&draw.mesh)?;
+            uploads.push((mesh_index, bytes));
+        }
+        let mut texture_uploads = Vec::new();
+        for texture_index in texture_indices.iter().flatten().copied() {
+            if self.canvas_textures[texture_index].uploaded
+                || texture_uploads.contains(&texture_index)
+            {
+                continue;
+            }
+            texture_uploads.push(texture_index);
+        }
+        let clear = ir_color(ui_color(frame.clear_color, 1.0)?)?;
+        if frame.draws.is_empty() {
+            let mut encoder = CommandEncoder::new(&table);
+            let descriptor = RenderPassDesc::new(
+                &table,
+                target,
+                area,
+                LoadOp::Clear(clear),
+                StoreOp::Store,
+            )
+            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            let mut pass = encoder
+                .begin_render_pass(descriptor)
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            pass.set_pipeline(color_pipeline)
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            let dummy = table
+                .buffer_ref(self.canvas_dummy_buffer)
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            pass.set_vertex_buffer(dummy, 0)
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            pass.set_uniforms(DrawUniforms::new(
+                Transform::identity(),
+                Color::rgba(0.0, 0.0, 0.0, 0.0).map_err(|_| Error::InvalidFrame)?,
+            ))
+            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            pass.draw(3, 0)
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            pass.end()
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            let commands = encoder
+                .finish()
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            queue
+                .submit_ir(context, &mut self.cache, &commands)
+                .map_err(|_| Error::sgfx(Stage::SubmitCommands))?;
+        } else {
+            let mut draw_index = 0usize;
+            let mut draw_offset = 0u32;
+            let mut first_submission = true;
+            while draw_index < frame.draws.len() {
+                let mut encoder = CommandEncoder::new(&table);
+                if first_submission {
+                    for (mesh_index, bytes) in &uploads {
+                        let cached = &self.canvas_meshes[*mesh_index];
+                        let buffer = table
+                            .buffer_ref(cached.buffer)
+                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                        encoder
+                            .write_buffer(buffer, 0, bytes)
+                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                    }
+                    for texture_index in &texture_uploads {
+                        let cached = &self.canvas_textures[*texture_index];
+                        let texture = table
+                            .texture_ref(cached.texture)
+                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                        let destination = PixelRect::new(
+                            0,
+                            0,
+                            cached.source.width,
+                            cached.source.height,
+                        )
+                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                        let bytes_per_row = cached
+                            .source
+                            .width
+                            .checked_mul(4)
+                            .ok_or(Error::FrameTooComplex)?;
+                        let write =
+                            TextureWrite::new(destination, bytes_per_row, &cached.source.pixels)
+                                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                        encoder
+                            .write_texture(texture, write)
+                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                    }
+                }
+                let load = if first_submission {
+                    LoadOp::Clear(clear)
+                } else {
+                    LoadOp::Load
+                };
+                let descriptor =
+                    RenderPassDesc::new(&table, target, area, load, StoreOp::Store)
+                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                let mut pass = encoder
+                    .begin_render_pass(descriptor)
+                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                let mut pass_vertices = 0u32;
+                let mut estimated_bytes = PASS_FIXED_COMMAND_BYTES;
+
+                while draw_index < frame.draws.len() && pass_vertices < MAX_PASS_VERTICES {
+                    let draw = &frame.draws[draw_index];
+                    let mesh_index = mesh_indices[draw_index];
+                    let texture_index = texture_indices[draw_index];
+                    let cached = &self.canvas_meshes[mesh_index];
+                    let remaining = cached.vertex_count.saturating_sub(draw_offset);
+                    let draw_bytes = if texture_index.is_some() {
+                        TEXTURED_DRAW_COMMAND_BYTES
+                    } else {
+                        SOLID_DRAW_COMMAND_BYTES
+                    };
+                    let available_bytes = MAX_OPAQUE_COMMAND_BYTES
+                        .saturating_sub(estimated_bytes)
+                        .saturating_sub(draw_bytes);
+                    let available_vertices = (MAX_PASS_VERTICES - pass_vertices)
+                        .min(available_bytes / CANONICAL_VERTEX_BYTES);
+                    let chunk = remaining.min(available_vertices) / 3 * 3;
+                    if chunk == 0 {
+                        break;
+                    }
+
+                    let buffer = table
+                        .buffer_ref(cached.buffer)
+                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                    let transform = Transform::from_columns(draw.transform)
+                        .map_err(|_| Error::InvalidFrame)?;
+                    let tint = ir_color(ui_color(draw.tint, 1.0)?)?;
+                    if let Some(texture_index) = texture_index {
+                        let texture = table
+                            .texture_ref(self.canvas_textures[texture_index].texture)
+                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                        pass.set_pipeline(texture_pipeline)
+                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                        pass.set_texture(texture)
+                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                        pass.set_sampler(sampler)
+                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                    } else {
+                        pass.set_pipeline(color_pipeline)
+                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                    }
+                    pass.set_vertex_buffer(buffer, 0)
+                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                    pass.set_uniforms(DrawUniforms::new(transform, tint))
+                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                    pass.draw(chunk, draw_offset)
+                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+
+                    pass_vertices = pass_vertices.saturating_add(chunk);
+                    estimated_bytes = estimated_bytes
+                        .saturating_add(draw_bytes)
+                        .saturating_add(chunk.saturating_mul(CANONICAL_VERTEX_BYTES));
+                    draw_offset = draw_offset.saturating_add(chunk);
+                    if draw_offset == cached.vertex_count {
+                        draw_index += 1;
+                        draw_offset = 0;
+                    }
+                }
+                if pass_vertices == 0 {
+                    return Err(Error::FrameTooComplex);
+                }
+                pass.end()
+                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                let commands = encoder
+                    .finish()
+                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                queue
+                    .submit_ir(context, &mut self.cache, &commands)
+                    .map_err(|_| Error::sgfx(Stage::SubmitCommands))?;
+                first_submission = false;
+            }
+        }
+        for (mesh_index, _) in &uploads {
+            self.canvas_meshes[*mesh_index].uploaded = true;
+        }
+        for texture_index in texture_uploads {
+            self.canvas_textures[texture_index].uploaded = true;
+        }
+        Ok(())
     }
 
     fn lower_buffer<'frame>(
@@ -994,6 +1465,56 @@ fn define_pipeline(
         .map_err(|_| Error::sgfx(Stage::DefineResources))
 }
 
+fn define_canvas_pipeline(
+    table: &ResourceTable,
+) -> Result<sgfx::ir::RenderPipelineRef<'_>> {
+    let layout = VertexBufferLayout::new(
+        CANVAS_VERTEX_STRIDE,
+        alloc::vec![
+            VertexAttribute::new(0, VertexFormat::Float32x4, 0),
+            VertexAttribute::new(1, VertexFormat::Float32x4, 16),
+        ],
+    )
+    .map_err(|_| Error::sgfx(Stage::DefineResources))?;
+    let descriptor = RenderPipelineDesc::new(
+        TextureFormat::Bgra8Unorm,
+        PrimitiveTopology::TriangleList,
+        layout,
+        FragmentProgram::VertexColor,
+        BlendState::SOURCE_OVER_STRAIGHT_ALPHA,
+        RasterState::new(sgfx::ir::CullMode::Back, FrontFace::CounterClockwise),
+    )
+    .map_err(|_| Error::sgfx(Stage::DefineResources))?;
+    table
+        .define_render_pipeline(descriptor)
+        .map_err(|_| Error::sgfx(Stage::DefineResources))
+}
+
+fn define_canvas_texture_pipeline(
+    table: &ResourceTable,
+) -> Result<sgfx::ir::RenderPipelineRef<'_>> {
+    let layout = VertexBufferLayout::new(
+        CANVAS_VERTEX_STRIDE,
+        alloc::vec![
+            VertexAttribute::new(0, VertexFormat::Float32x4, 0),
+            VertexAttribute::new(1, VertexFormat::Float32x2, 32),
+        ],
+    )
+    .map_err(|_| Error::sgfx(Stage::DefineResources))?;
+    let descriptor = RenderPipelineDesc::new(
+        TextureFormat::Bgra8Unorm,
+        PrimitiveTopology::TriangleList,
+        layout,
+        FragmentProgram::Texture(TextureSampleMode::Rgba),
+        BlendState::SOURCE_OVER_STRAIGHT_ALPHA,
+        RasterState::new(sgfx::ir::CullMode::Back, FrontFace::CounterClockwise),
+    )
+    .map_err(|_| Error::sgfx(Stage::DefineResources))?;
+    table
+        .define_render_pipeline(descriptor)
+        .map_err(|_| Error::sgfx(Stage::DefineResources))
+}
+
 fn define_sampled_texture(
     table: &ResourceTable,
     format: TextureFormat,
@@ -1078,6 +1599,41 @@ fn encode_vertices(vertices: &[Vertex]) -> Result<Vec<u8>> {
         bytes.extend_from_slice(&vertex.tex_coord[1].to_le_bytes());
     }
     Ok(bytes)
+}
+
+fn encode_canvas_vertices(mesh: &SgfxMesh) -> Result<Vec<u8>> {
+    let capacity = mesh
+        .vertices
+        .len()
+        .checked_mul(CANVAS_VERTEX_STRIDE as usize)
+        .ok_or(Error::FrameTooComplex)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|_| Error::FrameTooComplex)?;
+    for vertex in mesh.vertices.iter() {
+        for component in vertex.position {
+            bytes.extend_from_slice(&component.to_le_bytes());
+        }
+        for component in vertex.color {
+            bytes.extend_from_slice(&component.clamp(0.0, 1.0).to_le_bytes());
+        }
+        for component in vertex.tex_coord {
+            bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
+fn physical_canvas_extent(logical: f32, scale: f32) -> Result<u32> {
+    if !logical.is_finite() || logical <= 0.0 || !scale.is_finite() || scale <= 0.0 {
+        return Err(Error::InvalidFrame);
+    }
+    let physical = libm::ceilf(logical * scale);
+    if !physical.is_finite() || physical < 1.0 || physical > u32::MAX as f32 {
+        return Err(Error::InvalidFrame);
+    }
+    Ok(physical as u32)
 }
 
 fn ui_color(color: UiColor, opacity: f32) -> Result<[f32; 4]> {

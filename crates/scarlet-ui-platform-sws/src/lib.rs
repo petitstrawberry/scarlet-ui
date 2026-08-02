@@ -29,6 +29,10 @@ use scarlet_ui_renderer_sgfx::{
     SgfxBufferIdentity as RendererSgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxImage,
     SgfxPaintBackend, SgfxSinkError, SgfxSinkResult, SgfxSinkStatus,
 };
+pub use scarlet_ui_renderer_sgfx::{
+    SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
+    SgfxCanvasVertex, SgfxMesh, SgfxTexture,
+};
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code, rel_code};
 use sws_client as sws;
 

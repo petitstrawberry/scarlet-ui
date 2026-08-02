@@ -1731,6 +1731,12 @@ impl ElementRenderObject for WindowRenderObject {
         let height = libm::ceilf(self.size.height.max(0.0));
         let rect = Rect::from_xywh(origin.x, origin.y, width, height);
         ctx.fill_rect(rect, self.background_color);
+        true
+    }
+
+    fn paint_overlay(&self, ctx: &mut PaintContext<'_>, origin: Point) -> bool {
+        let width = libm::ceilf(self.size.width.max(0.0));
+        let height = libm::ceilf(self.size.height.max(0.0));
         if self.decorated && width > 0.0 && height > 0.0 {
             let border_color = Color::rgb(100u8, 100u8, 105u8);
             ctx.fill_rect(
@@ -1749,8 +1755,18 @@ impl ElementRenderObject for WindowRenderObject {
                 Rect::from_xywh(origin.x + width - 1.0, origin.y, 1.0, height),
                 border_color,
             );
+            return true;
         }
-        true
+        false
+    }
+
+    fn clip_bounds(&self, origin: Point) -> Option<(Rect, f32)> {
+        let width = libm::ceilf(self.size.width.max(0.0));
+        let height = libm::ceilf(self.size.height.max(0.0));
+        Some((
+            Rect::from_xywh(origin.x, origin.y, width, height),
+            WINDOW_CORNER_RADIUS as f32,
+        ))
     }
 
     fn update(&mut self, _new_view: &dyn View) -> UpdateResult {

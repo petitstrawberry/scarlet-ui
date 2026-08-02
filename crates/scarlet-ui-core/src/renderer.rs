@@ -1,6 +1,8 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::any::Any;
+use core::fmt::Debug;
 
 use crate::buffer::Buffer;
 use crate::color::Color;
@@ -79,6 +81,30 @@ pub fn path_rounded_rect(rect: Rect, corner_radius: f32) -> Path {
     pts
 }
 
+/// Type-erased renderer-specific paint payload.
+///
+/// Platform-independent views can place an extension in the normal paint
+/// order without making ScarletUI core depend on a particular renderer. A
+/// backend that recognizes the concrete payload may render it; other backends
+/// leave the pixels produced by preceding paint commands unchanged.
+pub trait PaintExtension: Any + Debug {
+    /// Return this payload as [`Any`] for backend downcasting.
+    ///
+    /// # Returns
+    ///
+    /// The type-erased payload.
+    fn as_any(&self) -> &dyn Any;
+}
+
+impl<T> PaintExtension for T
+where
+    T: Any + Debug,
+{
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PaintCommand {
     FillPath {
@@ -124,6 +150,13 @@ pub enum PaintCommand {
     PopClip,
     SetOpacity {
         opacity: f32,
+    },
+    /// Renderer-specific content placed at this point in paint order.
+    Extension {
+        /// Logical destination rectangle.
+        rect: Rect,
+        /// Type-erased backend payload.
+        payload: Arc<dyn PaintExtension>,
     },
 }
 
@@ -361,6 +394,17 @@ impl<'a> PaintContext<'a> {
 
     pub fn set_opacity(&mut self, opacity: f32) {
         self.commands.push(PaintCommand::SetOpacity { opacity });
+    }
+
+    /// Insert renderer-specific content into the paint list.
+    ///
+    /// # Arguments
+    ///
+    /// * `rect` - Logical destination rectangle occupied by the extension.
+    /// * `payload` - Backend payload shared with the synchronous render pass.
+    pub fn draw_extension(&mut self, rect: Rect, payload: Arc<dyn PaintExtension>) {
+        self.commands
+            .push(PaintCommand::Extension { rect, payload });
     }
 
     pub fn commands(&self) -> &[PaintCommand] {
@@ -1215,6 +1259,10 @@ impl CpuPaintRenderer {
                     self.pop_clip(damage_rects);
                 }
                 PaintCommand::SetOpacity { opacity: _ } => {}
+                PaintCommand::Extension {
+                    rect: _,
+                    payload: _,
+                } => {}
             }
         }
 
