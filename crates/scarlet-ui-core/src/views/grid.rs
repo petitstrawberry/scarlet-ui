@@ -5,12 +5,14 @@
 //! It is suitable for file managers, launchers, galleries, and media views.
 
 use crate::element::{
-    ComponentElement, Element, ElementRenderObject, LayoutConstraints, RenderElement,
+    ComponentElement, Element, ElementId, ElementRenderObject, LayoutConstraints, RenderElement,
+    UpdateResult,
 };
-use crate::geometry::{Point, Size};
+use crate::geometry::{Point, Rect, Size};
+use crate::pipeline::MountContext;
 use crate::state::{Listenable, State};
 use crate::view::View;
-use crate::views::{Frame, LazyVStack, ScrollView, ScrollbarVisibility, Spacer};
+use crate::views::{ScrollView, ScrollbarVisibility, Spacer};
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -22,7 +24,9 @@ type CellBuilder<T> = Rc<dyn Fn(usize, T, Option<usize>) -> Box<dyn View>>;
 ///
 /// The grid creates fixed-size rows and delegates each cell's content to the
 /// caller. The selected index is optional so the same component can be used as
-/// a selectable file view or as a plain icon gallery.
+/// a selectable file view or as a plain icon gallery. With
+/// [`GridView::minimum_cell_width`], the configured column count is treated as
+/// a maximum and the grid wraps items when the available width is smaller.
 #[derive(Clone)]
 pub struct GridView<T: Clone + 'static> {
     items: State<Vec<T>>,
@@ -30,6 +34,7 @@ pub struct GridView<T: Clone + 'static> {
     columns: usize,
     row_height: f32,
     spacing: f32,
+    minimum_cell_width: Option<f32>,
     cell_builder: CellBuilder<T>,
 }
 
@@ -40,7 +45,7 @@ impl<T: Clone + 'static> GridView<T> {
     ///
     /// * `items` - Reactive collection displayed by the grid.
     /// * `selected` - Reactive optional selected item index.
-    /// * `columns` - Number of cells in each row.
+    /// * `columns` - Maximum number of cells in each row.
     /// * `row_height` - Logical height allocated to each row.
     /// * `cell_builder` - Closure producing a cell view.
     ///
@@ -63,6 +68,7 @@ impl<T: Clone + 'static> GridView<T> {
             columns: columns.max(1),
             row_height: row_height.max(1.0),
             spacing: 12.0,
+            minimum_cell_width: None,
             cell_builder: Rc::new(move |index, item, selected| {
                 Box::new(cell_builder(index, item, selected))
             }),
@@ -80,6 +86,24 @@ impl<T: Clone + 'static> GridView<T> {
     /// The updated grid view.
     pub fn spacing(mut self, spacing: f32) -> Self {
         self.spacing = spacing.max(0.0);
+        self
+    }
+
+    /// Set the minimum logical width of a grid cell.
+    ///
+    /// When configured, the grid keeps this width and reduces the number of
+    /// columns as the available width shrinks. Items that no longer fit are
+    /// placed in the next row instead of being squeezed into narrower cells.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Minimum logical width of each cell.
+    ///
+    /// # Returns
+    ///
+    /// The updated grid view.
+    pub fn minimum_cell_width(mut self, width: f32) -> Self {
+        self.minimum_cell_width = width.is_finite().then(|| width.max(1.0));
         self
     }
 
@@ -136,14 +160,21 @@ struct GridRow {
     cells: Vec<AnyView>,
     row_height: f32,
     spacing: f32,
+    minimum_cell_width: Option<f32>,
 }
 
 impl GridRow {
-    fn new(cells: Vec<AnyView>, row_height: f32, spacing: f32) -> Self {
+    fn new(
+        cells: Vec<AnyView>,
+        row_height: f32,
+        spacing: f32,
+        minimum_cell_width: Option<f32>,
+    ) -> Self {
         Self {
             cells,
             row_height,
             spacing,
+            minimum_cell_width,
         }
     }
 }
@@ -157,7 +188,12 @@ impl View for GridRow {
             .collect();
         Box::new(RenderElement::with_children(
             self.clone(),
-            GridRowRenderObject::new(self.cells.len(), self.row_height, self.spacing),
+            GridRowRenderObject::new(
+                self.cells.len(),
+                self.row_height,
+                self.spacing,
+                self.minimum_cell_width,
+            ),
             children,
         ))
     }
@@ -179,15 +215,22 @@ struct GridRowRenderObject {
     cell_count: usize,
     row_height: f32,
     spacing: f32,
+    minimum_cell_width: Option<f32>,
     size: Size,
 }
 
 impl GridRowRenderObject {
-    fn new(cell_count: usize, row_height: f32, spacing: f32) -> Self {
+    fn new(
+        cell_count: usize,
+        row_height: f32,
+        spacing: f32,
+        minimum_cell_width: Option<f32>,
+    ) -> Self {
         Self {
             cell_count,
             row_height,
             spacing,
+            minimum_cell_width,
             size: Size::ZERO,
         }
     }
@@ -215,7 +258,11 @@ impl ElementRenderObject for GridRowRenderObject {
         let size = self.layout(constraints);
         let count = self.cell_count.max(children.len()).max(1);
         let total_spacing = self.spacing * count.saturating_sub(1) as f32;
-        let cell_width = ((size.width - total_spacing).max(0.0) / count as f32).max(0.0);
+        let available_width = (size.width - total_spacing).max(0.0);
+        let cell_width = match self.minimum_cell_width {
+            Some(minimum) => (available_width / count as f32).max(minimum),
+            None => (available_width / count as f32).max(0.0),
+        };
 
         for (index, child) in children.iter_mut().enumerate() {
             child.layout(LayoutConstraints::tight(cell_width, size.height));
@@ -239,34 +286,312 @@ impl ElementRenderObject for GridRowRenderObject {
     }
 }
 
-fn build_grid_child<T: Clone + 'static>(view: &GridView<T>) -> Box<dyn Element> {
-    let items = view.items.clone();
-    let selected = view.selected.clone();
-    let cell_builder = view.cell_builder.clone();
-    let columns = view.columns;
-    let row_height = view.row_height;
-    let spacing = view.spacing;
-    let item_count = items.get().len();
-    let row_count = item_count.div_ceil(columns);
+const GRID_CACHE_EXTENT: f32 = 512.0;
 
-    let rows = LazyVStack::new(row_count, row_height, move |row_index| {
+#[derive(Clone)]
+struct GridContentView<T: Clone + 'static> {
+    grid: GridView<T>,
+}
+
+impl<T: Clone + 'static> View for GridContentView<T> {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(GridContentElement::new(self.grid.clone()))
+    }
+
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        self.grid.listenables()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+struct GridContentElement<T: Clone + 'static> {
+    id: ElementId,
+    view: GridView<T>,
+    children: Vec<Box<dyn Element>>,
+    child_indices: Vec<usize>,
+    position: Point,
+    size: Size,
+    current_columns: usize,
+    materialized_columns: usize,
+    viewport_hint: Option<Rect>,
+    last_constraints: Option<LayoutConstraints>,
+    mount_context: Option<MountContext>,
+}
+
+impl<T: Clone + 'static> GridContentElement<T> {
+    fn new(view: GridView<T>) -> Self {
+        Self {
+            id: ElementId::generate(),
+            view,
+            children: Vec::new(),
+            child_indices: Vec::new(),
+            position: Point::ZERO,
+            size: Size::ZERO,
+            current_columns: 0,
+            materialized_columns: 0,
+            viewport_hint: None,
+            last_constraints: None,
+            mount_context: None,
+        }
+    }
+
+    fn width_from_constraints(constraints: LayoutConstraints) -> f32 {
+        if constraints.max_width.is_finite() {
+            constraints.max_width.max(constraints.min_width)
+        } else {
+            constraints.min_width.max(0.0)
+        }
+    }
+
+    fn columns_for_width(&self, width: f32) -> usize {
+        let maximum = self.view.columns.max(1);
+        let Some(minimum) = self.view.minimum_cell_width else {
+            return maximum;
+        };
+        if !width.is_finite() {
+            return maximum;
+        }
+
+        let stride = minimum + self.view.spacing;
+        if !stride.is_finite() || stride <= 0.0 {
+            return 1;
+        }
+
+        (libm::floorf((width + self.view.spacing) / stride) as usize).clamp(1, maximum)
+    }
+
+    fn row_count(&self, columns: usize) -> usize {
+        self.view.items.get().len().div_ceil(columns.max(1))
+    }
+
+    fn build_row(&self, row_index: usize, columns: usize) -> Box<dyn Element> {
+        let items = self.view.items.get();
+        let selected = self.view.selected.get();
         let mut cells = Vec::with_capacity(columns);
         for column in 0..columns {
             let index = row_index * columns + column;
-            if let Some(item) = items.get().get(index).cloned() {
-                cells.push(AnyView::new((cell_builder)(index, item, selected.get())));
+            if let Some(item) = items.get(index).cloned() {
+                cells.push(AnyView::new((self.view.cell_builder)(
+                    index, item, selected,
+                )));
             } else {
                 cells.push(AnyView::new(Box::new(Spacer::new())));
             }
         }
-        GridRow::new(cells, row_height, spacing)
-    });
+        GridRow::new(
+            cells,
+            self.view.row_height,
+            self.view.spacing,
+            self.view.minimum_cell_width,
+        )
+        .create_element()
+    }
 
-    Frame::width(
-        ScrollView::new(rows).scrollbar_visibility(ScrollbarVisibility::Automatic),
-        f32::INFINITY,
-    )
-    .create_element()
+    fn visible_range(&self, row_count: usize) -> core::ops::Range<usize> {
+        if row_count == 0 {
+            return 0..0;
+        }
+
+        let viewport = self.viewport_hint.unwrap_or_else(|| {
+            Rect::from_xywh(
+                0.0,
+                0.0,
+                self.size.width,
+                GRID_CACHE_EXTENT.max(self.view.row_height),
+            )
+        });
+        let row_height = self.view.row_height.max(1.0);
+        let start_y = (viewport.top() - GRID_CACHE_EXTENT).max(0.0);
+        let end_y = (viewport.bottom() + GRID_CACHE_EXTENT).max(start_y);
+        let start = (libm::floorf(start_y / row_height) as usize).min(row_count);
+        let end = (libm::ceilf(end_y / row_height) as usize + 1).min(row_count);
+        start..end.max(start)
+    }
+
+    fn clear_materialized_children(&mut self) {
+        for mut child in self.children.drain(..) {
+            child.unmount();
+        }
+        self.child_indices.clear();
+        self.materialized_columns = 0;
+    }
+
+    fn materialize_visible_children(&mut self) -> bool {
+        let columns = self.current_columns.max(1);
+        let range = self.visible_range(self.row_count(columns));
+        let desired_indices: Vec<usize> = range.clone().collect();
+        if self.materialized_columns == columns && self.child_indices == desired_indices {
+            return false;
+        }
+
+        let rebuild_all = self.materialized_columns != columns;
+        let mut old_children = core::mem::take(&mut self.children);
+        let mut old_indices = core::mem::take(&mut self.child_indices);
+        if rebuild_all {
+            for mut child in old_children.drain(..) {
+                child.unmount();
+            }
+            old_indices.clear();
+        }
+
+        let mut new_children = Vec::with_capacity(desired_indices.len());
+        let mut new_indices = Vec::with_capacity(desired_indices.len());
+        for index in desired_indices {
+            if let Some(position) = old_indices.iter().position(|old| *old == index) {
+                new_children.push(old_children.remove(position));
+                old_indices.remove(position);
+            } else {
+                let mut child = self.build_row(index, columns);
+                if let Some(context) = self.mount_context {
+                    child.mount(&context);
+                }
+                new_children.push(child);
+            }
+            new_indices.push(index);
+        }
+
+        for mut child in old_children {
+            child.unmount();
+        }
+        self.children = new_children;
+        self.child_indices = new_indices;
+        self.materialized_columns = columns;
+        true
+    }
+
+    fn layout_visible_children(&mut self) {
+        for (child, row_index) in self
+            .children
+            .iter_mut()
+            .zip(self.child_indices.iter().copied())
+        {
+            child.layout(LayoutConstraints::tight(
+                self.size.width,
+                self.view.row_height,
+            ));
+            child.set_position(Point::new(0.0, row_index as f32 * self.view.row_height));
+        }
+    }
+}
+
+impl<T: Clone + 'static> Element for GridContentElement<T> {
+    fn id(&self) -> ElementId {
+        self.id
+    }
+
+    fn type_name(&self) -> &str {
+        "GridContentElement"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn children(&self) -> &[Box<dyn Element>] {
+        &self.children
+    }
+
+    fn children_mut(&mut self) -> &mut [Box<dyn Element>] {
+        &mut self.children
+    }
+
+    fn update(&mut self, new_view: &dyn View) -> UpdateResult {
+        let Some(new_view) = new_view.as_any().downcast_ref::<GridContentView<T>>() else {
+            return UpdateResult::Replaced;
+        };
+        self.clear_materialized_children();
+        self.view = new_view.grid.clone();
+        if let Some(constraints) = self.last_constraints {
+            self.layout(constraints);
+        }
+        UpdateResult::Updated
+    }
+
+    fn rebuild(&mut self) -> UpdateResult {
+        UpdateResult::NoChange
+    }
+
+    fn mount(&mut self, context: &MountContext) {
+        self.mount_context = Some(*context);
+        for child in &mut self.children {
+            child.mount(context);
+        }
+    }
+
+    fn unmount(&mut self) {
+        for child in &mut self.children {
+            child.unmount();
+        }
+        self.mount_context = None;
+    }
+
+    fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        self.last_constraints = Some(constraints);
+        let width = Self::width_from_constraints(constraints);
+        self.current_columns = self.columns_for_width(width);
+        self.size = Size::new(
+            width,
+            self.row_count(self.current_columns) as f32 * self.view.row_height,
+        );
+        self.materialize_visible_children();
+        self.layout_visible_children();
+        self.size
+    }
+
+    fn last_layout_constraints(&self) -> Option<LayoutConstraints> {
+        self.last_constraints
+    }
+
+    fn set_last_layout_constraints(&mut self, constraints: LayoutConstraints) {
+        self.last_constraints = Some(constraints);
+    }
+
+    fn position(&self) -> Point {
+        self.position
+    }
+
+    fn set_position(&mut self, position: Point) {
+        self.position = position;
+    }
+
+    fn set_viewport_hint(&mut self, viewport: Rect) -> bool {
+        if self.viewport_hint == Some(viewport) {
+            return false;
+        }
+        self.viewport_hint = Some(viewport);
+        let changed = self.materialize_visible_children();
+        if changed {
+            self.layout_visible_children();
+        }
+        changed
+    }
+
+    fn bounds(&self) -> Rect {
+        Rect::new(self.position, self.size)
+    }
+
+    fn hit_test(&self, point: Point) -> bool {
+        self.bounds().contains(point)
+    }
+
+    fn clear_buffers(&mut self) {
+        for child in &mut self.children {
+            child.clear_buffers();
+        }
+    }
+}
+
+fn build_grid_child<T: Clone + 'static>(view: &GridView<T>) -> Box<dyn Element> {
+    ScrollView::new(GridContentView { grid: view.clone() })
+        .scrollbar_visibility(ScrollbarVisibility::Automatic)
+        .create_element()
 }
 
 impl<T: Clone + 'static> View for GridView<T> {
@@ -321,5 +646,151 @@ mod tests {
             .and_then(|(buffer, _)| buffer.get_pixel(170, 50));
 
         assert_eq!(pixel, Some(colors[1].to_bgra()));
+    }
+
+    #[test]
+    fn wraps_items_into_multiple_rows() {
+        let items = State::new(StateId::new(20_015), (0usize..10).collect::<Vec<_>>());
+        let selected = State::new(StateId::new(20_016), None);
+        let colors = [
+            Color::rgb(220, 40, 40),
+            Color::rgb(40, 180, 80),
+            Color::rgb(40, 80, 220),
+            Color::rgb(220, 180, 40),
+            Color::rgb(180, 40, 220),
+            Color::rgb(220, 100, 40),
+            Color::rgb(40, 180, 180),
+            Color::rgb(100, 40, 220),
+            Color::rgb(180, 180, 40),
+            Color::rgb(40, 120, 180),
+        ];
+        let grid = GridView::new(items, selected, 5, 120.0, move |index, _, _| {
+            crate::views::Rectangle::new()
+                .fill(colors[index])
+                .frame(f32::INFINITY, 100.0)
+        })
+        .spacing(10.0);
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(grid.create_element());
+        pipeline.layout_initial();
+        let buffer = pipeline
+            .render_with_damage()
+            .map(|(buffer, _)| buffer)
+            .expect("multi-row grid should render");
+
+        for (index, color) in colors.into_iter().enumerate() {
+            let row = (index / 5) as u32;
+            let column = (index % 5) as u32;
+            let cell_width = (800u32 - 4 * 10) / 5;
+            let left = column * (cell_width + 10);
+            let right = left + cell_width;
+            let top = row * 120u32;
+            let bottom = top + 100;
+            assert!(
+                (left..right).any(|x| {
+                    (top..bottom).any(|y| buffer.get_pixel(x, y) == Some(color.to_bgra()))
+                }),
+                "grid item {index} should be painted in row {row}, column {column}"
+            );
+        }
+    }
+
+    #[test]
+    fn wraps_items_into_multiple_rows_after_state_update() {
+        let items = State::new(StateId::new(20_017), Vec::<usize>::new());
+        let selected = State::new(StateId::new(20_018), None);
+        let colors = [
+            Color::rgb(220, 40, 40),
+            Color::rgb(40, 180, 80),
+            Color::rgb(40, 80, 220),
+            Color::rgb(220, 180, 40),
+            Color::rgb(180, 40, 220),
+            Color::rgb(220, 100, 40),
+            Color::rgb(40, 180, 180),
+            Color::rgb(100, 40, 220),
+            Color::rgb(180, 180, 40),
+            Color::rgb(40, 120, 180),
+        ];
+        let grid = GridView::new(items.clone(), selected, 5, 120.0, move |index, _, _| {
+            crate::views::Rectangle::new()
+                .fill(colors[index])
+                .frame(f32::INFINITY, 100.0)
+        })
+        .spacing(10.0);
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(grid.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        items.set((0usize..10).collect::<Vec<_>>());
+        let buffer = pipeline
+            .render_with_damage()
+            .map(|(buffer, _)| buffer)
+            .expect("updated multi-row grid should render");
+
+        let cell_width = (buffer.width() - 4 * 10) / 5;
+        for (index, color) in colors.into_iter().enumerate() {
+            let row = (index / 5) as u32;
+            let column = (index % 5) as u32;
+            let left = column * (cell_width + 10);
+            let right = left + cell_width;
+            let top = row * 120;
+            let bottom = top + 100;
+            assert!(
+                (left..right).any(|x| {
+                    (top..bottom).any(|y| buffer.get_pixel(x, y) == Some(color.to_bgra()))
+                }),
+                "updated grid item {index} should be painted in row {row}, column {column}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_minimum_cell_width_and_wraps_on_resize() {
+        let items = State::new(StateId::new(20_019), (0usize..6).collect::<Vec<_>>());
+        let selected = State::new(StateId::new(20_020), None);
+        let colors = [
+            Color::rgb(220, 40, 40),
+            Color::rgb(40, 180, 80),
+            Color::rgb(40, 80, 220),
+            Color::rgb(220, 180, 40),
+            Color::rgb(180, 40, 220),
+            Color::rgb(220, 100, 40),
+        ];
+        let grid = GridView::new(items, selected, 5, 120.0, move |index, _, _| {
+            crate::views::Rectangle::new()
+                .fill(colors[index])
+                .frame(f32::INFINITY, 100.0)
+        })
+        .spacing(10.0)
+        .minimum_cell_width(150.0);
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(grid.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        pipeline.resize(crate::geometry::Size::new(500.0, 400.0));
+        let buffer = pipeline
+            .render_with_damage()
+            .map(|(buffer, _)| buffer)
+            .expect("resized grid should render");
+
+        for (index, color) in colors.into_iter().enumerate() {
+            let row = (index / 3) as u32;
+            let column = (index % 3) as u32;
+            let left = column * 160;
+            let right = left + 150;
+            let top = row * 120;
+            let bottom = top + 100;
+            assert!(
+                (left..right).any(|x| {
+                    (top..bottom).any(|y| buffer.get_pixel(x, y) == Some(color.to_bgra()))
+                }),
+                "resized grid item {index} should remain at least 150px wide and wrap to row {row}"
+            );
+        }
     }
 }

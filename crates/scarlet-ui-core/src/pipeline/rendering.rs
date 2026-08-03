@@ -2390,13 +2390,14 @@ impl Default for RenderingPipeline {
 mod tests {
     use super::*;
     use crate::event::{Event, MouseButton, MouseEvent, ScrollSource, WheelPhase};
+    use crate::state::{State, StateId};
     use crate::testing::alloc_counter::{
         allocation_snapshot, measure_allocations, reset_allocation_counts,
     };
     use crate::view::{View, ViewExt};
     use crate::views::{
-        LazyVStack, NavigationLink, NavigationView, Rectangle, ScrollView, ScrollbarVisibility,
-        Text,
+        Either, GridView, LazyVStack, NavigationLink, NavigationView, Rectangle, ScrollView,
+        ScrollbarVisibility, Text, Window,
     };
 
     /// Phase 1 warm-scroll allocation baseline measured on this machine.
@@ -2776,6 +2777,77 @@ mod tests {
             .expect("content pixel should be available after scroll");
         assert_eq!(after_scroll, odd_color.to_bgra());
         assert_ne!(before_scroll, after_scroll);
+    }
+
+    #[test]
+    fn window_component_replacement_relayouts_new_grid_content() {
+        let show_grid = State::new(StateId::new(24_001), false);
+        let page_state = show_grid.clone();
+        let colors = [
+            crate::color::Color::rgb(220, 40, 40),
+            crate::color::Color::rgb(40, 180, 80),
+            crate::color::Color::rgb(40, 80, 220),
+            crate::color::Color::rgb(220, 180, 40),
+            crate::color::Color::rgb(180, 40, 220),
+            crate::color::Color::rgb(220, 100, 40),
+            crate::color::Color::rgb(40, 180, 180),
+            crate::color::Color::rgb(100, 40, 220),
+            crate::color::Color::rgb(180, 180, 40),
+            crate::color::Color::rgb(40, 120, 180),
+        ];
+        let window = Window::new(
+            "Files",
+            NavigationView::new((NavigationLink::new("Files", move || {
+                if page_state.get() {
+                    let items = State::new(StateId::new(24_002), (0usize..10).collect());
+                    let selected = State::new(StateId::new(24_003), None);
+                    Either::B(
+                        GridView::new(items, selected, 5, 120.0, move |index, _, _| {
+                            Rectangle::new()
+                                .fill(colors[index])
+                                .frame(f32::INFINITY, 100.0)
+                        })
+                        .spacing(10.0),
+                    )
+                } else {
+                    Either::A(Text::new("Loading"))
+                }
+            }),))
+            .sidebar_width(170.0),
+        )
+        .size(Size::new(960.0, 640.0));
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(window.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        show_grid.set(true);
+        let root = pipeline
+            .element_tree_mut()
+            .root_mut()
+            .expect("window root should exist");
+        root.update(&window);
+
+        let buffer = pipeline
+            .render_with_damage()
+            .map(|(buffer, _)| buffer)
+            .expect("replacement grid should render");
+        for (index, color) in colors.into_iter().enumerate() {
+            let row = (index / 5) as u32;
+            let column = (index % 5) as u32;
+            let left = 170 + column * 160;
+            let right = left + 150;
+            let top = 32 + row * 120;
+            let bottom = top + 100;
+            assert!(
+                (left..right.min(buffer.width())).any(|x| {
+                    (top..bottom.min(buffer.height()))
+                        .any(|y| buffer.get_pixel(x, y) == Some(color.to_bgra()))
+                }),
+                "replacement grid item {index} should be painted in row {row}, column {column}"
+            );
+        }
     }
 
     #[test]

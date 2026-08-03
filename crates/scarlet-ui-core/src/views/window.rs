@@ -932,7 +932,11 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                     match content.update(content_view) {
                         UpdateResult::NoChange => {}
                         UpdateResult::Updated => {
-                            crate::pipeline::mark_element_needs_paint(
+                            // Updating a component replaces its child element. The
+                            // replacement has no layout from the previous tree, so a
+                            // paint-only invalidation leaves descendants at their
+                            // initial bounds until the next resize.
+                            crate::pipeline::mark_element_needs_layout(
                                 self.pipeline_id,
                                 content.id(),
                             );

@@ -844,16 +844,20 @@ impl CpuPaintRenderer {
     }
 
     fn acquire_layer_buffer(&mut self) -> Buffer {
-        if let Some(mut buffer) = self.layer_pool.pop() {
+        let logical_width = self.buffer.logical_width();
+        let logical_height = self.buffer.logical_height();
+        let scale_milli = self.scale_milli;
+        if let Some(index) = self.layer_pool.iter().rposition(|buffer| {
+            buffer.logical_width() == logical_width
+                && buffer.logical_height() == logical_height
+                && buffer.scale_milli() == scale_milli
+        }) {
+            let mut buffer = self.layer_pool.swap_remove(index);
             buffer.clear(Color::TRANSPARENT);
             return buffer;
         }
 
-        Buffer::from_logical_dimensions_with_scale(
-            self.buffer.logical_width(),
-            self.buffer.logical_height(),
-            self.scale_milli,
-        )
+        Buffer::from_logical_dimensions_with_scale(logical_width, logical_height, scale_milli)
     }
 
     fn push_clip_layer(&mut self, clip: ClipRegion) {
@@ -2002,6 +2006,24 @@ mod tests {
 
         r.execute(&ctx);
         assert_eq!(r.retained_layer_count(), 1);
+    }
+
+    #[test]
+    fn rounded_clip_layer_buffer_matches_target_size() {
+        let fill = Color::rgb(255, 0, 0);
+        let mut ctx = PaintContext::new();
+        ctx.push_rounded_clip(Rect::from_xywh(0.0, 0.0, 50.0, 100.0), 8.0);
+        ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 50.0, 100.0), fill);
+        ctx.pop_clip();
+
+        let mut renderer = CpuPaintRenderer::new(Size::new(50.0, 50.0), 1000, Color::CLEAR);
+        let mut first = Buffer::from_logical_dimensions(50, 50);
+        renderer.execute_into_external_buffer(&mut first, Color::CLEAR, &ctx, None);
+
+        let mut expanded = Buffer::from_logical_dimensions(50, 100);
+        renderer.execute_into_external_buffer(&mut expanded, Color::CLEAR, &ctx, None);
+
+        assert_eq!(expanded.get_pixel(25, 75), Some(fill.to_bgra()));
     }
 
     #[test]
