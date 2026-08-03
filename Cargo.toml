@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/scarlet-ui",
     "crates/scarlet-ui-core",
+    "crates/scarlet-ui-file-icons",
     "crates/scarlet-ui-macros",
     "crates/scarlet-ui-icons-tabler",
     "crates/scarlet-ui-platform-sws",

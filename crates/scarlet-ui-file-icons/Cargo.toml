@@ -1,0 +1,15 @@
+[package]
+name = "scarlet-ui-file-icons"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+build = "build.rs"
+
+[build-dependencies]
+lyon_path = "1.0"
+lyon_tessellation = "1.0"
+svgtypes = "0.15"
+
+[lib]
+name = "scarlet_ui_file_icons"
+path = "src/lib.rs"
