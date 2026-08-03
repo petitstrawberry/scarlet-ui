@@ -38,8 +38,10 @@ pub use divider::{Divider, DividerOrientation, DividerRenderObject};
 pub use either::{Either, Either3, Either4, Either5, Either6};
 pub use grid::GridView;
 pub use header::{HeaderBar, HeaderBarRenderObject};
-pub use icon::{FileIconKind, FileIconView, IconView};
-pub use image::{BitmapImage, Image, ImageFit, ImageRenderObject, ImageSource};
+pub use icon::IconView;
+pub use image::{
+    BitmapImage, Image, ImageFit, ImageRenderObject, ImageSource, VectorImageData, VectorTriangle,
+};
 pub use lazy_vstack::LazyVStack;
 pub use list::ListView;
 pub use menu::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};

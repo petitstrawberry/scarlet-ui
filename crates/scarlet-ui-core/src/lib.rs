@@ -140,13 +140,13 @@ pub use views::modifiers::{
     AlignmentFrame, Background, Border, Clip, Focusable, Frame, OnKey, Padding, SetSize,
 };
 pub use views::{
-    BitmapImage, CanvasView, Divider, DividerOrientation, FileIconKind, FileIconView, GridView,
-    HeaderBar, IconView, ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView,
-    ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabItem, TabView, Toggle,
+    BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, IconView, Image,
+    ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView, ScrollWheelDirection,
+    ScrollbarVisibility, Select, Slider, TabItem, TabView, Toggle, VectorImageData, VectorTriangle,
 };
 pub use views::{
-    Button, HStack, Image, LazyVStack, Rectangle, Spacer, SplitAxis, SplitView, Text, TextField,
-    VStack, Window, WindowContentLayout, ZStack,
+    Button, HStack, LazyVStack, Rectangle, Spacer, SplitAxis, SplitView, Text, TextField, VStack,
+    Window, WindowContentLayout, ZStack,
 };
 pub use views::{
     EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView, TextViewRenderObject,
@@ -188,13 +188,14 @@ pub mod prelude {
     pub use crate::view::{View, ViewExt};
     pub use crate::views::modifiers::{Background, Border, Clip, Focusable, Frame, OnKey, Padding};
     pub use crate::views::{
-        BitmapImage, CanvasView, Divider, DividerOrientation, FileIconKind, FileIconView, GridView,
-        HeaderBar, IconView, ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView,
+        BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, IconView, Image,
+        ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView,
         ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabItem, TabView, Toggle,
+        VectorImageData, VectorTriangle,
     };
     pub use crate::views::{
-        Button, Either, Either3, Either4, Either5, Either6, HStack, Image, LazyVStack, Rectangle,
-        Spacer, SplitAxis, SplitView, Text, TextField, VStack, Window, WindowContentLayout, ZStack,
+        Button, Either, Either3, Either4, Either5, Either6, HStack, LazyVStack, Rectangle, Spacer,
+        SplitAxis, SplitView, Text, TextField, VStack, Window, WindowContentLayout, ZStack,
     };
     pub use crate::views::{
         EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView,

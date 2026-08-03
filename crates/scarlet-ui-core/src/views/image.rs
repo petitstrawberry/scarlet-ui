@@ -4,6 +4,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 
@@ -25,6 +26,8 @@ use zune_jpeg::zune_core::options::DecoderOptions;
 pub enum ImageSource {
     /// From decoded bitmap image data
     Bitmap(BitmapImage),
+    /// From runtime-rendered vector image data.
+    Vector(VectorImageData),
     /// Solid color placeholder
     Placeholder { width: u32, height: u32 },
 }
@@ -75,7 +78,64 @@ impl BitmapImage {
     }
 }
 
-/// Generic image view for decoded bitmaps, image files, and placeholders.
+/// A colored triangle in a vector image mesh.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VectorTriangle {
+    /// First vertex in source coordinates.
+    pub a: [f32; 2],
+    /// Second vertex in source coordinates.
+    pub b: [f32; 2],
+    /// Third vertex in source coordinates.
+    pub c: [f32; 2],
+    /// Fill color for the triangle.
+    pub color: Color,
+}
+
+/// Source data for a runtime-rendered vector image.
+#[derive(Clone, Debug)]
+pub struct VectorImageData {
+    width: f32,
+    height: f32,
+    triangles: Arc<[VectorTriangle]>,
+}
+
+impl VectorImageData {
+    /// Create vector image data from source dimensions and a triangle mesh.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Source coordinate width.
+    /// * `height` - Source coordinate height.
+    /// * `triangles` - Colored triangles in source coordinates.
+    ///
+    /// # Returns
+    ///
+    /// Shared vector image data suitable for use by one or more images.
+    pub fn new(width: f32, height: f32, triangles: Vec<VectorTriangle>) -> Self {
+        Self {
+            width: width.max(0.0),
+            height: height.max(0.0),
+            triangles: Arc::from(triangles.into_boxed_slice()),
+        }
+    }
+
+    /// Return the source coordinate width.
+    pub fn width(&self) -> f32 {
+        self.width
+    }
+
+    /// Return the source coordinate height.
+    pub fn height(&self) -> f32 {
+        self.height
+    }
+
+    /// Return the colored triangle mesh.
+    pub fn triangles(&self) -> &[VectorTriangle] {
+        &self.triangles
+    }
+}
+
+/// Generic image view for bitmaps, runtime-rendered vectors, and placeholders.
 #[derive(Clone)]
 pub struct Image {
     source: ImageSource,
@@ -128,6 +188,14 @@ impl Image {
         Self::new(ImageSource::Bitmap(image))
     }
 
+    /// Create an image view from runtime-rendered vector data.
+    ///
+    /// The vector mesh is kept as source data and emitted during painting; it
+    /// is not converted to a bitmap during the build.
+    pub fn from_vector(data: VectorImageData) -> Self {
+        Self::new(ImageSource::Vector(data))
+    }
+
     /// Create an image view from raw BGRA pixel data.
     pub fn from_raw(data: Vec<u32>, width: u32, height: u32) -> Self {
         Self::from_bitmap(BitmapImage::from_bgra(data, width, height))
@@ -172,6 +240,7 @@ impl Image {
                 width: image.width() as f32,
                 height: image.height() as f32,
             },
+            ImageSource::Vector(image) => Size::new(image.width(), image.height()),
             ImageSource::Placeholder { width, height } => Size {
                 width: *width as f32,
                 height: *height as f32,
@@ -236,6 +305,7 @@ impl ImageRenderObject {
                 width: image.width() as f32,
                 height: image.height() as f32,
             },
+            ImageSource::Vector(image) => Size::new(image.width(), image.height()),
             ImageSource::Placeholder { width, height } => Size {
                 width: *width as f32,
                 height: *height as f32,
@@ -328,6 +398,10 @@ impl ElementRenderObject for ImageRenderObject {
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
         let intrinsic = self.intrinsic_size();
         self.size = self.calculate_size(intrinsic, constraints);
+        if !matches!(self.source, ImageSource::Bitmap(_)) {
+            self.buffer = None;
+            return self.size;
+        }
         let width = libm::ceilf(self.size.width.max(1.0)) as u32;
         let height = libm::ceilf(self.size.height.max(1.0)) as u32;
         let needs_resize = self.buffer.as_ref().map_or(true, |b| {
@@ -361,6 +435,7 @@ impl ElementRenderObject for ImageRenderObject {
                     image.height(),
                     self.fit_mode,
                 ),
+                ImageSource::Vector(_) => {}
                 ImageSource::Placeholder { .. } => buffer.clear(Color::rgb(226u8, 229u8, 235u8)),
             }
         }
@@ -384,6 +459,9 @@ impl ElementRenderObject for ImageRenderObject {
                     ctx.fill_rect(rect, Color::rgb(226u8, 229u8, 235u8))
                 }
                 ImageSource::Bitmap(_) => ctx.fill_rect(rect, Color::TRANSPARENT),
+                ImageSource::Vector(image) => {
+                    paint_vector_image(ctx, origin, self.size, image, self.fit_mode)
+                }
             }
         }
         true
@@ -391,6 +469,57 @@ impl ElementRenderObject for ImageRenderObject {
 
     fn requires_buffer_render_for_paint(&self) -> bool {
         matches!(&self.source, ImageSource::Bitmap(_)) && self.buffer.is_some()
+    }
+}
+
+fn paint_vector_image(
+    ctx: &mut PaintContext,
+    origin: Point,
+    size: Size,
+    image: &VectorImageData,
+    fit_mode: ImageFit,
+) {
+    if image.width() <= 0.0 || image.height() <= 0.0 {
+        return;
+    }
+
+    let scale_x = size.width / image.width();
+    let scale_y = size.height / image.height();
+    let (scale_x, scale_y) = match fit_mode {
+        ImageFit::Fill => (scale_x, scale_y),
+        ImageFit::Contain | ImageFit::Cover | ImageFit::None => {
+            let scale = match fit_mode {
+                ImageFit::Cover => scale_x.max(scale_y),
+                ImageFit::Contain | ImageFit::None => scale_x.min(scale_y),
+                ImageFit::Fill => unreachable!(),
+            };
+            (scale, scale)
+        }
+    };
+    let draw_width = image.width() * scale_x;
+    let draw_height = image.height() * scale_y;
+    let draw_origin = if matches!(fit_mode, ImageFit::Fill) {
+        origin
+    } else {
+        Point::new(
+            origin.x + (size.width - draw_width) * 0.5,
+            origin.y + (size.height - draw_height) * 0.5,
+        )
+    };
+
+    let transform = |point: [f32; 2]| {
+        Point::new(
+            draw_origin.x + point[0] * scale_x,
+            draw_origin.y + point[1] * scale_y,
+        )
+    };
+    for triangle in image.triangles() {
+        ctx.fill_triangle(
+            transform(triangle.a),
+            transform(triangle.b),
+            transform(triangle.c),
+            triangle.color,
+        );
     }
 }
 
