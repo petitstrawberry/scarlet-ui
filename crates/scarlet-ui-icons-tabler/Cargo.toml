@@ -1,0 +1,13 @@
+[package]
+name = "scarlet-ui-icons-tabler"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+build = "build.rs"
+
+[build-dependencies]
+svgtypes = "0.15"
+
+[lib]
+name = "scarlet_ui_icons_tabler"
+path = "src/lib.rs"

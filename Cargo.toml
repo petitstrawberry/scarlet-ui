@@ -4,6 +4,7 @@ members = [
     "crates/scarlet-ui",
     "crates/scarlet-ui-core",
     "crates/scarlet-ui-macros",
+    "crates/scarlet-ui-icons-tabler",
     "crates/scarlet-ui-platform-sws",
     "crates/scarlet-ui-platform-winit",
     "crates/scarlet-ui-renderer-sgfx",
