@@ -10,6 +10,7 @@ use crate::compositor::{Compositor, DamageRect};
 use crate::element::{Element, ElementId};
 use crate::error::Result;
 use crate::geometry::{Point, Rect, Size};
+use crate::icon::{Icon, IconStyle};
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct FrameSize {
@@ -132,6 +133,17 @@ pub enum PaintCommand {
         text: String,
         color: Color,
         font_size_px: f32,
+    },
+    /// Draw a typed icon as a theme-tinted alpha mask.
+    DrawIcon {
+        /// Logical destination rectangle.
+        rect: Rect,
+        /// Selected icon.
+        icon: Icon,
+        /// Outline rasterization style.
+        style: IconStyle,
+        /// Tint applied after mask rasterization.
+        color: Color,
     },
     DrawBuffer {
         dst: Rect,
@@ -278,6 +290,30 @@ impl<'a> PaintContext<'a> {
             text: text.into(),
             color,
             font_size_px,
+        });
+    }
+
+    /// Draw a typed icon into a logical destination rectangle.
+    ///
+    /// Rasterization is deferred to the active backend so physical DPI is part
+    /// of the alpha-mask cache key. Color is applied after rasterization.
+    ///
+    /// # Arguments
+    ///
+    /// * `rect` - Logical square occupied by the icon.
+    /// * `icon` - Selected icon.
+    /// * `style` - Outline style used for mask generation.
+    /// * `color` - Theme or explicit tint color.
+    ///
+    /// # Returns
+    ///
+    /// Nothing. The icon command is appended to this paint context.
+    pub fn draw_icon(&mut self, rect: Rect, icon: Icon, style: IconStyle, color: Color) {
+        self.commands.push(PaintCommand::DrawIcon {
+            rect,
+            icon,
+            style,
+            color,
         });
     }
 
@@ -1172,6 +1208,48 @@ impl CpuPaintRenderer {
                         }
                     }
                 },
+                PaintCommand::DrawIcon {
+                    rect,
+                    icon,
+                    style,
+                    color,
+                } => {
+                    let destination = self.scale_rect(*rect);
+                    let pixel_size =
+                        libm::ceilf(destination.size.width.min(destination.size.height).max(1.0))
+                            .min(u16::MAX as f32) as u16;
+                    let raster = crate::icon::rasterize_icon(*icon, pixel_size, *style);
+                    let destination_x = destination.origin.x as i32;
+                    let destination_y = destination.origin.y as i32;
+                    match self.rebuild_effective_clip_rects(damage_rects) {
+                        EffectiveClipRects::Unclipped => {
+                            self.current_buffer_mut().composite_alpha_mask(
+                                raster.mask.as_ref(),
+                                raster.width,
+                                raster.height,
+                                destination_x,
+                                destination_y,
+                                *color,
+                                None,
+                            );
+                        }
+                        EffectiveClipRects::Empty => {}
+                        EffectiveClipRects::Rects => {
+                            for index in 0..self.scratch.clip_rects.len() {
+                                let clip = self.scale_rect(self.scratch.clip_rects[index]);
+                                self.current_buffer_mut().composite_alpha_mask(
+                                    raster.mask.as_ref(),
+                                    raster.width,
+                                    raster.height,
+                                    destination_x,
+                                    destination_y,
+                                    *color,
+                                    Some(clip),
+                                );
+                            }
+                        }
+                    }
+                }
                 PaintCommand::DrawBuffer { dst, buffer_idx } => {
                     if let Some(src) = ctx.buffer(BufferHandle(*buffer_idx)) {
                         let dst = self.scale_rect(*dst);

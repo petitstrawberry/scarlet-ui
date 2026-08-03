@@ -306,9 +306,7 @@ impl ApplicationRunner {
                         break;
                     }
                 }
-                if !slot_closing
-                    && let Some(pending) = pending_trackpad_moved.take()
-                {
+                if !slot_closing && let Some(pending) = pending_trackpad_moved.take() {
                     let _ = handle_window_event(app, slot, pending, &mut close_ids)?;
                 }
             }

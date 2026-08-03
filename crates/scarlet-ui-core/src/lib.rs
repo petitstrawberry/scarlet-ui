@@ -52,6 +52,7 @@ pub mod error;
 pub mod event;
 pub mod geometry;
 pub mod graphics;
+pub mod icon;
 pub mod macros;
 pub mod menu_model;
 mod os;
@@ -118,6 +119,10 @@ pub use graphics::{
     measure_text_sized_with_font_stack, rasterize_text, rasterize_text_with_font_stack,
     set_default_font, set_default_font_stack,
 };
+pub use icon::{
+    ALL_ICONS, Icon, IconFill, IconMaskKey, IconSize, IconStyle, IconWeight, RasterizedIcon,
+    rasterize_icon,
+};
 pub use menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
 pub use pipeline::{
     DirtyPhase, MountContext, PipelineId, PipelineOwner, RenderingPipeline, StateRegistry,
@@ -134,9 +139,9 @@ pub use view::{View, ViewExt};
 pub use views::modifiers::{
     AlignmentFrame, Background, Border, Clip, Focusable, Frame, OnKey, Padding, SetSize,
 };
-pub use views::navigation::Icon;
 pub use views::{
-    BitmapImage, CanvasView, Divider, DividerOrientation, ProgressView, ScrollAxis, ScrollView,
+    BitmapImage, CanvasView, Divider, DividerOrientation, FileIconKind, FileIconView, GridView,
+    HeaderBar, IconView, ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView,
     ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabItem, TabView, Toggle,
 };
 pub use views::{
@@ -173,6 +178,7 @@ pub mod prelude {
         clear_default_font_fallbacks, default_font_stack, measure_text_sized_with_font_stack,
         rasterize_text, rasterize_text_with_font_stack, set_default_font_stack,
     };
+    pub use crate::icon::{Icon, IconFill, IconSize, IconStyle, IconWeight};
     pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
     pub use crate::renderer::{CompositorBackendKind, RendererBackendKind};
     pub use crate::scene::{
@@ -182,7 +188,8 @@ pub mod prelude {
     pub use crate::view::{View, ViewExt};
     pub use crate::views::modifiers::{Background, Border, Clip, Focusable, Frame, OnKey, Padding};
     pub use crate::views::{
-        BitmapImage, CanvasView, Divider, DividerOrientation, ProgressView, ScrollAxis, ScrollView,
+        BitmapImage, CanvasView, Divider, DividerOrientation, FileIconKind, FileIconView, GridView,
+        HeaderBar, IconView, ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView,
         ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabItem, TabView, Toggle,
     };
     pub use crate::views::{

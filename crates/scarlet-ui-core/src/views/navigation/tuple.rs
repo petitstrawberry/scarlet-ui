@@ -6,6 +6,7 @@
 use crate::view::View;
 use crate::views::navigation::link::NavigationLink;
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 
 /// Trait for tuples of NavigationLinks
 ///
@@ -16,21 +17,33 @@ use alloc::boxed::Box;
 ///
 /// ```ignore
 /// // Tuples of different sizes all implement NavigationLinkTuple
-/// let link1 = NavigationLink::new("Home", Icon::Home, || Text::new("Home"));
-/// let link2 = NavigationLink::new("Settings", Icon::Settings, || Text::new("Settings"));
+/// let link1 = NavigationLink::new("Home", || Text::new("Home"));
+/// let link2 = NavigationLink::new("Settings", || Text::new("Settings"));
 ///
 /// // Works with 2 links
 /// let nav2 = NavigationView::new((link1, link2));
 ///
 /// // Works with 3 links
-/// let link3 = NavigationLink::new("Info", Icon::Info, || Text::new("Info"));
+/// let link3 = NavigationLink::new("Info", || Text::new("Info"));
 /// let nav3 = NavigationView::new((link1, link2, link3));
 /// ```
 pub trait NavigationLinkTuple {
-    /// Get the number of links in this tuple
+    /// Get the number of links in this tuple.
+    ///
+    /// # Returns
+    ///
+    /// Number of navigation links.
     fn count(&self) -> usize;
 
     /// Get the label for the link at the given index
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Link index.
+    ///
+    /// # Returns
+    ///
+    /// Borrowed display label.
     ///
     /// # Panics
     ///
@@ -39,21 +52,48 @@ pub trait NavigationLinkTuple {
 
     /// Get the icon for the link at the given index
     ///
+    /// # Arguments
+    ///
+    /// * `index` - Link index.
+    ///
+    /// # Returns
+    ///
+    /// The explicitly configured icon, if any.
+    ///
     /// # Panics
     ///
     /// Panics if index is out of bounds (>= count())
-    fn get_icon(&self, index: usize) -> &Icon;
+    fn get_icon(&self, index: usize) -> Option<Icon>;
 
     /// Build the content view for the link at the given index
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Link index.
+    ///
+    /// # Returns
+    ///
+    /// Newly built content view.
     ///
     /// # Panics
     ///
     /// Panics if index is out of bounds (>= count())
     fn build_content(&self, index: usize) -> Box<dyn View>;
+
+    /// Get the optional callback invoked when a link becomes selected.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Link index.
+    ///
+    /// # Returns
+    ///
+    /// Shared selection callback, if configured.
+    fn get_on_select(&self, index: usize) -> Option<Rc<dyn Fn()>>;
 }
 
 // Import Icon type for use in trait methods
-use crate::views::navigation::link::Icon;
+use crate::icon::Icon;
 
 // Implement NavigationLinkTuple for unit type (empty tuple)
 impl NavigationLinkTuple for () {
@@ -65,12 +105,16 @@ impl NavigationLinkTuple for () {
         panic!("Cannot access label in empty NavigationLink tuple")
     }
 
-    fn get_icon(&self, _index: usize) -> &Icon {
+    fn get_icon(&self, _index: usize) -> Option<Icon> {
         panic!("Cannot access icon in empty NavigationLink tuple")
     }
 
     fn build_content(&self, _index: usize) -> Box<dyn View> {
         panic!("Cannot access content in empty NavigationLink tuple")
+    }
+
+    fn get_on_select(&self, _index: usize) -> Option<Rc<dyn Fn()>> {
+        panic!("Cannot access selection callback in empty NavigationLink tuple")
     }
 }
 
@@ -87,9 +131,9 @@ impl NavigationLinkTuple for (NavigationLink,) {
         }
     }
 
-    fn get_icon(&self, index: usize) -> &Icon {
+    fn get_icon(&self, index: usize) -> Option<Icon> {
         match index {
-            0 => self.0.icon(),
+            0 => self.0.get_icon(),
             _ => panic!("NavigationLink index {} out of bounds (count: 1)", index),
         }
     }
@@ -97,6 +141,13 @@ impl NavigationLinkTuple for (NavigationLink,) {
     fn build_content(&self, index: usize) -> Box<dyn View> {
         match index {
             0 => self.0.build_content(),
+            _ => panic!("NavigationLink index {} out of bounds (count: 1)", index),
+        }
+    }
+
+    fn get_on_select(&self, index: usize) -> Option<Rc<dyn Fn()>> {
+        match index {
+            0 => self.0.selection_callback(),
             _ => panic!("NavigationLink index {} out of bounds (count: 1)", index),
         }
     }
@@ -116,10 +167,10 @@ impl NavigationLinkTuple for (NavigationLink, NavigationLink) {
         }
     }
 
-    fn get_icon(&self, index: usize) -> &Icon {
+    fn get_icon(&self, index: usize) -> Option<Icon> {
         match index {
-            0 => self.0.icon(),
-            1 => self.1.icon(),
+            0 => self.0.get_icon(),
+            1 => self.1.get_icon(),
             _ => panic!("NavigationLink index {} out of bounds (count: 2)", index),
         }
     }
@@ -128,6 +179,14 @@ impl NavigationLinkTuple for (NavigationLink, NavigationLink) {
         match index {
             0 => self.0.build_content(),
             1 => self.1.build_content(),
+            _ => panic!("NavigationLink index {} out of bounds (count: 2)", index),
+        }
+    }
+
+    fn get_on_select(&self, index: usize) -> Option<Rc<dyn Fn()>> {
+        match index {
+            0 => self.0.selection_callback(),
+            1 => self.1.selection_callback(),
             _ => panic!("NavigationLink index {} out of bounds (count: 2)", index),
         }
     }
@@ -148,11 +207,11 @@ impl NavigationLinkTuple for (NavigationLink, NavigationLink, NavigationLink) {
         }
     }
 
-    fn get_icon(&self, index: usize) -> &Icon {
+    fn get_icon(&self, index: usize) -> Option<Icon> {
         match index {
-            0 => self.0.icon(),
-            1 => self.1.icon(),
-            2 => self.2.icon(),
+            0 => self.0.get_icon(),
+            1 => self.1.get_icon(),
+            2 => self.2.get_icon(),
             _ => panic!("NavigationLink index {} out of bounds (count: 3)", index),
         }
     }
@@ -162,6 +221,15 @@ impl NavigationLinkTuple for (NavigationLink, NavigationLink, NavigationLink) {
             0 => self.0.build_content(),
             1 => self.1.build_content(),
             2 => self.2.build_content(),
+            _ => panic!("NavigationLink index {} out of bounds (count: 3)", index),
+        }
+    }
+
+    fn get_on_select(&self, index: usize) -> Option<Rc<dyn Fn()>> {
+        match index {
+            0 => self.0.selection_callback(),
+            1 => self.1.selection_callback(),
+            2 => self.2.selection_callback(),
             _ => panic!("NavigationLink index {} out of bounds (count: 3)", index),
         }
     }
@@ -190,12 +258,12 @@ impl NavigationLinkTuple
         }
     }
 
-    fn get_icon(&self, index: usize) -> &Icon {
+    fn get_icon(&self, index: usize) -> Option<Icon> {
         match index {
-            0 => self.0.icon(),
-            1 => self.1.icon(),
-            2 => self.2.icon(),
-            3 => self.3.icon(),
+            0 => self.0.get_icon(),
+            1 => self.1.get_icon(),
+            2 => self.2.get_icon(),
+            3 => self.3.get_icon(),
             _ => panic!("NavigationLink index {} out of bounds (count: 4)", index),
         }
     }
@@ -207,6 +275,80 @@ impl NavigationLinkTuple
             2 => self.2.build_content(),
             3 => self.3.build_content(),
             _ => panic!("NavigationLink index {} out of bounds (count: 4)", index),
+        }
+    }
+
+    fn get_on_select(&self, index: usize) -> Option<Rc<dyn Fn()>> {
+        match index {
+            0 => self.0.selection_callback(),
+            1 => self.1.selection_callback(),
+            2 => self.2.selection_callback(),
+            3 => self.3.selection_callback(),
+            _ => panic!("NavigationLink index {} out of bounds (count: 4)", index),
+        }
+    }
+}
+
+// Implement NavigationLinkTuple for 6-tuples.
+impl NavigationLinkTuple
+    for (
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+    )
+{
+    fn count(&self) -> usize {
+        6
+    }
+
+    fn get_label(&self, index: usize) -> &str {
+        match index {
+            0 => self.0.label(),
+            1 => self.1.label(),
+            2 => self.2.label(),
+            3 => self.3.label(),
+            4 => self.4.label(),
+            5 => self.5.label(),
+            _ => panic!("NavigationLink index {} out of bounds (count: 6)", index),
+        }
+    }
+
+    fn get_icon(&self, index: usize) -> Option<Icon> {
+        match index {
+            0 => self.0.get_icon(),
+            1 => self.1.get_icon(),
+            2 => self.2.get_icon(),
+            3 => self.3.get_icon(),
+            4 => self.4.get_icon(),
+            5 => self.5.get_icon(),
+            _ => panic!("NavigationLink index {} out of bounds (count: 6)", index),
+        }
+    }
+
+    fn build_content(&self, index: usize) -> Box<dyn View> {
+        match index {
+            0 => self.0.build_content(),
+            1 => self.1.build_content(),
+            2 => self.2.build_content(),
+            3 => self.3.build_content(),
+            4 => self.4.build_content(),
+            5 => self.5.build_content(),
+            _ => panic!("NavigationLink index {} out of bounds (count: 6)", index),
+        }
+    }
+
+    fn get_on_select(&self, index: usize) -> Option<Rc<dyn Fn()>> {
+        match index {
+            0 => self.0.selection_callback(),
+            1 => self.1.selection_callback(),
+            2 => self.2.selection_callback(),
+            3 => self.3.selection_callback(),
+            4 => self.4.selection_callback(),
+            5 => self.5.selection_callback(),
+            _ => panic!("NavigationLink index {} out of bounds (count: 6)", index),
         }
     }
 }
@@ -236,13 +378,13 @@ impl NavigationLinkTuple
         }
     }
 
-    fn get_icon(&self, index: usize) -> &Icon {
+    fn get_icon(&self, index: usize) -> Option<Icon> {
         match index {
-            0 => self.0.icon(),
-            1 => self.1.icon(),
-            2 => self.2.icon(),
-            3 => self.3.icon(),
-            4 => self.4.icon(),
+            0 => self.0.get_icon(),
+            1 => self.1.get_icon(),
+            2 => self.2.get_icon(),
+            3 => self.3.get_icon(),
+            4 => self.4.get_icon(),
             _ => panic!("NavigationLink index {} out of bounds (count: 5)", index),
         }
     }
@@ -254,6 +396,17 @@ impl NavigationLinkTuple
             2 => self.2.build_content(),
             3 => self.3.build_content(),
             4 => self.4.build_content(),
+            _ => panic!("NavigationLink index {} out of bounds (count: 5)", index),
+        }
+    }
+
+    fn get_on_select(&self, index: usize) -> Option<Rc<dyn Fn()>> {
+        match index {
+            0 => self.0.selection_callback(),
+            1 => self.1.selection_callback(),
+            2 => self.2.selection_callback(),
+            3 => self.3.selection_callback(),
+            4 => self.4.selection_callback(),
             _ => panic!("NavigationLink index {} out of bounds (count: 5)", index),
         }
     }

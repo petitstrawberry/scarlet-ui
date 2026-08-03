@@ -1,7 +1,7 @@
 use scarlet_ui::hstack;
 use scarlet_ui::prelude::*;
 use scarlet_ui::vstack;
-use scarlet_ui::{Icon, NavigationLink};
+use scarlet_ui::NavigationLink;
 
 #[derive(Clone)]
 struct PreviewApp {
@@ -355,10 +355,10 @@ fn widget_factory_preview() -> impl View + Clone {
     let display = factory.clone();
 
     scarlet_ui::navigation! {
-        NavigationLink::new("Overview", Icon::Home, move || overview.overview_page()),
-        NavigationLink::new("Controls", Icon::Settings, move || controls.controls_page()),
-        NavigationLink::new("Inputs", Icon::Search, move || inputs.inputs_page()),
-        NavigationLink::new("Display", Icon::Info, move || display.display_page()),
+        NavigationLink::new("Overview", move || overview.overview_page()),
+        NavigationLink::new("Controls", move || controls.controls_page()),
+        NavigationLink::new("Inputs", move || inputs.inputs_page()),
+        NavigationLink::new("Display", move || display.display_page()),
     }
     .sidebar_width(190.0)
 }

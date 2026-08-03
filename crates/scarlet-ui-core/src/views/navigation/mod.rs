@@ -9,6 +9,6 @@ mod tuple;
 mod view;
 mod view_impl;
 
-pub use link::{Icon, NavigationLink};
+pub use link::NavigationLink;
 pub use render::NavigationViewRenderObject;
 pub use view::NavigationView;

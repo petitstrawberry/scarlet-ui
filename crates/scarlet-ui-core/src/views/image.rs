@@ -75,7 +75,7 @@ impl BitmapImage {
     }
 }
 
-/// Image View - displays an image
+/// Generic image view for decoded bitmaps, image files, and placeholders.
 #[derive(Clone)]
 pub struct Image {
     source: ImageSource,
@@ -83,7 +83,23 @@ pub struct Image {
 }
 
 impl Image {
-    /// Create a new Image by decoding an image file from a path.
+    /// Create an image view from an image source.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - Bitmap or placeholder source to display.
+    ///
+    /// # Returns
+    ///
+    /// An image view using [`ImageFit::Contain`] by default.
+    pub fn new(source: ImageSource) -> Self {
+        Self {
+            source,
+            fit_mode: ImageFit::Contain,
+        }
+    }
+
+    /// Create an image view by decoding an image file from a path.
     ///
     /// JPEG/JPG files are currently supported. Unsupported or unreadable files
     /// render as a placeholder.
@@ -107,20 +123,17 @@ impl Image {
         }
     }
 
-    /// Create a new Image from decoded bitmap data.
+    /// Create an image view from decoded bitmap data.
     pub fn from_bitmap(image: BitmapImage) -> Self {
-        Self {
-            source: ImageSource::Bitmap(image),
-            fit_mode: ImageFit::Contain,
-        }
+        Self::new(ImageSource::Bitmap(image))
     }
 
-    /// Create a new Image from raw pixel data
+    /// Create an image view from raw BGRA pixel data.
     pub fn from_raw(data: Vec<u32>, width: u32, height: u32) -> Self {
         Self::from_bitmap(BitmapImage::from_bgra(data, width, height))
     }
 
-    /// Create an image from optional raw pixel data, falling back to a placeholder.
+    /// Create an image view from optional raw pixel data, falling back to a placeholder.
     pub fn from_optional_raw(data: Option<Vec<u32>>, width: u32, height: u32) -> Self {
         match data {
             Some(data) => Self::from_raw(data, width, height),
@@ -128,7 +141,7 @@ impl Image {
         }
     }
 
-    /// Create a placeholder image with specified dimensions
+    /// Create a placeholder image view with specified dimensions.
     pub fn placeholder(width: u32, height: u32) -> Self {
         Self {
             source: ImageSource::Placeholder { width, height },
@@ -140,6 +153,16 @@ impl Image {
     pub fn fit_mode(mut self, mode: ImageFit) -> Self {
         self.fit_mode = mode;
         self
+    }
+
+    /// Return the configured image source.
+    pub fn source(&self) -> &ImageSource {
+        &self.source
+    }
+
+    /// Return the configured fit mode.
+    pub fn get_fit_mode(&self) -> ImageFit {
+        self.fit_mode
     }
 
     /// Get the intrinsic size of the image

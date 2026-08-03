@@ -4,10 +4,10 @@
 //! Displays all available widgets across multiple navigation pages
 //! (Overview, Controls, Inputs, Display).
 
+use scarlet_ui::NavigationLink;
 use scarlet_ui::hstack;
 use scarlet_ui::prelude::*;
 use scarlet_ui::vstack;
-use scarlet_ui::{Icon, NavigationLink};
 use scarlet_ui_macros::View;
 
 #[derive(View, Clone)]
@@ -248,13 +248,39 @@ impl WidgetFactory {
         self.scroll_page(content, 560.0)
     }
 
+    fn icons(&self) -> impl View + Clone + use<> {
+        hstack! {
+            IconView::new(Icon::Folder)
+                .size(IconSize::Large)
+                .weight(IconWeight::Thin),
+            IconView::new(Icon::Folder)
+                .size(IconSize::Large)
+                .weight(IconWeight::Normal),
+            IconView::new(Icon::Folder)
+                .size(IconSize::Large)
+                .weight(IconWeight::Bold),
+            IconView::new(Icon::Folder)
+                .size(IconSize::Large)
+                .filled(),
+            IconView::new(Icon::Settings)
+                .size(IconSize::Large)
+                .filled()
+                .color(Color::rgb(52u8, 120u8, 246u8)),
+            IconView::new(Icon::Heart)
+                .size(IconSize::Large)
+                .filled()
+                .color(Color::rgb(220u8, 55u8, 85u8)),
+        }
+        .spacing(14.0)
+    }
+
     fn display_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
             Text::new("Display").font_size(24.0),
             self.row("Text", Text::new("Factory text sample").font_size(16.0)),
             self.row("Rectangle", self.rectangle()),
             self.row("Divider", self.divider()),
-            self.row("ProgressView", self.progress()),
+            self.row("Tabler Icons", self.icons()),
             self.row("ScrollView both", self.scroll_view()),
             self.row("ScrollView x", self.horizontal_scroll_view()),
             self.row("ScrollView y", self.vertical_scroll_view()),
@@ -279,10 +305,10 @@ impl Application for WidgetFactory {
             Window::new(
                 "Widget Factory",
                 scarlet_ui::navigation! {
-                    NavigationLink::new("Overview", Icon::Home, move || overview.overview_page()),
-                    NavigationLink::new("Controls", Icon::Settings, move || controls.controls_page()),
-                    NavigationLink::new("Inputs", Icon::Search, move || inputs.inputs_page()),
-                    NavigationLink::new("Display", Icon::Info, move || display.display_page()),
+                    NavigationLink::new("Overview", move || overview.overview_page()),
+                    NavigationLink::new("Controls", move || controls.controls_page()),
+                    NavigationLink::new("Inputs", move || inputs.inputs_page()),
+                    NavigationLink::new("Display", move || display.display_page()),
                 }
                 .sidebar_width(190.0),
             )

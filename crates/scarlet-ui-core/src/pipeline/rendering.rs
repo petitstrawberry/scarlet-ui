@@ -576,18 +576,17 @@ impl RenderingPipeline {
         }
 
         let physical_damage = self.paint_damage.as_deref();
-        let backend_frame = match self.paint_backend.render(
-            &ctx,
-            background_color,
-            damage_clip,
-            physical_damage,
-        ) {
-            Ok(frame) => frame,
-            Err(error) => {
-                self.paint_needs_full = true;
-                return Err(error);
-            }
-        };
+        let backend_frame =
+            match self
+                .paint_backend
+                .render(&ctx, background_color, damage_clip, physical_damage)
+            {
+                Ok(frame) => frame,
+                Err(error) => {
+                    self.paint_needs_full = true;
+                    return Err(error);
+                }
+            };
         match backend_frame {
             BackendFrame::Cpu { buffer } => Ok(PresentedFrame::Cpu {
                 buffer,
@@ -597,10 +596,7 @@ impl RenderingPipeline {
         }
     }
 
-    fn prepare_retained_composite_path(
-        &mut self,
-        background_color: crate::color::Color,
-    ) -> bool {
+    fn prepare_retained_composite_path(&mut self, background_color: crate::color::Color) -> bool {
         self.dirty_scratch.clear_for_frame();
         self.dirty_scratch
             .ids
@@ -2743,8 +2739,8 @@ mod tests {
         };
         let mut pipeline = RenderingPipeline::new();
         let root = NavigationView::new((
-            NavigationLink::new("First", crate::Icon::Home, || Text::new("first page")),
-            NavigationLink::new("Second", crate::Icon::Settings, page),
+            NavigationLink::new("First", || Text::new("first page")),
+            NavigationLink::new("Second", page),
         ))
         .create_element();
         pipeline.set_root(root);
@@ -2808,8 +2804,8 @@ mod tests {
         };
         let mut pipeline = RenderingPipeline::new();
         let root = NavigationView::new((
-            NavigationLink::new("First", crate::Icon::Home, || Text::new("first page")),
-            NavigationLink::new("Factory", crate::Icon::Settings, page),
+            NavigationLink::new("First", || Text::new("first page")),
+            NavigationLink::new("Factory", page),
         ))
         .create_element();
         pipeline.set_root(root);
@@ -2972,10 +2968,10 @@ mod tests {
         };
         let mut pipeline = RenderingPipeline::new();
         let root = crate::navigation! {
-            NavigationLink::new("Overview", crate::Icon::Home, overview),
-            NavigationLink::new("Controls", crate::Icon::Settings, controls),
-            NavigationLink::new("Inputs", crate::Icon::Search, inputs),
-            NavigationLink::new("Display", crate::Icon::Info, display),
+            NavigationLink::new("Overview", overview),
+            NavigationLink::new("Controls", controls),
+            NavigationLink::new("Inputs", inputs),
+            NavigationLink::new("Display", display),
         }
         .sidebar_width(190.0)
         .create_element();

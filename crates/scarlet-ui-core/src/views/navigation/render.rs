@@ -8,13 +8,14 @@ use crate::color::ColorPalette;
 use crate::element::{Element, ElementRenderObject, LayoutConstraints};
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::icon::{Icon, IconStyle};
 use crate::renderer::PaintContext;
 use crate::state::State;
-use crate::views::navigation::link::Icon;
 /// - Layout of sidebar and content areas
 /// - Mouse event handling for item selection and hover
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -29,11 +30,21 @@ pub struct NavigationViewRenderObject {
     /// Labels for each link
     labels: Vec<String>,
     /// Icons for each link
-    icons: Vec<Icon>,
+    icons: Vec<Option<Icon>>,
+    /// Optional callbacks invoked when a sidebar item becomes selected.
+    selection_callbacks: Vec<Option<Rc<dyn Fn()>>>,
     /// Currently selected link index
     selected_index: State<usize>,
     /// Width of the sidebar (fixed)
     sidebar_width: f32,
+    /// Whether icons are rendered next to sidebar labels.
+    shows_icons: bool,
+    /// Shared rendering style for sidebar icons.
+    icon_style: IconStyle,
+    /// Optional shared tint override for sidebar icons.
+    icon_color: Option<Color>,
+    /// Height reserved for the optional content header.
+    header_height: f32,
     /// Currently hovered link index (if any)
     hovered_index: Option<usize>,
     /// Height of each navigation item
@@ -51,20 +62,46 @@ pub struct NavigationViewRenderObject {
 }
 
 impl NavigationViewRenderObject {
-    /// Create a new NavigationViewRenderObject
+    /// Create a navigation render object.
+    ///
+    /// # Arguments
+    ///
+    /// * `labels` - Sidebar labels in display order.
+    /// * `icons` - Optional typed icon for each label.
+    /// * `selected_index` - Reactive selected-item index.
+    /// * `sidebar_width` - Fixed sidebar width.
+    /// * `shows_icons` - Whether configured icons are painted.
+    /// * `icon_style` - Shared vector and stroke style for configured icons.
+    /// * `icon_color` - Optional shared icon-only tint override.
+    /// * `header_height` - Optional content header height.
+    /// * `selection_callbacks` - Optional callbacks corresponding to links.
+    ///
+    /// # Returns
+    ///
+    /// A navigation render object ready for layout.
     pub fn new(
         labels: Vec<String>,
-        icons: Vec<Icon>,
+        icons: Vec<Option<Icon>>,
         selected_index: State<usize>,
         sidebar_width: f32,
+        shows_icons: bool,
+        icon_style: IconStyle,
+        icon_color: Option<Color>,
+        header_height: f32,
+        selection_callbacks: Vec<Option<Rc<dyn Fn()>>>,
     ) -> Self {
         let link_count = labels.len();
         Self {
             link_count,
             labels,
             icons,
+            selection_callbacks,
             selected_index,
             sidebar_width,
+            shows_icons,
+            icon_style,
+            icon_color,
+            header_height: header_height.max(0.0),
             hovered_index: None,
             item_height: 40.0,
             size: Size::ZERO,
@@ -114,6 +151,11 @@ impl NavigationViewRenderObject {
         self.link_count
     }
 
+    /// Clone the callback associated with a navigation item, if any.
+    pub fn selection_callback(&self, index: usize) -> Option<Rc<dyn Fn()>> {
+        self.selection_callbacks.get(index).cloned().flatten()
+    }
+
     /// Render a single navigation item
     #[allow(dead_code)]
     fn render_item(
@@ -121,7 +163,6 @@ impl NavigationViewRenderObject {
         canvas: &mut graphics::Canvas,
         y: i32,
         label: &str,
-        icon: &Icon,
         is_selected: bool,
         is_hovered: bool,
     ) {
@@ -153,9 +194,6 @@ impl NavigationViewRenderObject {
         };
 
         canvas.fill_rect(0, y, width as u32, height as u32, background_color);
-
-        // Icon (will be provided separately)
-        let _icon = icon;
 
         // Label
         let text_color = if is_selected {
@@ -213,10 +251,14 @@ impl ElementRenderObject for NavigationViewRenderObject {
             );
         }
 
-        // Expect exactly 2 children: sidebar and content
-        if children.len() != 2 {
+        let has_header = self.header_height > 0.0;
+        let content_index = if has_header { 2 } else { 1 };
+
+        // Children are sidebar, optional header, and content.
+        if children.len() != content_index + 1 {
             crate::logln!(
-                "[NavigationViewRenderObject::layout] WARNING: Expected 2 children, got {}",
+                "[NavigationViewRenderObject::layout] WARNING: Expected {} children, got {}",
+                content_index + 1,
                 children.len()
             );
         }
@@ -230,14 +272,28 @@ impl ElementRenderObject for NavigationViewRenderObject {
             Size::new(self.sidebar_width, constraints.max_height)
         };
 
-        // Layout content (child 1) with remaining width
-        let content_width = constraints.max_width - self.sidebar_width;
+        let content_width = (constraints.max_width - self.sidebar_width).max(0.0);
+        let header_height = if has_header {
+            self.header_height.min(constraints.max_height.max(0.0))
+        } else {
+            0.0
+        };
+
+        if has_header {
+            if let Some(header) = children.get_mut(1) {
+                header.layout(LayoutConstraints::tight(content_width, header_height));
+                header.set_position(Point::new(self.sidebar_width, 0.0));
+            }
+        }
+
+        // Layout content with the remaining height below the header.
+        let content_height = (constraints.max_height - header_height).max(0.0);
         let content_constraints =
-            LayoutConstraints::new(content_width, content_width, 0.0, constraints.max_height);
-        let _content_height = if let Some(content) = children.get_mut(1) {
+            LayoutConstraints::new(content_width, content_width, 0.0, content_height);
+        let _content_height = if let Some(content) = children.get_mut(content_index) {
             content.layout(content_constraints)
         } else {
-            Size::new(content_width, constraints.max_height)
+            Size::new(content_width, content_height)
         };
 
         // Position sidebar at (0, 0)
@@ -245,9 +301,9 @@ impl ElementRenderObject for NavigationViewRenderObject {
             sidebar.set_position(Point::ZERO);
         }
 
-        // Position content at (sidebar_width, 0)
-        if let Some(content) = children.get_mut(1) {
-            content.set_position(Point::new(self.sidebar_width, 0.0));
+        // Position content below the optional header.
+        if let Some(content) = children.get_mut(content_index) {
+            content.set_position(Point::new(self.sidebar_width, header_height));
         }
 
         // Total size is the full constraint
@@ -313,23 +369,17 @@ impl ElementRenderObject for NavigationViewRenderObject {
             // Clone values we need before the loop to avoid borrow issues
             let link_count = self.link_count;
             let selected = self.selected_index.get();
-            let hovered = self.hovered_index;
-            let sidebar_width = self.sidebar_width;
             let item_height = self.item_height;
             let font_size = self.font_size;
-            let icon_size = self.icon_size;
             let item_padding = self.item_padding;
 
             for i in 0..link_count {
                 let y = (i as f32 * item_height) as i32;
                 let is_selected = selected == i;
-                let is_hovered = hovered == Some(i);
 
-                // Get label and icon for this item
+                // Get the label for this item.
                 let label = self.labels.get(i).map(|s| s.as_str()).unwrap_or("Item");
-                let icon = self.icons.get(i).copied().unwrap_or(Icon::Home);
 
-                let width_px = sidebar_width as i32;
                 let height_px = item_height as i32;
 
                 // Draw underline for selected state (left indicator)
@@ -346,9 +396,6 @@ impl ElementRenderObject for NavigationViewRenderObject {
                         palette.primary(),
                     );
                 }
-
-                // Icon (will be provided separately)
-                let _icon = &icon;
 
                 // Label
                 let text_color = if is_selected {
@@ -418,7 +465,27 @@ impl ElementRenderObject for NavigationViewRenderObject {
             } else {
                 palette.text()
             };
-            let text_x = origin.x + self.item_padding + 8.0;
+            let text_x = if self.shows_icons {
+                if let Some(icon) = self.icons.get(i).copied().flatten() {
+                    let icon_size = self.icon_size as f32;
+                    crate::views::icon::paint_icon(
+                        ctx,
+                        Point::new(
+                            origin.x + self.item_padding + 4.0,
+                            origin.y + y + (self.item_height - icon_size) * 0.5,
+                        ),
+                        icon_size,
+                        icon,
+                        self.icon_style,
+                        self.icon_color.unwrap_or(text_color),
+                    );
+                    origin.x + self.item_padding + icon_size + 10.0
+                } else {
+                    origin.x + self.item_padding + 8.0
+                }
+            } else {
+                origin.x + self.item_padding + 8.0
+            };
             let text_y = origin.y + y + (self.item_height - self.font_size * 1.2) / 2.0;
             ctx.draw_text(
                 Point::new(text_x, text_y),

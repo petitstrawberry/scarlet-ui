@@ -42,14 +42,19 @@ where
         let sidebar_placeholder = Spacer::new();
         let mut children = Vec::new();
         children.push(sidebar_placeholder.create_element());
+        if let Some(header_builder) = self.nav.header_builder() {
+            children.push(header_builder().create_element());
+        }
         children.push(content_view.create_element());
 
         // Collect labels and icons
         let mut labels = Vec::new();
         let mut icons = Vec::new();
+        let mut selection_callbacks = Vec::new();
         for i in 0..self.nav.links().count() {
             labels.push(self.nav.links().get_label(i).to_string());
-            icons.push(*self.nav.links().get_icon(i));
+            icons.push(self.nav.links().get_icon(i));
+            selection_callbacks.push(self.nav.links().get_on_select(i));
         }
 
         let render_object = NavigationViewRenderObject::new(
@@ -57,6 +62,11 @@ where
             icons,
             self.nav.selected_index_state().clone(),
             self.nav.get_sidebar_width(),
+            self.nav.get_shows_icons(),
+            self.nav.get_icon_style(),
+            self.nav.get_icon_color(),
+            self.nav.get_header_height(),
+            selection_callbacks,
         );
 
         Box::new(RenderElement::with_children(

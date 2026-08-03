@@ -1425,6 +1425,10 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                                 if current != index {
                                     selected_state.set(index);
                                     crate::pipeline::mark_element_dirty(self.pipeline_id, self.id);
+                                    if let Some(callback) = render_object.selection_callback(index)
+                                    {
+                                        callback();
+                                    }
                                 }
                             }
                         }

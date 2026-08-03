@@ -661,6 +661,54 @@ impl Buffer {
         u32::from_le_bytes(bytes)
     }
 
+    /// Composite an alpha-only mask with a supplied tint color.
+    pub(crate) fn composite_alpha_mask(
+        &mut self,
+        mask: &[u8],
+        mask_width: u32,
+        mask_height: u32,
+        destination_x: i32,
+        destination_y: i32,
+        color: Color,
+        clip: Option<crate::geometry::Rect>,
+    ) {
+        if mask_width == 0
+            || mask_height == 0
+            || mask.len() < mask_width.saturating_mul(mask_height) as usize
+        {
+            return;
+        }
+        self.bump_revision();
+        let source = color.to_bgra();
+        for mask_y in 0..mask_height {
+            let target_y = destination_y + mask_y as i32;
+            if target_y < 0 || target_y >= self.height as i32 {
+                continue;
+            }
+            for mask_x in 0..mask_width {
+                let target_x = destination_x + mask_x as i32;
+                if target_x < 0 || target_x >= self.width as i32 {
+                    continue;
+                }
+                if clip.is_some_and(|clip| {
+                    target_x as f32 + 0.5 < clip.left()
+                        || target_x as f32 + 0.5 >= clip.right()
+                        || target_y as f32 + 0.5 < clip.top()
+                        || target_y as f32 + 0.5 >= clip.bottom()
+                }) {
+                    continue;
+                }
+                let alpha = mask[(mask_y * mask_width + mask_x) as usize];
+                if alpha == 0 {
+                    continue;
+                }
+                let target_index = (target_y as u32 * self.width + target_x as u32) as usize;
+                self.data[target_index] =
+                    Self::blend_pixels(self.data[target_index], source, alpha as f32 / 255.0);
+            }
+        }
+    }
+
     /// Set a pixel at the given position
     ///
     /// # Arguments

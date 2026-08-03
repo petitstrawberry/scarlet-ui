@@ -1,34 +1,14 @@
 //! NavigationLink - Data structure for navigation items
 //!
 //! NavigationLink represents a single navigation item in a NavigationView.
-//! It is NOT a View - it's a data structure that holds label, icon, and
-//! a closure to build the content view.
+//! It is NOT a View - it stores a label, optional typed icon, and a closure
+//! that builds the selected content view.
 
+use crate::icon::Icon;
 use crate::view::View;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
-
-/// Icon type for navigation items
-///
-/// Minimal geometric icons for MVP. Can be extended with more icons as needed.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Icon {
-    /// Home icon - house shape
-    Home,
-    /// Settings icon - gear shape
-    Settings,
-    /// Info icon - circle with 'i'
-    Info,
-    /// Search icon - magnifying glass
-    Search,
-    /// User/Profile icon - person shape
-    User,
-    /// File/Document icon
-    File,
-    /// Folder icon
-    Folder,
-}
 
 /// Navigation link data structure (NOT a View)
 ///
@@ -47,13 +27,16 @@ pub enum Icon {
 /// # Examples
 ///
 /// ```ignore
-/// let link = NavigationLink::new("Home", Icon::Home, || Text::new("Welcome to Home"));
+/// let link = NavigationLink::new("Home", || Text::new("Welcome to Home"))
+///     .icon(Icon::Home);
 /// ```
 pub struct NavigationLink {
     label: String,
-    icon: Icon,
+    icon: Option<Icon>,
     /// The closure that builds the content view, wrapped in Rc for Clone-ability
     pub(crate) content_builder: Rc<dyn Fn() -> Box<dyn View>>,
+    /// Optional callback invoked when the link becomes selected.
+    on_select: Option<Rc<dyn Fn()>>,
 }
 
 impl Clone for NavigationLink {
@@ -62,6 +45,7 @@ impl Clone for NavigationLink {
             label: self.label.clone(),
             icon: self.icon,
             content_builder: Rc::clone(&self.content_builder),
+            on_select: self.on_select.clone(),
         }
     }
 }
@@ -69,31 +53,57 @@ impl Clone for NavigationLink {
 impl NavigationLink {
     /// Create a new NavigationLink
     ///
-    /// # Parameters
+    /// # Arguments
     ///
     /// * `label` - Display text for the navigation item
-    /// * `icon` - Icon to display next to the label
     /// * `content_builder` - Closure that builds the content view when selected (boxed internally)
+    ///
+    /// # Returns
+    ///
+    /// A text-only navigation link. Call [`Self::icon`] to associate an icon.
     ///
     /// # Examples
     ///
     /// ```ignore
-    /// NavigationLink::new("Settings", Icon::Settings, || SettingsView::new())
+    /// NavigationLink::new("Settings", || SettingsView::new()).icon(Icon::Settings)
     /// ```
-    pub fn new<V>(
-        label: impl Into<String>,
-        icon: Icon,
-        content_builder: impl Fn() -> V + 'static,
-    ) -> Self
+    pub fn new<V>(label: impl Into<String>, content_builder: impl Fn() -> V + 'static) -> Self
     where
         V: View + 'static,
     {
         let builder = move || -> Box<dyn View> { Box::new(content_builder()) };
         Self {
             label: label.into(),
-            icon,
+            icon: None,
             content_builder: Rc::new(builder),
+            on_select: None,
         }
+    }
+
+    /// Add an icon to this navigation link.
+    ///
+    /// Navigation links are text-only unless an icon is explicitly supplied
+    /// and their containing NavigationView enables icon display.
+    ///
+    /// # Arguments
+    ///
+    /// * `icon` - Typed icon associated with this link.
+    ///
+    /// # Returns
+    ///
+    /// The updated navigation link.
+    pub fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// Register a callback invoked when this link is selected.
+    ///
+    /// The callback lets a navigation target update application state without
+    /// coupling that state change to page construction.
+    pub fn on_select(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_select = Some(Rc::new(callback));
+        self
     }
 
     /// Get the label text
@@ -101,9 +111,13 @@ impl NavigationLink {
         &self.label
     }
 
-    /// Get the icon
-    pub fn icon(&self) -> &Icon {
-        &self.icon
+    /// Get the optional icon.
+    ///
+    /// # Returns
+    ///
+    /// The explicitly configured icon, if any.
+    pub fn get_icon(&self) -> Option<Icon> {
+        self.icon
     }
 
     /// Build the content view
@@ -112,5 +126,10 @@ impl NavigationLink {
     pub fn build_content(&self) -> Box<dyn View> {
         // Call the Fn through Rc
         (self.content_builder)()
+    }
+
+    /// Clone the optional selection callback for navigation dispatch.
+    pub(crate) fn selection_callback(&self) -> Option<Rc<dyn Fn()>> {
+        self.on_select.clone()
     }
 }

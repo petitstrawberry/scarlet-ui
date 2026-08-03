@@ -7,6 +7,7 @@ use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::icon::{Icon, IconFill, IconStyle, IconWeight};
 use crate::renderer::PaintContext;
 use crate::view::View;
 use alloc::boxed::Box;
@@ -21,6 +22,9 @@ pub type ButtonCallback = Box<dyn Fn() + 'static>;
 #[derive(Clone)]
 pub struct Button {
     label: String,
+    icon: Option<Icon>,
+    icon_style: IconStyle,
+    icon_color: Option<Color>,
     on_click: Option<Arc<dyn Fn() + 'static>>,
     background_color: Color,
     border_color: Color,
@@ -36,6 +40,9 @@ impl Button {
         let palette = ColorPalette::default();
         Self {
             label: label_str,
+            icon: None,
+            icon_style: IconStyle::default(),
+            icon_color: None,
             on_click: None,
             background_color: palette.button_background(),
             border_color: palette.border(),
@@ -43,6 +50,138 @@ impl Button {
             font_size: 15.0,
             padding: 10.0,
         }
+    }
+
+    /// Create a compact icon-only button.
+    ///
+    /// # Arguments
+    ///
+    /// * `icon` - Icon painted inside the button.
+    ///
+    /// # Returns
+    ///
+    /// A button sized for application toolbars and header bars.
+    pub fn icon_only(icon: Icon) -> Self {
+        let palette = ColorPalette::default();
+        Self {
+            label: String::new(),
+            icon: Some(icon),
+            icon_style: IconStyle::default(),
+            icon_color: None,
+            on_click: None,
+            background_color: palette.button_background(),
+            border_color: palette.border(),
+            text_color: palette.text_primary(),
+            font_size: 15.0,
+            padding: 7.0,
+        }
+    }
+
+    /// Add an icon to this button.
+    ///
+    /// # Arguments
+    ///
+    /// * `icon` - Icon painted before the label.
+    ///
+    /// # Returns
+    ///
+    /// The updated button.
+    pub fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// Set the outline style used by this button's icon.
+    ///
+    /// # Arguments
+    ///
+    /// * `style` - Icon stroke style.
+    ///
+    /// # Returns
+    ///
+    /// The updated button.
+    pub fn icon_style(mut self, style: IconStyle) -> Self {
+        self.icon_style = style;
+        self
+    }
+
+    /// Set the stroke width used by this button's icon.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Stroke width in Tabler view-box units.
+    ///
+    /// # Returns
+    ///
+    /// The updated button.
+    pub fn icon_stroke_width(mut self, width: f32) -> Self {
+        self.icon_style = self.icon_style.stroke_width(width);
+        self
+    }
+
+    /// Set a semantic weight for this button's icon.
+    ///
+    /// # Arguments
+    ///
+    /// * `weight` - Thin, normal, or bold stroke weight.
+    ///
+    /// # Returns
+    ///
+    /// The updated button.
+    pub fn icon_weight(mut self, weight: IconWeight) -> Self {
+        self.icon_style = self.icon_style.weight(weight);
+        self
+    }
+
+    /// Select outline or filled treatment for this button's icon.
+    ///
+    /// # Arguments
+    ///
+    /// * `fill` - Requested vector treatment.
+    ///
+    /// # Returns
+    ///
+    /// The updated button.
+    pub fn icon_fill(mut self, fill: IconFill) -> Self {
+        self.icon_style = self.icon_style.fill(fill);
+        self
+    }
+
+    /// Use the official filled variant for this button's icon when available.
+    ///
+    /// # Returns
+    ///
+    /// The updated button.
+    pub fn icon_filled(self) -> Self {
+        self.icon_fill(IconFill::Filled)
+    }
+
+    /// Override the icon tint independently from the label color.
+    ///
+    /// # Arguments
+    ///
+    /// * `color` - Explicit icon tint.
+    ///
+    /// # Returns
+    ///
+    /// The updated button.
+    pub fn icon_color(mut self, color: Color) -> Self {
+        self.icon_color = Some(color);
+        self
+    }
+
+    /// Apply the compact flat appearance used by header bars.
+    ///
+    /// # Returns
+    ///
+    /// The updated button with transparent surface chrome and compact padding.
+    pub fn header_style(mut self) -> Self {
+        let palette = ColorPalette::default();
+        self.background_color = Color::CLEAR;
+        self.border_color = Color::CLEAR;
+        self.text_color = palette.text();
+        self.padding = 6.0;
+        self
     }
 
     /// Set the click callback
@@ -125,6 +264,9 @@ impl View for Button {
             self.clone(),
             ButtonRenderObject::new(
                 self.label.clone(),
+                self.icon,
+                self.icon_style,
+                self.icon_color,
                 self.background_color,
                 self.border_color,
                 self.text_color,
@@ -146,6 +288,9 @@ impl View for Button {
 /// Button RenderObject - handles button rendering and interaction
 pub struct ButtonRenderObject {
     label: String,
+    icon: Option<Icon>,
+    icon_style: IconStyle,
+    icon_color: Option<Color>,
     background_color: Color,
     border_color: Color,
     text_color: Color,
@@ -158,9 +303,28 @@ pub struct ButtonRenderObject {
 }
 
 impl ButtonRenderObject {
-    /// Create a new ButtonRenderObject
+    /// Create a button render object.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Button label.
+    /// * `icon` - Optional typed icon.
+    /// * `icon_style` - Icon vector and stroke style.
+    /// * `icon_color` - Optional icon-only tint override.
+    /// * `background_color` - Normal background color.
+    /// * `border_color` - Normal border color.
+    /// * `text_color` - Text and icon foreground color.
+    /// * `font_size` - Label font size.
+    /// * `padding` - Interior padding.
+    ///
+    /// # Returns
+    ///
+    /// A render object initialized in its normal interaction state.
     pub fn new(
         label: String,
+        icon: Option<Icon>,
+        icon_style: IconStyle,
+        icon_color: Option<Color>,
         background_color: Color,
         border_color: Color,
         text_color: Color,
@@ -169,6 +333,9 @@ impl ButtonRenderObject {
     ) -> Self {
         Self {
             label,
+            icon,
+            icon_style,
+            icon_color,
             background_color,
             border_color,
             text_color,
@@ -183,10 +350,19 @@ impl ButtonRenderObject {
 
     /// Estimate button size based on label
     fn estimate_size(&self) -> Size {
+        if self.icon.is_some() && self.label.is_empty() {
+            let side = self.font_size * 1.35 + self.padding * 2.0;
+            return Size::new(side, side);
+        }
         let char_width = self.font_size * 0.6;
 
         let text_width = self.label.len() as f32 * char_width;
-        let width = text_width + self.padding * 2.0;
+        let icon_width = if self.icon.is_some() {
+            self.font_size * 1.1 + 6.0
+        } else {
+            0.0
+        };
+        let width = text_width + icon_width + self.padding * 2.0;
         let height = self.font_size * 1.2 + self.padding * 2.0;
 
         Size { width, height }
@@ -376,15 +552,49 @@ impl ElementRenderObject for ButtonRenderObject {
         }
         ctx.stroke_rounded_rect(rect, 6.0, 1.0, border);
 
-        let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
-        let x = origin.x + ((self.size.width - text_w as f32) / 2.0).max(0.0);
-        let y = origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0);
-        ctx.draw_text(
-            Point::new(x, y),
-            self.label.clone(),
-            self.text_color,
-            self.font_size,
-        );
+        if let Some(icon) = self.icon {
+            let icon_size = if self.label.is_empty() {
+                (self.size.width.min(self.size.height) - self.padding).max(1.0)
+            } else {
+                (self.size.height - self.padding).max(1.0)
+            };
+            let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
+            let group_width = if self.label.is_empty() {
+                icon_size
+            } else {
+                icon_size + 6.0 + text_w as f32
+            };
+            let group_x = origin.x + ((self.size.width - group_width) / 2.0).max(0.0);
+            crate::views::icon::paint_icon(
+                ctx,
+                Point::new(group_x, origin.y + (self.size.height - icon_size) * 0.5),
+                icon_size,
+                icon,
+                self.icon_style,
+                self.icon_color.unwrap_or(self.text_color),
+            );
+            if !self.label.is_empty() {
+                ctx.draw_text(
+                    Point::new(
+                        group_x + icon_size + 6.0,
+                        origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0),
+                    ),
+                    self.label.clone(),
+                    self.text_color,
+                    self.font_size,
+                );
+            }
+        } else {
+            let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
+            let x = origin.x + ((self.size.width - text_w as f32) / 2.0).max(0.0);
+            let y = origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0);
+            ctx.draw_text(
+                Point::new(x, y),
+                self.label.clone(),
+                self.text_color,
+                self.font_size,
+            );
+        }
         true
     }
 }

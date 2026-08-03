@@ -248,8 +248,8 @@ macro_rules! match_view {
 ///
 /// ```ignore
 /// let nav = navigation! {
-///     NavigationLink::new("Home", Icon::Home, || Text::new("Home")),
-///     NavigationLink::new("Settings", Icon::Settings, || Text::new("Settings")),
+///     NavigationLink::new("Home", || Text::new("Home")),
+///     NavigationLink::new("Settings", || Text::new("Settings")),
 /// }
 /// .sidebar_width(200.0);
 /// ```

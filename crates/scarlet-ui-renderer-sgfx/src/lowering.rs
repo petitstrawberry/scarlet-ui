@@ -7,14 +7,15 @@ use alloc::vec::Vec;
 use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::color::Color as UiColor;
 use scarlet_ui_core::graphics::{GlyphRasterKey, rasterize_text};
+use scarlet_ui_core::icon::{IconMaskKey, rasterize_icon};
 use scarlet_ui_core::renderer::{BufferHandle, PaintCommand, PaintContext};
 use sgfx::ir::{
     AddressMode, BlendState, BufferDesc, BufferId, BufferUsage, Color, CommandEncoder,
     DrawUniforms, Extent2D, FilterMode, FragmentProgram, FrontFace, LoadOp, PixelRect,
     PrimitiveTopology, RasterState, RenderPassDesc, RenderPipelineDesc, RenderPipelineId,
     ResourceTable, SamplerDesc, SamplerId, StoreOp, TextureDesc, TextureFormat, TextureId,
-    TextureSampleMode, TextureUsage, TextureWrite, Transform, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    TextureSampleMode, TextureUsage, TextureWrite, Transform, VertexAttribute, VertexBufferLayout,
+    VertexFormat,
 };
 use sgfx::{Context, Image, IrResources, Queue};
 
@@ -38,6 +39,7 @@ const TEXTURED_DRAW_COMMAND_BYTES: u32 = 260;
 const GLYPH_ATLAS_SIZE: u32 = 2_048;
 const GLYPH_ATLAS_PADDING: u32 = 1;
 const MAX_GLYPH_ENTRIES: usize = 512;
+const MAX_ICON_ENTRIES: usize = 256;
 const MAX_BUFFER_TEXTURES: usize = 128;
 const CANVAS_VERTEX_STRIDE: u32 = 40;
 const MAX_CANVASES: usize = 32;
@@ -106,9 +108,18 @@ struct GlyphTexture {
     height: u32,
 }
 
+struct IconTexture {
+    key: IconMaskKey,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
 struct GlyphAtlas {
     texture: TextureId,
     entries: Vec<GlyphTexture>,
+    icon_entries: Vec<IconTexture>,
     cursor_x: u32,
     cursor_y: u32,
     row_height: u32,
@@ -167,8 +178,8 @@ impl RenderSession {
             return Err(Error::InvalidFrame);
         }
         let table = Rc::new(ResourceTable::new());
-        let extent = Extent2D::new(width, height)
-            .map_err(|_| Error::sgfx(Stage::DefineResources))?;
+        let extent =
+            Extent2D::new(width, height).map_err(|_| Error::sgfx(Stage::DefineResources))?;
         let target_usage = TextureUsage::RENDER_ATTACHMENT
             | TextureUsage::COPY_SRC
             | TextureUsage::COPY_DST
@@ -212,11 +223,8 @@ impl RenderSession {
             .id();
 
         let solid_pipeline = define_pipeline(&table, FragmentProgram::Solid)?.id();
-        let texture_pipeline = define_pipeline(
-            &table,
-            FragmentProgram::Texture(TextureSampleMode::Rgba),
-        )?
-        .id();
+        let texture_pipeline =
+            define_pipeline(&table, FragmentProgram::Texture(TextureSampleMode::Rgba))?.id();
         let glyph_pipeline = define_pipeline(
             &table,
             FragmentProgram::Texture(TextureSampleMode::AlphaMask),
@@ -239,6 +247,7 @@ impl RenderSession {
                 GLYPH_ATLAS_SIZE,
             )?,
             entries: Vec::new(),
+            icon_entries: Vec::new(),
             cursor_x: 0,
             cursor_y: 0,
             row_height: 0,
@@ -440,9 +449,7 @@ impl RenderSession {
                     stroke_width,
                     color,
                 } => {
-                    if let Some(geometry) =
-                        tessellator.stroke_rect(*rect, 0.0, *stroke_width)?
-                    {
+                    if let Some(geometry) = tessellator.stroke_rect(*rect, 0.0, *stroke_width)? {
                         push_draw(
                             &mut draws,
                             geometry,
@@ -488,15 +495,10 @@ impl RenderSession {
                         if glyph.width == 0 || glyph.height == 0 {
                             continue;
                         }
-                        let (texture, atlas_bounds, upload_required) = self.glyph_texture(
-                            glyph.key,
-                            glyph.width,
-                            glyph.height,
-                        )?;
+                        let (texture, atlas_bounds, upload_required) =
+                            self.glyph_texture(glyph.key, glyph.width, glyph.height)?;
                         if upload_required {
-                            uploads
-                                .try_reserve(1)
-                                .map_err(|_| Error::FrameTooComplex)?;
+                            uploads.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
                             uploads.push(TextureUpload {
                                 texture,
                                 x: atlas_bounds.x,
@@ -513,12 +515,59 @@ impl RenderSession {
                             glyph.width as f32,
                             glyph.height as f32,
                         );
-                        if let Some(geometry) = tessellator.textured_rect(
-                            destination,
-                            atlas_tex_coords(atlas_bounds),
-                        )? {
+                        if let Some(geometry) = tessellator
+                            .textured_rect(destination, atlas_tex_coords(atlas_bounds))?
+                        {
                             push_draw(&mut draws, geometry, color, DrawSource::Glyph(texture))?;
                         }
+                    }
+                }
+                PaintCommand::DrawIcon {
+                    rect,
+                    icon,
+                    style,
+                    color,
+                } => {
+                    if !rect.origin.x.is_finite()
+                        || !rect.origin.y.is_finite()
+                        || !rect.size.width.is_finite()
+                        || !rect.size.height.is_finite()
+                    {
+                        return Err(Error::InvalidFrame);
+                    }
+                    let pixel_size =
+                        libm::ceilf(rect.size.width.min(rect.size.height).max(1.0) * scale)
+                            .min(u16::MAX as f32) as u16;
+                    let raster = rasterize_icon(*icon, pixel_size, *style);
+                    let (texture, atlas_bounds, upload_required) =
+                        self.icon_texture(raster.key, raster.width, raster.height)?;
+                    if upload_required {
+                        uploads.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
+                        uploads.push(TextureUpload {
+                            texture,
+                            x: atlas_bounds.x,
+                            y: atlas_bounds.y,
+                            width: raster.width,
+                            height: raster.height,
+                            bytes_per_row: raster.width,
+                            bytes: UploadBytes::Shared(raster.mask),
+                        });
+                    }
+                    let destination = FloatRect::new(
+                        truncated_scaled(rect.origin.x, scale),
+                        truncated_scaled(rect.origin.y, scale),
+                        raster.width as f32,
+                        raster.height as f32,
+                    );
+                    if let Some(geometry) =
+                        tessellator.textured_rect(destination, atlas_tex_coords(atlas_bounds))?
+                    {
+                        push_draw(
+                            &mut draws,
+                            geometry,
+                            ui_color(*color, opacity)?,
+                            DrawSource::Glyph(texture),
+                        )?;
                     }
                 }
                 PaintCommand::DrawBuffer { dst, buffer_idx } => {
@@ -616,9 +665,7 @@ impl RenderSession {
                         truncated_scaled(rect.size.height, scale),
                     );
                     let tex_coords = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
-                    if let Some(geometry) =
-                        tessellator.textured_rect(destination, tex_coords)?
-                    {
+                    if let Some(geometry) = tessellator.textured_rect(destination, tex_coords)? {
                         push_draw(
                             &mut draws,
                             geometry,
@@ -634,9 +681,7 @@ impl RenderSession {
         // transparent degenerate draw so a damage rectangle that only clears
         // removed content still has a valid pass.
         let geometry = tessellator.dummy_draw()?;
-        draws
-            .try_reserve(1)
-            .map_err(|_| Error::FrameTooComplex)?;
+        draws.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
         draws.push(Draw {
             geometry,
             color: [0.0, 0.0, 0.0, 0.0],
@@ -737,7 +782,8 @@ impl RenderSession {
         }) {
             return Err(Error::InvalidFrame);
         }
-        let vertex_count = u32::try_from(mesh.vertices.len()).map_err(|_| Error::FrameTooComplex)?;
+        let vertex_count =
+            u32::try_from(mesh.vertices.len()).map_err(|_| Error::FrameTooComplex)?;
         let byte_size = u64::from(vertex_count)
             .checked_mul(u64::from(CANVAS_VERTEX_STRIDE))
             .ok_or(Error::FrameTooComplex)?;
@@ -865,14 +911,9 @@ impl RenderSession {
         let clear = ir_color(ui_color(frame.clear_color, 1.0)?)?;
         if frame.draws.is_empty() {
             let mut encoder = CommandEncoder::new(&table);
-            let descriptor = RenderPassDesc::new(
-                &table,
-                target,
-                area,
-                LoadOp::Clear(clear),
-                StoreOp::Store,
-            )
-            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            let descriptor =
+                RenderPassDesc::new(&table, target, area, LoadOp::Clear(clear), StoreOp::Store)
+                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
             let mut pass = encoder
                 .begin_render_pass(descriptor)
                 .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -890,8 +931,7 @@ impl RenderSession {
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
             pass.draw(3, 0)
                 .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-            pass.end()
-                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            pass.end().map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
             let commands = encoder
                 .finish()
                 .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -919,13 +959,9 @@ impl RenderSession {
                         let texture = table
                             .texture_ref(cached.texture)
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                        let destination = PixelRect::new(
-                            0,
-                            0,
-                            cached.source.width,
-                            cached.source.height,
-                        )
-                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                        let destination =
+                            PixelRect::new(0, 0, cached.source.width, cached.source.height)
+                                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                         let bytes_per_row = cached
                             .source
                             .width
@@ -944,9 +980,8 @@ impl RenderSession {
                 } else {
                     LoadOp::Load
                 };
-                let descriptor =
-                    RenderPassDesc::new(&table, target, area, load, StoreOp::Store)
-                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                let descriptor = RenderPassDesc::new(&table, target, area, load, StoreOp::Store)
+                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                 let mut pass = encoder
                     .begin_render_pass(descriptor)
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -983,7 +1018,7 @@ impl RenderSession {
                         target_state.width,
                         target_state.height,
                     )?)
-                        .map_err(|_| Error::InvalidFrame)?;
+                    .map_err(|_| Error::InvalidFrame)?;
                     let tint = ir_color(ui_color(draw.tint, 1.0)?)?;
                     if let Some(texture_index) = texture_index {
                         let texture = table
@@ -1019,8 +1054,7 @@ impl RenderSession {
                 if pass_vertices == 0 {
                     return Err(Error::FrameTooComplex);
                 }
-                pass.end()
-                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                pass.end().map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                 let commands = encoder
                     .finish()
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -1137,7 +1171,8 @@ impl RenderSession {
         if self.buffer_textures.len() >= MAX_BUFFER_TEXTURES {
             return Err(Error::FrameTooComplex);
         }
-        let texture = define_sampled_texture(&self.table, TextureFormat::Bgra8Unorm, width, height)?;
+        let texture =
+            define_sampled_texture(&self.table, TextureFormat::Bgra8Unorm, width, height)?;
         self.buffer_textures.push(BufferTexture {
             texture,
             buffer_identity,
@@ -1228,6 +1263,85 @@ impl RenderSession {
         Ok((self.glyph_atlas.texture, bounds, true))
     }
 
+    fn icon_texture(
+        &mut self,
+        key: IconMaskKey,
+        width: u32,
+        height: u32,
+    ) -> Result<(TextureId, PixelBounds, bool)> {
+        if let Some(entry) = self
+            .glyph_atlas
+            .icon_entries
+            .iter()
+            .find(|entry| entry.key == key && entry.width == width && entry.height == height)
+        {
+            return Ok((
+                self.glyph_atlas.texture,
+                PixelBounds {
+                    x: entry.x,
+                    y: entry.y,
+                    width: entry.width,
+                    height: entry.height,
+                },
+                false,
+            ));
+        }
+        if self.glyph_atlas.icon_entries.len() >= MAX_ICON_ENTRIES {
+            return Err(Error::FrameTooComplex);
+        }
+        let padded_width = width
+            .checked_add(GLYPH_ATLAS_PADDING)
+            .ok_or(Error::FrameTooComplex)?;
+        let padded_height = height
+            .checked_add(GLYPH_ATLAS_PADDING)
+            .ok_or(Error::FrameTooComplex)?;
+        if padded_width > GLYPH_ATLAS_SIZE || padded_height > GLYPH_ATLAS_SIZE {
+            return Err(Error::FrameTooComplex);
+        }
+        if self
+            .glyph_atlas
+            .cursor_x
+            .checked_add(padded_width)
+            .is_none_or(|right| right > GLYPH_ATLAS_SIZE)
+        {
+            self.glyph_atlas.cursor_x = 0;
+            self.glyph_atlas.cursor_y = self
+                .glyph_atlas
+                .cursor_y
+                .checked_add(self.glyph_atlas.row_height)
+                .ok_or(Error::FrameTooComplex)?;
+            self.glyph_atlas.row_height = 0;
+        }
+        if self
+            .glyph_atlas
+            .cursor_y
+            .checked_add(padded_height)
+            .is_none_or(|bottom| bottom > GLYPH_ATLAS_SIZE)
+        {
+            return Err(Error::FrameTooComplex);
+        }
+        let bounds = PixelBounds {
+            x: self.glyph_atlas.cursor_x,
+            y: self.glyph_atlas.cursor_y,
+            width,
+            height,
+        };
+        self.glyph_atlas.icon_entries.push(IconTexture {
+            key,
+            x: bounds.x,
+            y: bounds.y,
+            width,
+            height,
+        });
+        self.glyph_atlas.cursor_x = self
+            .glyph_atlas
+            .cursor_x
+            .checked_add(padded_width)
+            .ok_or(Error::FrameTooComplex)?;
+        self.glyph_atlas.row_height = self.glyph_atlas.row_height.max(padded_height);
+        Ok((self.glyph_atlas.texture, bounds, true))
+    }
+
     fn submit(
         &mut self,
         context: &Context,
@@ -1285,13 +1399,9 @@ impl RenderSession {
                         let texture = table
                             .texture_ref(upload.texture)
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                        let destination = PixelRect::new(
-                            upload.x,
-                            upload.y,
-                            upload.width,
-                            upload.height,
-                        )
-                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                        let destination =
+                            PixelRect::new(upload.x, upload.y, upload.width, upload.height)
+                                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                         let write = TextureWrite::new(
                             destination,
                             upload.bytes_per_row,
@@ -1318,7 +1428,8 @@ impl RenderSession {
 
                 while draw_index < frame.draws.len() && pass_vertices < MAX_PASS_VERTICES {
                     let draw = frame.draws[draw_index];
-                    let Some(scissor) = intersect_bounds(draw.geometry.scissor, *render_area) else {
+                    let Some(scissor) = intersect_bounds(draw.geometry.scissor, *render_area)
+                    else {
                         draw_index += 1;
                         draw_offset = 0;
                         continue;
@@ -1368,7 +1479,7 @@ impl RenderSession {
                         chunk,
                         draw.geometry.first_vertex.saturating_add(draw_offset),
                     )
-                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                     pass_vertices += chunk;
                     estimated_bytes = estimated_bytes
                         .saturating_add(draw_bytes)
@@ -1382,8 +1493,7 @@ impl RenderSession {
                 if pass_vertices == 0 {
                     return Err(Error::FrameTooComplex);
                 }
-                pass.end()
-                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                pass.end().map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                 let commands = encoder
                     .finish()
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -1475,9 +1585,7 @@ fn define_pipeline(
         .map_err(|_| Error::sgfx(Stage::DefineResources))
 }
 
-fn define_canvas_pipeline(
-    table: &ResourceTable,
-) -> Result<sgfx::ir::RenderPipelineRef<'_>> {
+fn define_canvas_pipeline(table: &ResourceTable) -> Result<sgfx::ir::RenderPipelineRef<'_>> {
     let layout = VertexBufferLayout::new(
         CANVAS_VERTEX_STRIDE,
         alloc::vec![
@@ -1568,9 +1676,7 @@ fn push_draw(
             return Ok(());
         }
     }
-    draws
-        .try_reserve(1)
-        .map_err(|_| Error::FrameTooComplex)?;
+    draws.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
     draws.push(Draw {
         geometry,
         color,
@@ -1585,12 +1691,7 @@ fn atlas_tex_coords(bounds: PixelBounds) -> [[f32; 2]; 4] {
     let top = bounds.y as f32 * inverse_size;
     let right = bounds.x.saturating_add(bounds.width) as f32 * inverse_size;
     let bottom = bounds.y.saturating_add(bounds.height) as f32 * inverse_size;
-    [
-        [left, top],
-        [right, top],
-        [right, bottom],
-        [left, bottom],
-    ]
+    [[left, top], [right, top], [right, bottom], [left, bottom]]
 }
 
 fn encode_vertices(vertices: &[Vertex]) -> Result<Vec<u8>> {
@@ -1685,13 +1786,8 @@ fn ui_color(color: UiColor, opacity: f32) -> Result<[f32; 4]> {
 }
 
 fn ir_color(components: [f32; 4]) -> Result<Color> {
-    Color::rgba(
-        components[0],
-        components[1],
-        components[2],
-        components[3],
-    )
-    .map_err(|_| Error::InvalidFrame)
+    Color::rgba(components[0], components[1], components[2], components[3])
+        .map_err(|_| Error::InvalidFrame)
 }
 
 fn finite_unit(value: f32) -> Result<f32> {

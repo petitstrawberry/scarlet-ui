@@ -635,11 +635,7 @@ fn select_font_for_char(ch: char, font_stack: &FontStack) -> (FontRef<'static>, 
 /// # Returns
 ///
 /// Owned positioned glyph masks in drawing order.
-pub fn rasterize_text(
-    text: &str,
-    font_size_px: f32,
-    scale_milli: u32,
-) -> Vec<RasterizedGlyph> {
+pub fn rasterize_text(text: &str, font_size_px: f32, scale_milli: u32) -> Vec<RasterizedGlyph> {
     let Some(font_stack) = default_font_stack() else {
         return Vec::new();
     };

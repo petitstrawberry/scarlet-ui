@@ -5,7 +5,7 @@
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::LayoutConstraints;
-use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::element::{Element, ElementRenderObject, RenderElement, UpdateResult};
 use crate::geometry::{Point, Size};
 use crate::graphics;
 use crate::renderer::PaintContext;
@@ -18,6 +18,7 @@ use core::any::Any;
 #[derive(Clone)]
 pub struct Text {
     content: String,
+    content_state: Option<crate::state::State<String>>,
     font_size: f32,
     color: Color,
 }
@@ -29,9 +30,25 @@ impl Text {
         let palette = ColorPalette::default();
         Self {
             content: content_str,
+            content_state: None,
             font_size: 16.0,
             color: palette.text_primary(),
         }
+    }
+
+    /// Create text whose content follows a reactive string state.
+    ///
+    /// # Arguments
+    ///
+    /// * `content` - State containing the displayed string.
+    ///
+    /// # Returns
+    ///
+    /// A text view that repaints and relayouts when the state changes.
+    pub fn from_state(content: crate::state::State<String>) -> Self {
+        let mut text = Self::new(content.get());
+        text.content_state = Some(content);
+        text
     }
 
     /// Set the font size in points
@@ -60,18 +77,28 @@ impl Text {
     pub fn text_color(&self) -> Color {
         self.color
     }
+
+    fn content_for_render(&self) -> String {
+        self.content_state
+            .as_ref()
+            .map(|state| state.get())
+            .unwrap_or_else(|| self.content.clone())
+    }
 }
 
 impl View for Text {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
             self.clone(),
-            TextRenderObject::new(self.content.clone(), self.font_size, self.color),
+            TextRenderObject::new(self.content_for_render(), self.font_size, self.color),
         ))
     }
 
     fn listenables(&self) -> alloc::vec::Vec<&dyn crate::state::Listenable> {
-        alloc::vec::Vec::new()
+        match self.content_state.as_ref() {
+            Some(state) => alloc::vec![state as &dyn crate::state::Listenable],
+            None => alloc::vec::Vec::new(),
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -235,6 +262,20 @@ impl ElementRenderObject for TextRenderObject {
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         ctx.draw_text(origin, self.content.clone(), self.color, self.font_size);
+        true
+    }
+
+    fn update(&mut self, new_view: &dyn View) -> UpdateResult {
+        let Some(text) = new_view.as_any().downcast_ref::<Text>() else {
+            return UpdateResult::Replaced;
+        };
+        self.content = text.content_for_render();
+        self.font_size = text.font_size;
+        self.color = text.color;
+        UpdateResult::Updated
+    }
+
+    fn update_needs_layout(&self) -> bool {
         true
     }
 }
