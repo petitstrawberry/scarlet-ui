@@ -358,6 +358,14 @@ impl ApplicationRunner {
                         slots.push(self.create_slot(app, declaration, slots.is_empty())?);
                     }
                 }
+                ApplicationCommand::OpenNewWindow(key) => {
+                    if let Some(declaration) = collect_scene_declarations(app)?
+                        .into_iter()
+                        .find(|declaration| declaration.key == key)
+                    {
+                        slots.push(self.create_slot(app, declaration, slots.is_empty())?);
+                    }
+                }
                 ApplicationCommand::DismissWindow(key) => {
                     let close_ids = slots
                         .iter()

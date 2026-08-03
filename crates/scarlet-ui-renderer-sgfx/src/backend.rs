@@ -404,14 +404,8 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         }
         let mut damage = Vec::new();
         for rect in physical_damage.ok_or(Error::InvalidFrame)? {
-            if let Some(rect) = clamp_damage(
-                *rect,
-                self.physical_width,
-                self.physical_height,
-            ) {
-                damage
-                    .try_reserve(1)
-                    .map_err(|_| Error::FrameTooComplex)?;
+            if let Some(rect) = clamp_damage(*rect, self.physical_width, self.physical_height) {
+                damage.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
                 damage.push(rect);
             }
         }
@@ -517,11 +511,7 @@ fn physical_dimensions(size: Size, scale_milli: u32) -> Result<(u32, u32)> {
     ))
 }
 
-fn clamp_damage(
-    damage: DamageRect,
-    frame_width: u32,
-    frame_height: u32,
-) -> Option<DamageRect> {
+fn clamp_damage(damage: DamageRect, frame_width: u32, frame_height: u32) -> Option<DamageRect> {
     let (x, y, width, height) = damage;
     if width == 0 || height == 0 || x >= frame_width || y >= frame_height {
         return None;

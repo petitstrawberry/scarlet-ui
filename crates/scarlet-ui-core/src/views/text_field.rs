@@ -32,7 +32,9 @@ pub struct TextField {
     text: State<String>,
     placeholder: String,
     on_submit: Option<Arc<dyn Fn() + 'static>>,
+    on_cancel: Option<Arc<dyn Fn() + 'static>>,
     blur_on_submit: bool,
+    autofocus: bool,
     background_color: Color,
     border_color: Color,
     focused_border_color: Color,
@@ -50,7 +52,9 @@ impl TextField {
             text,
             placeholder: String::new(),
             on_submit: None,
+            on_cancel: None,
             blur_on_submit: false,
+            autofocus: false,
             background_color: palette.background(),
             border_color: palette.background_tertiary(),
             focused_border_color: palette.primary_light().lighten(0.4),
@@ -76,6 +80,18 @@ impl TextField {
     /// Set the callback invoked when Enter is pressed while focused.
     pub fn on_submit(mut self, callback: impl Fn() + 'static) -> Self {
         self.on_submit = Some(Arc::new(callback));
+        self
+    }
+
+    /// Set the callback invoked when Escape is pressed while focused.
+    pub fn on_cancel(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_cancel = Some(Arc::new(callback));
+        self
+    }
+
+    /// Set whether this field receives keyboard focus when its element is created.
+    pub fn autofocus(mut self, autofocus: bool) -> Self {
+        self.autofocus = autofocus;
         self
     }
 
@@ -158,6 +174,13 @@ impl TextField {
             callback();
         }
     }
+
+    /// Invoke the cancel callback if present.
+    pub fn invoke_cancel(&self) {
+        if let Some(callback) = self.on_cancel.as_ref() {
+            callback();
+        }
+    }
 }
 
 impl View for TextField {
@@ -213,7 +236,7 @@ impl TextFieldRenderObject {
             preedit_cursor_byte: 0,
             preedit_anchor_byte: 0,
             preedit_spans: alloc::vec::Vec::new(),
-            focused: false,
+            focused: view.autofocus,
             dragging: false,
             placeholder: view.placeholder.clone(),
             background_color: view.background_color,
@@ -488,8 +511,12 @@ pub(crate) fn handle_text_field_keyboard(
         KeyEvent::Pressed {
             keycode: KeyCode::Escape,
             ..
+        } => {
+            field.invoke_cancel();
+            render_object.set_focused(false);
+            true
         }
-        | KeyEvent::Pressed {
+        KeyEvent::Pressed {
             keycode: KeyCode::Tab,
             ..
         } => {

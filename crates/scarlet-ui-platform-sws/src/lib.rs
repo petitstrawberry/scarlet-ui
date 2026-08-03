@@ -136,10 +136,7 @@ impl SwsSgfxFrameSink {
         }
     }
 
-    fn validate_identity(
-        &self,
-        identity: RendererSgfxBufferIdentity,
-    ) -> SgfxSinkResult<()> {
+    fn validate_identity(&self, identity: RendererSgfxBufferIdentity) -> SgfxSinkResult<()> {
         if identity.window_id != self.window_id
             || identity.compositor_epoch != self.compositor_epoch
         {
@@ -174,9 +171,7 @@ impl SwsSgfxFrameSink {
             sws_protocol::error_codes::SGFX_IMPORT_FAILED => SgfxSinkError::ImportFailed,
             sws_protocol::error_codes::WINDOW_NOT_OWNED
             | sws_protocol::error_codes::INVALID_SGFX_BUFFER
-            | sws_protocol::error_codes::STALE_SGFX_GENERATION => {
-                SgfxSinkError::InvalidIdentity
-            }
+            | sws_protocol::error_codes::STALE_SGFX_GENERATION => SgfxSinkError::InvalidIdentity,
             _ => SgfxSinkError::Protocol,
         }
     }
@@ -369,10 +364,7 @@ impl SgfxFrameSink for SwsSgfxFrameSink {
             .map_err(Self::map_error)
     }
 
-    fn wait_until_released(
-        &mut self,
-        token: SgfxCommitToken,
-    ) -> SgfxSinkResult<()> {
+    fn wait_until_released(&mut self, token: SgfxCommitToken) -> SgfxSinkResult<()> {
         self.validate_identity(token.identity)?;
         loop {
             self.pump_lifecycle()?;
@@ -400,11 +392,7 @@ impl SgfxFrameSink for SwsSgfxFrameSink {
         if damage.is_empty() {
             return Err(SgfxSinkError::Protocol);
         }
-        if self
-            .retained
-            .iter()
-            .any(|token| token.identity == identity)
-        {
+        if self.retained.iter().any(|token| token.identity == identity) {
             return Err(SgfxSinkError::BufferBusy);
         }
         let token = self.next_commit_token(identity)?;
@@ -420,17 +408,10 @@ impl SgfxFrameSink for SwsSgfxFrameSink {
         Ok(token)
     }
 
-    fn destroy_shared_image(
-        &mut self,
-        identity: RendererSgfxBufferIdentity,
-    ) -> SgfxSinkResult<()> {
+    fn destroy_shared_image(&mut self, identity: RendererSgfxBufferIdentity) -> SgfxSinkResult<()> {
         self.pump_lifecycle()?;
         self.validate_identity(identity)?;
-        if self
-            .retained
-            .iter()
-            .any(|token| token.identity == identity)
-        {
+        if self.retained.iter().any(|token| token.identity == identity) {
             return Err(SgfxSinkError::BufferBusy);
         }
         self.conn
@@ -458,11 +439,10 @@ impl PaintBackend for SwsSgfxPaintBackend {
         _logical_damage: Option<&[Rect]>,
         physical_damage: Option<&[DamageRect]>,
     ) -> Result<BackendFrame<'a>> {
-        match self.backend.render_and_commit(
-            context,
-            background_color,
-            physical_damage,
-        ) {
+        match self
+            .backend
+            .render_and_commit(context, background_color, physical_damage)
+        {
             Ok(()) => Ok(BackendFrame::External),
             Err(error) => {
                 logln!("[ScarletUI SGFX] render failed: {}", error);
@@ -1479,9 +1459,7 @@ impl PlatformWindow for SWSPlatformWindow {
             self.renderer_backend = RendererBackendKind::Cpu;
             return match self.requested_renderer_backend {
                 RequestedRendererBackend::Auto => Ok(None),
-                RequestedRendererBackend::Sgfx => {
-                    Err(scarlet_ui_core::error::Error::RenderError)
-                }
+                RequestedRendererBackend::Sgfx => Err(scarlet_ui_core::error::Error::RenderError),
                 RequestedRendererBackend::Cpu => Ok(None),
             };
         }

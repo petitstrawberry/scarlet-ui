@@ -64,7 +64,10 @@ impl fmt::Display for SgfxSinkError {
         match self {
             Self::Unavailable => formatter.write_str("shared SGFX images are unavailable"),
             Self::BackendLost { compositor_epoch } => {
-                write!(formatter, "SWS compositor epoch {compositor_epoch} was lost")
+                write!(
+                    formatter,
+                    "SWS compositor epoch {compositor_epoch} was lost"
+                )
             }
             Self::BufferBusy => formatter.write_str("shared SGFX buffer is busy"),
             Self::InvalidIdentity => formatter.write_str("invalid shared SGFX buffer identity"),

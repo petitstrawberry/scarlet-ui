@@ -45,10 +45,10 @@ impl Button {
             icon_color: None,
             on_click: None,
             background_color: palette.button_background(),
-            border_color: palette.border(),
+            border_color: Color::CLEAR,
             text_color: palette.text_primary(),
             font_size: 15.0,
-            padding: 10.0,
+            padding: 4.0,
         }
     }
 
@@ -70,7 +70,7 @@ impl Button {
             icon_color: None,
             on_click: None,
             background_color: palette.button_background(),
-            border_color: palette.border(),
+            border_color: Color::CLEAR,
             text_color: palette.text_primary(),
             font_size: 15.0,
             padding: 7.0,
@@ -409,10 +409,6 @@ impl ButtonRenderObject {
             self.border_color
         }
     }
-
-    fn highlight_color(&self, background: Color) -> Color {
-        Self::shade_color(background, 1.06)
-    }
 }
 
 impl ElementRenderObject for ButtonRenderObject {
@@ -492,7 +488,6 @@ impl ElementRenderObject for ButtonRenderObject {
         }
         let background = self.current_background();
         let border = self.current_border();
-        let highlight = self.highlight_color(background);
         if let Some(ref mut buffer) = self.buffer {
             let mut canvas = graphics::Canvas::for_buffer(buffer);
             let width = canvas.width();
@@ -500,11 +495,6 @@ impl ElementRenderObject for ButtonRenderObject {
 
             // Fill background
             canvas.fill_rect(0, 0, width, height, background);
-
-            // Subtle top highlight for a modern surface feel
-            if !self.pressed && height > 2 {
-                canvas.draw_line(1, 1, (width as i32) - 2, 1, highlight);
-            }
 
             // Border
             canvas.draw_rect(0, 0, width, height, border);
@@ -536,20 +526,8 @@ impl ElementRenderObject for ButtonRenderObject {
         let rect = Rect::new(origin, self.size);
         let background = self.current_background();
         let border = self.current_border();
-        let highlight = self.highlight_color(background);
 
         ctx.fill_rounded_rect(rect, 6.0, background);
-        if !self.pressed && self.size.height > 2.0 && self.size.width > 2.0 {
-            ctx.fill_rect(
-                Rect::from_xywh(
-                    origin.x + 1.0,
-                    origin.y + 1.0,
-                    (self.size.width - 2.0).max(0.0),
-                    1.0,
-                ),
-                highlight,
-            );
-        }
         ctx.stroke_rounded_rect(rect, 6.0, 1.0, border);
 
         if let Some(icon) = self.icon {

@@ -27,8 +27,8 @@ pub use canvas::{
     SgfxCanvasVertex, SgfxMesh, SgfxTexture,
 };
 pub use error::{Error, Result, Stage};
+pub use sgfx::Image as SgfxImage;
 pub use sink::{
     SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkResult,
     SgfxSinkStatus,
 };
-pub use sgfx::Image as SgfxImage;

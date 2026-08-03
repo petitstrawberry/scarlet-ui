@@ -101,7 +101,7 @@ pub use color::system::{
     YellowColors,
 };
 pub use color::{Color, ColorPalette, ColorScheme, SemanticColor, SystemColors};
-pub use command::{dismiss_window, open_window};
+pub use command::{dismiss_window, open_new_window, open_window};
 pub use compositor::Compositor;
 pub use element::{
     ComponentElement, DirtyFlags, Element, ElementId, ElementRenderObject, ElementTree,
@@ -164,7 +164,7 @@ pub use scarlet_ui_macros::preview;
 pub mod prelude {
     pub use crate::application::{Application, ApplicationRunner};
     pub use crate::color::{Color, ColorPalette, ColorScheme, SemanticColor};
-    pub use crate::command::{dismiss_window, open_window};
+    pub use crate::command::{dismiss_window, open_new_window, open_window};
     pub use crate::element::{
         DirtyFlags, Element, ElementId, ElementRenderObject, LayoutConstraints,
     };

@@ -1,7 +1,7 @@
+use scarlet_ui::NavigationLink;
 use scarlet_ui::hstack;
 use scarlet_ui::prelude::*;
 use scarlet_ui::vstack;
-use scarlet_ui::NavigationLink;
 
 #[derive(Clone)]
 struct PreviewApp {

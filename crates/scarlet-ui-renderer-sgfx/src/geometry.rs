@@ -472,15 +472,14 @@ impl Tessellator {
         for left in 0..edges.len() {
             for right in left + 1..edges.len() {
                 if let Some(y) = edge_intersection_y(edges[left], edges[right]) {
-                    bands
-                        .try_reserve(1)
-                        .map_err(|_| Error::FrameTooComplex)?;
+                    bands.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
                     bands.push(y);
                 }
             }
         }
         bands.sort_by(|left, right| {
-            left.partial_cmp(right).unwrap_or(core::cmp::Ordering::Equal)
+            left.partial_cmp(right)
+                .unwrap_or(core::cmp::Ordering::Equal)
         });
         bands.dedup_by(|left, right| (*left - *right).abs() <= 0.0001);
 
@@ -560,10 +559,7 @@ impl Tessellator {
         let direction_y = dy * inverse_length;
         let normal_x = -dy * inverse_length * half;
         let normal_y = dx * inverse_length * half;
-        let start = Point2::new(
-            from.x - direction_x * half,
-            from.y - direction_y * half,
-        );
+        let start = Point2::new(from.x - direction_x * half, from.y - direction_y * half);
         let end = Point2::new(to.x + direction_x * half, to.y + direction_y * half);
         let a = Point2::new(start.x + normal_x, start.y + normal_y);
         let b = Point2::new(end.x + normal_x, end.y + normal_y);
@@ -592,9 +588,9 @@ impl Tessellator {
             }
             polygon = Some(clipped);
         }
-        let additional = polygon
-            .as_ref()
-            .map_or(3, |vertices| vertices.len().saturating_sub(2).saturating_mul(3));
+        let additional = polygon.as_ref().map_or(3, |vertices| {
+            vertices.len().saturating_sub(2).saturating_mul(3)
+        });
         if self.vertices.len().saturating_add(additional) > MAX_FRAME_VERTICES {
             return Err(Error::FrameTooComplex);
         }
@@ -674,11 +670,7 @@ fn rounded_rect_points(rect: FloatRect, radius: f32) -> Vec<Point2> {
     rounded_rect_points_with_segments(rect, radius, segments)
 }
 
-fn rounded_rect_points_with_segments(
-    rect: FloatRect,
-    radius: f32,
-    segments: usize,
-) -> Vec<Point2> {
+fn rounded_rect_points_with_segments(rect: FloatRect, radius: f32, segments: usize) -> Vec<Point2> {
     let centers = [
         (rect.x + radius, rect.y + radius, core::f32::consts::PI),
         (
@@ -697,8 +689,7 @@ fn rounded_rect_points_with_segments(
     let _ = points.try_reserve(segments.saturating_add(1).saturating_mul(4));
     for (center_x, center_y, start_angle) in centers {
         for index in 0..=segments {
-            let angle = start_angle
-                + core::f32::consts::FRAC_PI_2 * index as f32 / segments as f32;
+            let angle = start_angle + core::f32::consts::FRAC_PI_2 * index as f32 / segments as f32;
             points.push(Point2::new(
                 center_x + radius * cosine(angle),
                 center_y + radius * sine(angle),
@@ -726,9 +717,11 @@ fn clip_to_convex_polygon(vertices: &[Vertex], clip: &[Point2]) -> Result<Vec<Ve
         }
         output.clear();
         let mut previous = input[input.len() - 1];
-        let mut previous_distance = edge_distance(edge_start, edge_end, previous.point(), orientation);
+        let mut previous_distance =
+            edge_distance(edge_start, edge_end, previous.point(), orientation);
         for current in input.iter().copied() {
-            let current_distance = edge_distance(edge_start, edge_end, current.point(), orientation);
+            let current_distance =
+                edge_distance(edge_start, edge_end, current.point(), orientation);
             let previous_inside = previous_distance >= -0.0001;
             let current_inside = current_distance >= -0.0001;
             if previous_inside != current_inside {
@@ -878,8 +871,7 @@ mod tests {
     #[test]
     fn rounded_corner_clipping_preserves_finite_texture_coordinates() {
         let bounds = FloatRect::new(0.0, 0.0, 200.0, 200.0);
-        let mut tessellator =
-            Tessellator::new(1_000, 200, 200, bounds).expect("valid tessellator");
+        let mut tessellator = Tessellator::new(1_000, 200, 200, bounds).expect("valid tessellator");
         tessellator
             .push_clip(Rect::from_xywh(0.0, 0.0, 200.0, 200.0), 32.0)
             .expect("valid rounded clip");

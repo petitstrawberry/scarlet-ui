@@ -9,6 +9,8 @@ use crate::scene::SceneWindowKey;
 pub enum ApplicationCommand {
     /// Open the single runtime instance for a declared scene window.
     OpenWindow(SceneWindowKey),
+    /// Open an additional runtime instance for a declared scene window.
+    OpenNewWindow(SceneWindowKey),
     /// Dismiss the runtime instance for a declared scene window.
     DismissWindow(SceneWindowKey),
 }
@@ -24,6 +26,21 @@ pub fn open_window(key: impl Into<SceneWindowKey>) {
     APPLICATION_COMMANDS
         .lock()
         .push(ApplicationCommand::OpenWindow(key.into()));
+}
+
+/// Request that a new runtime instance of a declared scene window be opened.
+///
+/// Unlike [`open_window`], this does not reuse an already-open instance with
+/// the same scene key. It is intended for document windows, dialogs, and
+/// other application windows that may be opened more than once.
+///
+/// # Arguments
+///
+/// * `key` - Stable scene window key declared by `Application::scenes()`.
+pub fn open_new_window(key: impl Into<SceneWindowKey>) {
+    APPLICATION_COMMANDS
+        .lock()
+        .push(ApplicationCommand::OpenNewWindow(key.into()));
 }
 
 /// Request that a declared scene window be dismissed.
