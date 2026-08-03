@@ -3,7 +3,7 @@
 //! Provides event modifiers for any view.
 
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::event::{FocusEvent, KeyEvent};
+use crate::event::{Event, FocusEvent, KeyEvent, MouseEvent, Phase};
 use crate::geometry::Size;
 use crate::state::{Listenable, State};
 use crate::view::View;
@@ -196,7 +196,7 @@ impl OnClickRenderObject {
         }
     }
 
-    pub fn set_callback(&mut self, callback: Box<dyn Fn()>) {
+    fn set_callback(&mut self, callback: Box<dyn Fn()>) {
         self.callback = Some(callback);
     }
 
@@ -293,9 +293,11 @@ impl<V: View, F: Fn() + Clone + 'static> OnHover<V, F> {
 
 impl<V: View + Clone, F: Fn() + Clone + 'static> View for OnHover<V, F> {
     fn create_element(&self) -> Box<dyn Element> {
+        let mut render_object = OnHoverRenderObject::new();
+        render_object.set_callback(Box::new(self.callback.clone()));
         Box::new(RenderElement::with_children(
             self.clone(),
-            OnHoverRenderObject::new(),
+            render_object,
             vec![self.inner.create_element()],
         ))
     }
@@ -312,17 +314,28 @@ impl<V: View + Clone, F: Fn() + Clone + 'static> View for OnHover<V, F> {
 /// Hover RenderObject
 pub struct OnHoverRenderObject {
     is_hovered: bool,
+    callback: Option<Box<dyn Fn()>>,
+    size: Size,
 }
 
 impl OnHoverRenderObject {
     pub fn new() -> Self {
-        Self { is_hovered: false }
+        Self {
+            is_hovered: false,
+            callback: None,
+            size: Size::ZERO,
+        }
+    }
+
+    fn set_callback(&mut self, callback: Box<dyn Fn()>) {
+        self.callback = Some(callback);
     }
 }
 
 impl ElementRenderObject for OnHoverRenderObject {
     fn layout(&mut self, _constraints: crate::element::LayoutConstraints) -> Size {
-        Size::ZERO
+        self.size = Size::ZERO;
+        self.size
     }
 
     fn layout_with_children(
@@ -331,18 +344,19 @@ impl ElementRenderObject for OnHoverRenderObject {
         children: &mut [Box<dyn Element>],
     ) -> Size {
         if let Some(child) = children.first_mut() {
-            child.layout(constraints)
+            self.size = child.layout(constraints);
         } else {
-            Size::ZERO
+            self.size = Size::ZERO;
         }
+        self.size
     }
 
     fn size(&self) -> Size {
-        Size::ZERO
+        self.size
     }
 
-    fn hit_test(&self, _point: crate::geometry::Point) -> bool {
-        true
+    fn hit_test(&self, point: crate::geometry::Point) -> bool {
+        point.x >= 0.0 && point.y >= 0.0 && point.x < self.size.width && point.y < self.size.height
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -351,6 +365,27 @@ impl ElementRenderObject for OnHoverRenderObject {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn handle_event(&mut self, event: &Event, phase: Phase) -> bool {
+        if !matches!(phase, Phase::Target | Phase::Bubble) {
+            return false;
+        }
+
+        match event {
+            Event::Mouse(MouseEvent::Entered { .. }) if !self.is_hovered => {
+                self.is_hovered = true;
+                if let Some(callback) = self.callback.as_ref() {
+                    callback();
+                    return true;
+                }
+            }
+            Event::Mouse(MouseEvent::Exited { .. }) => {
+                self.is_hovered = false;
+            }
+            _ => {}
+        }
+        false
     }
 
     fn render(&mut self) {
@@ -384,9 +419,11 @@ impl<V: View, F: Fn() + Clone + 'static> OnExit<V, F> {
 
 impl<V: View + Clone, F: Fn() + Clone + 'static> View for OnExit<V, F> {
     fn create_element(&self) -> Box<dyn Element> {
+        let mut render_object = OnExitRenderObject::new();
+        render_object.set_callback(Box::new(self.callback.clone()));
         Box::new(RenderElement::with_children(
             self.clone(),
-            OnExitRenderObject::new(),
+            render_object,
             vec![self.inner.create_element()],
         ))
     }
@@ -403,17 +440,28 @@ impl<V: View + Clone, F: Fn() + Clone + 'static> View for OnExit<V, F> {
 /// Exit RenderObject
 pub struct OnExitRenderObject {
     is_hovered: bool,
+    callback: Option<Box<dyn Fn()>>,
+    size: Size,
 }
 
 impl OnExitRenderObject {
     pub fn new() -> Self {
-        Self { is_hovered: false }
+        Self {
+            is_hovered: false,
+            callback: None,
+            size: Size::ZERO,
+        }
+    }
+
+    pub fn set_callback(&mut self, callback: Box<dyn Fn()>) {
+        self.callback = Some(callback);
     }
 }
 
 impl ElementRenderObject for OnExitRenderObject {
     fn layout(&mut self, _constraints: crate::element::LayoutConstraints) -> Size {
-        Size::ZERO
+        self.size = Size::ZERO;
+        self.size
     }
 
     fn layout_with_children(
@@ -422,18 +470,19 @@ impl ElementRenderObject for OnExitRenderObject {
         children: &mut [Box<dyn Element>],
     ) -> Size {
         if let Some(child) = children.first_mut() {
-            child.layout(constraints)
+            self.size = child.layout(constraints);
         } else {
-            Size::ZERO
+            self.size = Size::ZERO;
         }
+        self.size
     }
 
     fn size(&self) -> Size {
-        Size::ZERO
+        self.size
     }
 
-    fn hit_test(&self, _point: crate::geometry::Point) -> bool {
-        true
+    fn hit_test(&self, point: crate::geometry::Point) -> bool {
+        point.x >= 0.0 && point.y >= 0.0 && point.x < self.size.width && point.y < self.size.height
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -442,6 +491,27 @@ impl ElementRenderObject for OnExitRenderObject {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn handle_event(&mut self, event: &Event, phase: Phase) -> bool {
+        if !matches!(phase, Phase::Target | Phase::Bubble) {
+            return false;
+        }
+
+        match event {
+            Event::Mouse(MouseEvent::Entered { .. }) => {
+                self.is_hovered = true;
+            }
+            Event::Mouse(MouseEvent::Exited { .. }) if self.is_hovered => {
+                self.is_hovered = false;
+                if let Some(callback) = self.callback.as_ref() {
+                    callback();
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        false
     }
 
     fn render(&mut self) {

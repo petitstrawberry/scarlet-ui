@@ -449,31 +449,20 @@ impl EventDispatcher {
                             Some(target_id)
                         );
                     }
-                    if let Some(old_id) = self.hovered_id {
-                        let old_origin =
-                            Self::path_origin_from_ids(element_tree, &self.hovered_path)
-                                .unwrap_or(Point::ZERO);
-                        if let Some(old_element) = element_tree.find_element_mut(old_id) {
-                            let _ = old_element.handle_event(
-                                &Event::Mouse(Self::localize_mouse_event(
-                                    &crate::event::MouseEvent::Exited { x: *x, y: *y },
-                                    old_origin,
-                                )),
-                                Phase::Target,
-                            );
-                        }
-                    }
-
-                    if let Some(new_element) = element_tree.find_element_mut(target_id) {
-                        let new_origin = *path_origins.last().unwrap_or(&Point::ZERO);
-                        let _ = new_element.handle_event(
-                            &Event::Mouse(Self::localize_mouse_event(
-                                &crate::event::MouseEvent::Entered { x: *x, y: *y },
-                                new_origin,
-                            )),
-                            Phase::Target,
+                    if self.hovered_id.is_some() {
+                        let old_path = core::mem::take(&mut self.hovered_path);
+                        Self::dispatch_hover_path(
+                            element_tree,
+                            &old_path,
+                            &crate::event::MouseEvent::Exited { x: *x, y: *y },
                         );
                     }
+
+                    Self::dispatch_hover_path(
+                        element_tree,
+                        &path,
+                        &crate::event::MouseEvent::Entered { x: *x, y: *y },
+                    );
 
                     self.hovered_id = Some(target_id);
                     self.hovered_path = path.clone();
@@ -627,21 +616,15 @@ impl EventDispatcher {
             result
         } else {
             if let crate::event::MouseEvent::Moved { x, y } = event {
-                if let Some(old_id) = self.hovered_id {
-                    let old_origin = Self::path_origin_from_ids(element_tree, &self.hovered_path)
-                        .unwrap_or(Point::ZERO);
-                    if let Some(old_element) = element_tree.find_element_mut(old_id) {
-                        let _ = old_element.handle_event(
-                            &Event::Mouse(Self::localize_mouse_event(
-                                &crate::event::MouseEvent::Exited { x: *x, y: *y },
-                                old_origin,
-                            )),
-                            Phase::Target,
-                        );
-                    }
+                if self.hovered_id.is_some() {
+                    let old_path = core::mem::take(&mut self.hovered_path);
+                    Self::dispatch_hover_path(
+                        element_tree,
+                        &old_path,
+                        &crate::event::MouseEvent::Exited { x: *x, y: *y },
+                    );
                 }
                 self.hovered_id = None;
-                self.hovered_path.clear();
             }
             if let crate::event::MouseEvent::ButtonReleased {
                 button: crate::event::MouseButton::Left,
@@ -1270,18 +1253,24 @@ impl EventDispatcher {
         }
     }
 
-    fn path_origin_from_ids(element_tree: &mut ElementTree, path: &[ElementId]) -> Option<Point> {
-        if path.is_empty() {
-            return None;
+    fn dispatch_hover_path(
+        element_tree: &mut ElementTree,
+        path: &[ElementId],
+        event: &crate::event::MouseEvent,
+    ) {
+        let origins = Self::path_origins(element_tree, path);
+        for index in (0..path.len()).rev() {
+            let Some(element) = element_tree.find_element_mut(path[index]) else {
+                continue;
+            };
+            let phase = if index == path.len() - 1 {
+                Phase::Target
+            } else {
+                Phase::Bubble
+            };
+            let localized = Event::Mouse(Self::localize_mouse_event(event, origins[index]));
+            let _ = element.handle_event(&localized, phase);
         }
-        let mut acc = Point::ZERO;
-        for id in path {
-            let element = element_tree.find_element_mut(*id)?;
-            let pos = element.position();
-            acc.x += pos.x;
-            acc.y += pos.y;
-        }
-        Some(acc)
     }
 
     fn localize_mouse_event(
