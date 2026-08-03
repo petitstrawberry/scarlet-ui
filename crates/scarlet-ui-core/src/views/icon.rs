@@ -9,6 +9,9 @@ use crate::view::View;
 use alloc::boxed::Box;
 use alloc::string::String;
 use core::any::Any;
+use scarlet_ui_file_icons::{
+    FileIcon as EmbeddedFileIcon, extra_folder_icon, file_icon_data, vivid_icon_for_extension,
+};
 
 /// Semantic kind used to choose a file-system icon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,26 +81,15 @@ impl FileIconKind {
         }
     }
 
-    fn icon(self) -> Icon {
+    fn embedded_icon(self) -> EmbeddedFileIcon {
         match self {
-            Self::Folder => Icon::Folder,
-            Self::Image => Icon::Photo,
-            Self::Document => Icon::FileText,
-            Self::Audio => Icon::Music,
-            Self::Video => Icon::Video,
-            Self::Archive => Icon::Archive,
-            Self::Unknown => Icon::File,
-        }
-    }
-
-    fn color(self, palette: ColorPalette) -> Color {
-        match self {
-            Self::Folder => palette.warning(),
-            Self::Image => palette.success(),
-            Self::Audio => palette.info(),
-            Self::Video => palette.primary(),
-            Self::Archive => palette.secondary(),
-            Self::Document | Self::Unknown => palette.text_secondary(),
+            Self::Folder => extra_folder_icon(),
+            Self::Image => EmbeddedFileIcon::VividImage,
+            Self::Document => EmbeddedFileIcon::VividBlank,
+            Self::Audio => EmbeddedFileIcon::VividMp3,
+            Self::Video => EmbeddedFileIcon::VividMp4,
+            Self::Archive => EmbeddedFileIcon::VividZip,
+            Self::Unknown => EmbeddedFileIcon::VividBlank,
         }
     }
 }
@@ -237,8 +229,8 @@ impl IconView {
 #[derive(Clone)]
 pub struct FileIconView {
     kind: FileIconKind,
+    asset: EmbeddedFileIcon,
     size: IconSize,
-    style: IconStyle,
     color: Option<Color>,
 }
 
@@ -255,8 +247,8 @@ impl FileIconView {
     pub fn new(kind: FileIconKind) -> Self {
         Self {
             kind,
+            asset: kind.embedded_icon(),
             size: IconSize::ExtraLarge,
-            style: IconStyle::default(),
             color: None,
         }
     }
@@ -269,10 +261,22 @@ impl FileIconView {
     ///
     /// # Returns
     ///
-    /// A file icon view using the inferred semantic type.
+    /// A file icon view using the matching embedded Vivid extension icon when
+    /// available, with the semantic fallback otherwise.
     pub fn from_path(path: impl Into<String>) -> Self {
         let path = path.into();
-        Self::new(FileIconKind::from_path(&path))
+        let kind = FileIconKind::from_path(&path);
+        let asset = path
+            .rsplit_once('.')
+            .map(|(_, extension)| extension.to_ascii_lowercase())
+            .and_then(|extension| vivid_icon_for_extension(&extension))
+            .unwrap_or_else(|| kind.embedded_icon());
+        Self {
+            kind,
+            asset,
+            size: IconSize::ExtraLarge,
+            color: None,
+        }
     }
 
     /// Set a standard or explicit logical size.
@@ -287,71 +291,6 @@ impl FileIconView {
     pub fn size(mut self, size: IconSize) -> Self {
         self.size = size;
         self
-    }
-
-    /// Set the outline rendering style.
-    ///
-    /// # Arguments
-    ///
-    /// * `style` - Stroke style used during alpha-mask rasterization.
-    ///
-    /// # Returns
-    ///
-    /// The updated file icon view.
-    pub fn style(mut self, style: IconStyle) -> Self {
-        self.style = style;
-        self
-    }
-
-    /// Set the outline stroke width in Tabler view-box units.
-    ///
-    /// # Arguments
-    ///
-    /// * `width` - Stroke width, normally between 1.0 and 2.0.
-    ///
-    /// # Returns
-    ///
-    /// The updated file icon view.
-    pub fn stroke_width(mut self, width: f32) -> Self {
-        self.style = self.style.stroke_width(width);
-        self
-    }
-
-    /// Set a semantic outline weight.
-    ///
-    /// # Arguments
-    ///
-    /// * `weight` - Thin, normal, or bold stroke weight.
-    ///
-    /// # Returns
-    ///
-    /// The updated file icon view.
-    pub fn weight(mut self, weight: IconWeight) -> Self {
-        self.style = self.style.weight(weight);
-        self
-    }
-
-    /// Select the outline or filled vector treatment.
-    ///
-    /// # Arguments
-    ///
-    /// * `fill` - Requested vector treatment.
-    ///
-    /// # Returns
-    ///
-    /// The updated file icon view.
-    pub fn fill(mut self, fill: IconFill) -> Self {
-        self.style = self.style.fill(fill);
-        self
-    }
-
-    /// Use the official Tabler filled variant when available.
-    ///
-    /// # Returns
-    ///
-    /// The updated file icon view.
-    pub fn filled(self) -> Self {
-        self.fill(IconFill::Filled)
     }
 
     /// Override the semantic file color.
@@ -380,7 +319,8 @@ impl FileIconView {
 
 #[derive(Clone, Copy)]
 struct IconRenderObject {
-    icon: Icon,
+    icon: Option<Icon>,
+    file_icon: Option<EmbeddedFileIcon>,
     preferred_size: IconSize,
     style: IconStyle,
     color: Option<Color>,
@@ -390,9 +330,25 @@ struct IconRenderObject {
 impl IconRenderObject {
     fn new(icon: Icon, preferred_size: IconSize, style: IconStyle, color: Option<Color>) -> Self {
         Self {
-            icon,
+            icon: Some(icon),
+            file_icon: None,
             preferred_size,
             style,
+            color,
+            size: Size::ZERO,
+        }
+    }
+
+    fn new_file(
+        file_icon: EmbeddedFileIcon,
+        preferred_size: IconSize,
+        color: Option<Color>,
+    ) -> Self {
+        Self {
+            icon: None,
+            file_icon: Some(file_icon),
+            preferred_size,
+            style: IconStyle::default(),
             color,
             size: Size::ZERO,
         }
@@ -413,6 +369,43 @@ pub(crate) fn paint_icon(
         style,
         color,
     );
+}
+
+pub(crate) fn paint_file_icon(
+    ctx: &mut PaintContext,
+    rect: Rect,
+    icon: EmbeddedFileIcon,
+    tint: Option<Color>,
+) {
+    let data = file_icon_data(icon);
+    let scale = (rect.size.width / data.width)
+        .min(rect.size.height / data.height)
+        .max(0.0);
+    let width = data.width * scale;
+    let height = data.height * scale;
+    let origin = Point::new(
+        rect.origin.x + (rect.size.width - width) * 0.5,
+        rect.origin.y + (rect.size.height - height) * 0.5,
+    );
+
+    for triangle in data.triangles {
+        let color = tint.unwrap_or_else(|| {
+            Color::rgba(
+                (triangle.color >> 24) as u8,
+                (triangle.color >> 16) as u8,
+                (triangle.color >> 8) as u8,
+                triangle.color as u8,
+            )
+        });
+        let transform =
+            |point: [f32; 2]| Point::new(origin.x + point[0] * scale, origin.y + point[1] * scale);
+        ctx.fill_triangle(
+            transform(triangle.a),
+            transform(triangle.b),
+            transform(triangle.c),
+            color,
+        );
+    }
 }
 
 impl ElementRenderObject for IconRenderObject {
@@ -448,14 +441,23 @@ impl ElementRenderObject for IconRenderObject {
             origin.x + (self.size.width - side) * 0.5,
             origin.y + (self.size.height - side) * 0.5,
         );
-        paint_icon(
-            ctx,
-            icon_origin,
-            side,
-            self.icon,
-            self.style,
-            self.color.unwrap_or_else(|| ColorPalette::default().text()),
-        );
+        if let Some(file_icon) = self.file_icon {
+            paint_file_icon(
+                ctx,
+                Rect::from_xywh(icon_origin.x, icon_origin.y, side, side),
+                file_icon,
+                self.color,
+            );
+        } else if let Some(icon) = self.icon {
+            paint_icon(
+                ctx,
+                icon_origin,
+                side,
+                icon,
+                self.style,
+                self.color.unwrap_or_else(|| ColorPalette::default().text()),
+            );
+        }
         true
     }
 
@@ -483,15 +485,9 @@ impl View for IconView {
 
 impl View for FileIconView {
     fn create_element(&self) -> Box<dyn Element> {
-        let palette = ColorPalette::default();
         Box::new(RenderElement::new(
             self.clone(),
-            IconRenderObject::new(
-                self.kind.icon(),
-                self.size,
-                self.style,
-                Some(self.color.unwrap_or_else(|| self.kind.color(palette))),
-            ),
+            IconRenderObject::new_file(self.asset, self.size, self.color),
         ))
     }
 
