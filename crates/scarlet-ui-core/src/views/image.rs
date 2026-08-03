@@ -339,21 +339,20 @@ impl ImageRenderObject {
                 }
             }
             ImageFit::Cover => {
-                // Scale to cover constraints while preserving aspect ratio
-                if constraints.max_width > 0.0 && constraints.max_height > 0.0 {
-                    let scale_x = constraints.max_width / intrinsic.width;
-                    let scale_y = constraints.max_height / intrinsic.height;
-                    let scale = scale_x.max(scale_y).max(1.0);
-
-                    Size {
-                        width: (intrinsic.width * scale).max(constraints.min_width),
-                        height: (intrinsic.height * scale).max(constraints.min_height),
-                    }
-                } else {
-                    Size {
-                        width: intrinsic.width.max(constraints.min_width),
-                        height: intrinsic.height.max(constraints.min_height),
-                    }
+                // Cover paints into the constrained box and crops the excess.
+                // Returning the intrinsic size here lets a bitmap escape a
+                // fixed frame (and makes following content overlap it).
+                Size {
+                    width: if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
+                        constraints.max_width.max(constraints.min_width)
+                    } else {
+                        intrinsic.width.max(constraints.min_width)
+                    },
+                    height: if constraints.max_height.is_finite() && constraints.max_height > 0.0 {
+                        constraints.max_height.max(constraints.min_height)
+                    } else {
+                        intrinsic.height.max(constraints.min_height)
+                    },
                 }
             }
             ImageFit::Fill => {
@@ -618,4 +617,27 @@ fn decode_jpeg(bytes: &[u8]) -> Option<BitmapImage> {
         );
     }
     Some(BitmapImage::from_bgra(pixels, width as u32, height as u32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ImageFit, ImageRenderObject};
+    use crate::element::LayoutConstraints;
+    use crate::geometry::Size;
+
+    #[test]
+    fn cover_respects_a_fixed_frame() {
+        let render_object = ImageRenderObject::new(
+            super::ImageSource::Placeholder {
+                width: 320,
+                height: 240,
+            },
+            ImageFit::Cover,
+        );
+        let size = render_object.calculate_size(
+            Size::new(320.0, 240.0),
+            LayoutConstraints::tight(96.0, 78.0),
+        );
+        assert_eq!(size, Size::new(96.0, 78.0));
+    }
 }
