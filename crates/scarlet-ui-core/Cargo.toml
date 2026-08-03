@@ -14,7 +14,6 @@ scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", branch = "de
 libm = { version = "0.2", default-features = false }
 scarlet-ui-macros = { path = "../scarlet-ui-macros" }
 scarlet-ui-icons-tabler = { path = "../scarlet-ui-icons-tabler" }
-scarlet-ui-file-icons = { path = "../scarlet-ui-file-icons" }
 bitflags = { version = "2.6", default-features = false }
 ab_glyph = { version = "0.2", default-features = false, features = ["libm"] }
 zune-jpeg = { version = "0.5.8", default-features = false }
