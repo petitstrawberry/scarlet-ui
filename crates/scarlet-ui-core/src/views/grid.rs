@@ -10,7 +10,7 @@ use crate::element::{
 use crate::geometry::{Point, Size};
 use crate::state::{Listenable, State};
 use crate::view::View;
-use crate::views::{LazyVStack, ScrollView, ScrollbarVisibility, Spacer};
+use crate::views::{Frame, LazyVStack, ScrollView, ScrollbarVisibility, Spacer};
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -262,9 +262,11 @@ fn build_grid_child<T: Clone + 'static>(view: &GridView<T>) -> Box<dyn Element> 
         GridRow::new(cells, row_height, spacing)
     });
 
-    ScrollView::new(rows)
-        .scrollbar_visibility(ScrollbarVisibility::Automatic)
-        .create_element()
+    Frame::width(
+        ScrollView::new(rows).scrollbar_visibility(ScrollbarVisibility::Automatic),
+        f32::INFINITY,
+    )
+    .create_element()
 }
 
 impl<T: Clone + 'static> View for GridView<T> {
@@ -281,5 +283,43 @@ impl<T: Clone + 'static> View for GridView<T> {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GridView;
+    use crate::color::Color;
+    use crate::pipeline::RenderingPipeline;
+    use crate::state::{State, StateId};
+    use crate::view::{View, ViewExt};
+
+    #[test]
+    fn paints_all_columns_on_initial_layout() {
+        let items = State::new(StateId::new(20_001), vec![0usize, 1, 2, 3, 4]);
+        let selected = State::new(StateId::new(20_002), None);
+        let colors = [
+            Color::rgb(220, 40, 40),
+            Color::rgb(40, 180, 80),
+            Color::rgb(40, 80, 220),
+            Color::rgb(220, 180, 40),
+            Color::rgb(180, 40, 220),
+        ];
+        let grid = GridView::new(items, selected, 5, 120.0, move |index, _, _| {
+            crate::views::Rectangle::new()
+                .fill(colors[index])
+                .frame(f32::INFINITY, 100.0)
+        })
+        .spacing(10.0);
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(grid.create_element());
+        pipeline.layout_initial();
+
+        let pixel = pipeline
+            .render_with_damage()
+            .and_then(|(buffer, _)| buffer.get_pixel(170, 50));
+
+        assert_eq!(pixel, Some(colors[1].to_bgra()));
     }
 }
