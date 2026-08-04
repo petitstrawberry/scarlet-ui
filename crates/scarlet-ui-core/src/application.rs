@@ -130,6 +130,10 @@ pub trait Application: Clone + 'static {
     fn debug_logging(&self) -> bool {
         false
     }
+
+    /// Notify the application that its last window has been closed and the
+    /// runner is about to shut down.
+    fn on_shutdown(&mut self) {}
 }
 
 /// Backend-independent application runner.
@@ -174,6 +178,7 @@ impl ApplicationRunner {
         let mut slots = self.create_slots(app, declarations)?;
 
         if slots.is_empty() && app.exit_when_all_windows_closed() {
+            app.on_shutdown();
             return Ok(());
         }
 
@@ -232,6 +237,7 @@ impl ApplicationRunner {
             focus_on_create: window_info.focus_on_create,
             active_on_focus: window_info.active_on_focus,
             opaque: window_info.opaque,
+            placement: window_info.placement,
         };
 
         let mut window = self.backend.create_window(request)?;
@@ -313,12 +319,14 @@ impl ApplicationRunner {
 
             remove_closed_slots(slots, &close_ids);
             if slots.is_empty() && app.exit_when_all_windows_closed() {
+                app.on_shutdown();
                 return Ok(());
             }
 
             app.on_idle();
             self.handle_application_commands(app, slots)?;
             if slots.is_empty() && app.exit_when_all_windows_closed() {
+                app.on_shutdown();
                 return Ok(());
             }
 
