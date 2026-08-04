@@ -895,6 +895,11 @@ impl PlatformWindow for WinitPlatformWindow {
         Ok(())
     }
 
+    fn focus(&mut self) -> Result<()> {
+        self.window.focus_window();
+        Ok(())
+    }
+
     fn request_move(&mut self) -> Result<()> {
         let outer = self
             .window

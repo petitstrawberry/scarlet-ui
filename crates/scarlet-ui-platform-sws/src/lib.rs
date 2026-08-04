@@ -1662,6 +1662,12 @@ impl PlatformWindow for SWSPlatformWindow {
             .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
+    fn focus(&mut self) -> Result<()> {
+        self.conn
+            .focus_window(self.surface_id)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)
+    }
+
     fn request_move(&mut self) -> Result<()> {
         self.conn
             .request_move_window(self.surface_id)

@@ -157,6 +157,14 @@ pub trait PlatformWindow: Any {
     /// Restore the window from minimized or maximized state
     fn restore(&mut self) -> Result<()>;
 
+    /// Focus and raise the window through the platform window manager.
+    ///
+    /// Backends that cannot explicitly request focus may leave this as a
+    /// no-op. Window managers remain free to reject the request.
+    fn focus(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// Request that the window manager begins an interactive move
     fn request_move(&mut self) -> Result<()>;
 
