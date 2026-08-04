@@ -127,7 +127,7 @@ pub use menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
 pub use pipeline::{
     DirtyPhase, MountContext, PipelineId, PipelineOwner, RenderingPipeline, StateRegistry,
 };
-pub use platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
+pub use platform::{PlatformBackend, PlatformWindow, WindowCreateRequest, WindowPlacement};
 pub use render::{RenderNode, RenderTree};
 pub use renderer::{
     BackendFrame, CompositorBackendKind, CpuPaintBackend, PaintBackend, PresentedFrame,

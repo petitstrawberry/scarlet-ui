@@ -20,7 +20,7 @@ use scarlet_ui_core::platform::{PlatformBackend, PlatformWindow, WindowCreateReq
 use std::time::{Duration, Instant};
 
 use ::winit::application::ApplicationHandler;
-use ::winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
+use ::winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, Position};
 use ::winit::event::{
     ElementState as WinitElementState, Ime, MouseButton as WinitMouseButton, MouseScrollDelta,
     TouchPhase, WindowEvent,
@@ -681,10 +681,21 @@ pub struct WinitPlatformWindow {
 
 impl WinitPlatformWindow {
     fn create(shared: Rc<WinitSharedState>, request: WindowCreateRequest) -> Result<Self> {
-        let attributes = WindowAttributes::default()
+        let placement = request.placement;
+        let requested_position = match request.placement {
+            scarlet_ui_core::platform::WindowPlacement::Default
+            | scarlet_ui_core::platform::WindowPlacement::Centered => None,
+            scarlet_ui_core::platform::WindowPlacement::At { x, y } => {
+                Some(Position::Logical(LogicalPosition::new(x as f64, y as f64)))
+            }
+        };
+        let mut attributes = WindowAttributes::default()
             .with_title(request.title)
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(request.size.width, request.size.height));
+        if let Some(position) = requested_position {
+            attributes = attributes.with_position(position);
+        }
         let context = {
             let event_loop = shared.event_loop.borrow();
             SoftbufferContext::new(event_loop.owned_display_handle()).map_err(|_| Error::IoError)?
@@ -699,6 +710,21 @@ impl WinitPlatformWindow {
             )
         };
         window.set_ime_allowed(false);
+        if matches!(
+            placement,
+            scarlet_ui_core::platform::WindowPlacement::Centered
+        ) && let Some(monitor) = window.current_monitor()
+        {
+            let monitor_position = monitor.position();
+            let monitor_size = monitor.size();
+            let window_size = window.outer_size();
+            window.set_outer_position(PhysicalPosition::new(
+                monitor_position.x
+                    + (monitor_size.width as i32 - window_size.width as i32).max(0) / 2,
+                monitor_position.y
+                    + (monitor_size.height as i32 - window_size.height as i32).max(0) / 2,
+            ));
+        }
         let scale_factor = window.scale_factor();
         let inner_size = window.inner_size();
         let surface =
@@ -771,6 +797,7 @@ impl PlatformWindow for WinitPlatformWindow {
                 focus_on_create: true,
                 active_on_focus: true,
                 opaque: true,
+                placement: scarlet_ui_core::platform::WindowPlacement::Default,
             },
         )
     }
@@ -916,6 +943,7 @@ impl PlatformWindow for WinitPlatformWindow {
                 focus_on_create: true,
                 active_on_focus: true,
                 opaque: true,
+                placement: scarlet_ui_core::platform::WindowPlacement::Default,
             },
         )
     }

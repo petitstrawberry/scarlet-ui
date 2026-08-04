@@ -21,6 +21,7 @@ use crate::element::{
 use crate::geometry::{Point, Rect, Size};
 use crate::menu_model::MenuBarModel;
 use crate::pipeline::{MountContext, PipelineId};
+use crate::platform::WindowPlacement;
 use crate::renderer::PaintContext;
 use crate::state::Listenable;
 use crate::view::View;
@@ -45,6 +46,7 @@ pub struct WindowInfo {
     pub active_on_focus: bool,
     pub background_color: Color,
     pub opaque: bool,
+    pub placement: WindowPlacement,
 }
 
 impl WindowInfo {
@@ -58,6 +60,7 @@ impl WindowInfo {
         active_on_focus: bool,
         background_color: Color,
         opaque: bool,
+        placement: WindowPlacement,
     ) -> Self {
         Self {
             app_id,
@@ -69,6 +72,7 @@ impl WindowInfo {
             active_on_focus,
             background_color,
             opaque,
+            placement,
         }
     }
 }
@@ -152,6 +156,7 @@ pub struct Window<V: View> {
     menu_bar: Option<MenuBarModel>,
     focus_on_create: bool,
     active_on_focus: bool,
+    placement: WindowPlacement,
     scene_key: Option<String>,
     opens_at_launch: bool,
     content: V,
@@ -228,6 +233,7 @@ impl<V: View> Window<V> {
             menu_bar: None,
             focus_on_create: true,
             active_on_focus: true,
+            placement: WindowPlacement::Default,
             scene_key: None,
             opens_at_launch: true,
             content,
@@ -310,6 +316,12 @@ impl<V: View> Window<V> {
     /// Set whether focusing this window should change the active app
     pub fn active_on_focus(mut self, active_on_focus: bool) -> Self {
         self.active_on_focus = active_on_focus;
+        self
+    }
+
+    /// Set the initial placement hint passed to the window manager.
+    pub fn placement(mut self, placement: WindowPlacement) -> Self {
+        self.placement = placement;
         self
     }
 
@@ -397,6 +409,7 @@ impl<V: View + Clone> Clone for Window<V> {
             menu_bar: self.menu_bar.clone(),
             focus_on_create: self.focus_on_create,
             active_on_focus: self.active_on_focus,
+            placement: self.placement,
             scene_key: self.scene_key.clone(),
             opens_at_launch: self.opens_at_launch,
             content: self.content.clone(),
@@ -416,6 +429,7 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
             self.active_on_focus,
             self.background_color,
             self.opaque,
+            self.placement,
         )
     }
 

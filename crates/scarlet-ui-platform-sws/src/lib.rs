@@ -12,6 +12,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::color::Color;
 use scarlet_ui_core::compositor::DamageRect;
@@ -21,7 +22,9 @@ use scarlet_ui_core::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
 };
 use scarlet_ui_core::geometry::{Point, Rect, Size};
-use scarlet_ui_core::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
+use scarlet_ui_core::platform::{
+    PlatformBackend, PlatformWindow, WindowCreateRequest, WindowPlacement,
+};
 use scarlet_ui_core::renderer::{
     BackendFrame, CompositorBackendKind, PaintBackend, PaintContext, RendererBackendKind,
 };
@@ -54,6 +57,8 @@ macro_rules! logln {
 }
 
 const DEFAULT_SCALE_MILLI: u32 = 1000;
+const WINDOW_PLACEMENT_ENV: &str = "SCARLET_WINDOW_PLACEMENT";
+static WINDOW_PLACEMENT_CONSUMED: AtomicBool = AtomicBool::new(false);
 const WHEEL_LINE_DELTA: i32 = 32;
 const WHEEL_HI_RES_UNITS_PER_NOTCH: i32 = 120;
 const SWS_LEGACY_WHEEL_PIXELS_PER_NOTCH: i32 = 10;
@@ -106,6 +111,37 @@ fn renderer_backend_environment_value() -> Option<String> {
 #[cfg(not(feature = "std"))]
 fn renderer_backend_environment_value() -> Option<String> {
     std::env::var("SCARLET_UI_BACKEND")
+}
+
+#[cfg(feature = "std")]
+fn window_placement_environment_value() -> Option<String> {
+    std::env::var(WINDOW_PLACEMENT_ENV).ok()
+}
+
+#[cfg(not(feature = "std"))]
+fn window_placement_environment_value() -> Option<String> {
+    std::env::var(WINDOW_PLACEMENT_ENV)
+}
+
+fn apply_launch_window_placement(placement: WindowPlacement) -> WindowPlacement {
+    if !matches!(placement, WindowPlacement::Default)
+        || WINDOW_PLACEMENT_CONSUMED.load(Ordering::Acquire)
+    {
+        return placement;
+    }
+
+    if window_placement_environment_value().as_deref() != Some("centered") {
+        return placement;
+    }
+
+    if WINDOW_PLACEMENT_CONSUMED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        WindowPlacement::Centered
+    } else {
+        placement
+    }
 }
 
 struct SwsSgfxFrameSink {
@@ -736,6 +772,7 @@ impl PlatformBackend for SwsBackend {
                 request.focus_on_create,
                 request.active_on_focus,
                 request.opaque,
+                request.placement,
             )?,
         ))
     }
@@ -776,7 +813,11 @@ impl SWSPlatformWindow {
     }
 
     fn logical_to_physical_pos(&self, value: i32) -> i32 {
-        ((value as i64).saturating_mul(self.scale_milli as i64) / 1000) as i32
+        Self::logical_to_physical_pos_with_scale(value, self.scale_milli)
+    }
+
+    fn logical_to_physical_pos_with_scale(value: i32, scale_milli: u32) -> i32 {
+        ((value as i64).saturating_mul(scale_milli as i64) / 1000) as i32
     }
 
     fn physical_to_logical_pos(&self, value: i32) -> i32 {
@@ -809,6 +850,7 @@ impl SWSPlatformWindow {
             true,
             window_type == sws_protocol::window_types::NORMAL,
             true,
+            WindowPlacement::Default,
         )
     }
 
@@ -829,6 +871,7 @@ impl SWSPlatformWindow {
             true,
             window_type == sws_protocol::window_types::NORMAL,
             true,
+            WindowPlacement::Default,
         )
     }
 
@@ -842,6 +885,7 @@ impl SWSPlatformWindow {
         focus_on_create: bool,
         active_on_focus: bool,
         opaque: bool,
+        placement: WindowPlacement,
     ) -> Result<Self> {
         let conn = sws::Connection::connect("/tmp/sws.sock")
             .map_err(|_| scarlet_ui_core::error::Error::ConnectionFailed)?;
@@ -855,6 +899,7 @@ impl SWSPlatformWindow {
             focus_on_create,
             active_on_focus,
             opaque,
+            placement,
         )
     }
 
@@ -868,7 +913,9 @@ impl SWSPlatformWindow {
         focus_on_create: bool,
         active_on_focus: bool,
         opaque: bool,
+        placement: WindowPlacement,
     ) -> Result<Self> {
+        let placement = apply_launch_window_placement(placement);
         let requested_renderer_backend = RequestedRendererBackend::from_environment()?;
         let scale_milli = conn
             .get_output_scale()
@@ -879,9 +926,10 @@ impl SWSPlatformWindow {
         let physical_height =
             Self::logical_to_physical_len_with_scale(size.height.max(1.0) as u32, scale_milli);
 
-        // Create surface with type
+        // Create the surface with the placement hint in the same request so
+        // the compositor can apply its policy before the first frame.
         let surface_id = conn
-            .create_surface_with_type_and_policies(
+            .create_surface_with_type_and_policies_with_placement(
                 app_id,
                 title,
                 menu_titles,
@@ -891,6 +939,14 @@ impl SWSPlatformWindow {
                 true,
                 focus_on_create,
                 active_on_focus,
+                match placement {
+                    WindowPlacement::Default => sws_protocol::WindowPlacement::Default,
+                    WindowPlacement::Centered => sws_protocol::WindowPlacement::Centered,
+                    WindowPlacement::At { x, y } => sws_protocol::WindowPlacement::Absolute {
+                        x: Self::logical_to_physical_pos_with_scale(x, scale_milli),
+                        y: Self::logical_to_physical_pos_with_scale(y, scale_milli),
+                    },
+                },
             )
             .map_err(|_| scarlet_ui_core::error::Error::SurfaceCreationFailed)?;
 
@@ -939,6 +995,7 @@ impl SWSPlatformWindow {
             true,
             true,
             true,
+            WindowPlacement::Default,
         )
     }
 
@@ -960,6 +1017,7 @@ impl SWSPlatformWindow {
             focus_on_create,
             active_on_focus,
             opaque,
+            WindowPlacement::Default,
         )
     }
 
@@ -1384,6 +1442,7 @@ impl PlatformWindow for SWSPlatformWindow {
             true,
             true,
             true,
+            WindowPlacement::Default,
         )
     }
 
@@ -1675,6 +1734,7 @@ impl PlatformWindow for SWSPlatformWindow {
             true,
             window_type == sws_protocol::window_types::NORMAL,
             true,
+            WindowPlacement::Default,
         )
     }
 

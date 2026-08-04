@@ -445,6 +445,7 @@ impl PreviewHost {
                 focus_on_create: true,
                 active_on_focus: true,
                 opaque: true,
+                placement: crate::platform::WindowPlacement::Default,
             })
             .map_err(|error| error.to_string())?;
         window.set_title(session.title());

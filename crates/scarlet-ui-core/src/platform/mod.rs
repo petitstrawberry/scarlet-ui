@@ -12,6 +12,22 @@ use alloc::string::String;
 use core::any::Any;
 use std::time::Duration;
 
+/// Hint used by the window manager when placing a newly created window.
+///
+/// The compositor may adjust or ignore a placement request. Applications
+/// should use this as an initial placement preference, not as ownership of
+/// global screen coordinates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowPlacement {
+    /// Let the window manager apply its normal placement policy.
+    #[default]
+    Default,
+    /// Place the window at the center of the current workarea.
+    Centered,
+    /// Request an absolute position in logical screen coordinates.
+    At { x: i32, y: i32 },
+}
+
 /// Parameters used by a backend to create a window.
 pub struct WindowCreateRequest {
     /// Stable application identifier.
@@ -30,6 +46,8 @@ pub struct WindowCreateRequest {
     pub active_on_focus: bool,
     /// Whether the window contents are fully opaque.
     pub opaque: bool,
+    /// Initial placement hint passed to the window manager.
+    pub placement: WindowPlacement,
 }
 
 /// Creates platform windows for the application runner.

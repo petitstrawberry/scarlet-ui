@@ -275,7 +275,8 @@ impl RenderingPipeline {
     /// Extract window information from the element tree
     ///
     /// This searches the element tree for a Window View and extracts
-    /// the app_id, title, size, window type, background, and policies from it.
+    /// the app_id, title, size, window type, background, placement, and
+    /// policies from it.
     ///
     /// Returns window information or defaults if no Window is found.
     fn extract_window_info(&self) -> WindowInfo {
@@ -297,6 +298,7 @@ impl RenderingPipeline {
             true,
             crate::color::ColorPalette::light().window_background(),
             true,
+            crate::platform::WindowPlacement::Default,
         )
     }
 
