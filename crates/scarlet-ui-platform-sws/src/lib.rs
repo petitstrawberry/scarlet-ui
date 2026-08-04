@@ -1669,10 +1669,15 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn create_popup(&mut self, position: Point, size: Size) -> Result<u32> {
-        // Create a popup window with ALWAYS_ON_TOP type
+        let x = self.logical_to_physical_pos(position.x as i32);
+        let y = self.logical_to_physical_pos(position.y as i32);
+
+        // Create and place the popup in one request.  This avoids exposing the
+        // compositor's fallback position for one frame before move_window is
+        // processed.
         let popup_surface_id = self
             .conn
-            .create_surface_with_type_and_policies(
+            .create_surface_with_type_and_policies_with_placement(
                 "org.scarlet-os.popup",
                 "Popup",
                 "",
@@ -1682,15 +1687,17 @@ impl PlatformWindow for SWSPlatformWindow {
                 true,
                 true,
                 false,
+                sws_protocol::WindowPlacement::Absolute { x, y },
             )
             .map_err(|_| scarlet_ui_core::error::Error::SurfaceCreationFailed)?;
 
-        // Position the popup
         self.conn
-            .move_window(
+            .set_window_parent(popup_surface_id, Some(self.surface_id))
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
+        self.conn
+            .set_window_transient_flags(
                 popup_surface_id,
-                self.logical_to_physical_pos(position.x as i32),
-                self.logical_to_physical_pos(position.y as i32),
+                sws::TransientFlags::FOLLOW_PARENT_MOVE | sws::TransientFlags::RAISE_WITH_PARENT,
             )
             .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
 
