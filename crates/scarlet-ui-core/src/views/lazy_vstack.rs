@@ -146,9 +146,12 @@ impl LazyVStackElement {
         start..end.max(start)
     }
 
-    fn materialize_visible_children(&mut self) -> bool {
+    fn materialize_visible_children(&mut self, update_existing: bool) -> bool {
         let range = self.visible_range();
-        if self.child_indices == range.clone().collect::<Vec<_>>() {
+        if !update_existing
+            && self.child_indices.len() == range.len()
+            && self.child_indices.iter().copied().eq(range.clone())
+        {
             return false;
         }
 
@@ -160,7 +163,23 @@ impl LazyVStackElement {
 
         for index in range {
             if let Some(position) = old_indices.iter().position(|old| *old == index) {
-                new_children.push(old_children.remove(position));
+                let mut child = old_children.remove(position);
+                if update_existing {
+                    let new_child = self.view.build_item(index);
+                    if matches!(
+                        child.update_from_element(new_child.as_ref()),
+                        crate::element::UpdateResult::Replaced
+                    ) {
+                        child.unmount();
+                        let mut new_child = new_child;
+                        if let Some(ctx) = self.mount_context {
+                            new_child.mount(&ctx);
+                        }
+                        child = new_child;
+                    }
+                    changed = true;
+                }
+                new_children.push(child);
                 old_indices.remove(position);
             } else {
                 let mut child = self.view.build_item(index);
@@ -226,7 +245,20 @@ impl Element for LazyVStackElement {
             return UpdateResult::Replaced;
         };
         self.view = new_view.clone();
-        self.materialize_visible_children();
+        self.materialize_visible_children(true);
+        if let Some(constraints) = self.last_constraints {
+            self.layout(constraints);
+        }
+        UpdateResult::Updated
+    }
+
+    fn update_from_element(&mut self, new_element: &dyn Element) -> UpdateResult {
+        let Some(new_element) = new_element.as_any().downcast_ref::<Self>() else {
+            return UpdateResult::Replaced;
+        };
+
+        self.view = new_element.view.clone();
+        self.materialize_visible_children(true);
         if let Some(constraints) = self.last_constraints {
             self.layout(constraints);
         }
@@ -259,7 +291,7 @@ impl Element for LazyVStackElement {
             constraints.min_width.max(0.0)
         };
         self.size = Size::new(width, self.view.total_height());
-        self.materialize_visible_children();
+        self.materialize_visible_children(false);
         self.layout_visible_children();
         self.size
     }
@@ -285,7 +317,7 @@ impl Element for LazyVStackElement {
             return false;
         }
         self.viewport_hint = Some(viewport);
-        let changed = self.materialize_visible_children();
+        let changed = self.materialize_visible_children(false);
         if changed {
             self.layout_visible_children();
         }

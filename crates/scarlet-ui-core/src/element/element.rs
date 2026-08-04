@@ -182,6 +182,27 @@ pub trait Element {
     /// replaced, or unchanged.
     fn update(&mut self, new_view: &dyn View) -> UpdateResult;
 
+    /// Reconcile this Element with a newly-created Element of the same view
+    /// shape while retaining runtime state owned by the existing Element.
+    ///
+    /// This is used by container elements when a parent view is rebuilt. It
+    /// lets stateful descendants such as [`ScrollView`](crate::views::ScrollView)
+    /// survive a parent layout update instead of being discarded with the old
+    /// subtree.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_element` - Newly-created element tree used as the source of view
+    ///   properties and child structure.
+    ///
+    /// # Returns
+    ///
+    /// [`UpdateResult::Updated`] or [`UpdateResult::NoChange`] when the current
+    /// element was retained, otherwise [`UpdateResult::Replaced`].
+    fn update_from_element(&mut self, _new_element: &dyn Element) -> UpdateResult {
+        UpdateResult::Replaced
+    }
+
     /// Rebuild this Element from its stored View
     ///
     /// Called when the Element is marked dirty due to State changes.
