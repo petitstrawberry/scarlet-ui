@@ -98,10 +98,15 @@ impl ElementRenderObject for BackgroundRenderObject {
             child.set_position(Point::ZERO);
         }
 
-        self.size = constraints.constrain(child_size);
-        if self.size.width <= 0.0 || self.size.height <= 0.0 {
-            self.size = self.layout(constraints);
-        }
+        // A child can report zero on one unconstrained axis while retaining a
+        // meaningful size on the other axis. Keep that meaningful dimension:
+        // replacing the whole size with the fallback would, for example,
+        // collapse a fixed-height fill-width view to one pixel during a stack's
+        // measurement pass.
+        self.size = constraints.constrain(Size {
+            width: child_size.width.max(1.0),
+            height: child_size.height.max(1.0),
+        });
         self.size
     }
 
@@ -132,5 +137,22 @@ impl ElementRenderObject for BackgroundRenderObject {
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         ctx.fill_rect(Rect::new(origin, self.size), self.color);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::view::ViewExt;
+    use crate::views::Spacer;
+
+    #[test]
+    fn preserves_the_nonzero_child_axis_during_loose_measurement() {
+        let mut element = Background::new(Spacer::new().frame(f32::INFINITY, 450.0), Color::WHITE)
+            .create_element();
+
+        let size = element.layout(LayoutConstraints::new(0.0, f32::INFINITY, 0.0, 564.0));
+
+        assert_eq!(size, Size::new(1.0, 450.0));
     }
 }

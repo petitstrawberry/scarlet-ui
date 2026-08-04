@@ -34,6 +34,7 @@ pub struct GridView<T: Clone + 'static> {
     columns: usize,
     row_height: f32,
     spacing: f32,
+    row_spacing: f32,
     minimum_cell_width: Option<f32>,
     cell_builder: CellBuilder<T>,
 }
@@ -68,6 +69,7 @@ impl<T: Clone + 'static> GridView<T> {
             columns: columns.max(1),
             row_height: row_height.max(1.0),
             spacing: 12.0,
+            row_spacing: 0.0,
             minimum_cell_width: None,
             cell_builder: Rc::new(move |index, item, selected| {
                 Box::new(cell_builder(index, item, selected))
@@ -86,6 +88,20 @@ impl<T: Clone + 'static> GridView<T> {
     /// The updated grid view.
     pub fn spacing(mut self, spacing: f32) -> Self {
         self.spacing = spacing.max(0.0);
+        self
+    }
+
+    /// Set the vertical spacing between rows.
+    ///
+    /// # Arguments
+    ///
+    /// * `spacing` - Logical spacing between neighboring rows.
+    ///
+    /// # Returns
+    ///
+    /// The updated grid view.
+    pub fn row_spacing(mut self, spacing: f32) -> Self {
+        self.row_spacing = spacing.max(0.0);
         self
     }
 
@@ -378,6 +394,19 @@ impl<T: Clone + 'static> GridContentElement<T> {
         self.view.items.get().len().div_ceil(columns.max(1))
     }
 
+    fn row_stride(&self) -> f32 {
+        self.view.row_height + self.view.row_spacing
+    }
+
+    fn content_height(&self, row_count: usize) -> f32 {
+        if row_count == 0 {
+            0.0
+        } else {
+            row_count as f32 * self.view.row_height
+                + row_count.saturating_sub(1) as f32 * self.view.row_spacing
+        }
+    }
+
     fn build_row(&self, row_index: usize, columns: usize) -> Box<dyn View> {
         let items = self.view.items.get();
         let selected = self.view.selected.get();
@@ -410,14 +439,14 @@ impl<T: Clone + 'static> GridContentElement<T> {
                 0.0,
                 0.0,
                 self.size.width,
-                GRID_CACHE_EXTENT.max(self.view.row_height),
+                GRID_CACHE_EXTENT.max(self.row_stride()),
             )
         });
-        let row_height = self.view.row_height.max(1.0);
+        let row_stride = self.row_stride().max(1.0);
         let start_y = (viewport.top() - GRID_CACHE_EXTENT).max(0.0);
         let end_y = (viewport.bottom() + GRID_CACHE_EXTENT).max(start_y);
-        let start = (libm::floorf(start_y / row_height) as usize).min(row_count);
-        let end = (libm::ceilf(end_y / row_height) as usize + 1).min(row_count);
+        let start = (libm::floorf(start_y / row_stride) as usize).min(row_count);
+        let end = (libm::ceilf(end_y / row_stride) as usize + 1).min(row_count);
         start..end.max(start)
     }
 
@@ -483,6 +512,7 @@ impl<T: Clone + 'static> GridContentElement<T> {
     }
 
     fn layout_visible_children(&mut self) {
+        let row_stride = self.row_stride();
         for (child, row_index) in self
             .children
             .iter_mut()
@@ -492,7 +522,7 @@ impl<T: Clone + 'static> GridContentElement<T> {
                 self.size.width,
                 self.view.row_height,
             ));
-            child.set_position(Point::new(0.0, row_index as f32 * self.view.row_height));
+            child.set_position(Point::new(0.0, row_index as f32 * row_stride));
         }
     }
 }
@@ -556,10 +586,8 @@ impl<T: Clone + 'static> Element for GridContentElement<T> {
         self.last_constraints = Some(constraints);
         let width = Self::width_from_constraints(constraints);
         self.current_columns = self.columns_for_width(width);
-        self.size = Size::new(
-            width,
-            self.row_count(self.current_columns) as f32 * self.view.row_height,
-        );
+        let row_count = self.row_count(self.current_columns);
+        self.size = Size::new(width, self.content_height(row_count));
         self.materialize_visible_children();
         self.layout_visible_children();
         self.size
@@ -743,6 +771,32 @@ mod tests {
                 "grid item {index} should be painted in row {row}, column {column}"
             );
         }
+    }
+
+    #[test]
+    fn row_spacing_separates_neighboring_rows() {
+        let items = State::new(StateId::new(20_021), vec![0usize, 1]);
+        let selected = State::new(StateId::new(20_022), None);
+        let colors = [Color::rgb(220, 40, 40), Color::rgb(40, 80, 220)];
+        let grid = GridView::new(items, selected, 1, 40.0, move |index, _, _| {
+            crate::views::Rectangle::new()
+                .fill(colors[index])
+                .frame(f32::INFINITY, 40.0)
+        })
+        .row_spacing(10.0);
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(grid.create_element());
+        pipeline.layout_initial();
+        let buffer = pipeline
+            .render_with_damage()
+            .map(|(buffer, _)| buffer)
+            .expect("spaced grid should render");
+
+        assert_eq!(buffer.get_pixel(20, 20), Some(colors[0].to_bgra()));
+        assert_ne!(buffer.get_pixel(20, 45), Some(colors[0].to_bgra()));
+        assert_ne!(buffer.get_pixel(20, 45), Some(colors[1].to_bgra()));
+        assert_eq!(buffer.get_pixel(20, 55), Some(colors[1].to_bgra()));
     }
 
     #[test]

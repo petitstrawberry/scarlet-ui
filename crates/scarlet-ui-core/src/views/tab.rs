@@ -558,6 +558,66 @@ fn finite_tab_axis(min: f32, max: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::ComponentElement;
+    use crate::pipeline::RenderingPipeline;
+    use crate::state::State;
+    use crate::view::ViewExt;
+    use crate::views::{Rectangle, Spacer};
+
+    #[derive(Clone)]
+    struct UpdatingTabHarness {
+        sample: State<u32>,
+        selected_tab: State<usize>,
+    }
+
+    fn build_updating_tab_harness(view: &UpdatingTabHarness) -> Box<dyn View> {
+        let content_color = if view.sample.get() == 0 {
+            Color::rgb(20, 80, 180)
+        } else {
+            Color::rgb(20, 180, 80)
+        };
+        let selected_tab = view.selected_tab.clone();
+        Box::new(
+            crate::vstack! {
+                Rectangle::new()
+                    .fill(Color::rgb(180, 40, 40))
+                    .frame(f32::INFINITY, 100.0),
+                Spacer::new().frame_height(14.0),
+                TabView::with_selected_index(
+                    vec![TabItem::new("Overview", move || {
+                        Rectangle::new()
+                            .fill(content_color)
+                            .frame(f32::INFINITY, f32::INFINITY)
+                    })],
+                    selected_tab,
+                )
+                .tab_bar_height(38.0)
+                .frame(f32::INFINITY, 450.0)
+                .background(Color::rgb(245, 245, 248))
+                .clip_radius(12.0),
+            }
+            .padding(18.0)
+            .frame(780.0, 600.0)
+            .background(Color::WHITE),
+        )
+    }
+
+    impl View for UpdatingTabHarness {
+        fn create_element(&self) -> Box<dyn Element> {
+            Box::new(ComponentElement::new_with_builder(
+                self.clone(),
+                build_updating_tab_harness,
+            ))
+        }
+
+        fn listenables(&self) -> Vec<&dyn Listenable> {
+            vec![&self.sample]
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
 
     #[test]
     fn click_changes_selected_index() {
@@ -630,5 +690,29 @@ mod tests {
         ));
         assert_eq!(render_object.pressed_index(), None);
         assert_eq!(selected.get(), 0);
+    }
+
+    #[test]
+    fn tab_strip_and_content_remain_visible_after_ancestor_state_update() {
+        let sample = State::new(crate::state::generate_state_id(), 0u32);
+        let harness = UpdatingTabHarness {
+            sample: sample.clone(),
+            selected_tab: State::new(crate::state::generate_state_id(), 0usize),
+        };
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.resize(Size::new(780.0, 600.0));
+        pipeline.set_root(harness.create_element());
+        pipeline.layout_initial();
+
+        let first = pipeline
+            .render_with_damage()
+            .and_then(|(buffer, _)| buffer.get_pixel(30, 190));
+        assert_eq!(first, Some(Color::rgb(20, 80, 180).to_bgra()));
+
+        sample.set(1);
+        let second = pipeline
+            .render_with_damage()
+            .and_then(|(buffer, _)| buffer.get_pixel(30, 190));
+        assert_eq!(second, Some(Color::rgb(20, 180, 80).to_bgra()));
     }
 }
