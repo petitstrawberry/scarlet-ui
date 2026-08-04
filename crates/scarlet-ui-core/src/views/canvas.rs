@@ -4,7 +4,7 @@
 
 use crate::buffer::Buffer;
 use crate::color::Color;
-use crate::element::{Element, ElementRenderObject, LayoutConstraints, UpdateResult};
+use crate::element::{Element, ElementRenderObject, LayoutConstraints};
 use crate::event::Event;
 use crate::geometry::{Point, Rect, Size};
 use crate::renderer::PaintContext;
@@ -146,17 +146,6 @@ impl CanvasRenderObject {
 }
 
 impl ElementRenderObject for CanvasRenderObject {
-    fn update(&mut self, new_view: &dyn View) -> UpdateResult {
-        let Some(canvas) = new_view.as_any().downcast_ref::<CanvasView>() else {
-            return UpdateResult::Replaced;
-        };
-
-        self.size = canvas.size;
-        self.render_callback = canvas.render_callback.clone();
-        self.event_handler = canvas.event_handler.clone();
-        UpdateResult::Updated
-    }
-
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         // Apply constraints
         let width = if constraints.max_width.is_finite() && constraints.max_width > 0.0 {

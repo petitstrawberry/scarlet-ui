@@ -1166,7 +1166,6 @@ fn default_scrollbar_opacity() -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::UpdateResult;
     use crate::event::{ScrollSource, WheelPhase};
     use crate::state::generate_state_id;
     use crate::view::View;
@@ -1528,28 +1527,6 @@ mod tests {
         render_object.layout_with_children(LayoutConstraints::tight(100.0, 100.0), &mut children);
 
         assert_eq!(render_object.offset(), (0.0, 100.0));
-    }
-
-    #[test]
-    fn component_rebuild_preserves_scroll_offset() {
-        let old_view = ScrollView::new(Text::new("old")).content_size(100.0, 500.0);
-        let mut element = crate::element::ComponentElement::new(old_view.clone());
-        element.layout(LayoutConstraints::tight(100.0, 100.0));
-
-        let scroll = element.children_mut()[0]
-            .as_any_mut()
-            .downcast_mut::<RenderElement<ScrollView<Text>, ScrollViewRenderObject<Text>>>()
-            .expect("component child should be a scroll render element");
-        assert!(scroll.render_object_mut().set_offset(0.0, 80.0));
-
-        let new_view = ScrollView::new(Text::new("new")).content_size(100.0, 500.0);
-        assert!(matches!(element.update(&new_view), UpdateResult::Updated));
-
-        let scroll = element.children_mut()[0]
-            .as_any_mut()
-            .downcast_mut::<RenderElement<ScrollView<Text>, ScrollViewRenderObject<Text>>>()
-            .expect("updated component child should remain a scroll render element");
-        assert_eq!(scroll.render_object().offset(), (0.0, 80.0));
     }
 
     #[test]

@@ -424,49 +424,23 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn update(&mut self, new_view: &dyn View) -> UpdateResult {
-        let Some(typed_view) = new_view.as_any().downcast_ref::<V>() else {
-            return UpdateResult::Replaced;
-        };
-
-        let new_element = typed_view.create_element();
-        self.update_from_element(new_element.as_ref())
-    }
-
-    fn update_from_element(&mut self, new_element: &dyn Element) -> UpdateResult {
-        let Some(new_element) = new_element.as_any().downcast_ref::<Self>() else {
-            return UpdateResult::Replaced;
-        };
-
-        if self.mounted {
-            self.unsubscribe_view_listenables();
-        }
-
-        let render_result = self.render_object.update(&new_element.view);
-        if matches!(render_result, UpdateResult::Replaced) && self.children.is_empty() {
-            return UpdateResult::Replaced;
-        }
-        self.view = new_element.view.clone();
-
-        if self.children.len() != new_element.children.len() {
-            return UpdateResult::Replaced;
-        }
-
-        let mut result = match render_result {
-            UpdateResult::Updated | UpdateResult::Replaced => UpdateResult::Updated,
-            UpdateResult::NoChange => UpdateResult::NoChange,
-        };
-        for (child, new_child) in self.children.iter_mut().zip(new_element.children.iter()) {
-            match child.update_from_element(new_child.as_ref()) {
-                UpdateResult::Replaced => return UpdateResult::Replaced,
-                UpdateResult::Updated => result = UpdateResult::Updated,
-                UpdateResult::NoChange => {}
+        // Try to downcast the new_view to the same type as our stored view
+        if let Some(typed_view) = new_view.as_any().downcast_ref::<V>() {
+            if self.mounted {
+                self.unsubscribe_view_listenables();
             }
+            // Update the stored view (clone from the reference)
+            self.view = typed_view.clone();
+            // Delegate to the RenderObject's update method
+            let result = self.render_object.update(new_view);
+            if self.mounted {
+                self.subscribe_view_listenables();
+            }
+            result
+        } else {
+            // Type mismatch - need to replace
+            UpdateResult::Replaced
         }
-
-        if self.mounted {
-            self.subscribe_view_listenables();
-        }
-        result
     }
 
     fn rebuild(&mut self) -> UpdateResult {

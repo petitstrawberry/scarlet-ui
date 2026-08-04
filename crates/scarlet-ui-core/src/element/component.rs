@@ -74,24 +74,6 @@ impl<V: View + Clone> ComponentElement<V> {
     pub fn view_mut(&mut self) -> &mut V {
         &mut self.view
     }
-
-    fn replace_child(&mut self, mut new_child: Box<dyn Element>) {
-        let focused_path = self
-            .child
-            .as_ref()
-            .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
-
-        if let Some(child) = self.child.as_mut() {
-            child.unmount();
-        }
-
-        let ctx = MountContext::new(self.pipeline_id);
-        new_child.mount(&ctx);
-        self.child = Some(new_child);
-        if let (Some(path), Some(child)) = (focused_path.as_deref(), self.child.as_mut()) {
-            crate::element::restore_focus_at_path(child.as_mut(), path);
-        }
-    }
 }
 
 fn default_component_child<V: View + Clone>(view: &V) -> Box<dyn Element> {
@@ -137,21 +119,34 @@ impl<V: View + Clone> Element for ComponentElement<V> {
             return UpdateResult::Replaced;
         }
 
-        // Same type - reconcile the existing child before replacing it.
+        // Same type - try to downcast and update properties
         if let Some(new_typed_view) = new_view.as_any().downcast_ref::<V>() {
-            let new_child = (self.build_child)(new_typed_view);
+            // Note: We can't use == since V may not implement PartialEq
+            // For now, we'll assume the view has changed and update it
+
+            // Update our stored view
             self.view = new_typed_view.clone();
 
-            if let Some(child) = self.child.as_mut()
-                && !matches!(
-                    child.update_from_element(new_child.as_ref()),
-                    UpdateResult::Replaced
-                )
-            {
-                return UpdateResult::Updated;
+            let focused_path = self
+                .child
+                .as_ref()
+                .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
+
+            if let Some(ref mut child) = self.child {
+                child.unmount();
             }
 
-            self.replace_child(new_child);
+            // Create new child element
+            let mut new_child = (self.build_child)(&self.view);
+            let ctx = MountContext::new(self.pipeline_id);
+            new_child.mount(&ctx);
+
+            // Replace the old child with the new one
+            self.child = Some(new_child);
+            if let (Some(path), Some(child)) = (focused_path.as_deref(), self.child.as_mut()) {
+                crate::element::restore_focus_at_path(child.as_mut(), path);
+            }
+
             UpdateResult::Updated
         } else {
             // Should never happen since we checked type_id above
@@ -160,43 +155,39 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         }
     }
 
-    fn update_from_element(&mut self, new_element: &dyn Element) -> UpdateResult {
-        let Some(new_element) = new_element.as_any().downcast_ref::<Self>() else {
-            return UpdateResult::Replaced;
-        };
-
-        self.view = new_element.view.clone();
-        if let Some(new_child) = new_element.child.as_ref()
-            && let Some(child) = self.child.as_mut()
-            && !matches!(
-                child.update_from_element(new_child.as_ref()),
-                UpdateResult::Replaced
-            )
-        {
-            return UpdateResult::Updated;
-        }
-
-        self.replace_child((self.build_child)(&self.view));
-        UpdateResult::Updated
-    }
-
     fn rebuild(&mut self) -> UpdateResult {
-        // Build the next child as a description, then reconcile it with the
-        // existing child. This is important for stateful descendants: a
-        // Component rebuild must not discard a ScrollView merely because the
-        // component's view was rebuilt from State.
-        let new_child = (self.build_child)(&self.view);
-        if let Some(child) = self.child.as_mut()
-            && !matches!(
-                child.update_from_element(new_child.as_ref()),
-                UpdateResult::Replaced
-            )
-        {
-            crate::pipeline::mark_element_needs_layout(self.pipeline_id, child.id());
-            return UpdateResult::NoChange;
+        let focused_path = self
+            .child
+            .as_ref()
+            .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
+
+        if let Some(ref mut child) = self.child {
+            match child.update(&self.view) {
+                UpdateResult::NoChange => return UpdateResult::NoChange,
+                UpdateResult::Updated => {
+                    crate::pipeline::mark_element_needs_layout(self.pipeline_id, child.id());
+                    return UpdateResult::NoChange;
+                }
+                UpdateResult::Replaced => {
+                    child.unmount();
+                }
+            }
         }
 
-        self.replace_child(new_child);
+        // Create new child element from the stored view
+        let new_child = (self.build_child)(&self.view);
+
+        // Replace the old child with the new one
+        self.child = Some(new_child);
+
+        // Mount the new child
+        if let Some(ref mut child) = self.child {
+            let ctx = MountContext::new(self.pipeline_id);
+            child.mount(&ctx);
+            if let Some(path) = focused_path.as_deref() {
+                crate::element::restore_focus_at_path(child.as_mut(), path);
+            }
+        }
 
         if let Some(ref child) = self.child {
             crate::pipeline::mark_element_needs_layout(self.pipeline_id, child.id());
