@@ -171,18 +171,38 @@ fn write_menu_item_json(out: &mut String, item: &MenuItemModel) {
 }
 
 fn push_json_string(out: &mut String, value: &str) {
-    for b in value.bytes() {
-        match b {
-            b'\\' => out.push_str("\\\\"),
-            b'"' => out.push_str("\\\""),
-            b'\n' => out.push_str("\\n"),
-            b'\r' => out.push_str("\\r"),
-            b'\t' => out.push_str("\\t"),
-            0x00..=0x1f => {
-                let _ = alloc::fmt::write(out, format_args!("\\u{:04x}", b));
+    // JSON strings are UTF-8, so escaping must operate on Unicode scalar
+    // values rather than individual bytes. Casting UTF-8 continuation bytes
+    // to `char` corrupts titles such as `Open…` and other non-ASCII text.
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => {
+                let _ = alloc::fmt::write(out, format_args!("\\u{:04x}", ch as u32));
             }
-            _ => out.push(b as char),
+            ch => out.push(ch),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MenuBarModel, MenuEntry, MenuItemModel};
+    use alloc::vec;
+
+    #[test]
+    fn menu_json_preserves_unicode_text() {
+        let json = MenuBarModel::new(vec![MenuItemModel::new("file", "File").children(vec![
+            MenuEntry::Item(MenuItemModel::new("open", "Open…").shortcut("Ctrl+O")),
+        ])])
+        .to_json();
+
+        assert!(json.contains("\"title\":\"Open…\""));
+        assert!(json.contains("\"shortcut\":\"Ctrl+O\""));
     }
 }
 
