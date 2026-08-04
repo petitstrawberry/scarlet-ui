@@ -177,16 +177,16 @@ pub struct KeyModifiers {
 }
 
 impl KeyModifiers {
-    /// Returns the platform primary modifier state.
+    /// Returns the application shortcut modifier state.
     ///
-    /// Ctrl and Super are both treated as primary so callers can use one shortcut
-    /// path across Linux, Windows, macOS, and Scarlet OS.
+    /// Scarlet applications use Control for ordinary shortcuts. Super is
+    /// reserved for desktop-global actions such as the application launcher.
     ///
     /// # Returns
     ///
-    /// `true` when either Control or Super is pressed.
+    /// `true` when Control is pressed.
     pub fn primary(self) -> bool {
-        self.control || self.super_key
+        self.control
     }
 
     /// Returns empty keyboard modifiers.
