@@ -105,7 +105,15 @@ impl View for AnyView {
     }
 }
 
-fn build_list_child<T: Clone + 'static>(view: &ListView<T>) -> Box<dyn Element> {
+#[derive(Clone)]
+struct ListContentView<T: Clone + 'static> {
+    items: State<Vec<T>>,
+    selected: State<Option<usize>>,
+    row_height: f32,
+    row_builder: RowBuilder<T>,
+}
+
+fn build_list_content<T: Clone + 'static>(view: &ListContentView<T>) -> Box<dyn Element> {
     let items = view.items.clone();
     let selected = view.selected.clone();
     let row_builder = view.row_builder.clone();
@@ -120,7 +128,36 @@ fn build_list_child<T: Clone + 'static>(view: &ListView<T>) -> Box<dyn Element> 
             .expect("ListView row index must be within item count");
         AnyView::new((row_builder)(index, item, selected.get()))
     });
-    ScrollView::new(rows)
+    rows.create_element()
+}
+
+impl<T: Clone + 'static> View for ListContentView<T> {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(ComponentElement::new_with_builder(
+            self.clone(),
+            build_list_content::<T>,
+        ))
+    }
+
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        alloc::vec![&self.items, &self.selected]
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+fn build_list_child<T: Clone + 'static>(view: &ListView<T>) -> Box<dyn Element> {
+    let row_height = view.row_height;
+    let content = ListContentView {
+        items: view.items.clone(),
+        selected: view.selected.clone(),
+        row_height,
+        row_builder: view.row_builder.clone(),
+    };
+    ScrollView::new(content)
+        .scroll_to_index_state(view.selected.clone(), row_height)
         .scrollbar_visibility(ScrollbarVisibility::Automatic)
         .create_element()
 }
@@ -134,7 +171,10 @@ impl<T: Clone + 'static> View for ListView<T> {
     }
 
     fn listenables(&self) -> Vec<&dyn Listenable> {
-        alloc::vec![&self.items, &self.selected]
+        // The nested content view and ScrollView subscribe to these states.
+        // Keeping the outer component unsubscribed preserves the scroll
+        // render object while rows and selection are rebuilt underneath it.
+        Vec::new()
     }
 
     fn as_any(&self) -> &dyn Any {

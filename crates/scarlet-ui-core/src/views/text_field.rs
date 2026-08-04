@@ -33,6 +33,7 @@ pub struct TextField {
     placeholder: String,
     on_submit: Option<Arc<dyn Fn() + 'static>>,
     on_cancel: Option<Arc<dyn Fn() + 'static>>,
+    on_empty: Option<Arc<dyn Fn() + 'static>>,
     blur_on_submit: bool,
     autofocus: bool,
     background_color: Color,
@@ -53,6 +54,7 @@ impl TextField {
             placeholder: String::new(),
             on_submit: None,
             on_cancel: None,
+            on_empty: None,
             blur_on_submit: false,
             autofocus: false,
             background_color: palette.background(),
@@ -86,6 +88,12 @@ impl TextField {
     /// Set the callback invoked when Escape is pressed while focused.
     pub fn on_cancel(mut self, callback: impl Fn() + 'static) -> Self {
         self.on_cancel = Some(Arc::new(callback));
+        self
+    }
+
+    /// Set the callback invoked when editing removes all text.
+    pub fn on_empty(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_empty = Some(Arc::new(callback));
         self
     }
 
@@ -178,6 +186,13 @@ impl TextField {
     /// Invoke the cancel callback if present.
     pub fn invoke_cancel(&self) {
         if let Some(callback) = self.on_cancel.as_ref() {
+            callback();
+        }
+    }
+
+    /// Invoke the empty-text callback if present.
+    pub fn invoke_empty(&self) {
+        if let Some(callback) = self.on_empty.as_ref() {
             callback();
         }
     }
@@ -419,6 +434,13 @@ impl TextFieldRenderObject {
     }
 }
 
+fn blur_empty_text_field(field: &TextField, render_object: &mut TextFieldRenderObject) {
+    if render_object.text_document.is_empty() {
+        field.invoke_empty();
+        render_object.set_focused(false);
+    }
+}
+
 pub(crate) fn handle_text_field_keyboard(
     field: &TextField,
     render_object: &mut TextFieldRenderObject,
@@ -449,6 +471,7 @@ pub(crate) fn handle_text_field_keyboard(
         } => {
             render_object.clear_preedit();
             delete_backward(field, render_object);
+            blur_empty_text_field(field, render_object);
             true
         }
         KeyEvent::Pressed {
@@ -457,6 +480,7 @@ pub(crate) fn handle_text_field_keyboard(
         } => {
             render_object.clear_preedit();
             delete_forward(field, render_object);
+            blur_empty_text_field(field, render_object);
             true
         }
         KeyEvent::Pressed {
@@ -570,6 +594,7 @@ pub(crate) fn handle_text_field_text_input(
         } => {
             render_object.clear_preedit();
             delete_surrounding_text(field, render_object, *before_bytes, *after_bytes);
+            blur_empty_text_field(field, render_object);
             true
         }
         crate::event::Event::TextInputDone { .. } => true,
@@ -824,7 +849,7 @@ fn text_field_layout(
     padding: f32,
     size: Size,
 ) -> TextViewLayout {
-    TextViewLayout::compute(
+    let mut layout = TextViewLayout::compute(
         document,
         font_size,
         padding,
@@ -832,7 +857,26 @@ fn text_field_layout(
         size,
         TextViewScroll::default(),
         false,
-    )
+    );
+
+    // TextView uses its padding as the top inset because multi-line content
+    // grows downward. A single-line field has extra height in its fixed frame,
+    // so keeping that top inset leaves the glyphs visibly above center.
+    // Reposition the visual line (and therefore the caret/placeholder) while
+    // retaining the horizontal padding and the intrinsic-height behavior.
+    let text_top = if size.height > 0.0 {
+        ((size.height - layout.line_height) * 0.5).max(0.0)
+    } else {
+        padding
+    };
+    let vertical_offset = text_top - padding;
+    if vertical_offset.abs() > f32::EPSILON {
+        for line in &mut layout.visual_lines {
+            line.y += vertical_offset;
+        }
+    }
+
+    layout
 }
 
 fn single_line_text(text: &str) -> String {
@@ -1054,6 +1098,22 @@ mod tests {
 
         assert_eq!(render_object.selection.anchor.byte, "hello ".len());
         assert_eq!(render_object.selection.caret.byte, "hello world".len());
+    }
+
+    #[test]
+    fn single_line_text_is_vertically_centered_in_fixed_height() {
+        let field = TextField::new(State::new(StateId::new(7), String::from("text")))
+            .font_size(14.0)
+            .padding(8.0);
+        let mut render_object = TextFieldRenderObject::from_view(&field);
+        render_object.layout(LayoutConstraints::tight(240.0, 48.0));
+
+        let line = &render_object.layout.visual_lines[0];
+        let expected_top = (48.0 - render_object.layout.line_height) * 0.5;
+        assert!((line.y - expected_top).abs() < 0.001);
+        assert!(
+            (render_object.text_input_state().cursor_rect.origin.y - expected_top).abs() < 0.001
+        );
     }
 
     fn text_x(prefix: &str) -> i32 {
