@@ -57,8 +57,8 @@ macro_rules! logln {
 }
 
 const DEFAULT_SCALE_MILLI: u32 = 1000;
-const WINDOW_PLACEMENT_ENV: &str = "SCARLET_WINDOW_PLACEMENT";
-static WINDOW_PLACEMENT_CONSUMED: AtomicBool = AtomicBool::new(false);
+const ACTIVATION_TOKEN_ENV: &str = "SWS_ACTIVATION_TOKEN";
+static ACTIVATION_TOKEN_CONSUMED: AtomicBool = AtomicBool::new(false);
 const WHEEL_LINE_DELTA: i32 = 32;
 const WHEEL_HI_RES_UNITS_PER_NOTCH: i32 = 120;
 const SWS_LEGACY_WHEEL_PIXELS_PER_NOTCH: i32 = 10;
@@ -114,33 +114,31 @@ fn renderer_backend_environment_value() -> Option<String> {
 }
 
 #[cfg(feature = "std")]
-fn window_placement_environment_value() -> Option<String> {
-    std::env::var(WINDOW_PLACEMENT_ENV).ok()
+fn activation_token_environment_value() -> Option<String> {
+    std::env::var(ACTIVATION_TOKEN_ENV).ok()
 }
 
 #[cfg(not(feature = "std"))]
-fn window_placement_environment_value() -> Option<String> {
-    std::env::var(WINDOW_PLACEMENT_ENV)
+fn activation_token_environment_value() -> Option<String> {
+    std::env::var(ACTIVATION_TOKEN_ENV)
 }
 
-fn apply_launch_window_placement(placement: WindowPlacement) -> WindowPlacement {
-    if !matches!(placement, WindowPlacement::Default)
-        || WINDOW_PLACEMENT_CONSUMED.load(Ordering::Acquire)
+fn take_launch_activation_token(window_type: u32) -> Option<String> {
+    if window_type != sws_protocol::window_types::NORMAL
+        || ACTIVATION_TOKEN_CONSUMED.load(Ordering::Acquire)
     {
-        return placement;
+        return None;
     }
 
-    if window_placement_environment_value().as_deref() != Some("centered") {
-        return placement;
-    }
+    let token = activation_token_environment_value().filter(|token| !token.is_empty())?;
 
-    if WINDOW_PLACEMENT_CONSUMED
+    if ACTIVATION_TOKEN_CONSUMED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {
-        WindowPlacement::Centered
+        Some(token)
     } else {
-        placement
+        None
     }
 }
 
@@ -915,7 +913,7 @@ impl SWSPlatformWindow {
         opaque: bool,
         placement: WindowPlacement,
     ) -> Result<Self> {
-        let placement = apply_launch_window_placement(placement);
+        let activation_token = take_launch_activation_token(window_type);
         let requested_renderer_backend = RequestedRendererBackend::from_environment()?;
         let scale_milli = conn
             .get_output_scale()
@@ -928,8 +926,16 @@ impl SWSPlatformWindow {
 
         // Create the surface with the placement hint in the same request so
         // the compositor can apply its policy before the first frame.
-        let surface_id = conn
-            .create_surface_with_type_and_policies_with_placement(
+        let placement = match placement {
+            WindowPlacement::Default => sws_protocol::WindowPlacement::Default,
+            WindowPlacement::Centered => sws_protocol::WindowPlacement::Centered,
+            WindowPlacement::At { x, y } => sws_protocol::WindowPlacement::Absolute {
+                x: Self::logical_to_physical_pos_with_scale(x, scale_milli),
+                y: Self::logical_to_physical_pos_with_scale(y, scale_milli),
+            },
+        };
+        let surface_id = if let Some(activation_token) = activation_token {
+            conn.create_surface_with_type_and_policies_with_activation_token(
                 app_id,
                 title,
                 menu_titles,
@@ -939,16 +945,24 @@ impl SWSPlatformWindow {
                 true,
                 focus_on_create,
                 active_on_focus,
-                match placement {
-                    WindowPlacement::Default => sws_protocol::WindowPlacement::Default,
-                    WindowPlacement::Centered => sws_protocol::WindowPlacement::Centered,
-                    WindowPlacement::At { x, y } => sws_protocol::WindowPlacement::Absolute {
-                        x: Self::logical_to_physical_pos_with_scale(x, scale_milli),
-                        y: Self::logical_to_physical_pos_with_scale(y, scale_milli),
-                    },
-                },
+                placement,
+                &activation_token,
             )
-            .map_err(|_| scarlet_ui_core::error::Error::SurfaceCreationFailed)?;
+        } else {
+            conn.create_surface_with_type_and_policies_with_placement(
+                app_id,
+                title,
+                menu_titles,
+                physical_width,
+                physical_height,
+                window_type,
+                true,
+                focus_on_create,
+                active_on_focus,
+                placement,
+            )
+        }
+        .map_err(|_| scarlet_ui_core::error::Error::SurfaceCreationFailed)?;
 
         if !opaque {
             conn.set_window_has_alpha_content(surface_id, true)
