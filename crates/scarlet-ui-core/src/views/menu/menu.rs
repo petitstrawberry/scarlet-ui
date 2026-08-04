@@ -436,4 +436,33 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
 
         true
     }
+
+    fn update(&mut self, new_view: &dyn View) -> crate::element::UpdateResult {
+        let Some(menu) = new_view.as_any().downcast_ref::<Menu>() else {
+            return crate::element::UpdateResult::Replaced;
+        };
+        self.items = menu.items.clone();
+        self.item_height = menu.item_height;
+        self.width = menu.width;
+        self.hovered_index = self.hovered_index.filter(|index| *index < self.items.len());
+        self.size = Size::new(
+            self.width,
+            self.items
+                .iter()
+                .map(|item| {
+                    if matches!(item.action, MenuAction::Separator) {
+                        1.0
+                    } else {
+                        self.item_height
+                    }
+                })
+                .sum::<f32>()
+                + 4.0,
+        );
+        crate::element::UpdateResult::Updated
+    }
+
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
 }

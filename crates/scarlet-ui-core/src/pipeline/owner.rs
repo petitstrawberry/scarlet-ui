@@ -310,9 +310,8 @@ impl PipelineOwner {
         for id in dirty_build {
             // Find the element in the tree
             if let Some(element) = element_tree.find_element_mut(id) {
-                // Call rebuild() on the element
-                // - ComponentElement: recreates child from stored View
-                // - RenderElement: returns NoChange (properties updated via update())
+                // Rebuild a fresh View description and reconcile it with the
+                // retained child Element/RenderObject subtree.
                 if matches!(element.rebuild(), crate::element::UpdateResult::Updated) {
                     self.mark_needs_layout(id);
                 }

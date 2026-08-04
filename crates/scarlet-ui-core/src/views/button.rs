@@ -575,4 +575,24 @@ impl ElementRenderObject for ButtonRenderObject {
         }
         true
     }
+
+    fn update(&mut self, new_view: &dyn View) -> crate::element::UpdateResult {
+        let Some(button) = new_view.as_any().downcast_ref::<Button>() else {
+            return crate::element::UpdateResult::Replaced;
+        };
+        self.label = button.label.clone();
+        self.icon = button.icon;
+        self.icon_style = button.icon_style;
+        self.icon_color = button.icon_color;
+        self.background_color = button.background_color;
+        self.border_color = button.border_color;
+        self.text_color = button.text_color;
+        self.font_size = button.font_size;
+        self.padding = button.padding;
+        crate::element::UpdateResult::Updated
+    }
+
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
 }

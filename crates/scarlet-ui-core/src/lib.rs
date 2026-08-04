@@ -135,7 +135,7 @@ pub use renderer::{
 };
 pub use scene::{Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowGroup, WindowId};
 pub use state::{InvalidationKind, Listenable, State, StateId, SubscriptionId, generate_state_id};
-pub use view::{View, ViewExt};
+pub use view::{View, ViewExt, ViewKey};
 pub use views::modifiers::{
     AlignmentFrame, Background, Border, Clip, Focusable, Frame, OnKey, Padding, SetSize,
 };
@@ -185,7 +185,7 @@ pub mod prelude {
         Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowGroup, WindowId,
     };
     pub use crate::state::{InvalidationKind, Listenable, State, StateId, SubscriptionId};
-    pub use crate::view::{View, ViewExt};
+    pub use crate::view::{View, ViewExt, ViewKey};
     pub use crate::views::modifiers::{Background, Border, Clip, Focusable, Frame, OnKey, Padding};
     pub use crate::views::{
         BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, IconView, Image,

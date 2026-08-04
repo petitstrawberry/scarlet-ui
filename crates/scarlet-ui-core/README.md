@@ -22,6 +22,9 @@ PlatformWindow
 Normal applications should depend on `scarlet-ui`, not this crate directly.
 `scarlet-ui` re-exports the app-facing API and wires the selected backend.
 
+See the workspace [ScarletUI Architecture](../../docs/ARCHITECTURE.md) for the
+View, Element, RenderObject, reconciliation, and state-lifetime contracts.
+
 Useful checks:
 
 ```bash

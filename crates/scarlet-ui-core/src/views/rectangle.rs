@@ -375,6 +375,17 @@ impl ElementRenderObject for RectangleRenderObject {
 
         true
     }
+
+    fn update(&mut self, new_view: &dyn View) -> crate::element::UpdateResult {
+        let Some(rectangle) = new_view.as_any().downcast_ref::<Rectangle>() else {
+            return crate::element::UpdateResult::Replaced;
+        };
+        self.color = rectangle.color;
+        self.corner_radius = rectangle.corner_radius;
+        self.border_width = rectangle.border_width;
+        self.border_color = rectangle.border_color;
+        crate::element::UpdateResult::Updated
+    }
 }
 
 #[cfg(test)]

@@ -73,11 +73,10 @@ impl<C: ViewTuple + Clone> Clone for VStack<C> {
 
 impl<C: ViewTuple + Clone + 'static> View for VStack<C> {
     fn create_element(&self) -> Box<dyn Element> {
-        let children = self.content.create_elements();
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children(
             self.clone(),
-            VStackRenderObject::new(self.spacing, self.alignment),
-            children,
+            |view| VStackRenderObject::new(view.spacing, view.alignment),
+            |view| view.content.clone_views(),
         ))
     }
 

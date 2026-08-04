@@ -4,16 +4,65 @@
 //! where create_element() manufactures the corresponding Element.
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::Any;
 
 use crate::element::Element;
 
+/// Stable identity attached to a View among its siblings.
+///
+/// Unkeyed children are reconciled by position. Keyed children can move among
+/// siblings without losing their existing Element and RenderObject state.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ViewKey {
+    /// Numeric identity, commonly used for model identifiers.
+    Value(u64),
+    /// Human-readable identity.
+    Named(String),
+}
+
+impl From<u64> for ViewKey {
+    fn from(value: u64) -> Self {
+        Self::Value(value)
+    }
+}
+
+impl From<u32> for ViewKey {
+    fn from(value: u32) -> Self {
+        Self::Value(value as u64)
+    }
+}
+
+impl From<usize> for ViewKey {
+    fn from(value: usize) -> Self {
+        Self::Value(value as u64)
+    }
+}
+
+impl From<String> for ViewKey {
+    fn from(value: String) -> Self {
+        Self::Named(value)
+    }
+}
+
+impl From<&str> for ViewKey {
+    fn from(value: &str) -> Self {
+        Self::Named(String::from(value))
+    }
+}
+
+/// Object-safe cloning support for type-erased Views.
+pub trait ViewClone {
+    /// Clone this View into a type-erased View value.
+    fn clone_view(&self) -> Box<dyn View>;
+}
+
 /// Factory trait for creating UI elements
 ///
 /// Views are immutable descriptions of UI that create Elements when mounted.
 /// This follows the Factory Method pattern combined with the Component pattern.
-pub trait View: Any {
+pub trait View: Any + ViewClone {
     /// Create an Element from this View
     ///
     /// This is called when the View is first mounted into the element tree.
@@ -24,6 +73,11 @@ pub trait View: Any {
     /// The framework uses this to track when the View needs to rebuild.
     fn listenables(&self) -> Vec<&dyn crate::state::Listenable> {
         Vec::new()
+    }
+
+    /// Return this View's identity among siblings, when explicitly keyed.
+    fn key(&self) -> Option<&ViewKey> {
+        None
     }
 
     /// Get this View as Any for downcasting
@@ -42,17 +96,16 @@ pub trait View: Any {
     }
 }
 
-/// Helper trait for Views that can be cloned
-///
-/// Many Views need to be cloneable to work with the reconciliation system.
-pub trait ViewClone: View {
-    fn clone_view(&self) -> Box<dyn View>;
-}
-
 /// Blanket implementation for Clone + View types
 impl<V: View + Clone + 'static> ViewClone for V {
     fn clone_view(&self) -> Box<dyn View> {
         Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn View> {
+    fn clone(&self) -> Self {
+        self.clone_view()
     }
 }
 
@@ -72,6 +125,18 @@ impl<V: View + Clone + 'static> ViewClone for V {
 ///     .frame(200.0, 50.0);
 /// ```
 pub trait ViewExt: View {
+    /// Assign stable sibling identity to this view.
+    ///
+    /// Keys are only needed when children of the same parent can be inserted,
+    /// removed, or reordered while their runtime state must follow the model.
+    fn key<K>(self, key: K) -> crate::views::Keyed<Self>
+    where
+        Self: Sized + Clone,
+        K: Into<ViewKey>,
+    {
+        crate::views::Keyed::new(self, key.into())
+    }
+
     /// Add padding around this view
     ///
     /// # Arguments

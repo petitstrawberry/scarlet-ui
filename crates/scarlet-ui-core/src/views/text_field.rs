@@ -225,6 +225,7 @@ pub struct TextFieldRenderObject {
     preedit_anchor_byte: u32,
     preedit_spans: alloc::vec::Vec<u8>,
     focused: bool,
+    autofocus: bool,
     dragging: bool,
     placeholder: String,
     background_color: Color,
@@ -252,6 +253,7 @@ impl TextFieldRenderObject {
             preedit_anchor_byte: 0,
             preedit_spans: alloc::vec::Vec::new(),
             focused: view.autofocus,
+            autofocus: view.autofocus,
             dragging: false,
             placeholder: view.placeholder.clone(),
             background_color: view.background_color,
@@ -323,8 +325,17 @@ impl ElementRenderObject for TextFieldRenderObject {
         let Some(view) = new_view.as_any().downcast_ref::<TextField>() else {
             return crate::element::UpdateResult::Replaced;
         };
-        let focused = self.focused;
+        let focused = if self.autofocus != view.autofocus {
+            view.autofocus
+        } else {
+            self.focused
+        };
         let selection = self.selection;
+        let old_len = self.text_document.len();
+        let new_text = view.text.get();
+        let text_changed = self.text_document.as_str().as_ref() != new_text.as_str();
+        let selection_followed_old_end =
+            selection.anchor.byte == old_len && selection.caret.byte == old_len;
         let preedit = self.preedit.clone();
         let preedit_cursor_byte = self.preedit_cursor_byte;
         let preedit_anchor_byte = self.preedit_anchor_byte;
@@ -332,9 +343,13 @@ impl ElementRenderObject for TextFieldRenderObject {
         let size = self.size;
         *self = TextFieldRenderObject::from_view(view);
         let len = self.text_document.len();
-        self.selection = TextSelection {
-            anchor: TextPosition::new(selection.anchor.byte.min(len)),
-            caret: TextPosition::new(selection.caret.byte.min(len)),
+        self.selection = if text_changed && selection_followed_old_end {
+            TextSelection::collapsed(len)
+        } else {
+            TextSelection {
+                anchor: TextPosition::new(selection.anchor.byte.min(len)),
+                caret: TextPosition::new(selection.caret.byte.min(len)),
+            }
         };
         self.focused = focused;
         self.preedit = preedit;
@@ -945,9 +960,61 @@ fn is_word_grapheme(grapheme: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{Event, MouseButton, MouseEvent};
+    use crate::event::{Event, KeyEvent, MouseButton, MouseEvent};
     use crate::renderer::PaintCommand;
     use crate::state::StateId;
+
+    #[test]
+    fn autofocus_changes_are_applied_without_losing_interactive_focus() {
+        let text = State::new(crate::state::generate_state_id(), String::new());
+        let unfocused = TextField::new(text.clone());
+        let mut render_object = TextFieldRenderObject::from_view(&unfocused);
+        assert!(!render_object.is_focused());
+
+        let focused = TextField::new(text.clone()).autofocus(true);
+        render_object.update(&focused);
+        assert!(render_object.is_focused());
+
+        render_object.set_focused(false);
+        render_object.update(&focused);
+        assert!(
+            !render_object.is_focused(),
+            "an unchanged autofocus request must not steal focus back"
+        );
+
+        let unfocused_again = TextField::new(text);
+        render_object.set_focused(true);
+        render_object.update(&unfocused_again);
+        assert!(!render_object.is_focused());
+    }
+
+    #[test]
+    fn focused_field_handles_caret_movement_and_backspace() {
+        let text = State::new(crate::state::generate_state_id(), String::from("abc"));
+        let field = TextField::new(text.clone()).autofocus(true);
+        let mut render_object = TextFieldRenderObject::from_view(&field);
+
+        assert!(handle_text_field_keyboard(
+            &field,
+            &mut render_object,
+            KeyEvent::Pressed {
+                keycode: KeyCode::Left,
+                modifiers: KeyModifiers::default(),
+            },
+        ));
+        assert_eq!(render_object.selection.caret.byte, 2);
+
+        assert!(handle_text_field_keyboard(
+            &field,
+            &mut render_object,
+            KeyEvent::Pressed {
+                keycode: KeyCode::Backspace,
+                modifiers: KeyModifiers::default(),
+            },
+        ));
+        assert_eq!(text.get(), "ac");
+        assert_eq!(render_object.selection.caret.byte, 1);
+    }
 
     #[test]
     fn paint_preedit_emits_underline() {

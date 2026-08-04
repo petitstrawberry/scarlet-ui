@@ -6,6 +6,7 @@ mod element;
 mod focus;
 mod hstack;
 mod id;
+mod reconcile;
 mod render;
 mod tree;
 mod vstack;
@@ -18,6 +19,7 @@ pub use element::{
 pub(crate) use focus::{focused_descendant_path, restore_focus_at_path};
 pub use hstack::HStackElement;
 pub use id::ElementId;
+pub(crate) use reconcile::{update_child, update_children};
 pub use render::{RenderElement, RenderObject as ElementRenderObject, ScrollOffsetUpdate};
 pub use tree::{ElementTree, generate_element_id};
 pub use vstack::VStackElement;

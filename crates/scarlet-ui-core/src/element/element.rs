@@ -8,7 +8,7 @@ use core::any::Any;
 
 use crate::geometry::{Point, Rect, Size};
 use crate::pipeline::MountContext;
-use crate::view::View;
+use crate::view::{View, ViewKey};
 
 use super::id::ElementId;
 
@@ -154,6 +154,11 @@ pub trait Element {
         "Element"
     }
 
+    /// Return the key of the View currently represented by this Element.
+    fn view_key(&self) -> Option<&ViewKey> {
+        None
+    }
+
     /// Get detailed type information for debugging
     ///
     /// Returns a String with detailed type information.
@@ -185,8 +190,9 @@ pub trait Element {
     /// Rebuild this Element from its stored View
     ///
     /// Called when the Element is marked dirty due to State changes.
-    /// For ComponentElement, this recreates the child from the stored View.
-    /// For RenderElement, this returns NoChange since properties are updated directly.
+    /// Component and render elements build fresh child View descriptions and
+    /// reconcile them with their retained child Elements. A compatible child
+    /// is updated in place; only an incompatible child is replaced.
     ///
     /// Returns UpdateResult indicating whether the Element was rebuilt,
     /// replaced, or unchanged.

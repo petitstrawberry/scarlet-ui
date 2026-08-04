@@ -45,10 +45,10 @@ impl<V: View> Padding<V> {
 
 impl<V: View + Clone> View for Padding<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children(
             self.clone(),
-            PaddingRenderObject::new(self.insets),
-            vec![self.inner.create_element()],
+            |view| PaddingRenderObject::new(view.insets),
+            |view| vec![view.inner.clone_view()],
         ))
     }
 

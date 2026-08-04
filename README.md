@@ -90,6 +90,9 @@ Application::scenes()
 Application code should not choose or name a platform implementation. It imports
 the normal ScarletUI prelude, declares views and scenes, and calls `app.run()`.
 
+The normative runtime and reconciliation model is documented in
+[ScarletUI Architecture](docs/ARCHITECTURE.md).
+
 ## Live Preview
 
 ScarletUI preview is a native desktop development tool. It is separate from the

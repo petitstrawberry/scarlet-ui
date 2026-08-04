@@ -509,15 +509,16 @@ impl<V: View> ScrollView<V> {
 
 impl<V: View + Clone + 'static> View for ScrollView<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children(
             self.clone(),
-            ScrollViewRenderObject::<V>::from_view(self),
-            vec![
-                RepaintBoundary::new(self.inner.clone())
-                    .max_cache_pixels(AUTO_REPAINT_BOUNDARY_MAX_PIXELS)
-                    .cache_nested_boundaries(false)
-                    .create_element(),
-            ],
+            ScrollViewRenderObject::<V>::from_view,
+            |view| {
+                vec![Box::new(
+                    RepaintBoundary::new(view.inner.clone())
+                        .max_cache_pixels(AUTO_REPAINT_BOUNDARY_MAX_PIXELS)
+                        .cache_nested_boundaries(false),
+                )]
+            },
         ))
     }
 

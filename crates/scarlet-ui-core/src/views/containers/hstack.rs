@@ -73,11 +73,10 @@ impl<C: ViewTuple + Clone> Clone for HStack<C> {
 
 impl<C: ViewTuple + Clone + 'static> View for HStack<C> {
     fn create_element(&self) -> Box<dyn Element> {
-        let children = self.content.create_elements();
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children(
             self.clone(),
-            HStackRenderObject::new(self.spacing, self.alignment),
-            children,
+            |view| HStackRenderObject::new(view.spacing, view.alignment),
+            |view| view.content.clone_views(),
         ))
     }
 

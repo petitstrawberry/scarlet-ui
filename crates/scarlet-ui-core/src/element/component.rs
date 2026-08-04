@@ -19,17 +19,18 @@ use crate::view::View;
 /// ComponentElement is responsible for:
 /// - Owning the View instance
 /// - Tracking State subscriptions for rebuilds
-/// - Managing child Elements created by the View
+/// - Reconciling the child View description with a retained child Element
 pub struct ComponentElement<V: View + Clone> {
     id: ElementId,
     view: V,
-    build_child: fn(&V) -> Box<dyn Element>,
+    build_child: fn(&V) -> Box<dyn View>,
     child: Option<Box<dyn Element>>,
     size: Size,
     position: Point,
     last_constraints: Option<LayoutConstraints>,
     subscriptions: Vec<SubscriptionId>,
     pipeline_id: PipelineId,
+    mounted: bool,
 }
 
 impl<V: View + Clone> ComponentElement<V> {
@@ -43,15 +44,16 @@ impl<V: View + Clone> ComponentElement<V> {
     /// # Arguments
     ///
     /// * `view` - View value owned by this component.
-    /// * `build_child` - Function that creates the child element for `view`.
+    /// * `build_child` - Function that builds the child View description for `view`.
     ///
     /// # Returns
     ///
     /// Component element that subscribes to `view` listenables and rebuilds
-    /// children through `build_child`.
-    pub fn new_with_builder(view: V, build_child: fn(&V) -> Box<dyn Element>) -> Self {
+    /// its child through `build_child`.
+    pub fn new_with_builder(view: V, build_child: fn(&V) -> Box<dyn View>) -> Self {
         let id = ElementId::generate();
-        let child = build_child(&view);
+        let child_view = build_child(&view);
+        let child = child_view.create_element();
         Self {
             id,
             view,
@@ -62,6 +64,7 @@ impl<V: View + Clone> ComponentElement<V> {
             last_constraints: None,
             subscriptions: Vec::new(),
             pipeline_id: PipelineId::default(),
+            mounted: false,
         }
     }
 
@@ -74,10 +77,46 @@ impl<V: View + Clone> ComponentElement<V> {
     pub fn view_mut(&mut self) -> &mut V {
         &mut self.view
     }
+
+    fn subscribe_view_listenables(&mut self) {
+        let listenables = self.view.listenables();
+        for listenable in listenables {
+            let element_id = self.id;
+            let pipeline_id = self.pipeline_id;
+            let invalidation_kind = listenable.invalidation_kind();
+            let callback = Arc::new(move || match invalidation_kind {
+                InvalidationKind::Build => {
+                    crate::pipeline::mark_element_dirty(pipeline_id, element_id)
+                }
+                InvalidationKind::Paint => {
+                    crate::pipeline::mark_element_needs_paint(pipeline_id, element_id)
+                }
+            });
+            self.subscriptions.push(listenable.subscribe_any(callback));
+        }
+    }
+
+    fn unsubscribe_view_listenables(&mut self) {
+        if self.subscriptions.is_empty() {
+            return;
+        }
+
+        let listenables = self.view.listenables();
+        for (listenable, subscription_id) in listenables.iter().zip(self.subscriptions.iter()) {
+            listenable.unsubscribe(*subscription_id);
+        }
+        self.subscriptions.clear();
+    }
+
+    fn reconcile_built_child(&mut self) -> UpdateResult {
+        let child_view = (self.build_child)(&self.view);
+        let mount_context = self.mounted.then(|| MountContext::new(self.pipeline_id));
+        crate::element::update_child(&mut self.child, Some(child_view.as_ref()), mount_context)
+    }
 }
 
-fn default_component_child<V: View + Clone>(view: &V) -> Box<dyn Element> {
-    view.create_element()
+fn default_component_child<V: View + Clone>(view: &V) -> Box<dyn View> {
+    view.clone_view()
 }
 
 impl<V: View + Clone> Element for ComponentElement<V> {
@@ -87,6 +126,10 @@ impl<V: View + Clone> Element for ComponentElement<V> {
 
     fn type_name(&self) -> &str {
         "ComponentElement"
+    }
+
+    fn view_key(&self) -> Option<&crate::view::ViewKey> {
+        self.view.key()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -112,111 +155,36 @@ impl<V: View + Clone> Element for ComponentElement<V> {
     }
 
     fn update(&mut self, new_view: &dyn View) -> UpdateResult {
-        // Type-checking reconciliation: check if the new View is the same type
-        // Use Any's type_id method to avoid ambiguity
-        if Any::type_id(new_view) != Any::type_id(&self.view) {
-            // Different type - signal that this Element should be replaced
+        let Some(new_typed_view) = new_view.as_any().downcast_ref::<V>() else {
             return UpdateResult::Replaced;
+        };
+
+        if self.mounted {
+            self.unsubscribe_view_listenables();
         }
-
-        // Same type - try to downcast and update properties
-        if let Some(new_typed_view) = new_view.as_any().downcast_ref::<V>() {
-            // Note: We can't use == since V may not implement PartialEq
-            // For now, we'll assume the view has changed and update it
-
-            // Update our stored view
-            self.view = new_typed_view.clone();
-
-            let focused_path = self
-                .child
-                .as_ref()
-                .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
-
-            if let Some(ref mut child) = self.child {
-                child.unmount();
-            }
-
-            // Create new child element
-            let mut new_child = (self.build_child)(&self.view);
-            let ctx = MountContext::new(self.pipeline_id);
-            new_child.mount(&ctx);
-
-            // Replace the old child with the new one
-            self.child = Some(new_child);
-            if let (Some(path), Some(child)) = (focused_path.as_deref(), self.child.as_mut()) {
-                crate::element::restore_focus_at_path(child.as_mut(), path);
-            }
-
-            UpdateResult::Updated
-        } else {
-            // Should never happen since we checked type_id above
-            // but if it does, signal replacement
-            UpdateResult::Replaced
+        self.view = new_typed_view.clone();
+        let result = self.reconcile_built_child();
+        if self.mounted {
+            self.subscribe_view_listenables();
         }
+        result
     }
 
     fn rebuild(&mut self) -> UpdateResult {
-        let focused_path = self
-            .child
-            .as_ref()
-            .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
-
-        if let Some(ref mut child) = self.child {
-            match child.update(&self.view) {
-                UpdateResult::NoChange => return UpdateResult::NoChange,
-                UpdateResult::Updated => {
-                    crate::pipeline::mark_element_needs_layout(self.pipeline_id, child.id());
-                    return UpdateResult::NoChange;
-                }
-                UpdateResult::Replaced => {
-                    child.unmount();
-                }
-            }
+        if self.mounted {
+            self.unsubscribe_view_listenables();
         }
-
-        // Create new child element from the stored view
-        let new_child = (self.build_child)(&self.view);
-
-        // Replace the old child with the new one
-        self.child = Some(new_child);
-
-        // Mount the new child
-        if let Some(ref mut child) = self.child {
-            let ctx = MountContext::new(self.pipeline_id);
-            child.mount(&ctx);
-            if let Some(path) = focused_path.as_deref() {
-                crate::element::restore_focus_at_path(child.as_mut(), path);
-            }
+        let result = self.reconcile_built_child();
+        if self.mounted {
+            self.subscribe_view_listenables();
         }
-
-        if let Some(ref child) = self.child {
-            crate::pipeline::mark_element_needs_layout(self.pipeline_id, child.id());
-        }
-        UpdateResult::NoChange
+        result
     }
 
     fn mount(&mut self, ctx: &MountContext) {
         self.pipeline_id = ctx.pipeline_id();
-        // Subscribe to all Listenables from the View
-        let listenables = self.view.listenables();
-
-        // For each listenable, subscribe to rebuild notifications
-        // Store the subscription IDs so we can unsubscribe later
-        for listenable in listenables {
-            let element_id = self.id;
-            let pipeline_id = self.pipeline_id;
-            let invalidation_kind = listenable.invalidation_kind();
-            let callback = Arc::new(move || match invalidation_kind {
-                InvalidationKind::Build => {
-                    crate::pipeline::mark_element_dirty(pipeline_id, element_id)
-                }
-                InvalidationKind::Paint => {
-                    crate::pipeline::mark_element_needs_paint(pipeline_id, element_id)
-                }
-            });
-            let subscription_id = listenable.subscribe_any(callback);
-            self.subscriptions.push(subscription_id);
-        }
+        self.mounted = true;
+        self.subscribe_view_listenables();
 
         // Mount the child
         if let Some(ref mut child) = self.child {
@@ -230,12 +198,8 @@ impl<V: View + Clone> Element for ComponentElement<V> {
             child.unmount();
         }
 
-        // Unsubscribe from all Listenables to prevent stale callbacks
-        let listenables = self.view.listenables();
-        for (listenable, subscription_id) in listenables.iter().zip(self.subscriptions.iter()) {
-            listenable.unsubscribe(*subscription_id);
-        }
-        self.subscriptions.clear();
+        self.unsubscribe_view_listenables();
+        self.mounted = false;
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
@@ -273,9 +237,15 @@ impl<V: View + Clone> Element for ComponentElement<V> {
     }
 
     fn hit_test(&self, point: Point) -> bool {
-        // Delegate to child
+        // `point` is expressed in the parent's coordinate space. Component
+        // positions are intentionally not copied into their child Elements,
+        // so translate once before delegating into the component-local tree.
+        let local_point = Point {
+            x: point.x - self.position.x,
+            y: point.y - self.position.y,
+        };
         if let Some(ref child) = self.child {
-            child.hit_test(point)
+            child.hit_test(local_point)
         } else {
             self.bounds().contains(point)
         }
@@ -326,5 +296,7 @@ mod tests {
 
         assert_eq!(element.position(), Point::new(10.0, 32.0));
         assert_eq!(element.children()[0].position(), Point::ZERO);
+        assert!(!element.hit_test(Point::new(1.0, 1.0)));
+        assert!(element.hit_test(Point::new(11.0, 33.0)));
     }
 }

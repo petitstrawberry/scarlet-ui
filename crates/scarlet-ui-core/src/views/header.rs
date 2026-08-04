@@ -100,10 +100,10 @@ impl<C: View + Clone> HeaderBar<C> {
 
 impl<C: View + Clone + 'static> View for HeaderBar<C> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children(
             self.clone(),
-            HeaderBarRenderObject::new(self.height, self.background, self.border),
-            vec![self.content.create_element()],
+            |view| HeaderBarRenderObject::new(view.height, view.background, view.border),
+            |view| vec![view.content.clone_view()],
         ))
     }
 
@@ -197,8 +197,9 @@ impl ElementRenderObject for HeaderBarRenderObject {
     }
 
     fn update(&mut self, _new_view: &dyn View) -> UpdateResult {
-        // Header configuration is immutable after construction; child state is
-        // handled by the child element itself.
-        UpdateResult::Updated
+        // HeaderBar's content type is erased from this render-object type. The
+        // owning RenderElement recreates only this render object while keeping
+        // the child Element subtree intact.
+        UpdateResult::Replaced
     }
 }

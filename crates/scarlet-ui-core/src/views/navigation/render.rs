@@ -112,6 +112,32 @@ impl NavigationViewRenderObject {
         }
     }
 
+    /// Update declarative navigation configuration without resetting hover state.
+    pub(crate) fn update_configuration(
+        &mut self,
+        labels: Vec<String>,
+        icons: Vec<Option<Icon>>,
+        selected_index: State<usize>,
+        sidebar_width: f32,
+        shows_icons: bool,
+        icon_style: IconStyle,
+        icon_color: Option<Color>,
+        header_height: f32,
+        selection_callbacks: Vec<Option<Rc<dyn Fn()>>>,
+    ) {
+        self.link_count = labels.len();
+        self.labels = labels;
+        self.icons = icons;
+        self.selection_callbacks = selection_callbacks;
+        self.selected_index = selected_index;
+        self.sidebar_width = sidebar_width;
+        self.shows_icons = shows_icons;
+        self.icon_style = icon_style;
+        self.icon_color = icon_color;
+        self.header_height = header_height.max(0.0);
+        self.hovered_index = self.hovered_index.filter(|index| *index < self.link_count);
+    }
+
     /// Get the currently hovered index
     pub fn hovered_index(&self) -> Option<usize> {
         self.hovered_index
@@ -228,6 +254,10 @@ impl NavigationViewRenderObject {
 }
 
 impl ElementRenderObject for NavigationViewRenderObject {
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         self.size = Size {
             width: constraints.min_width.min(constraints.max_width),

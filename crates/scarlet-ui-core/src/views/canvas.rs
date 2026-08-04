@@ -221,4 +221,18 @@ impl ElementRenderObject for CanvasRenderObject {
     fn requires_buffer_render_for_paint(&self) -> bool {
         true
     }
+
+    fn update(&mut self, new_view: &dyn View) -> crate::element::UpdateResult {
+        let Some(canvas) = new_view.as_any().downcast_ref::<CanvasView>() else {
+            return crate::element::UpdateResult::Replaced;
+        };
+        self.size = canvas.size;
+        self.render_callback = canvas.render_callback.clone();
+        self.event_handler = canvas.event_handler.clone();
+        crate::element::UpdateResult::Updated
+    }
+
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
 }

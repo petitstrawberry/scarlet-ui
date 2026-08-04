@@ -37,6 +37,9 @@ pub trait ViewTuple {
     /// Create Elements for all views in this tuple
     fn create_elements(&self) -> Vec<Box<dyn Element>>;
 
+    /// Clone all child View descriptions in tuple order.
+    fn clone_views(&self) -> Vec<Box<dyn View>>;
+
     /// Collect all Listenable dependencies from views in this tuple
     fn collect_listenables<'a>(&'a self, collector: &mut Vec<&'a dyn Listenable>);
 }
@@ -44,6 +47,10 @@ pub trait ViewTuple {
 // Implement ViewTuple for unit type (empty tuple)
 impl ViewTuple for () {
     fn create_elements(&self) -> Vec<Box<dyn Element>> {
+        Vec::new()
+    }
+
+    fn clone_views(&self) -> Vec<Box<dyn View>> {
         Vec::new()
     }
 
@@ -58,6 +65,10 @@ impl<V1: View> ViewTuple for (V1,) {
         vec![self.0.create_element()]
     }
 
+    fn clone_views(&self) -> Vec<Box<dyn View>> {
+        vec![self.0.clone_view()]
+    }
+
     fn collect_listenables<'a>(&'a self, collector: &mut Vec<&'a dyn Listenable>) {
         collector.extend(self.0.listenables());
     }
@@ -67,6 +78,10 @@ impl<V1: View> ViewTuple for (V1,) {
 impl<V1: View, V2: View> ViewTuple for (V1, V2) {
     fn create_elements(&self) -> Vec<Box<dyn Element>> {
         vec![self.0.create_element(), self.1.create_element()]
+    }
+
+    fn clone_views(&self) -> Vec<Box<dyn View>> {
+        vec![self.0.clone_view(), self.1.clone_view()]
     }
 
     fn collect_listenables<'a>(&'a self, collector: &mut Vec<&'a dyn Listenable>) {
@@ -82,6 +97,14 @@ impl<V1: View, V2: View, V3: View> ViewTuple for (V1, V2, V3) {
             self.0.create_element(),
             self.1.create_element(),
             self.2.create_element(),
+        ]
+    }
+
+    fn clone_views(&self) -> Vec<Box<dyn View>> {
+        vec![
+            self.0.clone_view(),
+            self.1.clone_view(),
+            self.2.clone_view(),
         ]
     }
 
@@ -103,6 +126,15 @@ impl<V1: View, V2: View, V3: View, V4: View> ViewTuple for (V1, V2, V3, V4) {
         ]
     }
 
+    fn clone_views(&self) -> Vec<Box<dyn View>> {
+        vec![
+            self.0.clone_view(),
+            self.1.clone_view(),
+            self.2.clone_view(),
+            self.3.clone_view(),
+        ]
+    }
+
     fn collect_listenables<'a>(&'a self, collector: &mut Vec<&'a dyn Listenable>) {
         collector.extend(self.0.listenables());
         collector.extend(self.1.listenables());
@@ -120,6 +152,16 @@ impl<V1: View, V2: View, V3: View, V4: View, V5: View> ViewTuple for (V1, V2, V3
             self.2.create_element(),
             self.3.create_element(),
             self.4.create_element(),
+        ]
+    }
+
+    fn clone_views(&self) -> Vec<Box<dyn View>> {
+        vec![
+            self.0.clone_view(),
+            self.1.clone_view(),
+            self.2.clone_view(),
+            self.3.clone_view(),
+            self.4.clone_view(),
         ]
     }
 
@@ -147,6 +189,17 @@ impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View> ViewTuple
         ]
     }
 
+    fn clone_views(&self) -> Vec<Box<dyn View>> {
+        vec![
+            self.0.clone_view(),
+            self.1.clone_view(),
+            self.2.clone_view(),
+            self.3.clone_view(),
+            self.4.clone_view(),
+            self.5.clone_view(),
+        ]
+    }
+
     fn collect_listenables<'a>(&'a self, collector: &mut Vec<&'a dyn Listenable>) {
         collector.extend(self.0.listenables());
         collector.extend(self.1.listenables());
@@ -170,6 +223,18 @@ impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View> ViewT
             self.4.create_element(),
             self.5.create_element(),
             self.6.create_element(),
+        ]
+    }
+
+    fn clone_views(&self) -> Vec<Box<dyn View>> {
+        vec![
+            self.0.clone_view(),
+            self.1.clone_view(),
+            self.2.clone_view(),
+            self.3.clone_view(),
+            self.4.clone_view(),
+            self.5.clone_view(),
+            self.6.clone_view(),
         ]
     }
 
@@ -201,6 +266,19 @@ impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View, V8: V
         ]
     }
 
+    fn clone_views(&self) -> Vec<Box<dyn View>> {
+        vec![
+            self.0.clone_view(),
+            self.1.clone_view(),
+            self.2.clone_view(),
+            self.3.clone_view(),
+            self.4.clone_view(),
+            self.5.clone_view(),
+            self.6.clone_view(),
+            self.7.clone_view(),
+        ]
+    }
+
     fn collect_listenables<'a>(&'a self, collector: &mut Vec<&'a dyn Listenable>) {
         collector.extend(self.0.listenables());
         collector.extend(self.1.listenables());
@@ -228,6 +306,20 @@ impl<V1: View, V2: View, V3: View, V4: View, V5: View, V6: View, V7: View, V8: V
             self.6.create_element(),
             self.7.create_element(),
             self.8.create_element(),
+        ]
+    }
+
+    fn clone_views(&self) -> Vec<Box<dyn View>> {
+        vec![
+            self.0.clone_view(),
+            self.1.clone_view(),
+            self.2.clone_view(),
+            self.3.clone_view(),
+            self.4.clone_view(),
+            self.5.clone_view(),
+            self.6.clone_view(),
+            self.7.clone_view(),
+            self.8.clone_view(),
         ]
     }
 
@@ -270,6 +362,21 @@ impl<
             self.7.create_element(),
             self.8.create_element(),
             self.9.create_element(),
+        ]
+    }
+
+    fn clone_views(&self) -> Vec<Box<dyn View>> {
+        vec![
+            self.0.clone_view(),
+            self.1.clone_view(),
+            self.2.clone_view(),
+            self.3.clone_view(),
+            self.4.clone_view(),
+            self.5.clone_view(),
+            self.6.clone_view(),
+            self.7.clone_view(),
+            self.8.clone_view(),
+            self.9.clone_view(),
         ]
     }
 

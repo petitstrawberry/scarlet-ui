@@ -77,4 +77,12 @@ impl ElementRenderObject for SpacerRenderObject {
     fn render(&mut self) {
         // Spacer is invisible
     }
+
+    fn update(&mut self, new_view: &dyn View) -> crate::element::UpdateResult {
+        if new_view.as_any().downcast_ref::<Spacer>().is_some() {
+            crate::element::UpdateResult::NoChange
+        } else {
+            crate::element::UpdateResult::Replaced
+        }
+    }
 }

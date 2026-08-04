@@ -26,7 +26,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::any::Any;
 
-use crate::element::Element;
+use crate::element::{ComponentElement, Element};
 use crate::view::View;
 
 macro_rules! define_either {
@@ -38,31 +38,23 @@ macro_rules! define_either {
 
         impl<$($t: View + Clone + 'static),+> View for $name<$($t),+> {
             fn create_element(&self) -> Box<dyn Element> {
-                match self {
-                    $(Self::$t(v) => v.create_element(),)+
-                }
+                Box::new(ComponentElement::new_with_builder(
+                    self.clone(),
+                    |view| match view {
+                        $(Self::$t(value) => value.clone_view(),)+
+                    },
+                ))
             }
 
             fn listenables(&self) -> Vec<&dyn crate::state::Listenable> {
-                match self {
-                    $(Self::$t(v) => v.listenables(),)+
-                }
+                // The mounted branch owns its own subscriptions. The parent
+                // that chooses the branch is responsible for rebuilding this
+                // conditional value when the choice changes.
+                Vec::new()
             }
 
             fn as_any(&self) -> &dyn Any {
                 self
-            }
-
-            fn type_id(&self) -> core::any::TypeId {
-                match self {
-                    $(Self::$t(v) => View::type_id(v),)+
-                }
-            }
-
-            fn type_name(&self) -> &str {
-                match self {
-                    $(Self::$t(v) => View::type_name(v),)+
-                }
             }
         }
     };

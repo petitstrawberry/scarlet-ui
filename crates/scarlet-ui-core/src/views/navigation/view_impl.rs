@@ -36,43 +36,11 @@ where
     T: NavigationLinkTuple + Clone + 'static,
 {
     fn create_element(&self) -> Box<dyn Element> {
-        let selected = self.nav.selected_index_state().get();
-        let content_view = self.nav.links().build_content(selected);
-
-        let sidebar_placeholder = Spacer::new();
-        let mut children = Vec::new();
-        children.push(sidebar_placeholder.create_element());
-        if let Some(header_builder) = self.nav.header_builder() {
-            children.push(header_builder().create_element());
-        }
-        children.push(content_view.create_element());
-
-        // Collect labels and icons
-        let mut labels = Vec::new();
-        let mut icons = Vec::new();
-        let mut selection_callbacks = Vec::new();
-        for i in 0..self.nav.links().count() {
-            labels.push(self.nav.links().get_label(i).to_string());
-            icons.push(self.nav.links().get_icon(i));
-            selection_callbacks.push(self.nav.links().get_on_select(i));
-        }
-
-        let render_object = NavigationViewRenderObject::new(
-            labels,
-            icons,
-            self.nav.selected_index_state().clone(),
-            self.nav.get_sidebar_width(),
-            self.nav.get_shows_icons(),
-            self.nav.get_icon_style(),
-            self.nav.get_icon_color(),
-            self.nav.get_header_height(),
-            selection_callbacks,
-        );
-
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
-            render_object,
-            children,
+            navigation_render_object::<T>,
+            update_navigation_render_object::<T>,
+            navigation_child_views::<T>,
         ))
     }
 
@@ -87,14 +55,93 @@ where
     }
 }
 
+fn update_navigation_render_object<T>(
+    render_object: &mut NavigationViewRenderObject,
+    content: &NavigationContent<T>,
+) -> crate::element::UpdateResult
+where
+    T: NavigationLinkTuple + Clone + 'static,
+{
+    let mut labels = Vec::new();
+    let mut icons = Vec::new();
+    let mut selection_callbacks = Vec::new();
+    for index in 0..content.nav.links().count() {
+        labels.push(content.nav.links().get_label(index).to_string());
+        icons.push(content.nav.links().get_icon(index));
+        selection_callbacks.push(content.nav.links().get_on_select(index));
+    }
+
+    render_object.update_configuration(
+        labels,
+        icons,
+        content.nav.selected_index_state().clone(),
+        content.nav.get_sidebar_width(),
+        content.nav.get_shows_icons(),
+        content.nav.get_icon_style(),
+        content.nav.get_icon_color(),
+        content.nav.get_header_height(),
+        selection_callbacks,
+    );
+    crate::element::UpdateResult::Updated
+}
+
+fn navigation_render_object<T>(content: &NavigationContent<T>) -> NavigationViewRenderObject
+where
+    T: NavigationLinkTuple + Clone + 'static,
+{
+    let mut labels = Vec::new();
+    let mut icons = Vec::new();
+    let mut selection_callbacks = Vec::new();
+    for index in 0..content.nav.links().count() {
+        labels.push(content.nav.links().get_label(index).to_string());
+        icons.push(content.nav.links().get_icon(index));
+        selection_callbacks.push(content.nav.links().get_on_select(index));
+    }
+
+    NavigationViewRenderObject::new(
+        labels,
+        icons,
+        content.nav.selected_index_state().clone(),
+        content.nav.get_sidebar_width(),
+        content.nav.get_shows_icons(),
+        content.nav.get_icon_style(),
+        content.nav.get_icon_color(),
+        content.nav.get_header_height(),
+        selection_callbacks,
+    )
+}
+
+fn navigation_child_views<T>(content: &NavigationContent<T>) -> Vec<Box<dyn View>>
+where
+    T: NavigationLinkTuple + Clone + 'static,
+{
+    let selected = content.nav.selected_index_state().get();
+    let mut children: Vec<Box<dyn View>> = Vec::new();
+    children.push(Box::new(Spacer::new()));
+    if let Some(header_builder) = content.nav.header_builder() {
+        children.push(header_builder());
+    }
+    children.push(content.nav.links().build_content(selected));
+    children
+}
+
+fn build_navigation_content<T>(view: &NavigationView<T>) -> Box<dyn View>
+where
+    T: NavigationLinkTuple + Clone + 'static,
+{
+    Box::new(NavigationContent { nav: view.clone() })
+}
+
 // View implementation for NavigationView
 impl<T> View for NavigationView<T>
 where
     T: NavigationLinkTuple + Clone + 'static,
 {
     fn create_element(&self) -> Box<dyn Element> {
-        let content = NavigationContent { nav: self.clone() };
-        Box::new(ComponentElement::new(content))
+        Box::new(ComponentElement::new_with_builder(
+            self.clone(),
+            build_navigation_content::<T>,
+        ))
     }
 
     fn listenables(&self) -> Vec<&dyn Listenable> {

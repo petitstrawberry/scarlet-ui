@@ -800,6 +800,7 @@ pub struct WindowRenderElement<C: View + Clone + WindowViewInfo> {
     // Track maximized state for toggle
     maximized: bool,
     pipeline_id: PipelineId,
+    mounted: bool,
 }
 
 impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
@@ -822,6 +823,7 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
             last_mouse_pressed: false,
             maximized: false,
             pipeline_id: PipelineId::default(),
+            mounted: false,
         }
     }
 
@@ -847,10 +849,6 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
 
     fn titlebar_child_index(&self) -> Option<usize> {
         self.render_object.decorated.then_some(0)
-    }
-
-    fn content_child_index(&self) -> usize {
-        if self.render_object.decorated { 1 } else { 0 }
     }
 
     fn titlebar_render_object_mut(&mut self) -> Option<&mut WindowTitleBarRenderObject> {
@@ -890,6 +888,10 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
         "WindowRenderElement"
     }
 
+    fn view_key(&self) -> Option<&crate::view::ViewKey> {
+        self.view.key()
+    }
+
     fn type_name_debug(&self) -> alloc::string::String {
         alloc::format!("WindowRenderElement<{}>", core::any::type_name::<C>())
     }
@@ -911,74 +913,39 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
     }
 
     fn update(&mut self, new_view: &dyn View) -> UpdateResult {
-        if let Some(typed_view) = new_view.as_any().downcast_ref::<C>() {
-            if typed_view.is_decorated() != self.render_object.decorated {
-                return UpdateResult::Replaced;
-            }
+        let Some(typed_view) = new_view.as_any().downcast_ref::<C>() else {
+            return UpdateResult::Replaced;
+        };
+        if typed_view.is_decorated() != self.render_object.decorated {
+            return UpdateResult::Replaced;
+        }
 
-            let window_info = typed_view.window_info();
-            if let Some(index) = self.titlebar_child_index()
-                && let Some(titlebar) = self.children.get_mut(index)
-            {
-                let titlebar_view = WindowTitleBarView::new(window_info.title.clone());
-                if matches!(titlebar.update(&titlebar_view), UpdateResult::Updated) {
-                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, titlebar.id());
-                }
-            }
+        let window_info = typed_view.window_info();
+        let mut child_views: Vec<Box<dyn View>> = Vec::new();
+        if typed_view.is_decorated() {
+            child_views.push(Box::new(WindowTitleBarView::new(window_info.title.clone())));
+        }
+        if let Some(content) = typed_view.content_view() {
+            child_views.push(content.clone_view());
+        }
 
-            if let Some(content_view) = typed_view.content_view() {
-                let content_index = self.content_child_index();
-                if let Some(content) = self.children.get_mut(content_index) {
-                    match content.update(content_view) {
-                        UpdateResult::NoChange => {}
-                        UpdateResult::Updated => {
-                            // Updating a component replaces its child element. The
-                            // replacement has no layout from the previous tree, so a
-                            // paint-only invalidation leaves descendants at their
-                            // initial bounds until the next resize.
-                            crate::pipeline::mark_element_needs_layout(
-                                self.pipeline_id,
-                                content.id(),
-                            );
-                        }
-                        UpdateResult::Replaced => {
-                            let old_constraints = content.last_layout_constraints();
-                            let old_position = content.position();
-                            let focused_path =
-                                crate::element::focused_descendant_path(content.as_ref());
-                            content.unmount();
-                            let mut new_content = content_view.create_element();
-                            let ctx = MountContext::new(self.pipeline_id);
-                            new_content.mount(&ctx);
-                            if let Some(constraints) = old_constraints {
-                                new_content.layout(constraints);
-                                new_content.set_position(old_position);
-                            }
-                            if let Some(path) = focused_path.as_deref() {
-                                crate::element::restore_focus_at_path(new_content.as_mut(), path);
-                            }
-                            self.children[content_index] = new_content;
-                            if old_constraints.is_some() {
-                                crate::pipeline::mark_element_needs_paint(
-                                    self.pipeline_id,
-                                    self.children[content_index].id(),
-                                );
-                            } else {
-                                crate::pipeline::mark_element_needs_layout(
-                                    self.pipeline_id,
-                                    self.children[content_index].id(),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+        self.view = typed_view.clone();
+        let render_result = self
+            .render_object
+            .update_from_window_info(&window_info, typed_view.is_decorated());
+        let mount_context = self.mounted.then(|| MountContext::new(self.pipeline_id));
+        let child_result =
+            crate::element::update_children(&mut self.children, child_views, mount_context);
 
-            self.view = typed_view.clone();
-            self.render_object
-                .update_from_window_info(&window_info, typed_view.is_decorated())
+        if matches!(render_result, UpdateResult::Updated)
+            || matches!(child_result, UpdateResult::Updated)
+        {
+            if self.mounted {
+                crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
+            }
+            UpdateResult::Updated
         } else {
-            UpdateResult::Replaced
+            UpdateResult::NoChange
         }
     }
 
@@ -988,6 +955,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
 
     fn mount(&mut self, ctx: &MountContext) {
         self.pipeline_id = ctx.pipeline_id();
+        self.mounted = true;
         // Mount children
         for child in &mut self.children {
             child.mount(ctx);
@@ -999,6 +967,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
         for child in &mut self.children {
             child.unmount();
         }
+        self.mounted = false;
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {

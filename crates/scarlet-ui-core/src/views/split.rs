@@ -228,10 +228,10 @@ impl<A: View, B: View> SplitView<A, B> {
 
 impl<A: View + Clone + 'static, B: View + Clone + 'static> View for SplitView<A, B> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children(
             self.clone(),
-            SplitViewRenderObject::<A, B>::from_view(self),
-            vec![self.first.create_element(), self.second.create_element()],
+            SplitViewRenderObject::<A, B>::from_view,
+            |view| vec![view.first.clone_view(), view.second.clone_view()],
         ))
     }
 

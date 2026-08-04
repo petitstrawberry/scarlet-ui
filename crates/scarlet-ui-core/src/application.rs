@@ -833,33 +833,12 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
     }
 
     fn rebuild(&mut self) -> UpdateResult {
-        let focused_path = self
-            .child
-            .as_ref()
-            .and_then(|child| crate::element::focused_descendant_path(child.as_ref()));
-        let Some(new_view) = resolve_scene_view(&self.app, &self.scene_key) else {
-            return UpdateResult::NoChange;
-        };
-        if let Some(ref mut child) = self.child {
-            match child.update(new_view.as_ref()) {
-                UpdateResult::NoChange => return UpdateResult::NoChange,
-                UpdateResult::Updated => {
-                    crate::pipeline::mark_element_needs_layout(self.pipeline_id, child.id());
-                    return UpdateResult::NoChange;
-                }
-                UpdateResult::Replaced => child.unmount(),
-            }
-        }
-        self.child = Some(new_view.create_element());
-        if let Some(ref mut child) = self.child {
-            let ctx = MountContext::new(self.pipeline_id);
-            child.mount(&ctx);
-            if let Some(path) = focused_path.as_deref() {
-                crate::element::restore_focus_at_path(child.as_mut(), path);
-            }
-            crate::pipeline::mark_element_needs_layout(self.pipeline_id, child.id());
-        }
-        UpdateResult::NoChange
+        let new_view = resolve_scene_view(&self.app, &self.scene_key);
+        crate::element::update_child(
+            &mut self.child,
+            new_view.as_deref(),
+            Some(MountContext::new(self.pipeline_id)),
+        )
     }
 
     fn mount(&mut self, ctx: &MountContext) {

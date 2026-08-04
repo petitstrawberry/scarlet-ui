@@ -143,7 +143,10 @@ impl AnyView {
 
 impl View for AnyView {
     fn create_element(&self) -> Box<dyn Element> {
-        self.view.create_element()
+        Box::new(ComponentElement::new_with_builder(
+            self.clone(),
+            build_any_view,
+        ))
     }
 
     fn listenables(&self) -> Vec<&dyn Listenable> {
@@ -153,6 +156,10 @@ impl View for AnyView {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+fn build_any_view(view: &AnyView) -> Box<dyn View> {
+    view.view.as_ref().as_ref().clone_view()
 }
 
 #[derive(Clone)]
@@ -181,20 +188,22 @@ impl GridRow {
 
 impl View for GridRow {
     fn create_element(&self) -> Box<dyn Element> {
-        let children = self
-            .cells
-            .iter()
-            .map(|cell| cell.create_element())
-            .collect();
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children(
             self.clone(),
-            GridRowRenderObject::new(
-                self.cells.len(),
-                self.row_height,
-                self.spacing,
-                self.minimum_cell_width,
-            ),
-            children,
+            |view| {
+                GridRowRenderObject::new(
+                    view.cells.len(),
+                    view.row_height,
+                    view.spacing,
+                    view.minimum_cell_width,
+                )
+            },
+            |view| {
+                view.cells
+                    .iter()
+                    .map(|cell| Box::new(cell.clone()) as Box<dyn View>)
+                    .collect()
+            },
         ))
     }
 
@@ -319,6 +328,7 @@ struct GridContentElement<T: Clone + 'static> {
     viewport_hint: Option<Rect>,
     last_constraints: Option<LayoutConstraints>,
     mount_context: Option<MountContext>,
+    children_need_update: bool,
 }
 
 impl<T: Clone + 'static> GridContentElement<T> {
@@ -335,6 +345,7 @@ impl<T: Clone + 'static> GridContentElement<T> {
             viewport_hint: None,
             last_constraints: None,
             mount_context: None,
+            children_need_update: false,
         }
     }
 
@@ -367,7 +378,7 @@ impl<T: Clone + 'static> GridContentElement<T> {
         self.view.items.get().len().div_ceil(columns.max(1))
     }
 
-    fn build_row(&self, row_index: usize, columns: usize) -> Box<dyn Element> {
+    fn build_row(&self, row_index: usize, columns: usize) -> Box<dyn View> {
         let items = self.view.items.get();
         let selected = self.view.selected.get();
         let mut cells = Vec::with_capacity(columns);
@@ -381,13 +392,12 @@ impl<T: Clone + 'static> GridContentElement<T> {
                 cells.push(AnyView::new(Box::new(Spacer::new())));
             }
         }
-        GridRow::new(
+        Box::new(GridRow::new(
             cells,
             self.view.row_height,
             self.view.spacing,
             self.view.minimum_cell_width,
-        )
-        .create_element()
+        ))
     }
 
     fn visible_range(&self, row_count: usize) -> core::ops::Range<usize> {
@@ -411,55 +421,65 @@ impl<T: Clone + 'static> GridContentElement<T> {
         start..end.max(start)
     }
 
-    fn clear_materialized_children(&mut self) {
-        for mut child in self.children.drain(..) {
-            child.unmount();
-        }
-        self.child_indices.clear();
-        self.materialized_columns = 0;
-    }
-
     fn materialize_visible_children(&mut self) -> bool {
         let columns = self.current_columns.max(1);
         let range = self.visible_range(self.row_count(columns));
         let desired_indices: Vec<usize> = range.clone().collect();
-        if self.materialized_columns == columns && self.child_indices == desired_indices {
+        let columns_changed = self.materialized_columns != columns;
+        if self.child_indices == desired_indices && !columns_changed && !self.children_need_update {
             return false;
         }
-
-        let rebuild_all = self.materialized_columns != columns;
+        let update_existing = columns_changed || self.children_need_update;
         let mut old_children = core::mem::take(&mut self.children);
         let mut old_indices = core::mem::take(&mut self.child_indices);
-        if rebuild_all {
-            for mut child in old_children.drain(..) {
-                child.unmount();
-            }
-            old_indices.clear();
-        }
 
         let mut new_children = Vec::with_capacity(desired_indices.len());
         let mut new_indices = Vec::with_capacity(desired_indices.len());
+        let mut changed = columns_changed;
         for index in desired_indices {
             if let Some(position) = old_indices.iter().position(|old| *old == index) {
-                new_children.push(old_children.remove(position));
+                let old_child = old_children.remove(position);
                 old_indices.remove(position);
+                if update_existing {
+                    let row_view = self.build_row(index, columns);
+                    let mut child = Some(old_child);
+                    let result = crate::element::update_child(
+                        &mut child,
+                        Some(row_view.as_ref()),
+                        self.mount_context,
+                    );
+                    if !matches!(result, UpdateResult::NoChange) {
+                        changed = true;
+                    }
+                    if let Some(child) = child {
+                        new_children.push(child);
+                    }
+                } else {
+                    new_children.push(old_child);
+                }
             } else {
-                let mut child = self.build_row(index, columns);
+                let row_view = self.build_row(index, columns);
+                let mut child = row_view.create_element();
                 if let Some(context) = self.mount_context {
                     child.mount(&context);
                 }
                 new_children.push(child);
+                changed = true;
             }
             new_indices.push(index);
         }
 
+        if !old_children.is_empty() {
+            changed = true;
+        }
         for mut child in old_children {
             child.unmount();
         }
         self.children = new_children;
         self.child_indices = new_indices;
         self.materialized_columns = columns;
-        true
+        self.children_need_update = false;
+        changed
     }
 
     fn layout_visible_children(&mut self) {
@@ -506,8 +526,8 @@ impl<T: Clone + 'static> Element for GridContentElement<T> {
         let Some(new_view) = new_view.as_any().downcast_ref::<GridContentView<T>>() else {
             return UpdateResult::Replaced;
         };
-        self.clear_materialized_children();
         self.view = new_view.grid.clone();
+        self.children_need_update = true;
         if let Some(constraints) = self.last_constraints {
             self.layout(constraints);
         }
@@ -588,10 +608,11 @@ impl<T: Clone + 'static> Element for GridContentElement<T> {
     }
 }
 
-fn build_grid_child<T: Clone + 'static>(view: &GridView<T>) -> Box<dyn Element> {
-    ScrollView::new(GridContentView { grid: view.clone() })
-        .scrollbar_visibility(ScrollbarVisibility::Automatic)
-        .create_element()
+fn build_grid_child<T: Clone + 'static>(view: &GridView<T>) -> Box<dyn View> {
+    Box::new(
+        ScrollView::new(GridContentView { grid: view.clone() })
+            .scrollbar_visibility(ScrollbarVisibility::Automatic),
+    )
 }
 
 impl<T: Clone + 'static> View for GridView<T> {
@@ -615,6 +636,7 @@ impl<T: Clone + 'static> View for GridView<T> {
 mod tests {
     use super::GridView;
     use crate::color::Color;
+    use crate::event::{Event, MouseButton, MouseEvent};
     use crate::pipeline::RenderingPipeline;
     use crate::state::{State, StateId};
     use crate::view::{View, ViewExt};
@@ -646,6 +668,33 @@ mod tests {
             .and_then(|(buffer, _)| buffer.get_pixel(170, 50));
 
         assert_eq!(pixel, Some(colors[1].to_bgra()));
+    }
+
+    #[test]
+    fn selected_state_rebuilds_visible_cells_inside_scroll_view() {
+        let items = State::new(crate::state::generate_state_id(), vec![0usize]);
+        let selected = State::new(crate::state::generate_state_id(), None);
+        let off = Color::rgb(180, 40, 40);
+        let on = Color::rgb(40, 180, 80);
+        let grid = GridView::new(items, selected.clone(), 1, 80.0, move |_, _, selected| {
+            crate::views::Rectangle::new()
+                .fill(if selected == Some(0) { on } else { off })
+                .frame(f32::INFINITY, 80.0)
+        });
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(grid.create_element());
+        pipeline.layout_initial();
+        let before = pipeline
+            .render_with_damage()
+            .and_then(|(buffer, _)| buffer.get_pixel(20, 20));
+        assert_eq!(before, Some(off.to_bgra()));
+
+        selected.set(Some(0));
+        let after = pipeline
+            .render_with_damage()
+            .and_then(|(buffer, _)| buffer.get_pixel(20, 20));
+        assert_eq!(after, Some(on.to_bgra()));
     }
 
     #[test]
@@ -792,5 +841,56 @@ mod tests {
                 "resized grid item {index} should remain at least 150px wide and wrap to row {row}"
             );
         }
+    }
+
+    #[test]
+    fn wrapped_grid_click_targets_visual_cell_after_resize() {
+        let items = State::new(
+            crate::state::generate_state_id(),
+            (0usize..8).collect::<Vec<_>>(),
+        );
+        let selected = State::new(crate::state::generate_state_id(), None);
+        let activated = State::new(crate::state::generate_state_id(), None);
+        let activated_for_grid = activated.clone();
+        let grid = GridView::new(items, selected, 5, 120.0, move |index, _, _| {
+            let activated = activated_for_grid.clone();
+            crate::views::Rectangle::new()
+                .fill(Color::rgb(80, 120, 180))
+                .frame(f32::INFINITY, 120.0)
+                .on_click(move || activated.set(Some(index)))
+        })
+        .spacing(10.0)
+        .minimum_cell_width(150.0);
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(grid.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        // The initial 800px viewport fits five cells. At 640px the same grid
+        // wraps to four columns, matching the Files window configuration.
+        pipeline.resize(crate::geometry::Size::new(640.0, 400.0));
+        pipeline.render_with_damage();
+
+        assert!(
+            pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 75,
+                y: 60,
+                click_count: 1,
+            }))
+        );
+        assert_eq!(activated.get(), Some(0));
+
+        activated.set(None);
+        assert!(
+            pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 75,
+                y: 180,
+                click_count: 1,
+            }))
+        );
+        assert_eq!(activated.get(), Some(4));
     }
 }

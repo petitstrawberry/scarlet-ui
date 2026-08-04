@@ -114,17 +114,19 @@ impl<V: View> Frame<V> {
 
 impl<V: View + Clone> View for Frame<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children(
             self.clone(),
-            FrameRenderObject::new(
-                self.width,
-                self.height,
-                self.min_width,
-                self.min_height,
-                self.max_width,
-                self.max_height,
-            ),
-            vec![self.inner.create_element()],
+            |view| {
+                FrameRenderObject::new(
+                    view.width,
+                    view.height,
+                    view.min_width,
+                    view.min_height,
+                    view.max_width,
+                    view.max_height,
+                )
+            },
+            |view| vec![view.inner.clone_view()],
         ))
     }
 

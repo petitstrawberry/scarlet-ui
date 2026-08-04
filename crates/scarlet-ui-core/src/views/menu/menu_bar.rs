@@ -7,6 +7,7 @@
 use crate::element::{Element, ElementId, LayoutConstraints};
 use crate::event::Event;
 use crate::geometry::{Point, Rect, Size};
+use crate::pipeline::{MountContext, PipelineId};
 use crate::view::View;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -84,6 +85,9 @@ pub struct MenuBarElement {
     size: Size,
     on_hover_index: Option<Arc<dyn Fn(usize) + 'static>>,
     hovered_index: Option<usize>,
+    last_constraints: Option<LayoutConstraints>,
+    pipeline_id: PipelineId,
+    mounted: bool,
 }
 
 impl MenuBarElement {
@@ -101,6 +105,9 @@ impl MenuBarElement {
             size: Size::ZERO,
             on_hover_index,
             hovered_index: None,
+            last_constraints: None,
+            pipeline_id: PipelineId::default(),
+            mounted: false,
         }
     }
 
@@ -135,12 +142,44 @@ impl Element for MenuBarElement {
         &mut self.children
     }
 
-    fn update(&mut self, _new_view: &dyn crate::view::View) -> crate::element::UpdateResult {
-        crate::element::UpdateResult::Replaced
+    fn update(&mut self, new_view: &dyn crate::view::View) -> crate::element::UpdateResult {
+        let Some(menu_bar) = new_view.as_any().downcast_ref::<MenuBar>() else {
+            return crate::element::UpdateResult::Replaced;
+        };
+
+        self.spacing = menu_bar.spacing;
+        self.on_hover_index = menu_bar.on_hover_index.clone();
+        self.hovered_index = self
+            .hovered_index
+            .filter(|index| *index < menu_bar.items.len());
+        let child_views = menu_bar
+            .items
+            .iter()
+            .cloned()
+            .map(|item| Box::new(item) as Box<dyn View>)
+            .collect();
+        let mount_context = self.mounted.then(|| MountContext::new(self.pipeline_id));
+        crate::element::update_children(&mut self.children, child_views, mount_context);
+        crate::element::UpdateResult::Updated
     }
 
     fn rebuild(&mut self) -> crate::element::UpdateResult {
         crate::element::UpdateResult::NoChange
+    }
+
+    fn mount(&mut self, context: &MountContext) {
+        self.pipeline_id = context.pipeline_id();
+        self.mounted = true;
+        for child in &mut self.children {
+            child.mount(context);
+        }
+    }
+
+    fn unmount(&mut self) {
+        for child in &mut self.children {
+            child.unmount();
+        }
+        self.mounted = false;
     }
 
     fn handle_event(&mut self, event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
@@ -186,6 +225,7 @@ impl Element for MenuBarElement {
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        self.last_constraints = Some(constraints);
         // Calculate total width and max height
         let mut total_width: f32 = 0.0;
         let mut max_height: f32 = 0.0;
@@ -247,11 +287,11 @@ impl Element for MenuBarElement {
     }
 
     fn last_layout_constraints(&self) -> Option<LayoutConstraints> {
-        None
+        self.last_constraints
     }
 
-    fn set_last_layout_constraints(&mut self, _constraints: LayoutConstraints) {
-        // Not implemented
+    fn set_last_layout_constraints(&mut self, constraints: LayoutConstraints) {
+        self.last_constraints = Some(constraints);
     }
 
     fn position(&self) -> Point {

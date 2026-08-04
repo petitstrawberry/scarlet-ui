@@ -2389,16 +2389,182 @@ impl Default for RenderingPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{Event, MouseButton, MouseEvent, ScrollSource, WheelPhase};
+    use crate::element::ComponentElement;
+    use crate::event::{
+        Event, KeyCode, KeyEvent, MouseButton, MouseEvent, ScrollSource, WheelPhase,
+    };
     use crate::state::{State, StateId};
     use crate::testing::alloc_counter::{
         allocation_snapshot, measure_allocations, reset_allocation_counts,
     };
     use crate::view::{View, ViewExt};
     use crate::views::{
-        Either, GridView, LazyVStack, NavigationLink, NavigationView, Rectangle, ScrollView,
-        ScrollbarVisibility, Text, Window,
+        Button, Either, GridView, LazyVStack, MenuItem, NavigationLink, NavigationView, Rectangle,
+        ScrollView, ScrollbarVisibility, Text, TextField, Toggle, Window,
     };
+    use core::cell::Cell;
+    use std::rc::Rc;
+
+    #[derive(Clone)]
+    struct LauncherInputHarness {
+        query: State<alloc::string::String>,
+        focus_requested: State<bool>,
+        selection_moves: State<usize>,
+    }
+
+    fn build_launcher_input(view: &LauncherInputHarness) -> Box<dyn View> {
+        let query = view.query.clone();
+        let focus_requested = view.focus_requested.clone();
+        let empty_focus = focus_requested.clone();
+        let selection_moves = view.selection_moves.clone();
+        Box::new(
+            TextField::new(view.query.clone())
+                .autofocus(view.focus_requested.get())
+                .on_empty(move || empty_focus.set(false))
+                .on_key(move |event| match event {
+                    KeyEvent::Char { c } if !c.is_control() => {
+                        focus_requested.set(true);
+                        query.update(|value| value.push(c));
+                        true
+                    }
+                    KeyEvent::Pressed {
+                        keycode: KeyCode::Up,
+                        ..
+                    } => {
+                        selection_moves.update(|moves| *moves += 1);
+                        true
+                    }
+                    _ => false,
+                }),
+        )
+    }
+
+    impl View for LauncherInputHarness {
+        fn create_element(&self) -> Box<dyn Element> {
+            Box::new(ComponentElement::new_with_builder(
+                self.clone(),
+                build_launcher_input,
+            ))
+        }
+
+        fn listenables(&self) -> Vec<&dyn crate::state::Listenable> {
+            alloc::vec![&self.query, &self.focus_requested]
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn moving_between_children_does_not_exit_shared_hover_ancestor() {
+        let entered = Rc::new(Cell::new(0u32));
+        let exited = Rc::new(Cell::new(0u32));
+        let entered_callback = entered.clone();
+        let exited_callback = exited.clone();
+        let target = crate::hstack! {
+            Rectangle::new().frame(40.0, 40.0),
+            Rectangle::new().frame(40.0, 40.0),
+        }
+        .spacing(0.0)
+        .on_hover(move || entered_callback.set(entered_callback.get() + 1))
+        .on_exit(move || exited_callback.set(exited_callback.get() + 1));
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(target.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 10, y: 10 }));
+        assert_eq!(entered.get(), 1);
+        assert_eq!(exited.get(), 0);
+
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 50, y: 10 }));
+        assert_eq!(entered.get(), 1);
+        assert_eq!(exited.get(), 0);
+
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 900, y: 700 }));
+        assert_eq!(entered.get(), 1);
+        assert_eq!(exited.get(), 1);
+    }
+
+    #[test]
+    fn button_release_outside_capture_cancels_click() {
+        let clicked = State::new(crate::state::generate_state_id(), false);
+        let clicked_callback = clicked.clone();
+        let button = Button::new("Task").on_click(move || clicked_callback.set(true));
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(button.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 10, y: 10 }));
+        assert!(
+            pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: 10,
+                y: 10,
+                click_count: 1,
+            }))
+        );
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 200, y: 200 }));
+        assert!(
+            pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 200,
+                y: 200,
+                click_count: 1,
+            }))
+        );
+
+        assert!(!clicked.get());
+    }
+
+    #[test]
+    fn taskbar_menu_item_clears_hover_and_press_when_pointer_leaves() {
+        let clicked = Rc::new(Cell::new(false));
+        let clicked_callback = clicked.clone();
+        let item = MenuItem::new("Terminal").on_click(move || clicked_callback.set(true));
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(item.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 10, y: 10 }));
+        assert!(
+            pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: 10,
+                y: 10,
+                click_count: 1,
+            }))
+        );
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 900, y: 700 }));
+        assert!(
+            pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 900,
+                y: 700,
+                click_count: 1,
+            }))
+        );
+
+        assert!(!clicked.get());
+        let render_object = pipeline
+            .element_tree
+            .root()
+            .and_then(|root| root.render_object())
+            .and_then(|render_object| {
+                render_object
+                    .as_any()
+                    .downcast_ref::<crate::views::menu::MenuItemRenderObject>()
+            })
+            .expect("taskbar item should retain its menu-item render object");
+        assert!(!render_object.is_hovered());
+        assert!(!render_object.is_pressed());
+    }
 
     /// Phase 1 warm-scroll allocation baseline measured on this machine.
     /// This is the Phase 2 max budget and Phase 7's target is zero.
@@ -3348,6 +3514,170 @@ mod tests {
         let after = Arc::as_ptr(&pipeline.layer_store.chunk(chunk_id).unwrap().buffer);
         assert_eq!(before, after);
         assert!(pipeline.layer_store.container(layer_id).unwrap().valid);
+    }
+
+    #[test]
+    fn stateful_leaf_inside_scroll_repaints_without_unrelated_input() {
+        let is_on = State::new(crate::state::generate_state_id(), false);
+        let mut pipeline = RenderingPipeline::new();
+        let root = ScrollView::new(Toggle::new(is_on.clone()))
+            .content_size(100.0, 100.0)
+            .frame(100.0, 100.0)
+            .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+
+        let before = pipeline
+            .render_with_damage()
+            .and_then(|(buffer, _)| buffer.get_pixel(10, 15))
+            .expect("initial toggle pixel should be available");
+
+        is_on.set(true);
+        assert!(pipeline.has_dirty(), "toggle State must schedule a frame");
+        let after = pipeline
+            .render_with_damage()
+            .and_then(|(buffer, _)| buffer.get_pixel(10, 15))
+            .expect("toggle-only update should render a frame");
+
+        assert_ne!(before, after, "the scroll boundary must repaint the toggle");
+    }
+
+    #[test]
+    fn launcher_style_keyboard_routing_focuses_and_edits_text_field() {
+        let query = State::new(
+            crate::state::generate_state_id(),
+            alloc::string::String::new(),
+        );
+        let focus_requested = State::new(crate::state::generate_state_id(), false);
+        let selection_moves = State::new(crate::state::generate_state_id(), 0usize);
+        let harness = LauncherInputHarness {
+            query: query.clone(),
+            focus_requested: focus_requested.clone(),
+            selection_moves: selection_moves.clone(),
+        };
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(harness.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c: 'a' })));
+        pipeline
+            .render_with_damage()
+            .expect("the first character should focus and repaint the field");
+        assert_eq!(query.get(), "a");
+        assert!(focus_requested.get());
+        assert!(pipeline.focused_text_input_state().is_some());
+
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c: 'b' })));
+        pipeline
+            .render_with_damage()
+            .expect("focused text entry should repaint");
+        assert_eq!(query.get(), "ab");
+
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Pressed {
+            keycode: KeyCode::Left,
+            modifiers: crate::event::KeyModifiers::default(),
+        })));
+        pipeline.render_with_damage();
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Pressed {
+            keycode: KeyCode::Backspace,
+            modifiers: crate::event::KeyModifiers::default(),
+        })));
+        pipeline
+            .render_with_damage()
+            .expect("backspace should repaint the edited text");
+        assert_eq!(query.get(), "b");
+
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Pressed {
+            keycode: KeyCode::Up,
+            modifiers: crate::event::KeyModifiers::default(),
+        })));
+        pipeline.render_with_damage();
+        assert_eq!(selection_moves.get(), 1);
+    }
+
+    #[test]
+    fn stateful_leaf_on_lazily_selected_navigation_page_schedules_a_frame() {
+        let is_on = State::new(crate::state::generate_state_id(), false);
+        let controls_state = is_on.clone();
+        let root = NavigationView::new((
+            NavigationLink::new("Overview", || Text::new("overview")),
+            NavigationLink::new("Controls", move || {
+                ScrollView::new(crate::vstack! {
+                    Text::new("Controls").font_size(24.0),
+                    Toggle::new(controls_state.clone()),
+                })
+                .content_size(0.0, 360.0)
+            }),
+        ))
+        .create_element();
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        assert!(
+            pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 10,
+                y: 45,
+                click_count: 1,
+            }))
+        );
+        pipeline
+            .render_with_damage()
+            .expect("selecting the controls page should render");
+
+        fn find_toggle_id(element: &dyn Element) -> Option<ElementId> {
+            if element.render_object().is_some_and(|render_object| {
+                render_object
+                    .as_any()
+                    .downcast_ref::<crate::views::ToggleRenderObject>()
+                    .is_some()
+            }) {
+                return Some(element.id());
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| find_toggle_id(child.as_ref()))
+        }
+
+        let toggle_id = find_toggle_id(
+            pipeline
+                .element_tree()
+                .root()
+                .expect("navigation tree should have a root"),
+        )
+        .expect("controls page should contain a toggle");
+        let toggle_path = pipeline
+            .element_tree()
+            .find_path_ids(toggle_id)
+            .expect("toggle should remain in the element tree");
+        let (toggle_element, toggle_origin) = pipeline
+            .element_tree()
+            .element_and_absolute_origin_for_path(&toggle_path)
+            .expect("toggle origin should resolve");
+        let toggle_size = toggle_element.bounds().size;
+        let click_x = (toggle_origin.x + toggle_size.width * 0.5) as i32;
+        let click_y = (toggle_origin.y + toggle_size.height * 0.5) as i32;
+
+        assert!(
+            pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: click_x,
+                y: click_y,
+                click_count: 1,
+            }))
+        );
+        assert!(is_on.get(), "clicking the visible toggle must update State");
+        assert!(
+            pipeline.has_dirty(),
+            "a control mounted after navigation must retain its subscription"
+        );
+        pipeline
+            .render_with_damage()
+            .expect("the toggle-only update should present a frame");
     }
 
     #[test]

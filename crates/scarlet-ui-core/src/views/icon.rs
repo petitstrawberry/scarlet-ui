@@ -228,6 +228,21 @@ impl ElementRenderObject for IconRenderObject {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+
+    fn update(&mut self, new_view: &dyn View) -> crate::element::UpdateResult {
+        let Some(icon) = new_view.as_any().downcast_ref::<IconView>() else {
+            return crate::element::UpdateResult::Replaced;
+        };
+        self.icon = icon.icon;
+        self.preferred_size = icon.size;
+        self.style = icon.style;
+        self.color = icon.color;
+        crate::element::UpdateResult::Updated
+    }
+
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
 }
 
 impl View for IconView {

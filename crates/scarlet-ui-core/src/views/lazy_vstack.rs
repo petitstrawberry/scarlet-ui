@@ -83,8 +83,8 @@ impl LazyVStack {
         }
     }
 
-    fn build_item(&self, index: usize) -> Box<dyn Element> {
-        (self.builder)(index).create_element()
+    fn build_item(&self, index: usize) -> Box<dyn View> {
+        (self.builder)(index)
     }
 }
 
@@ -108,6 +108,7 @@ struct LazyVStackElement {
     viewport_hint: Option<Rect>,
     last_constraints: Option<LayoutConstraints>,
     mount_context: Option<MountContext>,
+    children_need_update: bool,
 }
 
 impl LazyVStackElement {
@@ -122,6 +123,7 @@ impl LazyVStackElement {
             viewport_hint: None,
             last_constraints: None,
             mount_context: None,
+            children_need_update: false,
         }
     }
 
@@ -148,22 +150,42 @@ impl LazyVStackElement {
 
     fn materialize_visible_children(&mut self) -> bool {
         let range = self.visible_range();
-        if self.child_indices == range.clone().collect::<Vec<_>>() {
+        let desired_indices = range.collect::<Vec<_>>();
+        if self.child_indices == desired_indices && !self.children_need_update {
             return false;
         }
 
+        let update_existing = self.children_need_update;
         let mut old_children = core::mem::take(&mut self.children);
         let mut old_indices = core::mem::take(&mut self.child_indices);
         let mut new_children = Vec::new();
         let mut new_indices = Vec::new();
         let mut changed = false;
 
-        for index in range {
+        for index in desired_indices {
             if let Some(position) = old_indices.iter().position(|old| *old == index) {
-                new_children.push(old_children.remove(position));
+                let old_child = old_children.remove(position);
                 old_indices.remove(position);
+                if update_existing {
+                    let item_view = self.view.build_item(index);
+                    let mut child = Some(old_child);
+                    let result = crate::element::update_child(
+                        &mut child,
+                        Some(item_view.as_ref()),
+                        self.mount_context,
+                    );
+                    if !matches!(result, UpdateResult::NoChange) {
+                        changed = true;
+                    }
+                    if let Some(child) = child {
+                        new_children.push(child);
+                    }
+                } else {
+                    new_children.push(old_child);
+                }
             } else {
-                let mut child = self.view.build_item(index);
+                let item_view = self.view.build_item(index);
+                let mut child = item_view.create_element();
                 if let Some(ctx) = self.mount_context {
                     child.mount(&ctx);
                 }
@@ -180,6 +202,7 @@ impl LazyVStackElement {
 
         self.children = new_children;
         self.child_indices = new_indices;
+        self.children_need_update = false;
         changed
     }
 
@@ -226,6 +249,7 @@ impl Element for LazyVStackElement {
             return UpdateResult::Replaced;
         };
         self.view = new_view.clone();
+        self.children_need_update = true;
         self.materialize_visible_children();
         if let Some(constraints) = self.last_constraints {
             self.layout(constraints);

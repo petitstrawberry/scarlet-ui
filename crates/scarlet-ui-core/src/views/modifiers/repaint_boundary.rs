@@ -41,10 +41,15 @@ impl<V: View> RepaintBoundary<V> {
 
 impl<V: View + Clone> View for RepaintBoundary<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children(
             self.clone(),
-            RepaintBoundaryRenderObject::new(self.max_cache_pixels, self.cache_nested_boundaries),
-            vec![self.inner.create_element()],
+            |view| {
+                RepaintBoundaryRenderObject::new(
+                    view.max_cache_pixels,
+                    view.cache_nested_boundaries,
+                )
+            },
+            |view| vec![view.inner.clone_view()],
         ))
     }
 

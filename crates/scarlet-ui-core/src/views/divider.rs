@@ -227,4 +227,18 @@ impl ElementRenderObject for DividerRenderObject {
         ctx.fill_rect(Rect::new(origin, self.size), self.color);
         true
     }
+
+    fn update(&mut self, new_view: &dyn View) -> crate::element::UpdateResult {
+        let Some(divider) = new_view.as_any().downcast_ref::<Divider>() else {
+            return crate::element::UpdateResult::Replaced;
+        };
+        self.orientation = divider.orientation;
+        self.color = divider.color;
+        self.thickness = divider.thickness;
+        crate::element::UpdateResult::Updated
+    }
+
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
 }

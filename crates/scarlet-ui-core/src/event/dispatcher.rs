@@ -5,7 +5,7 @@
 
 use crate::element::{Element, ElementId, ElementTree};
 use crate::event::Event;
-use crate::geometry::{Point, Rect};
+use crate::geometry::Point;
 use alloc::vec::Vec;
 
 /// Monotonic clock for expiring idle wheel gestures.
@@ -363,14 +363,24 @@ impl EventDispatcher {
                     None => None,
                 }
             }
-        } else if matches!(event, crate::event::MouseEvent::Moved { .. })
-            && !(self.left_button_down && self.captured_id.is_some())
-        {
-            self.cached_path_if_inside(element_tree, point)
-                .or_else(|| self.hit_test_with_path_ids(element_tree, point))
         } else {
             self.hit_test_with_path_ids(element_tree, point)
         };
+
+        // Hover follows the pointer's real hit path, independently from the
+        // path used for button capture below. A captured press still receives
+        // move/release events, but leaving its bounds must emit Exited so
+        // controls can cancel their pressed appearance and click action.
+        match event {
+            crate::event::MouseEvent::Moved { x, y }
+            | crate::event::MouseEvent::Entered { x, y } => {
+                self.update_hover_path(element_tree, path.as_deref(), *x, *y);
+            }
+            crate::event::MouseEvent::Exited { x, y } => {
+                self.update_hover_path(element_tree, None, *x, *y);
+            }
+            _ => {}
+        }
 
         if self.left_button_down {
             if let Some(captured_id) = self.captured_id {
@@ -433,39 +443,6 @@ impl EventDispatcher {
                     } else {
                         crate::logln!("[EventDispatcher] path[{}] id={:?} (not found)", index, id);
                     }
-                }
-            }
-
-            if let crate::event::MouseEvent::Moved { x, y } = event {
-                if self.captured_id.is_some() || self.wheel_target.is_some() {
-                    // Skip hover updates while dragging or mid-scroll, so that
-                    // content sliding under a stationary cursor does not fire
-                    // Entered/Exited on the children it crosses.
-                } else if self.hovered_id != Some(target_id) {
-                    if crate::debug::is_enabled() {
-                        crate::logln!(
-                            "[EventDispatcher] hover change: {:?} -> {:?}",
-                            self.hovered_id,
-                            Some(target_id)
-                        );
-                    }
-                    if self.hovered_id.is_some() {
-                        let old_path = core::mem::take(&mut self.hovered_path);
-                        Self::dispatch_hover_path(
-                            element_tree,
-                            &old_path,
-                            &crate::event::MouseEvent::Exited { x: *x, y: *y },
-                        );
-                    }
-
-                    Self::dispatch_hover_path(
-                        element_tree,
-                        &path,
-                        &crate::event::MouseEvent::Entered { x: *x, y: *y },
-                    );
-
-                    self.hovered_id = Some(target_id);
-                    self.hovered_path = path.clone();
                 }
             }
 
@@ -615,17 +592,6 @@ impl EventDispatcher {
             }
             result
         } else {
-            if let crate::event::MouseEvent::Moved { x, y } = event {
-                if self.hovered_id.is_some() {
-                    let old_path = core::mem::take(&mut self.hovered_path);
-                    Self::dispatch_hover_path(
-                        element_tree,
-                        &old_path,
-                        &crate::event::MouseEvent::Exited { x: *x, y: *y },
-                    );
-                }
-                self.hovered_id = None;
-            }
             if let crate::event::MouseEvent::ButtonReleased {
                 button: crate::event::MouseButton::Left,
                 ..
@@ -1070,54 +1036,6 @@ impl EventDispatcher {
         }
     }
 
-    fn cached_path_if_inside(
-        &mut self,
-        element_tree: &mut ElementTree,
-        point: Point,
-    ) -> Option<Vec<ElementId>> {
-        let hovered_id = self.hovered_id?;
-        let last = *self.hovered_path.last()?;
-        if last != hovered_id {
-            self.hovered_path.clear();
-            return None;
-        }
-
-        let mut parent_origin = Point::ZERO;
-        if self.hovered_path.len() > 1 {
-            for id in self.hovered_path.iter().take(self.hovered_path.len() - 1) {
-                let Some(element) = element_tree.find_element_mut(*id) else {
-                    self.hovered_path.clear();
-                    return None;
-                };
-                let pos = element.position();
-                parent_origin.x += pos.x;
-                parent_origin.y += pos.y;
-            }
-        }
-
-        let Some(target) = element_tree.find_element_mut(hovered_id) else {
-            self.hovered_path.clear();
-            return None;
-        };
-        let target_pos = target.position();
-        let absolute_origin = Point {
-            x: parent_origin.x + target_pos.x,
-            y: parent_origin.y + target_pos.y,
-        };
-        let size = target.bounds().size;
-        let rect = Rect::from_xywh(
-            absolute_origin.x,
-            absolute_origin.y,
-            size.width,
-            size.height,
-        );
-        if rect.contains(point) {
-            return Some(self.hovered_path.clone());
-        }
-
-        None
-    }
-
     fn update_captured_point_from_path(&mut self, element_tree: &mut ElementTree) {
         let Some(target_id) = self.captured_path.last().copied() else {
             return;
@@ -1253,13 +1171,64 @@ impl EventDispatcher {
         }
     }
 
-    fn dispatch_hover_path(
+    fn update_hover_path(
+        &mut self,
+        element_tree: &mut ElementTree,
+        new_path: Option<&[ElementId]>,
+        x: i32,
+        y: i32,
+    ) {
+        let new_path = new_path.unwrap_or(&[]);
+        if self.hovered_path.as_slice() == new_path {
+            self.hovered_id = new_path.last().copied();
+            return;
+        }
+
+        let old_path = core::mem::take(&mut self.hovered_path);
+        let shared_len = old_path
+            .iter()
+            .zip(new_path.iter())
+            .take_while(|(old, new)| old == new)
+            .count();
+
+        if crate::debug::is_enabled() {
+            crate::logln!(
+                "[EventDispatcher] hover change: {:?} -> {:?} shared={}",
+                old_path.last(),
+                new_path.last(),
+                shared_len
+            );
+        }
+
+        if shared_len < old_path.len() {
+            Self::dispatch_hover_path_suffix(
+                element_tree,
+                &old_path,
+                shared_len,
+                &crate::event::MouseEvent::Exited { x, y },
+            );
+        }
+        if shared_len < new_path.len() {
+            Self::dispatch_hover_path_suffix(
+                element_tree,
+                new_path,
+                shared_len,
+                &crate::event::MouseEvent::Entered { x, y },
+            );
+        }
+
+        self.hovered_path.extend_from_slice(new_path);
+        self.hovered_id = new_path.last().copied();
+    }
+
+    fn dispatch_hover_path_suffix(
         element_tree: &mut ElementTree,
         path: &[ElementId],
+        start: usize,
         event: &crate::event::MouseEvent,
     ) {
         let origins = Self::path_origins(element_tree, path);
-        for index in (0..path.len()).rev() {
+        for index in (start..path.len()).rev() {
             let Some(element) = element_tree.find_element_mut(path[index]) else {
                 continue;
             };
@@ -1342,7 +1311,7 @@ mod tests {
     use super::*;
     use crate::element::{ElementRenderObject, LayoutConstraints, UpdateResult};
     use crate::event::{MouseEvent, ScrollSource, WheelPhase};
-    use crate::geometry::Size;
+    use crate::geometry::{Rect, Size};
     use crate::view::View;
     use alloc::boxed::Box;
     use alloc::rc::Rc;

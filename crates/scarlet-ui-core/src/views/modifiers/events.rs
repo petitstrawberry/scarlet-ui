@@ -2,7 +2,7 @@
 //!
 //! Provides event modifiers for any view.
 
-use crate::element::{Element, ElementRenderObject, RenderElement};
+use crate::element::{Element, ElementRenderObject, RenderElement, UpdateResult};
 use crate::event::{Event, FocusEvent, KeyEvent, MouseEvent, Phase};
 use crate::geometry::Size;
 use crate::state::{Listenable, State};
@@ -48,10 +48,11 @@ impl<V: View> Focusable<V> {
 
 impl<V: View + Clone> View for Focusable<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
-            FocusableRenderObject::new(self.focused.clone()),
-            vec![self.inner.create_element()],
+            |view| FocusableRenderObject::new(view.focused.clone()),
+            update_focusable_render_object::<V>,
+            |view| vec![view.inner.clone_view()],
         ))
     }
 
@@ -64,6 +65,14 @@ impl<V: View + Clone> View for Focusable<V> {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+fn update_focusable_render_object<V: View>(
+    render_object: &mut FocusableRenderObject,
+    view: &Focusable<V>,
+) -> UpdateResult {
+    render_object.focused = view.focused.clone();
+    UpdateResult::Updated
 }
 
 /// Render object for [`Focusable`].
@@ -159,15 +168,15 @@ impl<V: View, F: Fn() + Clone + 'static> OnClick<V, F> {
 
 impl<V: View + Clone, F: Fn() + Clone + 'static> View for OnClick<V, F> {
     fn create_element(&self) -> Box<dyn Element> {
-        let mut render_object = OnClickRenderObject::new();
-        // Store callback in render object
-        // We need to clone the callback since F: Clone
-        render_object.set_callback(Box::new(self.callback.clone()));
-
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
-            render_object,
-            vec![self.inner.create_element()],
+            |view| {
+                let mut render_object = OnClickRenderObject::new();
+                render_object.set_callback(Box::new(view.callback.clone()));
+                render_object
+            },
+            update_on_click_render_object::<V, F>,
+            |view| vec![view.inner.clone_view()],
         ))
     }
 
@@ -178,6 +187,18 @@ impl<V: View + Clone, F: Fn() + Clone + 'static> View for OnClick<V, F> {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+fn update_on_click_render_object<V, F>(
+    render_object: &mut OnClickRenderObject,
+    view: &OnClick<V, F>,
+) -> UpdateResult
+where
+    V: View,
+    F: Fn() + Clone + 'static,
+{
+    render_object.set_callback(Box::new(view.callback.clone()));
+    UpdateResult::Updated
 }
 
 /// Click RenderObject
@@ -293,12 +314,15 @@ impl<V: View, F: Fn() + Clone + 'static> OnHover<V, F> {
 
 impl<V: View + Clone, F: Fn() + Clone + 'static> View for OnHover<V, F> {
     fn create_element(&self) -> Box<dyn Element> {
-        let mut render_object = OnHoverRenderObject::new();
-        render_object.set_callback(Box::new(self.callback.clone()));
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
-            render_object,
-            vec![self.inner.create_element()],
+            |view| {
+                let mut render_object = OnHoverRenderObject::new();
+                render_object.set_callback(Box::new(view.callback.clone()));
+                render_object
+            },
+            update_on_hover_render_object::<V, F>,
+            |view| vec![view.inner.clone_view()],
         ))
     }
 
@@ -309,6 +333,18 @@ impl<V: View + Clone, F: Fn() + Clone + 'static> View for OnHover<V, F> {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+fn update_on_hover_render_object<V, F>(
+    render_object: &mut OnHoverRenderObject,
+    view: &OnHover<V, F>,
+) -> UpdateResult
+where
+    V: View,
+    F: Fn() + Clone + 'static,
+{
+    render_object.set_callback(Box::new(view.callback.clone()));
+    UpdateResult::Updated
 }
 
 /// Hover RenderObject
@@ -419,12 +455,15 @@ impl<V: View, F: Fn() + Clone + 'static> OnExit<V, F> {
 
 impl<V: View + Clone, F: Fn() + Clone + 'static> View for OnExit<V, F> {
     fn create_element(&self) -> Box<dyn Element> {
-        let mut render_object = OnExitRenderObject::new();
-        render_object.set_callback(Box::new(self.callback.clone()));
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
-            render_object,
-            vec![self.inner.create_element()],
+            |view| {
+                let mut render_object = OnExitRenderObject::new();
+                render_object.set_callback(Box::new(view.callback.clone()));
+                render_object
+            },
+            update_on_exit_render_object::<V, F>,
+            |view| vec![view.inner.clone_view()],
         ))
     }
 
@@ -435,6 +474,18 @@ impl<V: View + Clone, F: Fn() + Clone + 'static> View for OnExit<V, F> {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+fn update_on_exit_render_object<V, F>(
+    render_object: &mut OnExitRenderObject,
+    view: &OnExit<V, F>,
+) -> UpdateResult
+where
+    V: View,
+    F: Fn() + Clone + 'static,
+{
+    render_object.set_callback(Box::new(view.callback.clone()));
+    UpdateResult::Updated
 }
 
 /// Exit RenderObject
@@ -554,13 +605,15 @@ impl<V: View, F: Fn(KeyEvent) -> bool + Clone + 'static> OnKey<V, F> {
 
 impl<V: View + Clone, F: Fn(KeyEvent) -> bool + Clone + 'static> View for OnKey<V, F> {
     fn create_element(&self) -> Box<dyn Element> {
-        let mut render_object = OnKeyRenderObject::new();
-        render_object.set_callback(Box::new(self.callback.clone()));
-
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
-            render_object,
-            vec![self.inner.create_element()],
+            |view| {
+                let mut render_object = OnKeyRenderObject::new();
+                render_object.set_callback(Box::new(view.callback.clone()));
+                render_object
+            },
+            update_on_key_render_object::<V, F>,
+            |view| vec![view.inner.clone_view()],
         ))
     }
 
@@ -571,6 +624,18 @@ impl<V: View + Clone, F: Fn(KeyEvent) -> bool + Clone + 'static> View for OnKey<
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+fn update_on_key_render_object<V, F>(
+    render_object: &mut OnKeyRenderObject,
+    view: &OnKey<V, F>,
+) -> UpdateResult
+where
+    V: View,
+    F: Fn(KeyEvent) -> bool + Clone + 'static,
+{
+    render_object.set_callback(Box::new(view.callback.clone()));
+    UpdateResult::Updated
 }
 
 /// Render object for [`OnKey`].
@@ -664,5 +729,54 @@ impl ElementRenderObject for OnKeyRenderObject {
 
     fn render(&mut self) {
         // Modifier doesn't directly render.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::view::ViewExt;
+    use crate::views::Text;
+    use core::cell::Cell;
+    use std::rc::Rc;
+
+    fn hover_view(counter: Rc<Cell<u32>>) -> impl View + Clone {
+        Text::new("hover target").on_hover(move || counter.set(counter.get() + 1))
+    }
+
+    #[test]
+    fn compatible_update_preserves_hover_state_and_replaces_callback() {
+        let first_count = Rc::new(Cell::new(0));
+        let first = hover_view(first_count.clone());
+        let mut element = first.create_element();
+        let element_id = element.id();
+        let render_object_address = element
+            .render_object()
+            .expect("hover modifier should own a render object")
+            as *const dyn ElementRenderObject as *const ();
+        let entered = Event::Mouse(MouseEvent::Entered { x: 1, y: 1 });
+        let exited = Event::Mouse(MouseEvent::Exited { x: 1, y: 1 });
+
+        assert!(element.handle_event(&entered, Phase::Target));
+        assert_eq!(first_count.get(), 1);
+
+        let second_count = Rc::new(Cell::new(0));
+        let second = hover_view(second_count.clone());
+        assert!(matches!(element.update(&second), UpdateResult::Updated));
+        assert_eq!(element.id(), element_id);
+        assert_eq!(
+            element
+                .render_object()
+                .expect("hover render object should be retained")
+                as *const dyn ElementRenderObject as *const (),
+            render_object_address
+        );
+
+        assert!(!element.handle_event(&entered, Phase::Target));
+        assert_eq!(first_count.get(), 1);
+        assert_eq!(second_count.get(), 0);
+        assert!(!element.handle_event(&exited, Phase::Target));
+        assert!(element.handle_event(&entered, Phase::Target));
+        assert_eq!(second_count.get(), 1);
     }
 }

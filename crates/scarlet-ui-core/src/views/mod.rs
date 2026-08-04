@@ -11,6 +11,7 @@ mod grid;
 mod header;
 mod icon;
 mod image;
+mod keyed;
 mod lazy_vstack;
 mod list;
 pub mod menu;
@@ -42,6 +43,7 @@ pub use icon::IconView;
 pub use image::{
     BitmapImage, Image, ImageFit, ImageRenderObject, ImageSource, VectorImageData, VectorTriangle,
 };
+pub use keyed::Keyed;
 pub use lazy_vstack::LazyVStack;
 pub use list::ListView;
 pub use menu::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};

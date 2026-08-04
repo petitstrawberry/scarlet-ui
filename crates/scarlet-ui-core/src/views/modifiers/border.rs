@@ -67,10 +67,10 @@ impl<V: View> Border<V> {
 
 impl<V: View + Clone> View for Border<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children(
             self.clone(),
-            BorderRenderObject::new(self.color, self.width, self.corner_radius),
-            vec![self.inner.create_element()],
+            |view| BorderRenderObject::new(view.color, view.width, view.corner_radius),
+            |view| vec![view.inner.clone_view()],
         ))
     }
 

@@ -293,6 +293,9 @@ pub struct RenderElement<V: View + Clone, R: RenderObject> {
     pipeline_id: PipelineId,
     subscriptions: Vec<SubscriptionId>,
     mounted: bool,
+    render_object_builder: Option<fn(&V) -> R>,
+    render_object_updater: Option<fn(&mut R, &V) -> UpdateResult>,
+    child_views_builder: Option<fn(&V) -> Vec<Box<dyn View>>>,
 }
 
 impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
@@ -308,6 +311,32 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
+            render_object_builder: None,
+            render_object_updater: None,
+            child_views_builder: None,
+        }
+    }
+
+    /// Create a leaf RenderElement whose RenderObject can be recreated locally.
+    ///
+    /// A builder is required when the RenderObject does not support an in-place
+    /// update. Reconciliation then preserves the Element while replacing only
+    /// its RenderObject.
+    pub fn new_with_builder(view: V, render_object_builder: fn(&V) -> R) -> Self {
+        let render_object = render_object_builder(&view);
+        Self {
+            id: ElementId::generate(),
+            view,
+            render_object,
+            children: Vec::new(),
+            position: Point::ZERO,
+            last_constraints: None,
+            pipeline_id: PipelineId::default(),
+            subscriptions: Vec::new(),
+            mounted: false,
+            render_object_builder: Some(render_object_builder),
+            render_object_updater: None,
+            child_views_builder: None,
         }
     }
 
@@ -323,6 +352,82 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
+            render_object_builder: None,
+            render_object_updater: None,
+            child_views_builder: None,
+        }
+    }
+
+    /// Create a RenderElement from View-to-RenderObject and View-to-children builders.
+    ///
+    /// The builders are retained and used by later reconciliation passes, so
+    /// child Elements are updated in place instead of being inflated again.
+    pub fn with_view_children(
+        view: V,
+        render_object_builder: fn(&V) -> R,
+        child_views_builder: fn(&V) -> Vec<Box<dyn View>>,
+    ) -> Self {
+        let render_object = render_object_builder(&view);
+        let children = child_views_builder(&view)
+            .into_iter()
+            .map(|child| child.create_element())
+            .collect();
+        Self {
+            id: ElementId::generate(),
+            view,
+            render_object,
+            children,
+            position: Point::ZERO,
+            last_constraints: None,
+            pipeline_id: PipelineId::default(),
+            subscriptions: Vec::new(),
+            mounted: false,
+            render_object_builder: Some(render_object_builder),
+            render_object_updater: None,
+            child_views_builder: Some(child_views_builder),
+        }
+    }
+
+    /// Create a RenderElement with explicit builders and an in-place updater.
+    ///
+    /// This is useful when the concrete View type contains generic callbacks
+    /// that a type-erased RenderObject cannot downcast on its own.
+    ///
+    /// # Arguments
+    ///
+    /// * `view` - Initial View description.
+    /// * `render_object_builder` - Function that creates the RenderObject.
+    /// * `render_object_updater` - Function that updates it from the typed View.
+    /// * `child_views_builder` - Function that builds child View descriptions.
+    ///
+    /// # Returns
+    ///
+    /// A RenderElement that preserves its RenderObject when the updater accepts
+    /// a compatible View.
+    pub fn with_view_children_and_updater(
+        view: V,
+        render_object_builder: fn(&V) -> R,
+        render_object_updater: fn(&mut R, &V) -> UpdateResult,
+        child_views_builder: fn(&V) -> Vec<Box<dyn View>>,
+    ) -> Self {
+        let render_object = render_object_builder(&view);
+        let children = child_views_builder(&view)
+            .into_iter()
+            .map(|child| child.create_element())
+            .collect();
+        Self {
+            id: ElementId::generate(),
+            view,
+            render_object,
+            children,
+            position: Point::ZERO,
+            last_constraints: None,
+            pipeline_id: PipelineId::default(),
+            subscriptions: Vec::new(),
+            mounted: false,
+            render_object_builder: Some(render_object_builder),
+            render_object_updater: Some(render_object_updater),
+            child_views_builder: Some(child_views_builder),
         }
     }
 
@@ -388,6 +493,39 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
     pub fn add_child(&mut self, child: Box<dyn Element>) {
         self.children.push(child);
     }
+
+    fn mount_context(&self) -> Option<MountContext> {
+        self.mounted.then(|| MountContext::new(self.pipeline_id))
+    }
+
+    fn update_render_object_from_view(&mut self) -> (UpdateResult, bool) {
+        let needs_layout = self.render_object.update_needs_layout();
+        let update_result = if let Some(updater) = self.render_object_updater {
+            updater(&mut self.render_object, &self.view)
+        } else {
+            self.render_object.update(&self.view)
+        };
+        match update_result {
+            UpdateResult::Replaced => {
+                let Some(builder) = self.render_object_builder else {
+                    return (UpdateResult::Replaced, true);
+                };
+                self.render_object = builder(&self.view);
+                (UpdateResult::Updated, true)
+            }
+            UpdateResult::Updated => (UpdateResult::Updated, needs_layout),
+            UpdateResult::NoChange => (UpdateResult::NoChange, false),
+        }
+    }
+
+    fn update_children_from_view(&mut self) -> UpdateResult {
+        let Some(builder) = self.child_views_builder else {
+            return UpdateResult::NoChange;
+        };
+        let child_views = builder(&self.view);
+        let mount_context = self.mount_context();
+        crate::element::update_children(&mut self.children, child_views, mount_context)
+    }
 }
 
 impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
@@ -397,6 +535,10 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
     fn type_name(&self) -> &str {
         "RenderElement"
+    }
+
+    fn view_key(&self) -> Option<&crate::view::ViewKey> {
+        self.view.key()
     }
 
     fn type_name_debug(&self) -> alloc::string::String {
@@ -424,37 +566,48 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn update(&mut self, new_view: &dyn View) -> UpdateResult {
-        // Try to downcast the new_view to the same type as our stored view
-        if let Some(typed_view) = new_view.as_any().downcast_ref::<V>() {
-            if self.mounted {
-                self.unsubscribe_view_listenables();
-            }
-            // Update the stored view (clone from the reference)
-            self.view = typed_view.clone();
-            // Delegate to the RenderObject's update method
-            let result = self.render_object.update(new_view);
+        let Some(typed_view) = new_view.as_any().downcast_ref::<V>() else {
+            return UpdateResult::Replaced;
+        };
+
+        if self.mounted {
+            self.unsubscribe_view_listenables();
+        }
+        self.view = typed_view.clone();
+        let (render_result, _) = self.update_render_object_from_view();
+        if matches!(render_result, UpdateResult::Replaced) {
             if self.mounted {
                 self.subscribe_view_listenables();
             }
-            result
+            return UpdateResult::Replaced;
+        }
+        let child_result = self.update_children_from_view();
+        if self.mounted {
+            self.subscribe_view_listenables();
+        }
+
+        if matches!(render_result, UpdateResult::Updated)
+            || matches!(child_result, UpdateResult::Updated)
+        {
+            UpdateResult::Updated
         } else {
-            // Type mismatch - need to replace
-            UpdateResult::Replaced
+            UpdateResult::NoChange
         }
     }
 
     fn rebuild(&mut self) -> UpdateResult {
-        // State owned by render views can change without a parent rebuilding.
-        // Keep the render object in sync with the stored view before layout/paint.
-        let update_needs_layout = self.render_object.update_needs_layout();
-        match self.render_object.update(&self.view) {
-            UpdateResult::Updated if update_needs_layout => UpdateResult::Updated,
-            UpdateResult::Updated => {
-                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
-                UpdateResult::NoChange
-            }
-            other => other,
+        let (render_result, render_needs_layout) = self.update_render_object_from_view();
+        if matches!(render_result, UpdateResult::Replaced) {
+            return UpdateResult::Replaced;
         }
+        let child_result = self.update_children_from_view();
+        if matches!(child_result, UpdateResult::Updated) || render_needs_layout {
+            return UpdateResult::Updated;
+        }
+        if matches!(render_result, UpdateResult::Updated) {
+            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+        }
+        UpdateResult::NoChange
     }
 
     fn mount(&mut self, ctx: &MountContext) {
@@ -1076,14 +1229,6 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
-                    MouseEvent::Moved { .. } => {
-                        if !render_object.is_hovered() {
-                            render_object.set_hovered(true);
-                        }
-                        menu_item.invoke_on_hover();
-                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
-                        return true;
-                    }
                     MouseEvent::Exited { .. } => {
                         render_object.set_hovered(false);
                         render_object.set_pressed(false);
@@ -1166,7 +1311,20 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     crate::logln!("[RenderElement] Toggle click id={:?}", self.id);
                 }
                 let state = toggle.get_is_on().clone();
-                state.update(|value| *value = !*value);
+                let next = !state.get();
+                if let Some(render_object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::ToggleRenderObject>()
+                {
+                    // Keep interaction feedback synchronous. The State
+                    // notification still rebuilds declarative dependants, but
+                    // this control must not need an unrelated event before its
+                    // own RenderObject reflects the click.
+                    render_object.set_is_on(next);
+                }
+                state.set(next);
+                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                 return true;
             }
         }

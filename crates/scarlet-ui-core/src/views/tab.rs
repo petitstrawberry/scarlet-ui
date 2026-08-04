@@ -206,7 +206,10 @@ impl TabView {
 
 impl View for TabView {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(ComponentElement::new(TabViewContent { tabs: self.clone() }))
+        Box::new(ComponentElement::new_with_builder(
+            self.clone(),
+            build_tab_view_content,
+        ))
     }
 
     fn listenables(&self) -> Vec<&dyn Listenable> {
@@ -218,6 +221,10 @@ impl View for TabView {
     }
 }
 
+fn build_tab_view_content(view: &TabView) -> Box<dyn View> {
+    Box::new(TabViewContent { tabs: view.clone() })
+}
+
 #[derive(Clone)]
 struct TabViewContent {
     tabs: TabView,
@@ -225,25 +232,10 @@ struct TabViewContent {
 
 impl View for TabViewContent {
     fn create_element(&self) -> Box<dyn Element> {
-        let child = self.tabs.active_content();
-        let render_object = TabViewRenderObject::new(
-            self.tabs.labels(),
-            self.tabs.selected_index_state().clone(),
-            self.tabs.tab_bar_height,
-            self.tabs.tab_padding,
-            self.tabs.font_size,
-            self.tabs.background_color,
-            self.tabs.selected_color,
-            self.tabs.hover_color,
-            self.tabs.border_color,
-            self.tabs.text_color,
-            self.tabs.selected_text_color,
-        );
-
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children(
             self.clone(),
-            render_object,
-            vec![child.create_element()],
+            tab_render_object,
+            |view| vec![view.tabs.active_content()],
         ))
     }
 
@@ -254,6 +246,22 @@ impl View for TabViewContent {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+fn tab_render_object(view: &TabViewContent) -> TabViewRenderObject {
+    TabViewRenderObject::new(
+        view.tabs.labels(),
+        view.tabs.selected_index_state().clone(),
+        view.tabs.tab_bar_height,
+        view.tabs.tab_padding,
+        view.tabs.font_size,
+        view.tabs.background_color,
+        view.tabs.selected_color,
+        view.tabs.hover_color,
+        view.tabs.border_color,
+        view.tabs.text_color,
+        view.tabs.selected_text_color,
+    )
 }
 
 /// Render object for [`TabView`].
@@ -499,6 +507,35 @@ impl ElementRenderObject for TabViewRenderObject {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn update(&mut self, new_view: &dyn View) -> crate::element::UpdateResult {
+        let Some(content) = new_view.as_any().downcast_ref::<TabViewContent>() else {
+            return crate::element::UpdateResult::Replaced;
+        };
+
+        self.labels = content.tabs.labels();
+        self.selected_index = content.tabs.selected_index_state().clone();
+        self.tab_bar_height = content.tabs.tab_bar_height;
+        self.tab_padding = content.tabs.tab_padding;
+        self.font_size = content.tabs.font_size;
+        self.background_color = content.tabs.background_color;
+        self.selected_color = content.tabs.selected_color;
+        self.hover_color = content.tabs.hover_color;
+        self.border_color = content.tabs.border_color;
+        self.text_color = content.tabs.text_color;
+        self.selected_text_color = content.tabs.selected_text_color;
+        self.hovered_index = self
+            .hovered_index
+            .filter(|index| *index < self.labels.len());
+        self.pressed_index = self
+            .pressed_index
+            .filter(|index| *index < self.labels.len());
+        crate::element::UpdateResult::Updated
+    }
+
+    fn update_needs_layout(&self) -> bool {
+        true
     }
 
     fn render(&mut self) {

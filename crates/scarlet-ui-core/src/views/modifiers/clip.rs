@@ -29,10 +29,10 @@ impl<V: View> Clip<V> {
 
 impl<V: View + Clone> View for Clip<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children(
             self.clone(),
-            ClipRenderObject::new(self.radius),
-            vec![self.inner.create_element()],
+            |view| ClipRenderObject::new(view.radius),
+            |view| vec![view.inner.clone_view()],
         ))
     }
 

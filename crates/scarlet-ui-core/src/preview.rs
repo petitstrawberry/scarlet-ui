@@ -278,13 +278,14 @@ impl<V> PreviewShell<V>
 where
     V: View + Clone + 'static,
 {
-    fn create_shell_element(shell: &Self) -> Box<dyn Element> {
-        Window::new(
-            shell.title.clone(),
-            AlignmentFrame::new(shell.content.clone(), Alignment::Center),
+    fn create_shell_element(shell: &Self) -> Box<dyn View> {
+        Box::new(
+            Window::new(
+                shell.title.clone(),
+                AlignmentFrame::new(shell.content.clone(), Alignment::Center),
+            )
+            .size(shell.size),
         )
-        .size(shell.size)
-        .create_element()
     }
 }
 

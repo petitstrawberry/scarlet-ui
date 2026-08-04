@@ -469,6 +469,19 @@ impl ElementRenderObject for ImageRenderObject {
     fn requires_buffer_render_for_paint(&self) -> bool {
         matches!(&self.source, ImageSource::Bitmap(_)) && self.buffer.is_some()
     }
+
+    fn update(&mut self, new_view: &dyn View) -> crate::element::UpdateResult {
+        let Some(image) = new_view.as_any().downcast_ref::<Image>() else {
+            return crate::element::UpdateResult::Replaced;
+        };
+        self.source = image.source.clone();
+        self.fit_mode = image.fit_mode;
+        crate::element::UpdateResult::Updated
+    }
+
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
 }
 
 fn paint_vector_image(

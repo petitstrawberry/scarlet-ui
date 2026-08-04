@@ -5,7 +5,8 @@
 use crate::color::Color;
 use crate::element::LayoutConstraints;
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::{Point, Size};
+use crate::geometry::{Point, Rect, Size};
+use crate::renderer::PaintContext;
 use crate::view::View;
 use alloc::boxed::Box;
 use alloc::vec;
@@ -37,10 +38,10 @@ impl<V: View> Background<V> {
 
 impl<V: View + Clone> View for Background<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_children(
+        Box::new(RenderElement::with_view_children(
             self.clone(),
-            BackgroundRenderObject::new(self.color),
-            vec![self.inner.create_element()],
+            |view| BackgroundRenderObject::new(view.color),
+            |view| vec![view.inner.clone_view()],
         ))
     }
 
@@ -84,6 +85,26 @@ impl ElementRenderObject for BackgroundRenderObject {
         self.size
     }
 
+    fn layout_with_children(
+        &mut self,
+        constraints: LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
+        let mut child_size = Size::ZERO;
+        for child in children {
+            let size = child.layout(constraints);
+            child_size.width = child_size.width.max(size.width);
+            child_size.height = child_size.height.max(size.height);
+            child.set_position(Point::ZERO);
+        }
+
+        self.size = constraints.constrain(child_size);
+        if self.size.width <= 0.0 || self.size.height <= 0.0 {
+            self.size = self.layout(constraints);
+        }
+        self.size
+    }
+
     fn size(&self) -> Size {
         self.size
     }
@@ -106,5 +127,10 @@ impl ElementRenderObject for BackgroundRenderObject {
 
     fn render(&mut self) {
         // Modifier doesn't directly render - child handles its own rendering
+    }
+
+    fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        ctx.fill_rect(Rect::new(origin, self.size), self.color);
+        true
     }
 }
