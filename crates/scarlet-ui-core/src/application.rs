@@ -65,6 +65,15 @@ pub trait Application: Clone + 'static {
     /// Configure a created platform window before the main loop starts.
     fn on_window_created(&mut self, _ctx: &WindowContext, _window: &mut dyn PlatformWindow) {}
 
+    /// Handle a user request to close a window.
+    ///
+    /// Return `true` to allow the runner to close the window, or `false` to
+    /// keep it open. Programmatic dismissal through [`crate::dismiss_window`]
+    /// does not invoke this hook.
+    fn on_window_close_requested(&mut self, _ctx: &WindowContext) -> bool {
+        true
+    }
+
     /// Synchronize application-managed window state.
     fn on_window_sync(&mut self, _ctx: &WindowContext, _window: &mut dyn PlatformWindow) {}
 
@@ -541,6 +550,9 @@ fn handle_window_event<A: Application>(
             close_ids.push(slot.context.window_id);
             return Ok(true);
         }
+        Event::Window(crate::event::WindowEvent::CloseRequested) => {
+            return Ok(handle_window_close_request(app, slot, close_ids));
+        }
         Event::Resize { width, height } => {
             let new_size = Size::new(width as f32, height as f32);
             if slot.window.resize(width, height).is_ok() {
@@ -682,7 +694,7 @@ fn handle_window_event<A: Application>(
         }
         _ => {
             let _ = slot.pipeline.handle_event(&event);
-            let closing = handle_emitted_window_events(slot, close_ids)?;
+            let closing = handle_emitted_window_events(app, slot, close_ids)?;
             if closing {
                 return Ok(true);
             }
@@ -690,6 +702,20 @@ fn handle_window_event<A: Application>(
         }
     }
     Ok(false)
+}
+
+fn handle_window_close_request<A: Application>(
+    app: &mut A,
+    slot: &mut WindowSlot<A>,
+    close_ids: &mut Vec<WindowId>,
+) -> bool {
+    if !app.on_window_close_requested(&slot.context) {
+        return false;
+    }
+
+    let _ = slot.window.close();
+    close_ids.push(slot.context.window_id);
+    true
 }
 
 fn sync_after_event<A: Application>(slot: &mut WindowSlot<A>) -> Result<()> {
@@ -701,15 +727,16 @@ fn sync_after_event<A: Application>(slot: &mut WindowSlot<A>) -> Result<()> {
 }
 
 fn handle_emitted_window_events<A: Application>(
+    app: &mut A,
     slot: &mut WindowSlot<A>,
     close_ids: &mut Vec<WindowId>,
 ) -> Result<bool> {
     for emitted_event in slot.pipeline.take_emitted_events() {
         match emitted_event {
             Event::Window(crate::event::WindowEvent::CloseRequested) => {
-                let _ = slot.window.close();
-                close_ids.push(slot.context.window_id);
-                return Ok(true);
+                if handle_window_close_request(app, slot, close_ids) {
+                    return Ok(true);
+                }
             }
             Event::Window(crate::event::WindowEvent::MaximizeRequested) => {
                 let _ = slot.window.maximize();

@@ -455,8 +455,12 @@ impl ApplicationHandler for WinitPumpHandler {
         let mut state = state.borrow_mut();
 
         match event {
-            WindowEvent::CloseRequested | WindowEvent::Destroyed => {
-                window.set_visible(false);
+            WindowEvent::CloseRequested => {
+                state.push(Event::Window(
+                    scarlet_ui_core::event::WindowEvent::CloseRequested,
+                ));
+            }
+            WindowEvent::Destroyed => {
                 state.push(Event::Quit);
             }
             WindowEvent::Resized(size) => {
