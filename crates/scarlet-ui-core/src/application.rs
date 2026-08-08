@@ -360,8 +360,13 @@ impl ApplicationRunner {
                 spin_without_present = 0;
                 wait_for_next_event(slots, Duration::from_millis(16));
             } else if any_presented {
-                // A frame was presented — stay responsive for animation.
+                // A frame was presented. Cap the presentation rate at ~60 fps
+                // so a pipeline that keeps marking itself dirty (e.g. during
+                // window close when SWS echoes frame acknowledgements) cannot
+                // pin a full core. wait_for_next_event returns early if a new
+                // event arrives, so genuine animation stays responsive.
                 spin_without_present = 0;
+                wait_for_next_event(slots, Duration::from_millis(16));
             } else {
                 // Events arrived (or the pipeline stayed dirty) but nothing
                 // was presented. Give a brief grace window for the next frame
