@@ -1,12 +1,17 @@
 //! Menu model definitions for application menu bars.
 
-use crate::os::Mutex;
+use crate::os::{Mutex, spawn_detached};
 use crate::views::{MenuBar, MenuItem};
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+/// Menu activation callback.
+///
+/// Callbacks execute on a detached worker rather than the application event
+/// loop. The `Send + Sync` contract permits that execution model and prevents
+/// blocking IPC or filesystem work from freezing every window in the process.
 pub type MenuCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 #[derive(Clone)]
@@ -189,26 +194,21 @@ fn push_json_string(out: &mut String, value: &str) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{MenuBarModel, MenuEntry, MenuItemModel};
-    use alloc::vec;
-
-    #[test]
-    fn menu_json_preserves_unicode_text() {
-        let json = MenuBarModel::new(vec![MenuItemModel::new("file", "File").children(vec![
-            MenuEntry::Item(MenuItemModel::new("open", "Open…").shortcut("Ctrl+O")),
-        ])])
-        .to_json();
-
-        assert!(json.contains("\"title\":\"Open…\""));
-        assert!(json.contains("\"shortcut\":\"Ctrl+O\""));
-    }
-}
-
 type MenuCallbackKey = (u32, String);
 
 static MENU_CALLBACKS: Mutex<BTreeMap<MenuCallbackKey, MenuCallback>> = Mutex::new(BTreeMap::new());
+static MENU_CALLBACKS_IN_FLIGHT: Mutex<BTreeSet<MenuCallbackKey>> =
+    Mutex::new(BTreeSet::new());
+
+struct MenuCallbackCompletion {
+    key: MenuCallbackKey,
+}
+
+impl Drop for MenuCallbackCompletion {
+    fn drop(&mut self) {
+        MENU_CALLBACKS_IN_FLIGHT.lock().remove(&self.key);
+    }
+}
 
 pub fn register_menu_callbacks(window_id: u32, menu_bar: &MenuBarModel) {
     let mut registry = MENU_CALLBACKS.lock();
@@ -218,15 +218,27 @@ pub fn register_menu_callbacks(window_id: u32, menu_bar: &MenuBarModel) {
     }
 }
 
+/// Invoke a menu callback without blocking the application event loop.
+///
+/// At most one invocation of a given `(window, item)` callback may run at a
+/// time. Repeated activation while a slow callback is still performing IPC is
+/// treated as handled but does not start duplicate work.
 pub fn invoke_menu_callback(window_id: u32, item_id: &str) -> bool {
     let key = (window_id, item_id.to_string());
     let callback = MENU_CALLBACKS.lock().get(&key).cloned();
-    if let Some(callback) = callback {
-        callback();
-        true
-    } else {
-        false
+    let Some(callback) = callback else {
+        return false;
+    };
+
+    if !MENU_CALLBACKS_IN_FLIGHT.lock().insert(key.clone()) {
+        return true;
     }
+
+    spawn_detached(move || {
+        let _completion = MenuCallbackCompletion { key };
+        callback();
+    });
+    true
 }
 
 pub fn unregister_menu_callbacks(window_id: u32) {
@@ -247,5 +259,67 @@ fn collect_callbacks(
         if let MenuEntry::Item(child) = entry {
             collect_callbacks(window_id, child, registry);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MENU_CALLBACKS_IN_FLIGHT, MenuBarModel, MenuEntry, MenuItemModel, invoke_menu_callback,
+        register_menu_callbacks, unregister_menu_callbacks,
+    };
+    use alloc::sync::Arc;
+    use alloc::vec;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+    use std::time::Duration;
+
+    #[test]
+    fn menu_json_preserves_unicode_text() {
+        let json = MenuBarModel::new(vec![MenuItemModel::new("file", "File").children(vec![
+            MenuEntry::Item(MenuItemModel::new("open", "Open…").shortcut("Ctrl+O")),
+        ])])
+        .to_json();
+
+        assert!(json.contains("\"title\":\"Open…\""));
+        assert!(json.contains("\"shortcut\":\"Ctrl+O\""));
+    }
+
+    #[test]
+    fn slow_menu_callback_runs_off_thread_and_is_not_reentered() {
+        let window_id = 0xfeed;
+        let key = (window_id, String::from("open"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_callback = Arc::clone(&calls);
+        let started = Arc::new(Barrier::new(2));
+        let started_for_callback = Arc::clone(&started);
+        let release = Arc::new(Barrier::new(2));
+        let release_for_callback = Arc::clone(&release);
+        let callback = Arc::new(move || {
+            calls_for_callback.fetch_add(1, Ordering::AcqRel);
+            started_for_callback.wait();
+            release_for_callback.wait();
+        });
+        let menu = MenuBarModel::new(vec![
+            MenuItemModel::new("file", "File").children(vec![MenuEntry::Item(
+                MenuItemModel::new("open", "Open").on_activate(callback),
+            )]),
+        ]);
+        register_menu_callbacks(window_id, &menu);
+
+        assert!(invoke_menu_callback(window_id, "open"));
+        started.wait();
+        assert!(invoke_menu_callback(window_id, "open"));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+
+        release.wait();
+        for _ in 0..100 {
+            if !MENU_CALLBACKS_IN_FLIGHT.lock().contains(&key) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!MENU_CALLBACKS_IN_FLIGHT.lock().contains(&key));
+        unregister_menu_callbacks(window_id);
     }
 }

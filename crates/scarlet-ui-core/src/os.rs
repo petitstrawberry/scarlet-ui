@@ -27,3 +27,24 @@ impl<T> Mutex<T> {
 pub use scarlet_std::fs::File;
 #[cfg(not(feature = "std"))]
 pub use scarlet_std::sync::Mutex;
+
+/// Run work on a detached thread.
+///
+/// This is used for callbacks that may perform blocking IPC or filesystem I/O
+/// and therefore must not run on the application event loop.
+#[cfg(feature = "std")]
+pub fn spawn_detached<F>(task: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    drop(std::thread::spawn(task));
+}
+
+/// Run work on a detached Scarlet userspace thread.
+#[cfg(not(feature = "std"))]
+pub fn spawn_detached<F>(task: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    drop(scarlet_std::thread::spawn(task));
+}
