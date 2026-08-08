@@ -292,6 +292,11 @@ impl ApplicationRunner {
         slots: &mut Vec<WindowSlot<A>>,
     ) -> Result<()> {
         let app_wheel_coalesce_enabled = app_wheel_coalesce_env_enabled();
+        // Counts consecutive iterations that processed events (or had a dirty
+        // pipeline) without actually presenting a frame. A few of these are
+        // normal during an event burst; a long run means the compositor or
+        // transport is degraded and the loop would otherwise pin a full core.
+        let mut spin_without_present: u32 = 0;
         loop {
             let mut any_event = false;
             let mut any_presented = false;
@@ -352,7 +357,23 @@ impl ApplicationRunner {
             }
 
             if !any_event && !any_presented {
+                spin_without_present = 0;
                 wait_for_next_event(slots, Duration::from_millis(16));
+            } else if any_presented {
+                // A frame was presented — stay responsive for animation.
+                spin_without_present = 0;
+            } else {
+                // Events arrived (or the pipeline stayed dirty) but nothing
+                // was presented. Give a brief grace window for the next frame
+                // to land, then back off exponentially up to the normal idle
+                // sleep so a stuck compositor cannot monopolize a core.
+                spin_without_present = spin_without_present.saturating_add(1);
+                let backoff_ms = if spin_without_present <= 3 {
+                    1u64
+                } else {
+                    (1u64 << (spin_without_present - 4).min(4)).min(16)
+                };
+                wait_for_next_event(slots, Duration::from_millis(backoff_ms));
             }
         }
     }
