@@ -663,6 +663,8 @@ pub struct SWSPlatformWindow {
     text_input: Option<TextInputContext>,
     pending_wheel: PendingWheelDelta,
     needs_full_present: bool,
+    transport_failed: bool,
+    quit_queued: bool,
 }
 
 fn normalized_wheel_axis(discrete: i32, has_discrete: bool, hi_res: i32, has_hi_res: bool) -> i32 {
@@ -996,6 +998,8 @@ impl SWSPlatformWindow {
             text_input: None,
             pending_wheel: PendingWheelDelta::default(),
             needs_full_present: false,
+            transport_failed: false,
+            quit_queued: false,
         })
     }
 
@@ -1062,7 +1066,32 @@ impl SWSPlatformWindow {
         self.pending_events.push(event);
     }
 
+    fn queue_quit(&mut self) {
+        if !self.quit_queued {
+            self.quit_queued = true;
+            self.push_event(Event::Quit);
+        }
+    }
+
+    fn mark_transport_failed(&mut self) {
+        if self.transport_failed {
+            return;
+        }
+        self.transport_failed = true;
+        self.pending_events.clear();
+        self.pending_head = 0;
+        logln!(
+            "[SWSPlatformWindow] transport failed for surface {}",
+            self.surface_id
+        );
+        self.queue_quit();
+    }
+
     pub fn sync_text_input(&mut self, state: Option<&TextInputElementState>) {
+        if self.transport_failed {
+            return;
+        }
+
         let Some(state) = state else {
             if let Some(context) = self.text_input.as_mut()
                 && context.enabled
@@ -1467,10 +1496,14 @@ impl PlatformWindow for SWSPlatformWindow {
             self.pending_head = 0;
         }
 
-        let _ = self.conn.dispatch().ok();
+        if !self.transport_failed && self.conn.dispatch().is_err() {
+            self.mark_transport_failed();
+        }
 
-        while let Some(ev) = self.event_receiver.poll_event() {
-            self.handle_sws_event(ev);
+        if !self.transport_failed {
+            while let Some(ev) = self.event_receiver.poll_event() {
+                self.handle_sws_event(ev);
+            }
         }
 
         if self.pending_head < self.pending_events.len() {
@@ -1567,6 +1600,10 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn present_with_damage(&mut self, buffer: &Buffer, damage: Option<&[DamageRect]>) {
+        if self.transport_failed {
+            return;
+        }
+
         let damage = if self.needs_full_present {
             None
         } else {
@@ -1578,7 +1615,7 @@ impl PlatformWindow for SWSPlatformWindow {
         }
 
         // Get the surface and copy pixels
-        let _ = self.conn.with_surface_mut(self.surface_id, |surface| {
+        let copied = self.conn.with_surface_mut(self.surface_id, |surface| {
             // Get the shared memory buffer
             surface.with_buffer(|shm_buf, width, height| {
                 let full_damage = [(0, 0, width, height)];
@@ -1588,24 +1625,37 @@ impl PlatformWindow for SWSPlatformWindow {
                 }
             });
         });
+        if copied.is_none() {
+            self.queue_quit();
+            return;
+        }
 
-        match damage {
+        let committed = match damage {
             Some(rects) => {
+                let mut committed = true;
                 for rect in rects {
                     let (x, y, width, height) = *rect;
-                    if width > 0 && height > 0 {
-                        let _ = self
+                    if width > 0
+                        && height > 0
+                        && self
                             .conn
-                            .commit_region(self.surface_id, x, y, width, height);
+                            .commit_region(self.surface_id, x, y, width, height)
+                            .is_err()
+                    {
+                        committed = false;
+                        break;
                     }
                 }
+                committed
             }
-            None => {
-                let _ = self.conn.commit(self.surface_id);
-            }
+            None => self.conn.commit(self.surface_id).is_ok(),
         };
 
-        self.needs_full_present = false;
+        if committed {
+            self.needs_full_present = false;
+        } else {
+            self.mark_transport_failed();
+        }
     }
 
     fn set_title(&mut self, title: &str) {
@@ -2086,7 +2136,7 @@ impl SWSPlatformWindow {
             }
             SwsEvent::SurfaceDestroyed { surface_id } => {
                 if surface_id == self.surface_id {
-                    self.push_event(Event::Quit);
+                    self.queue_quit();
                     if debug {
                         logln!("[SWSPlatformWindow] SurfaceDestroyed");
                     }
