@@ -265,13 +265,13 @@ fn collect_callbacks(
 #[cfg(test)]
 mod tests {
     use super::{
-        MenuBarModel, MenuEntry, MenuItemModel, invoke_menu_callback, register_menu_callbacks,
-        unregister_menu_callbacks,
+        MENU_CALLBACKS_IN_FLIGHT, MenuBarModel, MenuEntry, MenuItemModel, invoke_menu_callback,
+        register_menu_callbacks, unregister_menu_callbacks,
     };
     use alloc::sync::Arc;
     use alloc::vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::mpsc;
+    use std::sync::Barrier;
     use std::time::Duration;
 
     #[test]
@@ -288,14 +288,17 @@ mod tests {
     #[test]
     fn slow_menu_callback_runs_off_thread_and_is_not_reentered() {
         let window_id = 0xfeed;
+        let key = (window_id, String::from("open"));
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_callback = Arc::clone(&calls);
-        let (started_tx, started_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
+        let started = Arc::new(Barrier::new(2));
+        let started_for_callback = Arc::clone(&started);
+        let release = Arc::new(Barrier::new(2));
+        let release_for_callback = Arc::clone(&release);
         let callback = Arc::new(move || {
             calls_for_callback.fetch_add(1, Ordering::AcqRel);
-            started_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
+            started_for_callback.wait();
+            release_for_callback.wait();
         });
         let menu = MenuBarModel::new(vec![
             MenuItemModel::new("file", "File").children(vec![MenuEntry::Item(
@@ -305,16 +308,18 @@ mod tests {
         register_menu_callbacks(window_id, &menu);
 
         assert!(invoke_menu_callback(window_id, "open"));
-        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        started.wait();
         assert!(invoke_menu_callback(window_id, "open"));
         assert_eq!(calls.load(Ordering::Acquire), 1);
 
-        release_tx.send(()).unwrap();
+        release.wait();
         for _ in 0..100 {
-            if calls.load(Ordering::Acquire) == 1 {
-                std::thread::sleep(Duration::from_millis(1));
+            if !MENU_CALLBACKS_IN_FLIGHT.lock().contains(&key) {
+                break;
             }
+            std::thread::sleep(Duration::from_millis(1));
         }
+        assert!(!MENU_CALLBACKS_IN_FLIGHT.lock().contains(&key));
         unregister_menu_callbacks(window_id);
     }
 }
