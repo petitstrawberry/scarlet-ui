@@ -6,6 +6,9 @@ on:
       - automation/fix-sws-event-liveness-20260808
     paths:
       - .github/workflows/automation-patch.yml
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
