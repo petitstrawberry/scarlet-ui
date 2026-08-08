@@ -23,6 +23,8 @@ use crate::scene::{
 use crate::state::{InvalidationKind, StateId, SubscriptionId};
 use crate::view::View;
 
+const MAX_EVENTS_PER_WINDOW_PER_TICK: usize = 64;
+
 #[cfg(feature = "std")]
 fn wheel_log_env_enabled() -> bool {
     std::env::var("SCARLET_UI_WHEEL_LOG")
@@ -306,7 +308,10 @@ impl ApplicationRunner {
                 slot.presented_this_cycle = false;
                 let mut pending_trackpad_moved = None;
                 let mut slot_closing = false;
-                while let Some(event) = slot.window.poll_event() {
+                for _ in 0..MAX_EVENTS_PER_WINDOW_PER_TICK {
+                    let Some(event) = slot.window.poll_event() else {
+                        break;
+                    };
                     any_event = true;
                     let Some(event) = coalesce_trackpad_moved_for_batch(
                         &mut pending_trackpad_moved,
@@ -586,9 +591,6 @@ fn handle_window_event<A: Application>(
                 slot.pipeline.resize(new_size);
                 app.on_window_resize(&slot.context, width, height);
                 sync_text_input(slot.window.as_mut(), &slot.pipeline);
-                if present_pipeline(&mut slot.pipeline, slot.window.as_mut())? {
-                    slot.presented_this_cycle = true;
-                }
             }
         }
         Event::ScreenSizeChanged { width, height } => {
@@ -600,11 +602,6 @@ fn handle_window_event<A: Application>(
                     sync_output_scale(&mut slot.pipeline, slot.window.as_ref());
                     slot.pipeline.resize(new_size);
                     sync_text_input(slot.window.as_mut(), &slot.pipeline);
-                }
-            }
-            if resize_to.is_some() || slot.pipeline.has_dirty() {
-                if present_pipeline(&mut slot.pipeline, slot.window.as_mut())? {
-                    slot.presented_this_cycle = true;
                 }
             }
         }
@@ -746,9 +743,6 @@ fn handle_window_close_request<A: Application>(
 
 fn sync_after_event<A: Application>(slot: &mut WindowSlot<A>) -> Result<()> {
     sync_text_input(slot.window.as_mut(), &slot.pipeline);
-    if slot.pipeline.has_dirty() && present_pipeline(&mut slot.pipeline, slot.window.as_mut())? {
-        slot.presented_this_cycle = true;
-    }
     Ok(())
 }
 
