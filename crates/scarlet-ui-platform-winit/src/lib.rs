@@ -28,7 +28,7 @@ use ::winit::event::{
 use ::winit::event_loop::{ActiveEventLoop, EventLoop};
 use ::winit::keyboard::{Key, ModifiersState, NamedKey};
 use ::winit::platform::pump_events::EventLoopExtPumpEvents;
-use ::winit::window::{Window as WinitWindow, WindowAttributes, WindowId};
+use ::winit::window::{Fullscreen, Window as WinitWindow, WindowAttributes, WindowId};
 
 type SoftbufferContext = softbuffer::Context<::winit::event_loop::OwnedDisplayHandle>;
 type SoftbufferSurface =
@@ -890,6 +890,12 @@ impl PlatformWindow for WinitPlatformWindow {
 
     fn maximize(&mut self) -> Result<()> {
         self.window.set_maximized(true);
+        Ok(())
+    }
+
+    fn set_fullscreen(&mut self, fullscreen: bool) -> Result<()> {
+        let mode = fullscreen.then(|| Fullscreen::Borderless(self.window.current_monitor()));
+        self.window.set_fullscreen(mode);
         Ok(())
     }
 

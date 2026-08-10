@@ -809,6 +809,10 @@ mod tests {
             Ok(())
         }
 
+        fn set_fullscreen(&mut self, _fullscreen: bool) -> crate::Result<()> {
+            Ok(())
+        }
+
         fn restore(&mut self) -> crate::Result<()> {
             Ok(())
         }

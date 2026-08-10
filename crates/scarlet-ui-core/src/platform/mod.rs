@@ -151,10 +151,31 @@ pub trait PlatformWindow: Any {
     /// Minimize the window (hide it)
     fn minimize(&mut self) -> Result<()>;
 
-    /// Maximize the window to screen dimensions
+    /// Maximize the window within the platform workarea.
+    ///
+    /// Maximized state remains distinct from fullscreen state and normally
+    /// leaves shell UI such as panels visible.
     fn maximize(&mut self) -> Result<()>;
 
-    /// Restore the window from minimized or maximized state
+    /// Set whether the window occupies an entire output in fullscreen mode.
+    ///
+    /// Fullscreen remains distinct from maximized state. Implementations may
+    /// reject an enabled request when another window owns the output fullscreen
+    /// slot.
+    ///
+    /// # Arguments
+    ///
+    /// * `fullscreen` - `true` to enter fullscreen, or `false` to leave it
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the platform accepted the request.
+    fn set_fullscreen(&mut self, fullscreen: bool) -> Result<()>;
+
+    /// Restore the window from minimized or maximized state.
+    ///
+    /// This does not leave fullscreen state; call [`Self::set_fullscreen`]
+    /// with `false` for that transition.
     fn restore(&mut self) -> Result<()>;
 
     /// Focus and raise the window through the platform window manager.

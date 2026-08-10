@@ -1720,6 +1720,15 @@ impl PlatformWindow for SWSPlatformWindow {
             .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
+    fn set_fullscreen(&mut self, fullscreen: bool) -> Result<()> {
+        let result = if fullscreen {
+            self.conn.set_fullscreen(self.surface_id)
+        } else {
+            self.conn.unset_fullscreen(self.surface_id)
+        };
+        result.map_err(|_| scarlet_ui_core::error::Error::IoError)
+    }
+
     fn restore(&mut self) -> Result<()> {
         self.conn
             .restore_window(self.surface_id)
