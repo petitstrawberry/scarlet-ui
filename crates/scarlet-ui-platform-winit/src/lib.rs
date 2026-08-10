@@ -379,11 +379,14 @@ impl WinitEventState {
         serial
     }
 
-    fn sync_fullscreen_state(&mut self, window: &WinitWindow) {
+    fn sync_fullscreen_state(&mut self, window: &WinitWindow) -> bool {
         let fullscreen = window.fullscreen().is_some();
         if fullscreen != self.fullscreen {
             self.fullscreen = fullscreen;
             self.push(Event::FullscreenChanged { fullscreen });
+            true
+        } else {
+            false
         }
     }
 
@@ -464,6 +467,23 @@ impl ApplicationHandler for WinitPumpHandler {
         };
         let mut state = state.borrow_mut();
 
+        // Winit does not expose a dedicated fullscreen-changed event. Its
+        // macOS delegate does update Window::fullscreen(), so synthesize the
+        // framework event while handling the next native window event.
+        let resize_event = matches!(
+            &event,
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
+        );
+        let fullscreen_changed = state.sync_fullscreen_state(&window);
+        if fullscreen_changed && !resize_event {
+            let size = window.inner_size();
+            let scale_factor = state.scale_factor;
+            state.push(Event::Resize {
+                width: physical_to_logical_len(size.width, scale_factor),
+                height: physical_to_logical_len(size.height, scale_factor),
+            });
+        }
+
         match event {
             WindowEvent::CloseRequested => {
                 state.push(Event::Window(
@@ -474,7 +494,6 @@ impl ApplicationHandler for WinitPumpHandler {
                 state.push(Event::Quit);
             }
             WindowEvent::Resized(size) => {
-                state.sync_fullscreen_state(&window);
                 let logical_width = physical_to_logical_len(size.width, state.scale_factor);
                 let logical_height = physical_to_logical_len(size.height, state.scale_factor);
                 state.push(Event::Resize {
@@ -483,7 +502,6 @@ impl ApplicationHandler for WinitPumpHandler {
                 });
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                state.sync_fullscreen_state(&window);
                 state.scale_factor = scale_factor;
                 let size = window.inner_size();
                 state.push(Event::Resize {
