@@ -21,6 +21,9 @@ pub enum Event {
     /// Window resize event
     Resize { width: u32, height: u32 },
 
+    /// Window fullscreen state changed on the platform.
+    FullscreenChanged { fullscreen: bool },
+
     /// Screen size changed
     ScreenSizeChanged { width: u32, height: u32 },
 

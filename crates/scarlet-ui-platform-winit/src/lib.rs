@@ -100,6 +100,7 @@ struct WinitEventState {
     cursor_x: i32,
     cursor_y: i32,
     window_focused: bool,
+    fullscreen: bool,
     manual_move_active: bool,
     manual_move_origin_outer_x: i32,
     manual_move_origin_outer_y: i32,
@@ -203,6 +204,7 @@ impl WinitEventState {
             cursor_x: 0,
             cursor_y: 0,
             window_focused: true,
+            fullscreen: false,
             manual_move_active: false,
             manual_move_origin_outer_x: 0,
             manual_move_origin_outer_y: 0,
@@ -377,6 +379,14 @@ impl WinitEventState {
         serial
     }
 
+    fn sync_fullscreen_state(&mut self, window: &WinitWindow) {
+        let fullscreen = window.fullscreen().is_some();
+        if fullscreen != self.fullscreen {
+            self.fullscreen = fullscreen;
+            self.push(Event::FullscreenChanged { fullscreen });
+        }
+    }
+
     fn defer_empty_preedit(&mut self) {
         let context_id = self.text_input_context_id;
         let serial = self.next_text_input_serial();
@@ -464,6 +474,7 @@ impl ApplicationHandler for WinitPumpHandler {
                 state.push(Event::Quit);
             }
             WindowEvent::Resized(size) => {
+                state.sync_fullscreen_state(&window);
                 let logical_width = physical_to_logical_len(size.width, state.scale_factor);
                 let logical_height = physical_to_logical_len(size.height, state.scale_factor);
                 state.push(Event::Resize {
@@ -472,6 +483,7 @@ impl ApplicationHandler for WinitPumpHandler {
                 });
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                state.sync_fullscreen_state(&window);
                 state.scale_factor = scale_factor;
                 let size = window.inner_size();
                 state.push(Event::Resize {
@@ -897,10 +909,6 @@ impl PlatformWindow for WinitPlatformWindow {
         let mode = fullscreen.then(|| Fullscreen::Borderless(self.window.current_monitor()));
         self.window.set_fullscreen(mode);
         Ok(())
-    }
-
-    fn is_fullscreen(&self) -> Option<bool> {
-        Some(self.window.fullscreen().is_some())
     }
 
     fn restore(&mut self) -> Result<()> {

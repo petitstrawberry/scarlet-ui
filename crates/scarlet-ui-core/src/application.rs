@@ -79,6 +79,9 @@ pub trait Application: Clone + 'static {
     /// Synchronize application-managed window state.
     fn on_window_sync(&mut self, _ctx: &WindowContext, _window: &mut dyn PlatformWindow) {}
 
+    /// Handle a platform fullscreen state change.
+    fn on_window_fullscreen_changed(&mut self, _ctx: &WindowContext, _fullscreen: bool) {}
+
     /// Handle committed text from an input method.
     fn on_text_input_commit(
         &mut self,
@@ -592,6 +595,9 @@ fn handle_window_event<A: Application>(
                 app.on_window_resize(&slot.context, width, height);
                 sync_text_input(slot.window.as_mut(), &slot.pipeline);
             }
+        }
+        Event::FullscreenChanged { fullscreen } => {
+            app.on_window_fullscreen_changed(&slot.context, fullscreen);
         }
         Event::ScreenSizeChanged { width, height } => {
             let resize_to = app.on_screen_size_changed(width, height);

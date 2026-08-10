@@ -1728,13 +1728,7 @@ impl PlatformWindow for SWSPlatformWindow {
         } else {
             self.conn.unset_fullscreen(self.surface_id)
         };
-        result.map_err(|_| scarlet_ui_core::error::Error::IoError)?;
-        self.fullscreen = fullscreen;
-        Ok(())
-    }
-
-    fn is_fullscreen(&self) -> Option<bool> {
-        Some(self.fullscreen)
+        result.map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
     fn restore(&mut self) -> Result<()> {
@@ -2142,7 +2136,11 @@ impl SWSPlatformWindow {
                 surface_id,
                 state_flags,
             } if surface_id == self.surface_id => {
-                self.fullscreen = state_flags & sws::window_state::FULLSCREEN != 0;
+                let fullscreen = state_flags & sws::window_state::FULLSCREEN != 0;
+                if fullscreen != self.fullscreen {
+                    self.fullscreen = fullscreen;
+                    self.push_event(Event::FullscreenChanged { fullscreen });
+                }
             }
             SwsEvent::ScreenSizeChanged { width, height } => {
                 self.push_event(Event::ScreenSizeChanged {

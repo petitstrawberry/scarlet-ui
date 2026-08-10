@@ -177,6 +177,7 @@ impl EventDispatcher {
                 self.handle_resize(element_tree, *width, *height);
                 false
             }
+            Event::FullscreenChanged { .. } => false,
             Event::ScreenSizeChanged { .. } => false,
             Event::Mouse(mouse_event) => self.dispatch_mouse(element_tree, mouse_event),
             Event::Keyboard(key_event) => self.dispatch_keyboard(element_tree, key_event),
