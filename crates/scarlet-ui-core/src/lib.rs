@@ -186,7 +186,9 @@ pub mod prelude {
     };
     pub use crate::state::{InvalidationKind, Listenable, State, StateId, SubscriptionId};
     pub use crate::view::{View, ViewExt, ViewKey};
-    pub use crate::views::modifiers::{Background, Border, Clip, Focusable, Frame, OnKey, Padding};
+    pub use crate::views::modifiers::{
+        Background, Border, Clip, Focusable, Frame, OnKey, OnMouseMove, Padding,
+    };
     pub use crate::views::{
         BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, IconView, Image,
         ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView,

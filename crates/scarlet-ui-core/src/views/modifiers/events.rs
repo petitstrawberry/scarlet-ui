@@ -476,6 +476,129 @@ impl<V: View + Clone, F: Fn() + Clone + 'static> View for OnExit<V, F> {
     }
 }
 
+/// Mouse-move event modifier - observes pointer movement without consuming it.
+#[derive(Clone)]
+pub struct OnMouseMove<V: View, F: Clone + 'static> {
+    inner: V,
+    callback: F,
+}
+
+impl<V: View, F: Fn(i32, i32) + Clone + 'static> OnMouseMove<V, F> {
+    /// Create a new mouse-move modifier.
+    pub fn new(inner: V, callback: F) -> Self {
+        Self { inner, callback }
+    }
+}
+
+impl<V: View + Clone, F: Fn(i32, i32) + Clone + 'static> View for OnMouseMove<V, F> {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(RenderElement::with_view_children_and_updater(
+            self.clone(),
+            |view| {
+                let mut render_object = OnMouseMoveRenderObject::new();
+                render_object.set_callback(Box::new(view.callback.clone()));
+                render_object
+            },
+            update_on_mouse_move_render_object::<V, F>,
+            |view| vec![view.inner.clone_view()],
+        ))
+    }
+
+    fn listenables(&self) -> alloc::vec::Vec<&dyn Listenable> {
+        self.inner.listenables()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+fn update_on_mouse_move_render_object<V, F>(
+    render_object: &mut OnMouseMoveRenderObject,
+    view: &OnMouseMove<V, F>,
+) -> UpdateResult
+where
+    V: View,
+    F: Fn(i32, i32) + Clone + 'static,
+{
+    render_object.set_callback(Box::new(view.callback.clone()));
+    UpdateResult::Updated
+}
+
+/// Render object for [`OnMouseMove`].
+pub struct OnMouseMoveRenderObject {
+    callback: Option<Box<dyn Fn(i32, i32)>>,
+    size: Size,
+}
+
+impl OnMouseMoveRenderObject {
+    pub fn new() -> Self {
+        Self {
+            callback: None,
+            size: Size::ZERO,
+        }
+    }
+
+    fn set_callback(&mut self, callback: Box<dyn Fn(i32, i32)>) {
+        self.callback = Some(callback);
+    }
+}
+
+impl ElementRenderObject for OnMouseMoveRenderObject {
+    fn layout(&mut self, _constraints: crate::element::LayoutConstraints) -> Size {
+        self.size = Size::ZERO;
+        self.size
+    }
+
+    fn layout_with_children(
+        &mut self,
+        constraints: crate::element::LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
+        if let Some(child) = children.first_mut() {
+            self.size = child.layout(constraints);
+        } else {
+            self.size = Size::ZERO;
+        }
+        self.size
+    }
+
+    fn size(&self) -> Size {
+        self.size
+    }
+
+    fn hit_test(&self, point: crate::geometry::Point) -> bool {
+        point.x >= 0.0 && point.y >= 0.0 && point.x < self.size.width && point.y < self.size.height
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn handle_event(&mut self, event: &Event, phase: Phase) -> bool {
+        if !matches!(phase, Phase::Target | Phase::Bubble) {
+            return false;
+        }
+
+        match event {
+            Event::Mouse(MouseEvent::Entered { x, y })
+            | Event::Mouse(MouseEvent::Moved { x, y }) => {
+                if let Some(callback) = self.callback.as_ref() {
+                    callback(*x, *y);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn render(&mut self) {}
+}
+
 fn update_on_exit_render_object<V, F>(
     render_object: &mut OnExitRenderObject,
     view: &OnExit<V, F>,

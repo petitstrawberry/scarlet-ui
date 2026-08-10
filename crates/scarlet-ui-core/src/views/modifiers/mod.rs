@@ -18,7 +18,7 @@ pub use border::{Border, BorderRenderObject};
 pub use clip::{Clip, ClipRenderObject};
 pub use events::{
     Focusable, FocusableRenderObject, OnClick, OnClickRenderObject, OnExit, OnExitRenderObject,
-    OnHover, OnHoverRenderObject, OnKey, OnKeyRenderObject,
+    OnHover, OnHoverRenderObject, OnKey, OnKeyRenderObject, OnMouseMove, OnMouseMoveRenderObject,
 };
 pub use frame::{Frame, FrameRenderObject};
 pub use padding::{Padding, PaddingRenderObject};

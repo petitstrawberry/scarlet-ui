@@ -277,6 +277,17 @@ pub trait ViewExt: View {
         crate::views::modifiers::OnExit::new(self, callback)
     }
 
+    /// Observe pointer movement within this view without consuming the event.
+    fn on_mouse_move<F: Fn(i32, i32) + Clone + 'static>(
+        self,
+        callback: F,
+    ) -> crate::views::modifiers::OnMouseMove<Self, F>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::OnMouseMove::new(self, callback)
+    }
+
     /// Add a keyboard handler to this view
     ///
     /// # Arguments
