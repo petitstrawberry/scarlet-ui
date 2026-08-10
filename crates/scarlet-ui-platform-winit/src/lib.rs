@@ -899,6 +899,10 @@ impl PlatformWindow for WinitPlatformWindow {
         Ok(())
     }
 
+    fn is_fullscreen(&self) -> Option<bool> {
+        Some(self.window.fullscreen().is_some())
+    }
+
     fn restore(&mut self) -> Result<()> {
         self.window.set_minimized(false);
         self.window.set_maximized(false);

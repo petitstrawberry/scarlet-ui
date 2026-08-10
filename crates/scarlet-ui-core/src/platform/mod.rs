@@ -172,6 +172,20 @@ pub trait PlatformWindow: Any {
     /// `Ok(())` when the platform accepted the request.
     fn set_fullscreen(&mut self, fullscreen: bool) -> Result<()>;
 
+    /// Return the platform's currently observed fullscreen state.
+    ///
+    /// Backends that cannot query fullscreen state return `None`. The value
+    /// describes the platform window, so it also reflects fullscreen changes
+    /// initiated by the window manager or operating system.
+    ///
+    /// # Returns
+    ///
+    /// `Some(true)` when the window is fullscreen, `Some(false)` when it is
+    /// not fullscreen, or `None` when the state is unavailable.
+    fn is_fullscreen(&self) -> Option<bool> {
+        None
+    }
+
     /// Restore the window from minimized or maximized state.
     ///
     /// This does not leave fullscreen state; call [`Self::set_fullscreen`]

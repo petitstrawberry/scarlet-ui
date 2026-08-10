@@ -646,6 +646,7 @@ pub struct SWSPlatformWindow {
     compositor_backend: CompositorBackendKind,
     scale_milli: u32,
     current_size: Size,
+    fullscreen: bool,
     pending_events: Vec<Event>,
     pending_head: usize,
     pointer_x: i32,
@@ -981,6 +982,7 @@ impl SWSPlatformWindow {
             compositor_backend: CompositorBackendKind::Unknown,
             scale_milli,
             current_size: size,
+            fullscreen: false,
             pending_events: Vec::new(),
             pending_head: 0,
             pointer_x: 0,
@@ -1726,7 +1728,13 @@ impl PlatformWindow for SWSPlatformWindow {
         } else {
             self.conn.unset_fullscreen(self.surface_id)
         };
-        result.map_err(|_| scarlet_ui_core::error::Error::IoError)
+        result.map_err(|_| scarlet_ui_core::error::Error::IoError)?;
+        self.fullscreen = fullscreen;
+        Ok(())
+    }
+
+    fn is_fullscreen(&self) -> Option<bool> {
+        Some(self.fullscreen)
     }
 
     fn restore(&mut self) -> Result<()> {
@@ -2129,6 +2137,12 @@ impl SWSPlatformWindow {
                         );
                     }
                 }
+            }
+            SwsEvent::SurfaceStateChanged {
+                surface_id,
+                state_flags,
+            } if surface_id == self.surface_id => {
+                self.fullscreen = state_flags & sws::window_state::FULLSCREEN != 0;
             }
             SwsEvent::ScreenSizeChanged { width, height } => {
                 self.push_event(Event::ScreenSizeChanged {
