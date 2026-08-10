@@ -10,7 +10,7 @@ std = ["dep:raw-window-handle"]
 preview = ["std", "dep:inventory", "dep:libloading"]
 
 [dependencies]
-scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "scarlet-std", optional = true }
+scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", rev = "c155e461dc53576bf32859ac1af44fec52164ed8", package = "scarlet-std", optional = true }
 libm = { version = "0.2", default-features = false }
 scarlet-ui-macros = { path = "../scarlet-ui-macros" }
 scarlet-ui-icons-tabler = { path = "../scarlet-ui-icons-tabler" }

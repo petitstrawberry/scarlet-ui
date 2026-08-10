@@ -34,7 +34,7 @@ use scarlet_ui_renderer_sgfx::{
 };
 pub use scarlet_ui_renderer_sgfx::{
     SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
-    SgfxCanvasVertex, SgfxMesh, SgfxTexture,
+    SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
 };
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code, rel_code};
 use sws_client as sws;
@@ -588,6 +588,55 @@ struct PendingWheelDelta {
     has_hi_res_y: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PendingRelativeMotion {
+    dx: i32,
+    dy: i32,
+}
+
+impl PendingRelativeMotion {
+    fn push_input(&mut self, type_: u16, code: u16, value: i32, pointer_locked: bool) -> bool {
+        if !pointer_locked || type_ != event_type::EV_REL {
+            return false;
+        }
+        match code {
+            rel_code::REL_X => self.dx = self.dx.saturating_add(value),
+            rel_code::REL_Y => self.dy = self.dy.saturating_add(value),
+            _ => return false,
+        }
+        true
+    }
+
+    fn take(&mut self) -> Option<(i32, i32)> {
+        if self.dx == 0 && self.dy == 0 {
+            return None;
+        }
+        Some((core::mem::take(&mut self.dx), core::mem::take(&mut self.dy)))
+    }
+}
+
+fn pointer_lock_supported(capabilities: u64) -> bool {
+    capabilities & sws_protocol::capabilities::POINTER_LOCK != 0
+}
+
+fn update_pointer_lock_state(current: &mut bool, locked: bool) -> bool {
+    if *current == locked {
+        false
+    } else {
+        *current = locked;
+        true
+    }
+}
+
+fn apply_pointer_lock_confirmation(
+    current: &mut bool,
+    requested: &mut Option<bool>,
+    locked: bool,
+) -> bool {
+    let had_pending_request = requested.take().is_some();
+    update_pointer_lock_state(current, locked) || had_pending_request
+}
+
 impl PendingWheelDelta {
     fn add_discrete_x(&mut self, value: i32) {
         self.discrete_x = self.discrete_x.saturating_add(value);
@@ -647,6 +696,8 @@ pub struct SWSPlatformWindow {
     scale_milli: u32,
     current_size: Size,
     fullscreen: bool,
+    pointer_locked: bool,
+    pointer_lock_requested: Option<bool>,
     pending_events: Vec<Event>,
     pending_head: usize,
     pointer_x: i32,
@@ -663,6 +714,7 @@ pub struct SWSPlatformWindow {
     click_state: ClickState,
     text_input: Option<TextInputContext>,
     pending_wheel: PendingWheelDelta,
+    pending_relative: PendingRelativeMotion,
     needs_full_present: bool,
     transport_failed: bool,
     quit_queued: bool,
@@ -983,6 +1035,8 @@ impl SWSPlatformWindow {
             scale_milli,
             current_size: size,
             fullscreen: false,
+            pointer_locked: false,
+            pointer_lock_requested: None,
             pending_events: Vec::new(),
             pending_head: 0,
             pointer_x: 0,
@@ -999,6 +1053,7 @@ impl SWSPlatformWindow {
             click_state: ClickState::default(),
             text_input: None,
             pending_wheel: PendingWheelDelta::default(),
+            pending_relative: PendingRelativeMotion::default(),
             needs_full_present: false,
             transport_failed: false,
             quit_queued: false,
@@ -1506,6 +1561,7 @@ impl PlatformWindow for SWSPlatformWindow {
             while let Some(ev) = self.event_receiver.poll_event() {
                 self.handle_sws_event(ev);
             }
+            self.flush_pending_relative_motion();
         }
 
         if self.pending_head < self.pending_events.len() {
@@ -1731,6 +1787,30 @@ impl PlatformWindow for SWSPlatformWindow {
         result.map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
+    fn set_pointer_lock(&mut self, locked: bool) -> Result<()> {
+        if self.pointer_lock_requested == Some(locked)
+            || (self.pointer_lock_requested.is_none() && locked == self.pointer_locked)
+        {
+            return Ok(());
+        }
+        let capabilities = self
+            .conn
+            .get_capabilities()
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
+        if !pointer_lock_supported(capabilities.capabilities) {
+            return Err(scarlet_ui_core::error::Error::PointerLockUnsupported);
+        }
+        self.conn
+            .set_pointer_lock(self.surface_id, locked)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
+        self.pointer_lock_requested = Some(locked);
+        Ok(())
+    }
+
+    fn pointer_locked(&self) -> bool {
+        self.pointer_locked
+    }
+
     fn restore(&mut self) -> Result<()> {
         self.conn
             .restore_window(self.surface_id)
@@ -1901,6 +1981,12 @@ impl PlatformWindow for SWSPlatformWindow {
 }
 
 impl SWSPlatformWindow {
+    fn flush_pending_relative_motion(&mut self) {
+        if let Some((dx, dy)) = self.pending_relative.take() {
+            self.push_event(Event::Mouse(MouseEvent::RelativeMotion { dx, dy }));
+        }
+    }
+
     fn flush_pending_wheel(&mut self) {
         if self.pending_wheel.is_empty() {
             return;
@@ -1958,14 +2044,14 @@ impl SWSPlatformWindow {
                 }
 
                 match (input.type_, input.code) {
-                    (event_type::EV_ABS, abs_code::ABS_X) => {
+                    (event_type::EV_ABS, abs_code::ABS_X) if !self.pointer_locked => {
                         self.pointer_x = self.physical_to_logical_pos(input.value);
                         self.pending_move = true;
                         if debug {
                             logln!("[SWSPlatformWindow] ABS_X: {}", input.value);
                         }
                     }
-                    (event_type::EV_ABS, abs_code::ABS_Y) => {
+                    (event_type::EV_ABS, abs_code::ABS_Y) if !self.pointer_locked => {
                         self.pointer_y = self.physical_to_logical_pos(input.value);
                         self.pending_move = true;
                         if debug {
@@ -1988,6 +2074,23 @@ impl SWSPlatformWindow {
                             self.pending_move = false;
                         }
                         self.flush_pending_wheel();
+                        self.flush_pending_relative_motion();
+                    }
+                    (event_type::EV_REL, rel_code::REL_X) if self.pointer_locked => {
+                        let _ = self.pending_relative.push_input(
+                            input.type_,
+                            input.code,
+                            input.value,
+                            self.pointer_locked,
+                        );
+                    }
+                    (event_type::EV_REL, rel_code::REL_Y) if self.pointer_locked => {
+                        let _ = self.pending_relative.push_input(
+                            input.type_,
+                            input.code,
+                            input.value,
+                            self.pointer_locked,
+                        );
                     }
                     (event_type::EV_REL, rel_code::REL_WHEEL) => {
                         self.pending_wheel.add_discrete_y(input.value);
@@ -2142,6 +2245,20 @@ impl SWSPlatformWindow {
                     self.push_event(Event::FullscreenChanged { fullscreen });
                 }
             }
+            SwsEvent::PointerLockChanged { window_id, locked } if window_id == self.surface_id => {
+                if !apply_pointer_lock_confirmation(
+                    &mut self.pointer_locked,
+                    &mut self.pointer_lock_requested,
+                    locked,
+                ) {
+                    return;
+                }
+                if !locked {
+                    self.flush_pending_relative_motion();
+                    self.pending_relative = PendingRelativeMotion::default();
+                }
+                self.push_event(Event::PointerLockChanged { locked });
+            }
             SwsEvent::ScreenSizeChanged { width, height } => {
                 self.push_event(Event::ScreenSizeChanged {
                     width: self.physical_to_logical_len(width),
@@ -2228,6 +2345,13 @@ impl SWSPlatformWindow {
                 let menu_titles = Self::sanitize_menu_titles(&menu_titles);
                 if window_id != self.surface_id {
                     self.reset_transient_modifiers();
+                    self.pointer_lock_requested = None;
+                    if self.pointer_locked {
+                        self.flush_pending_relative_motion();
+                        self.pointer_locked = false;
+                        self.pending_relative = PendingRelativeMotion::default();
+                        self.push_event(Event::PointerLockChanged { locked: false });
+                    }
                 }
                 // Push FocusChanged event for all windows to receive
                 // This allows TaskBar to update its menu based on focus changes
@@ -2302,6 +2426,50 @@ impl SWSPlatformWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_motion_coalesces_axes_and_drains_without_syn() {
+        let mut pending = PendingRelativeMotion::default();
+        assert!(pending.push_input(event_type::EV_REL, rel_code::REL_X, 4, true));
+        assert!(pending.push_input(event_type::EV_REL, rel_code::REL_Y, -3, true));
+        assert!(pending.push_input(event_type::EV_REL, rel_code::REL_X, 2, true));
+        assert_eq!(pending.take(), Some((6, -3)));
+        assert_eq!(pending.take(), None);
+    }
+
+    #[test]
+    fn relative_motion_is_ignored_without_pointer_lock() {
+        let mut pending = PendingRelativeMotion::default();
+        assert!(!pending.push_input(event_type::EV_REL, rel_code::REL_X, 4, false));
+        assert_eq!(pending.take(), None);
+    }
+
+    #[test]
+    fn pointer_lock_capability_and_revoke_state_are_explicit() {
+        assert!(!pointer_lock_supported(0));
+        assert!(pointer_lock_supported(
+            sws_protocol::capabilities::POINTER_LOCK
+        ));
+
+        let mut locked = true;
+        assert!(update_pointer_lock_state(&mut locked, false));
+        assert!(!locked);
+        assert!(!update_pointer_lock_state(&mut locked, false));
+    }
+
+    #[test]
+    fn rejected_pending_lock_still_emits_confirmation() {
+        let mut locked = false;
+        let mut requested = Some(true);
+
+        assert!(apply_pointer_lock_confirmation(
+            &mut locked,
+            &mut requested,
+            false,
+        ));
+        assert!(!locked);
+        assert_eq!(requested, None);
+    }
 
     #[test]
     fn wheel_delta_prefers_hi_res_over_discrete() {

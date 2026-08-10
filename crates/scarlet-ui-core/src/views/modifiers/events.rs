@@ -483,6 +483,219 @@ pub struct OnMouseMove<V: View, F: Clone + 'static> {
     callback: F,
 }
 
+/// Relative pointer-motion modifier for OS-level pointer lock.
+///
+/// A pointer press within this modifier registers it as the candidate owner.
+/// When the platform subsequently confirms pointer lock, relative motion is
+/// routed exclusively to that registered element until lock is released.
+#[derive(Clone)]
+pub struct OnMouseDelta<V: View, F: Clone + 'static> {
+    inner: V,
+    callback: F,
+}
+
+impl<V: View, F: Fn(i32, i32) + Clone + 'static> OnMouseDelta<V, F> {
+    /// Create a relative pointer-motion modifier.
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - Wrapped view
+    /// * `callback` - Function called with horizontal and vertical deltas
+    ///
+    /// # Returns
+    ///
+    /// A new [`OnMouseDelta`] modifier.
+    pub fn new(inner: V, callback: F) -> Self {
+        Self { inner, callback }
+    }
+}
+
+impl<V: View + Clone, F: Fn(i32, i32) + Clone + 'static> View for OnMouseDelta<V, F> {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(RenderElement::with_view_children_and_updater(
+            self.clone(),
+            |view| OnMouseDeltaRenderObject {
+                callback: Box::new(view.callback.clone()),
+                size: Size::ZERO,
+            },
+            |render_object, view| {
+                render_object.callback = Box::new(view.callback.clone());
+                UpdateResult::Updated
+            },
+            |view| vec![view.inner.clone_view()],
+        ))
+    }
+
+    fn listenables(&self) -> alloc::vec::Vec<&dyn Listenable> {
+        self.inner.listenables()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Render object for [`OnMouseDelta`].
+pub struct OnMouseDeltaRenderObject {
+    callback: Box<dyn Fn(i32, i32)>,
+    size: Size,
+}
+
+impl ElementRenderObject for OnMouseDeltaRenderObject {
+    fn layout(&mut self, _constraints: crate::element::LayoutConstraints) -> Size {
+        self.size = Size::ZERO;
+        self.size
+    }
+
+    fn layout_with_children(
+        &mut self,
+        constraints: crate::element::LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
+        self.size = children
+            .first_mut()
+            .map_or(Size::ZERO, |child| child.layout(constraints));
+        self.size
+    }
+
+    fn size(&self) -> Size {
+        self.size
+    }
+
+    fn hit_test(&self, point: crate::geometry::Point) -> bool {
+        point.x >= 0.0 && point.y >= 0.0 && point.x < self.size.width && point.y < self.size.height
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn handle_event(&mut self, event: &Event, phase: Phase) -> bool {
+        if matches!(phase, Phase::Target | Phase::Bubble)
+            && let Event::Mouse(MouseEvent::RelativeMotion { dx, dy }) = event
+        {
+            (self.callback)(*dx, *dy);
+        }
+        false
+    }
+
+    fn render(&mut self) {}
+}
+
+/// Mouse-button modifier for press and release events.
+#[derive(Clone)]
+pub struct OnMouseButton<V: View, F: Clone + 'static> {
+    inner: V,
+    callback: F,
+}
+
+impl<V: View, F: Fn(crate::event::MouseButton, bool) -> bool + Clone + 'static>
+    OnMouseButton<V, F>
+{
+    /// Create a mouse-button modifier.
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - Wrapped view
+    /// * `callback` - Function called with the button and `true` for press
+    ///
+    /// # Returns
+    ///
+    /// A new [`OnMouseButton`] modifier.
+    pub fn new(inner: V, callback: F) -> Self {
+        Self { inner, callback }
+    }
+}
+
+impl<V, F> View for OnMouseButton<V, F>
+where
+    V: View + Clone,
+    F: Fn(crate::event::MouseButton, bool) -> bool + Clone + 'static,
+{
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(RenderElement::with_view_children_and_updater(
+            self.clone(),
+            |view| OnMouseButtonRenderObject {
+                callback: Box::new(view.callback.clone()),
+                size: Size::ZERO,
+            },
+            |render_object, view| {
+                render_object.callback = Box::new(view.callback.clone());
+                UpdateResult::Updated
+            },
+            |view| vec![view.inner.clone_view()],
+        ))
+    }
+
+    fn listenables(&self) -> alloc::vec::Vec<&dyn Listenable> {
+        self.inner.listenables()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Render object for [`OnMouseButton`].
+pub struct OnMouseButtonRenderObject {
+    callback: Box<dyn Fn(crate::event::MouseButton, bool) -> bool>,
+    size: Size,
+}
+
+impl ElementRenderObject for OnMouseButtonRenderObject {
+    fn layout(&mut self, _constraints: crate::element::LayoutConstraints) -> Size {
+        Size::ZERO
+    }
+
+    fn layout_with_children(
+        &mut self,
+        constraints: crate::element::LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
+        self.size = children
+            .first_mut()
+            .map_or(Size::ZERO, |child| child.layout(constraints));
+        self.size
+    }
+
+    fn size(&self) -> Size {
+        self.size
+    }
+
+    fn hit_test(&self, point: crate::geometry::Point) -> bool {
+        point.x >= 0.0 && point.y >= 0.0 && point.x < self.size.width && point.y < self.size.height
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn handle_event(&mut self, event: &Event, phase: Phase) -> bool {
+        if !matches!(phase, Phase::Target | Phase::Bubble) {
+            return false;
+        }
+        match event {
+            Event::Mouse(MouseEvent::ButtonPressed { button, .. }) => {
+                (self.callback)(*button, true)
+            }
+            Event::Mouse(MouseEvent::ButtonReleased { button, .. }) => {
+                (self.callback)(*button, false)
+            }
+            _ => false,
+        }
+    }
+
+    fn render(&mut self) {}
+}
+
 impl<V: View, F: Fn(i32, i32) + Clone + 'static> OnMouseMove<V, F> {
     /// Create a new mouse-move modifier.
     pub fn new(inner: V, callback: F) -> Self {
@@ -901,5 +1114,49 @@ mod tests {
         assert!(!element.handle_event(&exited, Phase::Target));
         assert!(element.handle_event(&entered, Phase::Target));
         assert_eq!(second_count.get(), 1);
+    }
+
+    #[test]
+    fn mouse_delta_modifier_observes_relative_motion() {
+        let dx_seen = Rc::new(Cell::new(0));
+        let dy_seen = Rc::new(Cell::new(0));
+        let dx_callback = dx_seen.clone();
+        let dy_callback = dy_seen.clone();
+        let mut element = Text::new("relative target")
+            .on_mouse_delta(move |dx, dy| {
+                dx_callback.set(dx);
+                dy_callback.set(dy);
+            })
+            .create_element();
+
+        assert!(!element.handle_event(
+            &Event::Mouse(MouseEvent::RelativeMotion { dx: 7, dy: -4 }),
+            Phase::Target,
+        ));
+        assert_eq!(dx_seen.get(), 7);
+        assert_eq!(dy_seen.get(), -4);
+    }
+
+    #[test]
+    fn mouse_button_modifier_reports_button_state_and_consumption() {
+        let seen = Rc::new(Cell::new(None));
+        let callback_seen = seen.clone();
+        let mut element = Text::new("button target")
+            .on_mouse_button(move |button, pressed| {
+                callback_seen.set(Some((button, pressed)));
+                true
+            })
+            .create_element();
+
+        assert!(element.handle_event(
+            &Event::Mouse(MouseEvent::ButtonPressed {
+                button: crate::event::MouseButton::Right,
+                x: 2,
+                y: 3,
+                click_count: 1,
+            }),
+            Phase::Target,
+        ));
+        assert_eq!(seen.get(), Some((crate::event::MouseButton::Right, true)));
     }
 }

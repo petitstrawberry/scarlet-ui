@@ -186,4 +186,15 @@ mod tests {
 
         let _spacer = Spacer::new();
     }
+
+    #[test]
+    fn pointer_lock_input_api_is_exported_by_facade() {
+        use scarlet_ui::prelude::*;
+
+        let _event = Event::PointerLockChanged { locked: true };
+        let _motion = MouseEvent::RelativeMotion { dx: 3, dy: -2 };
+        let _view = Text::new("pointer target")
+            .on_mouse_delta(|_, _| {})
+            .on_mouse_button(|button, pressed| matches!(button, MouseButton::Left) && pressed);
+    }
 }

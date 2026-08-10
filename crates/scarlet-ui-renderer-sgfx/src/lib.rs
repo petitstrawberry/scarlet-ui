@@ -24,7 +24,7 @@ mod sink;
 pub use backend::{DEFAULT_GPU_DEVICE, SgfxPaintBackend};
 pub use canvas::{
     SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
-    SgfxCanvasVertex, SgfxMesh, SgfxTexture,
+    SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
 };
 pub use error::{Error, Result, Stage};
 pub use sgfx::Image as SgfxImage;

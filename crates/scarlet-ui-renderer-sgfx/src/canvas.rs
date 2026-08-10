@@ -43,6 +43,32 @@ impl Default for SgfxCanvasHandle {
     }
 }
 
+/// Stable identity for a dynamically updated SGFX canvas mesh.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SgfxMeshHandle(u64);
+
+impl SgfxMeshHandle {
+    /// Allocate a stable mesh identity.
+    ///
+    /// # Returns
+    ///
+    /// A handle suitable for reuse by successive revisions of one mesh.
+    pub fn new() -> Self {
+        let id = NEXT_MESH_ID.fetch_add(1, Ordering::Relaxed);
+        Self(id.max(1))
+    }
+
+    pub(crate) const fn id(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for SgfxMeshHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// One vertex consumed by the SGFX canvas vertex-color pipeline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SgfxCanvasVertex {
@@ -137,7 +163,8 @@ impl SgfxTexture {
 /// Immutable triangle-list mesh retained by the SGFX renderer.
 #[derive(Debug)]
 pub struct SgfxMesh {
-    pub(crate) id: u64,
+    pub(crate) handle: SgfxMeshHandle,
+    pub(crate) revision: u64,
     pub(crate) vertices: Arc<[SgfxCanvasVertex]>,
 }
 
@@ -150,12 +177,57 @@ impl SgfxMesh {
     ///
     /// # Returns
     ///
-    /// A retained mesh. Structural and numeric validation occurs when rendered.
+    /// A retained mesh with a unique handle and revision zero. Structural and
+    /// numeric validation occurs when rendered. A rendered mesh must contain a
+    /// non-empty multiple of three vertices; omit the draw for an empty world.
     pub fn new(vertices: Vec<SgfxCanvasVertex>) -> Arc<Self> {
+        Self::with_handle(SgfxMeshHandle::new(), 0, vertices)
+    }
+
+    /// Create one revision of a dynamically updated triangle-list mesh.
+    ///
+    /// Reusing `handle` lets the renderer update an existing GPU buffer. The
+    /// buffer grows to the next power-of-two capacity only when required and
+    /// is retained when later revisions shrink. A frame must not contain two
+    /// different revisions of the same handle.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - Stable identity shared by successive mesh revisions.
+    /// * `revision` - Application-controlled content revision.
+    /// * `vertices` - Vertices whose length must be a non-empty multiple of three when drawn.
+    ///
+    /// # Returns
+    ///
+    /// A retained revision of the dynamic mesh.
+    pub fn with_handle(
+        handle: SgfxMeshHandle,
+        revision: u64,
+        vertices: Vec<SgfxCanvasVertex>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            id: NEXT_MESH_ID.fetch_add(1, Ordering::Relaxed).max(1),
+            handle,
+            revision,
             vertices: vertices.into(),
         })
+    }
+
+    /// Return the stable identity used by the renderer mesh cache.
+    ///
+    /// # Returns
+    ///
+    /// This mesh's stable handle.
+    pub const fn handle(&self) -> SgfxMeshHandle {
+        self.handle
+    }
+
+    /// Return the application-controlled content revision.
+    ///
+    /// # Returns
+    ///
+    /// This mesh's revision.
+    pub const fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Return the triangle count.
@@ -232,6 +304,7 @@ pub struct SgfxCanvasFrame {
     pub(crate) revision: u64,
     pub(crate) clear_color: Color,
     pub(crate) reference_aspect: f32,
+    pub(crate) depth_test: bool,
     pub(crate) draws: Vec<SgfxCanvasDraw>,
 }
 
@@ -251,8 +324,45 @@ impl SgfxCanvasFrame {
             revision,
             clear_color,
             reference_aspect: 1.0,
+            depth_test: false,
             draws: Vec::new(),
         }
+    }
+
+    /// Enable depth testing and depth writes for canvas draws.
+    ///
+    /// The renderer clears depth to `1.0` and compares fragments with `Less`.
+    /// Rendering returns an explicit error if the graphics device does not
+    /// support depth attachments.
+    ///
+    /// # Returns
+    ///
+    /// This frame with depth testing enabled.
+    pub fn depth_tested(self) -> Self {
+        self.with_depth(true)
+    }
+
+    /// Configure depth testing and depth writes for canvas draws.
+    ///
+    /// # Arguments
+    ///
+    /// * `enabled` - Whether the canvas uses a cleared `Depth32Float` attachment.
+    ///
+    /// # Returns
+    ///
+    /// This frame with the requested depth behavior.
+    pub fn with_depth(mut self, enabled: bool) -> Self {
+        self.depth_test = enabled;
+        self
+    }
+
+    /// Return whether depth testing is requested.
+    ///
+    /// # Returns
+    ///
+    /// `true` when canvas draws use depth testing and depth writes.
+    pub const fn uses_depth(&self) -> bool {
+        self.depth_test
     }
 
     /// Set the aspect ratio used when the frame transforms were constructed.
@@ -487,5 +597,61 @@ impl ElementRenderObject for SgfxCanvasRenderObject {
 
     fn update_needs_layout(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn triangle() -> Vec<SgfxCanvasVertex> {
+        alloc::vec![
+            SgfxCanvasVertex::new([0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]),
+            SgfxCanvasVertex::new([1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]),
+            SgfxCanvasVertex::new([0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]),
+        ]
+    }
+
+    #[test]
+    fn canvas_depth_is_opt_in_and_configurable() {
+        let color_only = SgfxCanvasFrame::new(1, Color::BLACK);
+        assert!(!color_only.uses_depth());
+        assert!(
+            SgfxCanvasFrame::new(1, Color::BLACK)
+                .depth_tested()
+                .uses_depth()
+        );
+        assert!(
+            SgfxCanvasFrame::new(1, Color::BLACK)
+                .with_depth(true)
+                .uses_depth()
+        );
+        assert!(
+            !SgfxCanvasFrame::new(1, Color::BLACK)
+                .depth_tested()
+                .with_depth(false)
+                .uses_depth()
+        );
+    }
+
+    #[test]
+    fn dynamic_mesh_preserves_handle_and_revision() {
+        let handle = SgfxMeshHandle::new();
+        let first = SgfxMesh::with_handle(handle, 7, triangle());
+        let second = SgfxMesh::with_handle(handle, 8, triangle());
+        assert_eq!(first.handle(), handle);
+        assert_eq!(second.handle(), handle);
+        assert_eq!(first.revision(), 7);
+        assert_eq!(second.revision(), 8);
+        assert_eq!(first.triangle_count(), 1);
+    }
+
+    #[test]
+    fn legacy_mesh_constructor_allocates_distinct_handles() {
+        let first = SgfxMesh::new(triangle());
+        let second = SgfxMesh::new(triangle());
+        assert_ne!(first.handle(), second.handle());
+        assert_eq!(first.revision(), 0);
+        assert_eq!(second.revision(), 0);
     }
 }

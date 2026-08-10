@@ -24,6 +24,9 @@ pub enum Event {
     /// Window fullscreen state changed on the platform.
     FullscreenChanged { fullscreen: bool },
 
+    /// Window pointer-lock state changed on the platform.
+    PointerLockChanged { locked: bool },
+
     /// Screen size changed
     ScreenSizeChanged { width: u32, height: u32 },
 
@@ -92,6 +95,9 @@ pub enum MouseEvent {
     Entered { x: i32, y: i32 },
     /// Mouse exited an element
     Exited { x: i32, y: i32 },
+
+    /// Pointer motion relative to its previous position while pointer lock is active.
+    RelativeMotion { dx: i32, dy: i32 },
 
     /// Mouse button pressed
     ButtonPressed {

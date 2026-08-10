@@ -65,6 +65,7 @@ pub struct SgfxPaintBackend<S> {
     compositor_epoch: Option<u32>,
     next_slot: usize,
     front_slot: Option<usize>,
+    supports_depth: bool,
 }
 
 impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
@@ -132,6 +133,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             compositor_epoch: None,
             next_slot: 0,
             front_slot: None,
+            supports_depth: capabilities.supports_depth(),
         };
         backend.initialize_shared_images()?;
         Ok(backend)
@@ -335,8 +337,12 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         } else {
             self.generation
         };
-        let replacement =
-            RenderSession::new(&self.context, self.physical_width, self.physical_height)?;
+        let replacement = RenderSession::new(
+            &self.context,
+            self.physical_width,
+            self.physical_height,
+            self.supports_depth,
+        )?;
         if let Some(previous) = self.session.replace(replacement) {
             let images = previous.into_images();
             for (index, image) in images.into_iter().enumerate() {

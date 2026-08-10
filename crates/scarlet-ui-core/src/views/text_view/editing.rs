@@ -267,7 +267,9 @@ pub(crate) fn handle_text_view_mouse(
         MouseEvent::Wheel {
             delta_x, delta_y, ..
         } => scroll_view(view, render_object, delta_x, delta_y),
-        MouseEvent::Entered { .. } | MouseEvent::Exited { .. } => false,
+        MouseEvent::Entered { .. }
+        | MouseEvent::Exited { .. }
+        | MouseEvent::RelativeMotion { .. } => false,
         MouseEvent::ButtonPressed { .. } | MouseEvent::ButtonReleased { .. } => false,
     }
 }

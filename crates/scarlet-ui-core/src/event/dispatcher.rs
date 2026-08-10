@@ -121,6 +121,10 @@ pub struct EventDispatcher {
     left_button_down: bool,
     focused_id: Option<ElementId>,
     focused_path: Vec<ElementId>,
+    /// Relative-motion handler selected by the most recent pointer press.
+    pointer_lock_candidate_id: Option<ElementId>,
+    /// Handler that owns relative motion while platform pointer lock is active.
+    pointer_lock_target_id: Option<ElementId>,
     /// Events emitted by elements during event handling
     emitted_events: Vec<Event>,
 }
@@ -143,6 +147,8 @@ impl EventDispatcher {
             left_button_down: false,
             focused_id: None,
             focused_path: Vec::new(),
+            pointer_lock_candidate_id: None,
+            pointer_lock_target_id: None,
             emitted_events: Vec::new(),
         }
     }
@@ -178,6 +184,10 @@ impl EventDispatcher {
                 false
             }
             Event::FullscreenChanged { .. } => false,
+            Event::PointerLockChanged { locked } => {
+                self.update_pointer_lock_target(element_tree, *locked);
+                false
+            }
             Event::ScreenSizeChanged { .. } => false,
             Event::Mouse(mouse_event) => self.dispatch_mouse(element_tree, mouse_event),
             Event::Keyboard(key_event) => self.dispatch_keyboard(element_tree, key_event),
@@ -221,6 +231,9 @@ impl EventDispatcher {
         element_tree: &mut ElementTree,
         event: &crate::event::MouseEvent,
     ) -> bool {
+        if matches!(event, crate::event::MouseEvent::RelativeMotion { .. }) {
+            return self.dispatch_relative_mouse(element_tree, event);
+        }
         // 1. Hit test to find target and path
         let point = self.extract_point_from_mouse(&event);
         let is_wheel = matches!(event, crate::event::MouseEvent::Wheel { .. });
@@ -448,6 +461,15 @@ impl EventDispatcher {
             }
 
             if let crate::event::MouseEvent::ButtonPressed { .. } = event {
+                self.pointer_lock_candidate_id = path.iter().rev().copied().find(|id| {
+                    element_tree.find_element_mut(*id).is_some_and(|element| {
+                        element.render_object().is_some_and(|render_object| {
+                            render_object
+                                .as_any()
+                                .is::<crate::views::modifiers::OnMouseDeltaRenderObject>()
+                        })
+                    })
+                });
                 if let Some(focus_id) = element_tree.nearest_focusable_in_path(&path) {
                     if let Some(focus_path) = element_tree.find_path_ids(focus_id) {
                         self.set_focused_element(element_tree, focus_id, &focus_path);
@@ -617,6 +639,58 @@ impl EventDispatcher {
             }
             wheel_consumed_without_path
         }
+    }
+
+    /// Route pointer-lock motion without hit testing absolute coordinates.
+    fn dispatch_relative_mouse(
+        &mut self,
+        element_tree: &mut ElementTree,
+        event: &crate::event::MouseEvent,
+    ) -> bool {
+        let Some(target_id) = self.pointer_lock_target_id else {
+            return false;
+        };
+        let Some(path) = element_tree.find_path_ids(target_id) else {
+            self.pointer_lock_target_id = None;
+            return false;
+        };
+        let event = Event::Mouse(*event);
+
+        for id in path.iter().take(path.len().saturating_sub(1)) {
+            if element_tree
+                .find_element_mut(*id)
+                .is_some_and(|element| element.handle_event(&event, Phase::Capture))
+            {
+                return true;
+            }
+        }
+        if element_tree
+            .find_element_mut(target_id)
+            .is_some_and(|target| target.handle_event(&event, Phase::Target))
+        {
+            return true;
+        }
+        for id in path.iter().rev().skip(1) {
+            if element_tree
+                .find_element_mut(*id)
+                .is_some_and(|element| element.handle_event(&event, Phase::Bubble))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn update_pointer_lock_target(&mut self, element_tree: &mut ElementTree, locked: bool) {
+        if !locked {
+            self.pointer_lock_target_id = None;
+            self.pointer_lock_candidate_id = None;
+            return;
+        }
+
+        self.pointer_lock_target_id = self
+            .pointer_lock_candidate_id
+            .filter(|id| element_tree.find_path_ids(*id).is_some());
     }
 
     /// Dispatch a keyboard event
@@ -1022,6 +1096,7 @@ impl EventDispatcher {
                 x: *x as f32,
                 y: *y as f32,
             },
+            crate::event::MouseEvent::RelativeMotion { .. } => Point::ZERO,
             crate::event::MouseEvent::ButtonPressed { x, y, .. } => Point {
                 x: *x as f32,
                 y: *y as f32,
@@ -1248,6 +1323,9 @@ impl EventDispatcher {
         origin: Point,
     ) -> crate::event::MouseEvent {
         match *event {
+            crate::event::MouseEvent::RelativeMotion { dx, dy } => {
+                crate::event::MouseEvent::RelativeMotion { dx, dy }
+            }
             crate::event::MouseEvent::Moved { x, y } => crate::event::MouseEvent::Moved {
                 x: x - origin.x as i32,
                 y: y - origin.y as i32,
@@ -1313,7 +1391,8 @@ mod tests {
     use crate::element::{ElementRenderObject, LayoutConstraints, UpdateResult};
     use crate::event::{MouseEvent, ScrollSource, WheelPhase};
     use crate::geometry::{Rect, Size};
-    use crate::view::View;
+    use crate::view::{View, ViewExt};
+    use crate::views::{HStack, Rectangle};
     use alloc::boxed::Box;
     use alloc::rc::Rc;
     use core::any::Any;
@@ -1465,6 +1544,75 @@ mod tests {
 
     fn mouse_moved(y: i32) -> Event {
         Event::Mouse(MouseEvent::Moved { x: 10, y })
+    }
+
+    #[test]
+    fn pointer_lock_routes_relative_motion_to_clicked_nonfocusable_canvas() {
+        let first_seen = Rc::new(Cell::new(0));
+        let second_seen = Rc::new(Cell::new(0));
+        let first_callback = first_seen.clone();
+        let second_callback = second_seen.clone();
+        let root = HStack::new((
+            Rectangle::new()
+                .frame(50.0, 50.0)
+                .on_mouse_delta(move |dx, _| first_callback.set(dx)),
+            Rectangle::new()
+                .frame(50.0, 50.0)
+                .on_mouse_delta(move |dx, _| second_callback.set(dx)),
+        ));
+        let mut tree = ElementTree::new();
+        tree.set_root(root.create_element());
+        tree.layout(LayoutConstraints::tight(100.0, 50.0));
+        let mut dispatcher = EventDispatcher::new();
+
+        assert!(!dispatcher.dispatch(
+            &mut tree,
+            &Event::Mouse(MouseEvent::RelativeMotion { dx: 99, dy: 0 }),
+        ));
+        assert_eq!(first_seen.get(), 0);
+        assert_eq!(second_seen.get(), 0);
+
+        let press_first = Event::Mouse(MouseEvent::ButtonPressed {
+            button: crate::event::MouseButton::Left,
+            x: 25,
+            y: 25,
+            click_count: 1,
+        });
+        let _ = dispatcher.dispatch(&mut tree, &press_first);
+        let _ = dispatcher.dispatch(&mut tree, &Event::PointerLockChanged { locked: true });
+        assert!(!dispatcher.dispatch(
+            &mut tree,
+            &Event::Mouse(MouseEvent::RelativeMotion { dx: 13, dy: -2 }),
+        ));
+        assert_eq!(first_seen.get(), 13);
+        assert_eq!(second_seen.get(), 0);
+
+        let _ = dispatcher.dispatch(&mut tree, &Event::PointerLockChanged { locked: false });
+        let _ = dispatcher.dispatch(
+            &mut tree,
+            &Event::Mouse(MouseEvent::ButtonReleased {
+                button: crate::event::MouseButton::Left,
+                x: 25,
+                y: 25,
+                click_count: 1,
+            }),
+        );
+        let _ = dispatcher.dispatch(
+            &mut tree,
+            &Event::Mouse(MouseEvent::ButtonPressed {
+                button: crate::event::MouseButton::Left,
+                x: 75,
+                y: 25,
+                click_count: 1,
+            }),
+        );
+        let _ = dispatcher.dispatch(&mut tree, &Event::PointerLockChanged { locked: true });
+        assert!(!dispatcher.dispatch(
+            &mut tree,
+            &Event::Mouse(MouseEvent::RelativeMotion { dx: -7, dy: 4 }),
+        ));
+        assert_eq!(first_seen.get(), 13);
+        assert_eq!(second_seen.get(), -7);
     }
 
     fn nested_wheel_tree(outer_count: Rc<Cell<u32>>, inner_count: Rc<Cell<u32>>) -> ElementTree {

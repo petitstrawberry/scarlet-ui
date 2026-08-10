@@ -11,11 +11,11 @@ use scarlet_ui_core::icon::{IconMaskKey, rasterize_icon};
 use scarlet_ui_core::renderer::{BufferHandle, PaintCommand, PaintContext};
 use sgfx::ir::{
     AddressMode, BlendState, BufferDesc, BufferId, BufferUsage, Color, CommandEncoder,
-    DrawUniforms, Extent2D, FilterMode, FragmentProgram, FrontFace, LoadOp, PixelRect,
-    PrimitiveTopology, RasterState, RenderPassDesc, RenderPipelineDesc, RenderPipelineId,
-    ResourceTable, SamplerDesc, SamplerId, StoreOp, TextureDesc, TextureFormat, TextureId,
-    TextureSampleMode, TextureUsage, TextureWrite, Transform, VertexAttribute, VertexBufferLayout,
-    VertexFormat,
+    CompareFunction, DepthLoadOp, DepthState, DrawUniforms, Extent2D, FilterMode, FragmentProgram,
+    FrontFace, LoadOp, PixelRect, PrimitiveTopology, RasterState, RenderPassDesc,
+    RenderPipelineDesc, RenderPipelineId, ResourceTable, SamplerDesc, SamplerId, StoreOp,
+    TextureDesc, TextureFormat, TextureId, TextureSampleMode, TextureUsage, TextureWrite,
+    Transform, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use sgfx::{Context, Image, IrResources, Queue};
 
@@ -128,6 +128,7 @@ struct GlyphAtlas {
 struct CanvasTarget {
     handle_id: u64,
     texture: TextureId,
+    depth: Option<TextureId>,
     width: u32,
     height: u32,
     revision: u64,
@@ -135,10 +136,97 @@ struct CanvasTarget {
 }
 
 struct CanvasMesh {
-    mesh_id: u64,
+    handle_id: u64,
+    revision: u64,
     buffer: BufferId,
     vertex_count: u32,
+    capacity_vertices: u32,
     uploaded: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CanvasMeshCacheAction {
+    Reuse,
+    Upload,
+    Reallocate(u32),
+}
+
+fn canvas_mesh_cache_action(
+    cached_revision: u64,
+    capacity_vertices: u32,
+    revision: u64,
+    vertex_count: u32,
+) -> Result<CanvasMeshCacheAction> {
+    if cached_revision == revision {
+        return Ok(CanvasMeshCacheAction::Reuse);
+    }
+    if vertex_count <= capacity_vertices {
+        return Ok(CanvasMeshCacheAction::Upload);
+    }
+    vertex_count
+        .checked_next_power_of_two()
+        .map(CanvasMeshCacheAction::Reallocate)
+        .ok_or(Error::FrameTooComplex)
+}
+
+fn canvas_frame_has_revision_conflict(frame: &SgfxCanvasFrame) -> bool {
+    frame.draws.iter().enumerate().any(|(index, draw)| {
+        frame.draws[..index].iter().any(|previous| {
+            previous.mesh.handle == draw.mesh.handle && previous.mesh.revision != draw.mesh.revision
+        })
+    })
+}
+
+fn validate_depth_support(requested: bool, supported: bool) -> Result<()> {
+    if requested && !supported {
+        Err(Error::DepthUnsupported)
+    } else {
+        Ok(())
+    }
+}
+
+fn canvas_pass_reaches_frame_end(
+    meshes: &[CanvasMesh],
+    mesh_indices: &[usize],
+    texture_indices: &[Option<usize>],
+    mut draw_index: usize,
+    mut draw_offset: u32,
+) -> bool {
+    let mut pass_vertices = 0u32;
+    let mut estimated_bytes = PASS_FIXED_COMMAND_BYTES;
+    while draw_index < mesh_indices.len() && pass_vertices < MAX_PASS_VERTICES {
+        let Some(cached) = mesh_indices
+            .get(draw_index)
+            .and_then(|index| meshes.get(*index))
+        else {
+            return false;
+        };
+        let draw_bytes = if texture_indices.get(draw_index).copied().flatten().is_some() {
+            TEXTURED_DRAW_COMMAND_BYTES
+        } else {
+            SOLID_DRAW_COMMAND_BYTES
+        };
+        let available_bytes = MAX_OPAQUE_COMMAND_BYTES
+            .saturating_sub(estimated_bytes)
+            .saturating_sub(draw_bytes);
+        let available_vertices =
+            (MAX_PASS_VERTICES - pass_vertices).min(available_bytes / CANONICAL_VERTEX_BYTES);
+        let remaining = cached.vertex_count.saturating_sub(draw_offset);
+        let chunk = remaining.min(available_vertices) / 3 * 3;
+        if chunk == 0 {
+            return false;
+        }
+        pass_vertices = pass_vertices.saturating_add(chunk);
+        estimated_bytes = estimated_bytes
+            .saturating_add(draw_bytes)
+            .saturating_add(chunk.saturating_mul(CANONICAL_VERTEX_BYTES));
+        draw_offset = draw_offset.saturating_add(chunk);
+        if draw_offset == cached.vertex_count {
+            draw_index += 1;
+            draw_offset = 0;
+        }
+    }
+    draw_index == mesh_indices.len()
 }
 
 struct CanvasTexture {
@@ -163,6 +251,8 @@ pub(crate) struct RenderSession {
     glyph_atlas: GlyphAtlas,
     canvas_pipeline: RenderPipelineId,
     canvas_texture_pipeline: RenderPipelineId,
+    canvas_depth_pipeline: Option<RenderPipelineId>,
+    canvas_depth_texture_pipeline: Option<RenderPipelineId>,
     canvas_dummy_buffer: BufferId,
     canvas_targets: Vec<CanvasTarget>,
     canvas_meshes: Vec<CanvasMesh>,
@@ -170,10 +260,16 @@ pub(crate) struct RenderSession {
     frame_serial: u64,
     width: u32,
     height: u32,
+    supports_depth: bool,
 }
 
 impl RenderSession {
-    pub(crate) fn new(context: &Context, width: u32, height: u32) -> Result<Self> {
+    pub(crate) fn new(
+        context: &Context,
+        width: u32,
+        height: u32,
+        supports_depth: bool,
+    ) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(Error::InvalidFrame);
         }
@@ -252,8 +348,8 @@ impl RenderSession {
             cursor_y: 0,
             row_height: 0,
         };
-        let canvas_pipeline = define_canvas_pipeline(&table)?.id();
-        let canvas_texture_pipeline = define_canvas_texture_pipeline(&table)?.id();
+        let canvas_pipeline = define_canvas_pipeline(&table, false)?.id();
+        let canvas_texture_pipeline = define_canvas_texture_pipeline(&table, false)?.id();
         let canvas_dummy_buffer = table
             .define_buffer(
                 BufferDesc::new(
@@ -288,6 +384,8 @@ impl RenderSession {
             glyph_atlas,
             canvas_pipeline,
             canvas_texture_pipeline,
+            canvas_depth_pipeline: None,
+            canvas_depth_texture_pipeline: None,
             canvas_dummy_buffer,
             canvas_targets: Vec::new(),
             canvas_meshes: Vec::new(),
@@ -295,6 +393,7 @@ impl RenderSession {
             frame_serial: 0,
             width,
             height,
+            supports_depth,
         })
     }
 
@@ -317,6 +416,8 @@ impl RenderSession {
             glyph_atlas: _,
             canvas_pipeline: _,
             canvas_texture_pipeline: _,
+            canvas_depth_pipeline: _,
+            canvas_depth_texture_pipeline: _,
             canvas_dummy_buffer: _,
             canvas_targets: _,
             canvas_meshes: _,
@@ -324,6 +425,7 @@ impl RenderSession {
             frame_serial: _,
             width: _,
             height: _,
+            supports_depth: _,
         } = self;
         drop(cache);
         drop(table);
@@ -654,6 +756,7 @@ impl RenderSession {
                         target.handle_id == canvas.handle.id()
                             && target.width == canvas_width
                             && target.height == canvas_height
+                            && target.depth.is_some() == canvas.frame.depth_test
                             && target.initialized
                     }) else {
                         continue;
@@ -712,7 +815,8 @@ impl RenderSession {
             };
             let width = physical_canvas_extent(rect.size.width, scale)?;
             let height = physical_canvas_extent(rect.size.height, scale)?;
-            let target_index = self.canvas_target(canvas.handle.id(), width, height)?;
+            let target_index =
+                self.canvas_target(canvas.handle.id(), width, height, canvas.frame.depth_test)?;
             let unchanged = {
                 let target = &self.canvas_targets[target_index];
                 target.initialized && target.revision == canvas.frame.revision
@@ -728,12 +832,22 @@ impl RenderSession {
         Ok(())
     }
 
-    fn canvas_target(&mut self, handle_id: u64, width: u32, height: u32) -> Result<usize> {
+    fn canvas_target(
+        &mut self,
+        handle_id: u64,
+        width: u32,
+        height: u32,
+        depth_test: bool,
+    ) -> Result<usize> {
         if let Some(index) = self.canvas_targets.iter().position(|target| {
-            target.handle_id == handle_id && target.width == width && target.height == height
+            target.handle_id == handle_id
+                && target.width == width
+                && target.height == height
+                && target.depth.is_some() == depth_test
         }) {
             return Ok(index);
         }
+        validate_depth_support(depth_test, self.supports_depth)?;
         if self.canvas_targets.len() >= MAX_CANVASES {
             return Err(Error::FrameTooComplex);
         }
@@ -750,9 +864,27 @@ impl RenderSession {
             )
             .map_err(|_| Error::sgfx(Stage::DefineResources))?
             .id();
+        let depth = if depth_test {
+            Some(
+                self.table
+                    .define_texture(
+                        TextureDesc::new(
+                            TextureFormat::Depth32Float,
+                            extent,
+                            TextureUsage::RENDER_ATTACHMENT,
+                        )
+                        .map_err(|_| Error::sgfx(Stage::DefineResources))?,
+                    )
+                    .map_err(|_| Error::sgfx(Stage::DefineResources))?
+                    .id(),
+            )
+        } else {
+            None
+        };
         self.canvas_targets.push(CanvasTarget {
             handle_id,
             texture,
+            depth,
             width,
             height,
             revision: 0,
@@ -762,17 +894,7 @@ impl RenderSession {
     }
 
     fn canvas_mesh(&mut self, mesh: &SgfxMesh) -> Result<usize> {
-        if let Some(index) = self
-            .canvas_meshes
-            .iter()
-            .position(|cached| cached.mesh_id == mesh.id)
-        {
-            return Ok(index);
-        }
-        if self.canvas_meshes.len() >= MAX_CANVAS_MESHES
-            || mesh.vertices.is_empty()
-            || mesh.vertices.len() % 3 != 0
-        {
+        if mesh.vertices.is_empty() || !mesh.vertices.len().is_multiple_of(3) {
             return Err(Error::FrameTooComplex);
         }
         if !mesh.vertices.iter().all(|vertex| {
@@ -784,7 +906,44 @@ impl RenderSession {
         }
         let vertex_count =
             u32::try_from(mesh.vertices.len()).map_err(|_| Error::FrameTooComplex)?;
-        let byte_size = u64::from(vertex_count)
+        if let Some(index) = self
+            .canvas_meshes
+            .iter()
+            .position(|cached| cached.handle_id == mesh.handle.id())
+        {
+            let action = canvas_mesh_cache_action(
+                self.canvas_meshes[index].revision,
+                self.canvas_meshes[index].capacity_vertices,
+                mesh.revision,
+                vertex_count,
+            )?;
+            if action == CanvasMeshCacheAction::Reuse {
+                return Ok(index);
+            }
+            if let CanvasMeshCacheAction::Reallocate(capacity_vertices) = action {
+                let byte_size = u64::from(capacity_vertices)
+                    .checked_mul(u64::from(CANVAS_VERTEX_STRIDE))
+                    .ok_or(Error::FrameTooComplex)?;
+                self.canvas_meshes[index].buffer = self
+                    .table
+                    .define_buffer(
+                        BufferDesc::new(byte_size, BufferUsage::VERTEX | BufferUsage::COPY_DST)
+                            .map_err(|_| Error::sgfx(Stage::DefineResources))?,
+                    )
+                    .map_err(|_| Error::sgfx(Stage::DefineResources))?
+                    .id();
+                self.canvas_meshes[index].capacity_vertices = capacity_vertices;
+            }
+            self.canvas_meshes[index].revision = mesh.revision;
+            self.canvas_meshes[index].vertex_count = vertex_count;
+            self.canvas_meshes[index].uploaded = false;
+            return Ok(index);
+        }
+        if self.canvas_meshes.len() >= MAX_CANVAS_MESHES {
+            return Err(Error::FrameTooComplex);
+        }
+        let capacity_vertices = vertex_count;
+        let byte_size = u64::from(capacity_vertices)
             .checked_mul(u64::from(CANVAS_VERTEX_STRIDE))
             .ok_or(Error::FrameTooComplex)?;
         let buffer = self
@@ -796,9 +955,11 @@ impl RenderSession {
             .map_err(|_| Error::sgfx(Stage::DefineResources))?
             .id();
         self.canvas_meshes.push(CanvasMesh {
-            mesh_id: mesh.id,
+            handle_id: mesh.handle.id(),
+            revision: mesh.revision,
             buffer,
             vertex_count,
+            capacity_vertices,
             uploaded: false,
         });
         Ok(self.canvas_meshes.len() - 1)
@@ -853,6 +1014,12 @@ impl RenderSession {
         if frame.draws.len() > MAX_CANVAS_DRAWS {
             return Err(Error::FrameTooComplex);
         }
+        if canvas_frame_has_revision_conflict(frame) {
+            return Err(Error::InvalidFrame);
+        }
+        if frame.depth_test {
+            self.ensure_canvas_depth_pipelines()?;
+        }
         let mut mesh_indices = Vec::new();
         let mut texture_indices = Vec::new();
         mesh_indices
@@ -881,11 +1048,27 @@ impl RenderSession {
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
         let area = PixelRect::new(0, 0, target_state.width, target_state.height)
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+        let color_pipeline_id = if frame.depth_test {
+            self.canvas_depth_pipeline.ok_or(Error::InvalidFrame)?
+        } else {
+            self.canvas_pipeline
+        };
+        let texture_pipeline_id = if frame.depth_test {
+            self.canvas_depth_texture_pipeline
+                .ok_or(Error::InvalidFrame)?
+        } else {
+            self.canvas_texture_pipeline
+        };
         let color_pipeline = table
-            .render_pipeline_ref(self.canvas_pipeline)
+            .render_pipeline_ref(color_pipeline_id)
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
         let texture_pipeline = table
-            .render_pipeline_ref(self.canvas_texture_pipeline)
+            .render_pipeline_ref(texture_pipeline_id)
+            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+        let depth = target_state
+            .depth
+            .map(|depth| table.texture_ref(depth))
+            .transpose()
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
         let sampler = table
             .sampler_ref(self.sampler)
@@ -914,6 +1097,18 @@ impl RenderSession {
             let descriptor =
                 RenderPassDesc::new(&table, target, area, LoadOp::Clear(clear), StoreOp::Store)
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            let descriptor = if let Some(depth) = depth {
+                descriptor
+                    .with_depth_attachment(
+                        &table,
+                        depth,
+                        DepthLoadOp::Clear(1.0),
+                        StoreOp::DontCare,
+                    )
+                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?
+            } else {
+                descriptor
+            };
             let mut pass = encoder
                 .begin_render_pass(descriptor)
                 .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -980,8 +1175,31 @@ impl RenderSession {
                 } else {
                     LoadOp::Load
                 };
+                let depth_store = if canvas_pass_reaches_frame_end(
+                    &self.canvas_meshes,
+                    &mesh_indices,
+                    &texture_indices,
+                    draw_index,
+                    draw_offset,
+                ) {
+                    StoreOp::DontCare
+                } else {
+                    StoreOp::Store
+                };
                 let descriptor = RenderPassDesc::new(&table, target, area, load, StoreOp::Store)
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                let descriptor = if let Some(depth) = depth {
+                    let depth_load = if first_submission {
+                        DepthLoadOp::Clear(1.0)
+                    } else {
+                        DepthLoadOp::Load
+                    };
+                    descriptor
+                        .with_depth_attachment(&table, depth, depth_load, depth_store)
+                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?
+                } else {
+                    descriptor
+                };
                 let mut pass = encoder
                     .begin_render_pass(descriptor)
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -1069,6 +1287,18 @@ impl RenderSession {
         }
         for texture_index in texture_uploads {
             self.canvas_textures[texture_index].uploaded = true;
+        }
+        Ok(())
+    }
+
+    fn ensure_canvas_depth_pipelines(&mut self) -> Result<()> {
+        validate_depth_support(true, self.supports_depth)?;
+        if self.canvas_depth_pipeline.is_none() {
+            self.canvas_depth_pipeline = Some(define_canvas_pipeline(&self.table, true)?.id());
+        }
+        if self.canvas_depth_texture_pipeline.is_none() {
+            self.canvas_depth_texture_pipeline =
+                Some(define_canvas_texture_pipeline(&self.table, true)?.id());
         }
         Ok(())
     }
@@ -1585,7 +1815,10 @@ fn define_pipeline(
         .map_err(|_| Error::sgfx(Stage::DefineResources))
 }
 
-fn define_canvas_pipeline(table: &ResourceTable) -> Result<sgfx::ir::RenderPipelineRef<'_>> {
+fn define_canvas_pipeline(
+    table: &ResourceTable,
+    depth_test: bool,
+) -> Result<sgfx::ir::RenderPipelineRef<'_>> {
     let layout = VertexBufferLayout::new(
         CANVAS_VERTEX_STRIDE,
         alloc::vec![
@@ -1603,6 +1836,17 @@ fn define_canvas_pipeline(table: &ResourceTable) -> Result<sgfx::ir::RenderPipel
         RasterState::new(sgfx::ir::CullMode::Back, FrontFace::CounterClockwise),
     )
     .map_err(|_| Error::sgfx(Stage::DefineResources))?;
+    let descriptor = if depth_test {
+        descriptor
+            .with_depth_stencil(DepthState::new(
+                TextureFormat::Depth32Float,
+                CompareFunction::Less,
+                true,
+            ))
+            .map_err(|_| Error::sgfx(Stage::DefineResources))?
+    } else {
+        descriptor
+    };
     table
         .define_render_pipeline(descriptor)
         .map_err(|_| Error::sgfx(Stage::DefineResources))
@@ -1610,6 +1854,7 @@ fn define_canvas_pipeline(table: &ResourceTable) -> Result<sgfx::ir::RenderPipel
 
 fn define_canvas_texture_pipeline(
     table: &ResourceTable,
+    depth_test: bool,
 ) -> Result<sgfx::ir::RenderPipelineRef<'_>> {
     let layout = VertexBufferLayout::new(
         CANVAS_VERTEX_STRIDE,
@@ -1628,6 +1873,17 @@ fn define_canvas_texture_pipeline(
         RasterState::new(sgfx::ir::CullMode::Back, FrontFace::CounterClockwise),
     )
     .map_err(|_| Error::sgfx(Stage::DefineResources))?;
+    let descriptor = if depth_test {
+        descriptor
+            .with_depth_stencil(DepthState::new(
+                TextureFormat::Depth32Float,
+                CompareFunction::Less,
+                true,
+            ))
+            .map_err(|_| Error::sgfx(Stage::DefineResources))?
+    } else {
+        descriptor
+    };
     table
         .define_render_pipeline(descriptor)
         .map_err(|_| Error::sgfx(Stage::DefineResources))
@@ -1834,4 +2090,137 @@ fn truncated_scaled(value: f32, scale: f32) -> f32 {
 
 fn truncated(value: f32) -> f32 {
     (value as i32) as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::canvas::{SgfxCanvasDraw, SgfxCanvasVertex, SgfxMeshHandle};
+
+    fn triangle(z: f32) -> Vec<SgfxCanvasVertex> {
+        alloc::vec![
+            SgfxCanvasVertex::new([0.0, 0.0, z, 1.0], [1.0; 4]),
+            SgfxCanvasVertex::new([1.0, 0.0, z, 1.0], [1.0; 4]),
+            SgfxCanvasVertex::new([0.0, 1.0, z, 1.0], [1.0; 4]),
+        ]
+    }
+
+    #[test]
+    fn mesh_cache_reuses_updates_and_grows_to_power_of_two() {
+        assert_eq!(
+            canvas_mesh_cache_action(3, 8, 3, 8).unwrap(),
+            CanvasMeshCacheAction::Reuse
+        );
+        assert_eq!(
+            canvas_mesh_cache_action(3, 8, 4, 3).unwrap(),
+            CanvasMeshCacheAction::Upload
+        );
+        assert_eq!(
+            canvas_mesh_cache_action(4, 8, 5, 9).unwrap(),
+            CanvasMeshCacheAction::Reallocate(16)
+        );
+        assert_eq!(
+            canvas_mesh_cache_action(5, 16, 6, 3).unwrap(),
+            CanvasMeshCacheAction::Upload
+        );
+    }
+
+    #[test]
+    fn depth_support_is_required_only_for_opted_in_frames() {
+        assert_eq!(validate_depth_support(false, false), Ok(()));
+        assert_eq!(
+            validate_depth_support(true, false),
+            Err(Error::DepthUnsupported)
+        );
+        assert_eq!(validate_depth_support(true, true), Ok(()));
+    }
+
+    #[test]
+    fn split_canvas_pass_stores_depth_until_the_final_chunk() {
+        let table = ResourceTable::new();
+        let buffer = table
+            .define_buffer(
+                BufferDesc::new(
+                    u64::from(3_000 * CANVAS_VERTEX_STRIDE),
+                    BufferUsage::VERTEX | BufferUsage::COPY_DST,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .id();
+        let meshes = [CanvasMesh {
+            handle_id: 1,
+            revision: 1,
+            buffer,
+            vertex_count: 3_000,
+            capacity_vertices: 3_000,
+            uploaded: true,
+        }];
+        assert!(!canvas_pass_reaches_frame_end(&meshes, &[0], &[None], 0, 0,));
+        assert!(canvas_pass_reaches_frame_end(
+            &meshes,
+            &[0],
+            &[None],
+            0,
+            1_920,
+        ));
+    }
+
+    #[test]
+    fn one_canvas_frame_rejects_mixed_revisions_of_a_handle() {
+        let handle = SgfxMeshHandle::new();
+        let transform = Transform::identity().columns();
+        let valid = SgfxCanvasFrame::new(1, UiColor::BLACK)
+            .draw(SgfxCanvasDraw::new(
+                SgfxMesh::with_handle(handle, 4, triangle(0.0)),
+                transform,
+            ))
+            .draw(SgfxCanvasDraw::new(
+                SgfxMesh::with_handle(handle, 4, triangle(0.5)),
+                transform,
+            ));
+        assert!(!canvas_frame_has_revision_conflict(&valid));
+
+        let invalid = valid.draw(SgfxCanvasDraw::new(
+            SgfxMesh::with_handle(handle, 5, triangle(1.0)),
+            transform,
+        ));
+        assert!(canvas_frame_has_revision_conflict(&invalid));
+    }
+
+    #[test]
+    fn depth_target_pipeline_and_pass_descriptor_are_valid() {
+        let table = ResourceTable::new();
+        let extent = Extent2D::new(64, 48).unwrap();
+        let color = table
+            .define_texture(
+                TextureDesc::new(
+                    TextureFormat::Bgra8Unorm,
+                    extent,
+                    TextureUsage::RENDER_ATTACHMENT,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let depth = table
+            .define_texture(
+                TextureDesc::new(
+                    TextureFormat::Depth32Float,
+                    extent,
+                    TextureUsage::RENDER_ATTACHMENT,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let area = PixelRect::new(0, 0, 64, 48).unwrap();
+        let pass = RenderPassDesc::new(&table, color, area, LoadOp::DontCare, StoreOp::Store)
+            .unwrap()
+            .with_depth_attachment(&table, depth, DepthLoadOp::Clear(1.0), StoreOp::DontCare)
+            .unwrap();
+        let attachment = pass.depth_attachment().unwrap();
+        assert_eq!(attachment.load(), DepthLoadOp::Clear(1.0));
+        assert_eq!(attachment.store(), StoreOp::DontCare);
+        assert!(define_canvas_pipeline(&table, true).is_ok());
+        assert!(define_canvas_texture_pipeline(&table, true).is_ok());
+    }
 }
