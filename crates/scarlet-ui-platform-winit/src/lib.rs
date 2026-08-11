@@ -22,13 +22,15 @@ use std::time::{Duration, Instant};
 use ::winit::application::ApplicationHandler;
 use ::winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, Position};
 use ::winit::event::{
-    ElementState as WinitElementState, Ime, MouseButton as WinitMouseButton, MouseScrollDelta,
-    TouchPhase, WindowEvent,
+    DeviceEvent, ElementState as WinitElementState, Ime, MouseButton as WinitMouseButton,
+    MouseScrollDelta, TouchPhase, WindowEvent,
 };
 use ::winit::event_loop::{ActiveEventLoop, EventLoop};
 use ::winit::keyboard::{Key, ModifiersState, NamedKey};
 use ::winit::platform::pump_events::EventLoopExtPumpEvents;
-use ::winit::window::{Fullscreen, Window as WinitWindow, WindowAttributes, WindowId};
+use ::winit::window::{
+    CursorGrabMode, Fullscreen, Window as WinitWindow, WindowAttributes, WindowId,
+};
 
 type SoftbufferContext = softbuffer::Context<::winit::event_loop::OwnedDisplayHandle>;
 type SoftbufferSurface =
@@ -101,6 +103,7 @@ struct WinitEventState {
     cursor_y: i32,
     window_focused: bool,
     fullscreen: bool,
+    pointer_locked: bool,
     manual_move_active: bool,
     manual_move_origin_outer_x: i32,
     manual_move_origin_outer_y: i32,
@@ -205,6 +208,7 @@ impl WinitEventState {
             cursor_y: 0,
             window_focused: true,
             fullscreen: false,
+            pointer_locked: false,
             manual_move_active: false,
             manual_move_origin_outer_x: 0,
             manual_move_origin_outer_y: 0,
@@ -423,6 +427,7 @@ struct WinitWindowEntry {
 struct WinitSharedState {
     event_loop: RefCell<EventLoop<()>>,
     windows: RefCell<BTreeMap<WindowId, WinitWindowEntry>>,
+    pointer_lock_owner: RefCell<Option<WindowId>>,
 }
 
 impl WinitSharedState {
@@ -431,6 +436,7 @@ impl WinitSharedState {
         Self {
             event_loop: RefCell::new(event_loop),
             windows: RefCell::new(BTreeMap::new()),
+            pointer_lock_owner: RefCell::new(None),
         }
     }
 
@@ -445,7 +451,44 @@ impl WinitSharedState {
     }
 
     fn remove_window(&self, window_id: WindowId) {
+        self.clear_pointer_lock_owner(window_id);
         self.windows.borrow_mut().remove(&window_id);
+    }
+
+    fn claim_pointer_lock(
+        &self,
+        window_id: WindowId,
+    ) -> Option<(Rc<RefCell<WinitEventState>>, Rc<WinitWindow>)> {
+        let previous =
+            replace_exclusive_owner(&mut self.pointer_lock_owner.borrow_mut(), window_id);
+        previous
+            .filter(|previous| *previous != window_id)
+            .and_then(|previous| self.window_entry(previous))
+    }
+
+    fn clear_pointer_lock_owner(&self, window_id: WindowId) {
+        let _ = clear_exclusive_owner(&mut self.pointer_lock_owner.borrow_mut(), window_id);
+    }
+
+    fn pointer_lock_owner(&self) -> Option<WindowId> {
+        *self.pointer_lock_owner.borrow()
+    }
+}
+
+fn replace_exclusive_owner<T: Copy + Eq>(owner: &mut Option<T>, new_owner: T) -> Option<T> {
+    if *owner == Some(new_owner) {
+        None
+    } else {
+        owner.replace(new_owner)
+    }
+}
+
+fn clear_exclusive_owner<T: Copy + Eq>(owner: &mut Option<T>, expected_owner: T) -> bool {
+    if *owner != Some(expected_owner) {
+        false
+    } else {
+        *owner = None;
+        true
     }
 }
 
@@ -491,6 +534,8 @@ impl ApplicationHandler for WinitPumpHandler {
                 ));
             }
             WindowEvent::Destroyed => {
+                self.shared.clear_pointer_lock_owner(window_id);
+                mark_pointer_lock_released(&mut state);
                 state.push(Event::Quit);
             }
             WindowEvent::Resized(size) => {
@@ -512,6 +557,8 @@ impl ApplicationHandler for WinitPumpHandler {
             WindowEvent::Focused(focused) => {
                 state.window_focused = focused;
                 if !focused {
+                    self.shared.clear_pointer_lock_owner(window_id);
+                    release_native_pointer_lock(&window, &mut state);
                     state.manual_move_active = false;
                     state.ime_preedit_active = false;
                     state.modifiers = KeyModifiers::empty();
@@ -547,6 +594,9 @@ impl ApplicationHandler for WinitPumpHandler {
                 state.cursor_physical_y = position.y;
                 state.cursor_x = new_x;
                 state.cursor_y = new_y;
+                if state.pointer_locked {
+                    return;
+                }
                 let x = state.cursor_x;
                 let y = state.cursor_y;
                 state.push(Event::Mouse(MouseEvent::Moved { x, y }));
@@ -557,6 +607,10 @@ impl ApplicationHandler for WinitPumpHandler {
                 state.push(Event::Mouse(MouseEvent::Entered { x, y }));
             }
             WindowEvent::CursorLeft { .. } => {
+                if state.pointer_locked {
+                    self.shared.clear_pointer_lock_owner(window_id);
+                    release_native_pointer_lock(&window, &mut state);
+                }
                 let x = state.cursor_x;
                 let y = state.cursor_y;
                 state.push(Event::Mouse(MouseEvent::Exited { x, y }));
@@ -701,6 +755,56 @@ impl ApplicationHandler for WinitPumpHandler {
             _ => {}
         }
     }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: ::winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        let DeviceEvent::MouseMotion { delta: (dx, dy) } = event else {
+            return;
+        };
+        let Some(owner) = self.shared.pointer_lock_owner() else {
+            return;
+        };
+        let Some((state, _window)) = self.shared.window_entry(owner) else {
+            self.shared.clear_pointer_lock_owner(owner);
+            return;
+        };
+        let mut state = state.borrow_mut();
+        if let Some(event) = relative_motion_event(dx, dy, true, &state) {
+            state.push(event);
+        }
+    }
+}
+
+fn relative_motion_event(
+    dx: f64,
+    dy: f64,
+    is_pointer_lock_owner: bool,
+    state: &WinitEventState,
+) -> Option<Event> {
+    (is_pointer_lock_owner && state.window_focused && state.pointer_locked).then(|| {
+        Event::Mouse(MouseEvent::RelativeMotion {
+            dx: f64_to_i32_saturated(dx.round()),
+            dy: f64_to_i32_saturated(dy.round()),
+        })
+    })
+}
+
+fn release_native_pointer_lock(window: &WinitWindow, state: &mut WinitEventState) {
+    let _ = window.set_cursor_grab(CursorGrabMode::None);
+    window.set_cursor_visible(true);
+    mark_pointer_lock_released(state);
+}
+
+fn mark_pointer_lock_released(state: &mut WinitEventState) {
+    if !state.pointer_locked {
+        return;
+    }
+    state.pointer_locked = false;
+    state.push(Event::PointerLockChanged { locked: false });
 }
 
 pub struct WinitPlatformWindow {
@@ -815,6 +919,11 @@ impl WinitPlatformWindow {
     pub(crate) fn set_observed_logical_size(&mut self, size: Size) {
         self.current_size = size;
     }
+
+    fn release_pointer_lock(&mut self) {
+        self.shared.clear_pointer_lock_owner(self.window.id());
+        release_native_pointer_lock(&self.window, &mut self.state.borrow_mut());
+    }
 }
 
 impl PlatformWindow for WinitPlatformWindow {
@@ -901,6 +1010,7 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn close(&mut self) -> Result<()> {
+        self.release_pointer_lock();
         self.window.set_visible(false);
         let mut handler = WinitPumpHandler {
             shared: self.shared.clone(),
@@ -914,6 +1024,7 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn minimize(&mut self) -> Result<()> {
+        self.release_pointer_lock();
         self.window.set_minimized(true);
         Ok(())
     }
@@ -927,6 +1038,35 @@ impl PlatformWindow for WinitPlatformWindow {
         let mode = fullscreen.then(|| Fullscreen::Borderless(self.window.current_monitor()));
         self.window.set_fullscreen(mode);
         Ok(())
+    }
+
+    fn set_pointer_lock(&mut self, locked: bool) -> Result<()> {
+        if !locked {
+            self.release_pointer_lock();
+            return Ok(());
+        }
+        if self.state.borrow().pointer_locked {
+            return Ok(());
+        }
+
+        self.window
+            .set_cursor_grab(CursorGrabMode::Locked)
+            .or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Confined))
+            .map_err(|_| Error::PointerLockUnsupported)?;
+        self.window.set_cursor_visible(false);
+        if let Some((previous_state, previous_window)) =
+            self.shared.claim_pointer_lock(self.window.id())
+        {
+            release_native_pointer_lock(&previous_window, &mut previous_state.borrow_mut());
+        }
+        let mut state = self.state.borrow_mut();
+        state.pointer_locked = true;
+        state.push(Event::PointerLockChanged { locked: true });
+        Ok(())
+    }
+
+    fn pointer_locked(&self) -> bool {
+        self.state.borrow().pointer_locked
     }
 
     fn restore(&mut self) -> Result<()> {
@@ -1188,6 +1328,52 @@ mod tests {
             phase: WheelPhase::Moved,
             source: ScrollSource::Trackpad,
         })
+    }
+
+    #[test]
+    fn device_motion_routes_only_to_exclusive_pointer_lock_owner() {
+        let mut owner_state = WinitEventState::new_with_wheel_coalesce(1.0, false);
+        let mut other_state = WinitEventState::new_with_wheel_coalesce(1.0, false);
+        owner_state.pointer_locked = true;
+        other_state.pointer_locked = true;
+
+        assert!(matches!(
+            relative_motion_event(3.6, -2.4, true, &owner_state),
+            Some(Event::Mouse(MouseEvent::RelativeMotion { dx: 4, dy: -2 }))
+        ));
+        assert!(relative_motion_event(3.6, -2.4, false, &other_state).is_none());
+
+        owner_state.window_focused = false;
+        assert!(relative_motion_event(3.6, -2.4, true, &owner_state).is_none());
+    }
+
+    #[test]
+    fn claiming_pointer_lock_replaces_previous_owner() {
+        let mut owner = Some(1_u32);
+
+        assert_eq!(replace_exclusive_owner(&mut owner, 2), Some(1));
+        assert_eq!(owner, Some(2));
+        assert_eq!(replace_exclusive_owner(&mut owner, 2), None);
+        assert_eq!(owner, Some(2));
+    }
+
+    #[test]
+    fn lifecycle_release_clears_only_owner_and_notifies_once() {
+        let mut owner = Some(2_u32);
+        assert!(!clear_exclusive_owner(&mut owner, 1));
+        assert_eq!(owner, Some(2));
+        assert!(clear_exclusive_owner(&mut owner, 2));
+        assert_eq!(owner, None);
+
+        let mut state = WinitEventState::new_with_wheel_coalesce(1.0, false);
+        state.pointer_locked = true;
+        mark_pointer_lock_released(&mut state);
+        mark_pointer_lock_released(&mut state);
+        assert!(matches!(
+            state.pop(),
+            Some(Event::PointerLockChanged { locked: false })
+        ));
+        assert!(state.pop().is_none());
     }
 
     #[test]

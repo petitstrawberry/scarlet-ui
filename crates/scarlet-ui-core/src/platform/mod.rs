@@ -172,6 +172,30 @@ pub trait PlatformWindow: Any {
     /// `Ok(())` when the platform accepted the request.
     fn set_fullscreen(&mut self, fullscreen: bool) -> Result<()>;
 
+    /// Request or release OS-level pointer lock for this window.
+    ///
+    /// # Arguments
+    ///
+    /// * `locked` - `true` to hide and constrain the pointer, or `false` to release it
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the backend accepted the request. Backends without
+    /// pointer-lock support return [`crate::error::Error::PointerLockUnsupported`].
+    fn set_pointer_lock(&mut self, locked: bool) -> Result<()> {
+        let _ = locked;
+        Err(crate::error::Error::PointerLockUnsupported)
+    }
+
+    /// Return the pointer-lock state confirmed by the platform backend.
+    ///
+    /// # Returns
+    ///
+    /// `true` only while the backend considers pointer lock active.
+    fn pointer_locked(&self) -> bool {
+        false
+    }
+
     /// Restore the window from minimized or maximized state.
     ///
     /// This does not leave fullscreen state; call [`Self::set_fullscreen`]

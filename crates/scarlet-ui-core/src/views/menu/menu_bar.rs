@@ -195,7 +195,9 @@ impl Element for MenuBarElement {
                 x: *x as f32,
                 y: *y as f32,
             },
-            crate::event::MouseEvent::Exited { .. } | crate::event::MouseEvent::Wheel { .. } => {
+            crate::event::MouseEvent::Exited { .. }
+            | crate::event::MouseEvent::Wheel { .. }
+            | crate::event::MouseEvent::RelativeMotion { .. } => {
                 self.hovered_index = None;
                 return false;
             }

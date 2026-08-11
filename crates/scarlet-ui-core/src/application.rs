@@ -82,6 +82,17 @@ pub trait Application: Clone + 'static {
     /// Handle a platform fullscreen state change.
     fn on_window_fullscreen_changed(&mut self, _ctx: &WindowContext, _fullscreen: bool) {}
 
+    /// Handle a platform pointer-lock state change.
+    ///
+    /// This reports the state confirmed by the backend, including forced
+    /// release after focus loss or an OS revocation.
+    ///
+    /// # Arguments
+    ///
+    /// * `_ctx` - Context for the window whose state changed
+    /// * `_locked` - Pointer-lock state confirmed by the platform
+    fn on_window_pointer_lock_changed(&mut self, _ctx: &WindowContext, _locked: bool) {}
+
     /// Handle committed text from an input method.
     fn on_text_input_commit(
         &mut self,
@@ -599,6 +610,12 @@ fn handle_window_event<A: Application>(
         Event::FullscreenChanged { fullscreen } => {
             app.on_window_fullscreen_changed(&slot.context, fullscreen);
         }
+        Event::PointerLockChanged { locked } => {
+            let _ = slot
+                .pipeline
+                .handle_event(&Event::PointerLockChanged { locked });
+            notify_pointer_lock_changed(app, &slot.context, locked);
+        }
         Event::ScreenSizeChanged { width, height } => {
             let resize_to = app.on_screen_size_changed(width, height);
             if let Some(new_size) = resize_to {
@@ -731,6 +748,10 @@ fn handle_window_event<A: Application>(
         }
     }
     Ok(false)
+}
+
+fn notify_pointer_lock_changed<A: Application>(app: &mut A, context: &WindowContext, locked: bool) {
+    app.on_window_pointer_lock_changed(context, locked);
 }
 
 fn handle_window_close_request<A: Application>(
@@ -984,6 +1005,40 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::rc::Rc;
+    use core::cell::Cell;
+
+    #[derive(Clone)]
+    struct PointerLockLifecycleApp {
+        observed: Rc<Cell<Option<bool>>>,
+    }
+
+    impl Application for PointerLockLifecycleApp {
+        fn scenes(&self) -> impl Scene {}
+
+        fn on_window_pointer_lock_changed(&mut self, _ctx: &WindowContext, locked: bool) {
+            self.observed.set(Some(locked));
+        }
+    }
+
+    #[test]
+    fn pointer_lock_changed_reaches_application_lifecycle() {
+        let observed = Rc::new(Cell::new(None));
+        let mut app = PointerLockLifecycleApp {
+            observed: observed.clone(),
+        };
+        let context = WindowContext {
+            window_id: WindowId::generate(),
+            scene_key: SceneWindowKey::main(),
+            pipeline_id: PipelineId::generate(),
+            platform_window_id: 42,
+            is_primary: true,
+        };
+
+        notify_pointer_lock_changed(&mut app, &context, true);
+
+        assert_eq!(observed.get(), Some(true));
+    }
 
     fn wheel(delta_y: i32, phase: WheelPhase, source: ScrollSource) -> Event {
         Event::Mouse(MouseEvent::Wheel {

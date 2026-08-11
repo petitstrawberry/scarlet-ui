@@ -36,6 +36,9 @@ pub enum Error {
     /// Event dispatch error
     EventDispatchError,
 
+    /// Pointer lock is not supported by the selected platform backend.
+    PointerLockUnsupported,
+
     /// Duplicate scene window key
     DuplicateSceneWindowKey,
 }
@@ -57,6 +60,7 @@ impl fmt::Display for Error {
                 write!(f, "Invalid renderer backend: {}", value)
             }
             Error::EventDispatchError => write!(f, "Event dispatch error"),
+            Error::PointerLockUnsupported => write!(f, "Pointer lock is not supported"),
             Error::DuplicateSceneWindowKey => write!(f, "Duplicate scene window key"),
         }
     }

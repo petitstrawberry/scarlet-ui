@@ -51,6 +51,8 @@ pub enum Error {
     },
     /// A frame dimension or paint value was invalid.
     InvalidFrame,
+    /// A canvas requested depth testing on a device without depth support.
+    DepthUnsupported,
     /// The frame exceeded SGFX's bounded IR command or resource limits.
     FrameTooComplex,
     /// The image-pool generation counter was exhausted.
@@ -75,6 +77,9 @@ impl fmt::Display for Error {
                 write!(formatter, "SGFX sink failed at {stage:?}: {source}")
             }
             Self::InvalidFrame => formatter.write_str("invalid ScarletUI frame"),
+            Self::DepthUnsupported => {
+                formatter.write_str("SGFX device does not support canvas depth testing")
+            }
             Self::FrameTooComplex => formatter.write_str("ScarletUI frame exceeds SGFX IR limits"),
             Self::GenerationExhausted => formatter.write_str("SGFX buffer generation exhausted"),
         }

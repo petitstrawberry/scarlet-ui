@@ -26,7 +26,6 @@
 //! traits exposed by this core crate.
 
 #![cfg_attr(not(feature = "std"), no_std)]
-#![feature(portable_simd)]
 
 #[cfg(all(feature = "std", feature = "legacy-scarlet-std"))]
 compile_error!("scarlet-ui features `std` and `legacy-scarlet-std` are mutually exclusive");
@@ -137,7 +136,8 @@ pub use scene::{Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowGroup,
 pub use state::{InvalidationKind, Listenable, State, StateId, SubscriptionId, generate_state_id};
 pub use view::{View, ViewExt, ViewKey};
 pub use views::modifiers::{
-    AlignmentFrame, Background, Border, Clip, Focusable, Frame, OnKey, Padding, SetSize,
+    AlignmentFrame, Background, Border, Clip, Focusable, Frame, OnKey, OnMouseButton, OnMouseDelta,
+    Padding, SetSize,
 };
 pub use views::{
     BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, IconView, Image,
@@ -170,7 +170,8 @@ pub mod prelude {
     };
     pub use crate::error::{Error, Result};
     pub use crate::event::{
-        Event, FocusEvent, KeyEvent, LifecycleEvent, MouseEvent, ScrollSource, WheelPhase,
+        Event, FocusEvent, KeyEvent, LifecycleEvent, MouseButton, MouseEvent, ScrollSource,
+        WheelPhase,
     };
     pub use crate::geometry::*;
     pub use crate::graphics::{
@@ -187,7 +188,8 @@ pub mod prelude {
     pub use crate::state::{InvalidationKind, Listenable, State, StateId, SubscriptionId};
     pub use crate::view::{View, ViewExt, ViewKey};
     pub use crate::views::modifiers::{
-        Background, Border, Clip, Focusable, Frame, OnKey, OnMouseMove, Padding,
+        Background, Border, Clip, Focusable, Frame, OnKey, OnMouseButton, OnMouseDelta,
+        OnMouseMove, Padding,
     };
     pub use crate::views::{
         BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, IconView, Image,

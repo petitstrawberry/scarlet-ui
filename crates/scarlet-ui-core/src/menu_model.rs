@@ -197,8 +197,7 @@ fn push_json_string(out: &mut String, value: &str) {
 type MenuCallbackKey = (u32, String);
 
 static MENU_CALLBACKS: Mutex<BTreeMap<MenuCallbackKey, MenuCallback>> = Mutex::new(BTreeMap::new());
-static MENU_CALLBACKS_IN_FLIGHT: Mutex<BTreeSet<MenuCallbackKey>> =
-    Mutex::new(BTreeSet::new());
+static MENU_CALLBACKS_IN_FLIGHT: Mutex<BTreeSet<MenuCallbackKey>> = Mutex::new(BTreeSet::new());
 
 struct MenuCallbackCompletion {
     key: MenuCallbackKey,
@@ -300,11 +299,9 @@ mod tests {
             started_for_callback.wait();
             release_for_callback.wait();
         });
-        let menu = MenuBarModel::new(vec![
-            MenuItemModel::new("file", "File").children(vec![MenuEntry::Item(
-                MenuItemModel::new("open", "Open").on_activate(callback),
-            )]),
-        ]);
+        let menu = MenuBarModel::new(vec![MenuItemModel::new("file", "File").children(vec![
+            MenuEntry::Item(MenuItemModel::new("open", "Open").on_activate(callback)),
+        ])]);
         register_menu_callbacks(window_id, &menu);
 
         assert!(invoke_menu_callback(window_id, "open"));

@@ -288,6 +288,48 @@ pub trait ViewExt: View {
         crate::views::modifiers::OnMouseMove::new(self, callback)
     }
 
+    /// Observe relative pointer motion delivered while OS pointer lock is active.
+    ///
+    /// The most recently pressed view carrying this modifier becomes the
+    /// relative-motion owner when the platform confirms pointer lock.
+    ///
+    /// # Arguments
+    ///
+    /// * `callback` - Function called with horizontal and vertical deltas
+    ///
+    /// # Returns
+    ///
+    /// A modifier that observes pointer-lock motion.
+    fn on_mouse_delta<F: Fn(i32, i32) + Clone + 'static>(
+        self,
+        callback: F,
+    ) -> crate::views::modifiers::OnMouseDelta<Self, F>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::OnMouseDelta::new(self, callback)
+    }
+
+    /// Handle mouse button presses and releases within this view.
+    ///
+    /// # Arguments
+    ///
+    /// * `callback` - Function called with the button and `true` for press;
+    ///   return `true` to consume the event
+    ///
+    /// # Returns
+    ///
+    /// A modifier that handles button presses and releases.
+    fn on_mouse_button<F: Fn(crate::event::MouseButton, bool) -> bool + Clone + 'static>(
+        self,
+        callback: F,
+    ) -> crate::views::modifiers::OnMouseButton<Self, F>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::OnMouseButton::new(self, callback)
+    }
+
     /// Add a keyboard handler to this view
     ///
     /// # Arguments

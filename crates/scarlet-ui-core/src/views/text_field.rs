@@ -639,6 +639,7 @@ pub(crate) fn handle_text_field_mouse(
         }
         MouseEvent::Entered { .. }
         | MouseEvent::Exited { .. }
+        | MouseEvent::RelativeMotion { .. }
         | MouseEvent::Wheel { .. }
         | MouseEvent::ButtonPressed { .. }
         | MouseEvent::ButtonReleased { .. } => false,
