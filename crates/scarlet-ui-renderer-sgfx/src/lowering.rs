@@ -47,6 +47,8 @@ const MAX_CANVAS_MESHES: usize = 256;
 const MAX_CANVAS_TEXTURES: usize = 128;
 const MAX_CANVAS_DRAWS: usize = 240;
 
+const CANVAS_TARGET_TEX_COORDS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DrawSource {
     Solid,
@@ -767,8 +769,9 @@ impl RenderSession {
                         truncated_scaled(rect.size.width, scale),
                         truncated_scaled(rect.size.height, scale),
                     );
-                    let tex_coords = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
-                    if let Some(geometry) = tessellator.textured_rect(destination, tex_coords)? {
+                    if let Some(geometry) =
+                        tessellator.textured_rect(destination, CANVAS_TARGET_TEX_COORDS)?
+                    {
                         push_draw(
                             &mut draws,
                             geometry,
@@ -2133,6 +2136,14 @@ mod tests {
             Err(Error::DepthUnsupported)
         );
         assert_eq!(validate_depth_support(true, true), Ok(()));
+    }
+
+    #[test]
+    fn canvas_target_composite_preserves_vertical_orientation() {
+        assert_eq!(CANVAS_TARGET_TEX_COORDS[0], [0.0, 0.0]);
+        assert_eq!(CANVAS_TARGET_TEX_COORDS[1], [1.0, 0.0]);
+        assert_eq!(CANVAS_TARGET_TEX_COORDS[2], [1.0, 1.0]);
+        assert_eq!(CANVAS_TARGET_TEX_COORDS[3], [0.0, 1.0]);
     }
 
     #[test]
