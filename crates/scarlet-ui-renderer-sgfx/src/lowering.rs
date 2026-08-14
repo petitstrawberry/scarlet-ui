@@ -38,8 +38,9 @@ const SOLID_DRAW_COMMAND_BYTES: u32 = 200;
 const TEXTURED_DRAW_COMMAND_BYTES: u32 = 260;
 const GLYPH_ATLAS_SIZE: u32 = 2_048;
 const GLYPH_ATLAS_PADDING: u32 = 1;
-const MAX_GLYPH_ENTRIES: usize = 512;
+const MAX_GLYPH_ENTRIES: usize = 1_024;
 const MAX_ICON_ENTRIES: usize = 256;
+const MAX_GLYPH_ATLASES: usize = 2;
 const MAX_BUFFER_TEXTURES: usize = 128;
 const CANVAS_VERTEX_STRIDE: u32 = 40;
 const MAX_CANVASES: usize = 32;
@@ -93,6 +94,7 @@ struct LoweredFrame<'frame> {
     uploads: Vec<TextureUpload<'frame>>,
 }
 
+#[derive(Clone, Copy)]
 struct BufferTexture {
     texture: TextureId,
     buffer_identity: u64,
@@ -125,6 +127,136 @@ struct GlyphAtlas {
     cursor_x: u32,
     cursor_y: u32,
     row_height: u32,
+    used_frame: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtlasEntryKind {
+    Glyph,
+    Icon,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GlyphAtlasCacheAction {
+    Append(usize),
+    Recycle(usize),
+    Create,
+}
+
+impl GlyphAtlas {
+    fn new(texture: TextureId) -> Self {
+        Self {
+            texture,
+            entries: Vec::new(),
+            icon_entries: Vec::new(),
+            cursor_x: 0,
+            cursor_y: 0,
+            row_height: 0,
+            used_frame: 0,
+        }
+    }
+
+    fn reset(&mut self, frame_serial: u64) {
+        self.entries.clear();
+        self.icon_entries.clear();
+        self.cursor_x = 0;
+        self.cursor_y = 0;
+        self.row_height = 0;
+        self.used_frame = frame_serial;
+    }
+
+    fn can_allocate(&self, kind: AtlasEntryKind, width: u32, height: u32) -> bool {
+        let has_entry_capacity = match kind {
+            AtlasEntryKind::Glyph => self.entries.len() < MAX_GLYPH_ENTRIES,
+            AtlasEntryKind::Icon => self.icon_entries.len() < MAX_ICON_ENTRIES,
+        };
+        has_entry_capacity && self.next_slot(width, height).is_some()
+    }
+
+    fn allocate(&mut self, kind: AtlasEntryKind, width: u32, height: u32) -> Option<PixelBounds> {
+        if !self.can_allocate(kind, width, height) {
+            return None;
+        }
+        let (bounds, cursor_x, cursor_y, row_height) = self.next_slot(width, height)?;
+        self.cursor_x = cursor_x;
+        self.cursor_y = cursor_y;
+        self.row_height = row_height;
+        Some(bounds)
+    }
+
+    fn next_slot(&self, width: u32, height: u32) -> Option<(PixelBounds, u32, u32, u32)> {
+        let padded_width = width.checked_add(GLYPH_ATLAS_PADDING)?;
+        let padded_height = height.checked_add(GLYPH_ATLAS_PADDING)?;
+        if padded_width > GLYPH_ATLAS_SIZE || padded_height > GLYPH_ATLAS_SIZE {
+            return None;
+        }
+
+        let mut x = self.cursor_x;
+        let mut y = self.cursor_y;
+        let mut row_height = self.row_height;
+        if x.checked_add(padded_width)
+            .is_none_or(|right| right > GLYPH_ATLAS_SIZE)
+        {
+            x = 0;
+            y = y.checked_add(row_height)?;
+            row_height = 0;
+        }
+        if y.checked_add(padded_height)
+            .is_none_or(|bottom| bottom > GLYPH_ATLAS_SIZE)
+        {
+            return None;
+        }
+
+        Some((
+            PixelBounds {
+                x,
+                y,
+                width,
+                height,
+            },
+            x.checked_add(padded_width)?,
+            y,
+            row_height.max(padded_height),
+        ))
+    }
+
+    fn empty_can_allocate(width: u32, height: u32) -> bool {
+        width
+            .checked_add(GLYPH_ATLAS_PADDING)
+            .is_some_and(|padded| padded <= GLYPH_ATLAS_SIZE)
+            && height
+                .checked_add(GLYPH_ATLAS_PADDING)
+                .is_some_and(|padded| padded <= GLYPH_ATLAS_SIZE)
+    }
+}
+
+fn glyph_atlas_cache_action(
+    atlases: &[GlyphAtlas],
+    frame_serial: u64,
+    kind: AtlasEntryKind,
+    width: u32,
+    height: u32,
+    max_atlases: usize,
+) -> Option<GlyphAtlasCacheAction> {
+    if !GlyphAtlas::empty_can_allocate(width, height) {
+        return None;
+    }
+    if let Some(index) = atlases.iter().position(|atlas| {
+        atlas.used_frame == frame_serial && atlas.can_allocate(kind, width, height)
+    }) {
+        return Some(GlyphAtlasCacheAction::Append(index));
+    }
+    if let Some(index) = atlases
+        .iter()
+        .position(|atlas| atlas.used_frame != frame_serial)
+    {
+        return Some(GlyphAtlasCacheAction::Recycle(index));
+    }
+    if atlases.len() < max_atlases {
+        Some(GlyphAtlasCacheAction::Create)
+    } else {
+        None
+    }
 }
 
 struct CanvasTarget {
@@ -250,7 +382,8 @@ pub(crate) struct RenderSession {
     glyph_pipeline: RenderPipelineId,
     sampler: SamplerId,
     buffer_textures: Vec<BufferTexture>,
-    glyph_atlas: GlyphAtlas,
+    glyph_atlases: Vec<GlyphAtlas>,
+    glyph_atlas_rebuild_required: bool,
     canvas_pipeline: RenderPipelineId,
     canvas_texture_pipeline: RenderPipelineId,
     canvas_depth_pipeline: Option<RenderPipelineId>,
@@ -337,19 +470,17 @@ impl RenderSession {
             ))
             .map_err(|_| Error::sgfx(Stage::DefineResources))?
             .id();
-        let glyph_atlas = GlyphAtlas {
-            texture: define_sampled_texture(
-                &table,
-                TextureFormat::R8Unorm,
-                GLYPH_ATLAS_SIZE,
-                GLYPH_ATLAS_SIZE,
-            )?,
-            entries: Vec::new(),
-            icon_entries: Vec::new(),
-            cursor_x: 0,
-            cursor_y: 0,
-            row_height: 0,
-        };
+        let glyph_atlas = GlyphAtlas::new(define_sampled_texture(
+            &table,
+            TextureFormat::R8Unorm,
+            GLYPH_ATLAS_SIZE,
+            GLYPH_ATLAS_SIZE,
+        )?);
+        let mut glyph_atlases = Vec::new();
+        glyph_atlases
+            .try_reserve_exact(1)
+            .map_err(|_| Error::FrameTooComplex)?;
+        glyph_atlases.push(glyph_atlas);
         let canvas_pipeline = define_canvas_pipeline(&table, false)?.id();
         let canvas_texture_pipeline = define_canvas_texture_pipeline(&table, false)?.id();
         let canvas_dummy_buffer = table
@@ -383,7 +514,8 @@ impl RenderSession {
             glyph_pipeline,
             sampler,
             buffer_textures: Vec::new(),
-            glyph_atlas,
+            glyph_atlases,
+            glyph_atlas_rebuild_required: false,
             canvas_pipeline,
             canvas_texture_pipeline,
             canvas_depth_pipeline: None,
@@ -415,7 +547,8 @@ impl RenderSession {
             glyph_pipeline: _,
             sampler: _,
             buffer_textures: _,
-            glyph_atlas: _,
+            glyph_atlases: _,
+            glyph_atlas_rebuild_required: _,
             canvas_pipeline: _,
             canvas_texture_pipeline: _,
             canvas_depth_pipeline: _,
@@ -499,10 +632,56 @@ impl RenderSession {
             for texture in &mut self.buffer_textures {
                 texture.used_frame = 0;
             }
+            for atlas in &mut self.glyph_atlases {
+                atlas.used_frame = 0;
+            }
         }
     }
 
     fn lower<'frame>(
+        &mut self,
+        paint: &'frame PaintContext<'_>,
+        scale_milli: u32,
+        render_area: PixelBounds,
+    ) -> Result<LoweredFrame<'frame>> {
+        let mut buffer_textures_before = Vec::new();
+        buffer_textures_before
+            .try_reserve_exact(self.buffer_textures.len())
+            .map_err(|_| Error::FrameTooComplex)?;
+        buffer_textures_before.extend(self.buffer_textures.iter().copied());
+        self.glyph_atlas_rebuild_required = false;
+        match self.lower_once(paint, scale_milli, render_area) {
+            Err(Error::FrameTooComplex) if self.glyph_atlas_rebuild_required => {
+                // Cached atlas pages may contain glyphs from many older frames. Rebuild
+                // once before reporting a genuinely over-complex current frame.
+                for atlas in &mut self.glyph_atlases {
+                    atlas.reset(self.frame_serial);
+                }
+                for (texture, previous) in self
+                    .buffer_textures
+                    .iter_mut()
+                    .zip(buffer_textures_before.iter().copied())
+                {
+                    *texture = previous;
+                }
+                for texture in self
+                    .buffer_textures
+                    .iter_mut()
+                    .skip(buffer_textures_before.len())
+                {
+                    // The first lowering pass never submitted this new texture. Keep
+                    // the resource reusable, but force the retry to upload its pixels.
+                    texture.revision = texture.revision.wrapping_add(1);
+                    texture.used_frame = 0;
+                }
+                self.glyph_atlas_rebuild_required = false;
+                self.lower_once(paint, scale_milli, render_area)
+            }
+            result => result,
+        }
+    }
+
+    fn lower_once<'frame>(
         &mut self,
         paint: &'frame PaintContext<'_>,
         scale_milli: u32,
@@ -1423,77 +1602,41 @@ impl RenderSession {
         width: u32,
         height: u32,
     ) -> Result<(TextureId, PixelBounds, bool)> {
-        if let Some(entry) = self
-            .glyph_atlas
-            .entries
-            .iter()
-            .find(|entry| entry.key == key && entry.width == width && entry.height == height)
-        {
-            return Ok((
-                self.glyph_atlas.texture,
-                PixelBounds {
+        for atlas in &mut self.glyph_atlases {
+            if let Some(entry) = atlas
+                .entries
+                .iter()
+                .find(|entry| entry.key == key && entry.width == width && entry.height == height)
+            {
+                let bounds = PixelBounds {
                     x: entry.x,
                     y: entry.y,
                     width: entry.width,
                     height: entry.height,
-                },
-                false,
-            ));
+                };
+                atlas.used_frame = self.frame_serial;
+                return Ok((atlas.texture, bounds, false));
+            }
         }
-        if self.glyph_atlas.entries.len() >= MAX_GLYPH_ENTRIES {
+
+        let atlas_index = self.glyph_atlas_for_insert(AtlasEntryKind::Glyph, width, height)?;
+        let atlas = &mut self.glyph_atlases[atlas_index];
+        atlas
+            .entries
+            .try_reserve(1)
+            .map_err(|_| Error::FrameTooComplex)?;
+        let Some(bounds) = atlas.allocate(AtlasEntryKind::Glyph, width, height) else {
+            self.glyph_atlas_rebuild_required = true;
             return Err(Error::FrameTooComplex);
-        }
-        let padded_width = width
-            .checked_add(GLYPH_ATLAS_PADDING)
-            .ok_or(Error::FrameTooComplex)?;
-        let padded_height = height
-            .checked_add(GLYPH_ATLAS_PADDING)
-            .ok_or(Error::FrameTooComplex)?;
-        if padded_width > GLYPH_ATLAS_SIZE || padded_height > GLYPH_ATLAS_SIZE {
-            return Err(Error::FrameTooComplex);
-        }
-        if self
-            .glyph_atlas
-            .cursor_x
-            .checked_add(padded_width)
-            .is_none_or(|right| right > GLYPH_ATLAS_SIZE)
-        {
-            self.glyph_atlas.cursor_x = 0;
-            self.glyph_atlas.cursor_y = self
-                .glyph_atlas
-                .cursor_y
-                .checked_add(self.glyph_atlas.row_height)
-                .ok_or(Error::FrameTooComplex)?;
-            self.glyph_atlas.row_height = 0;
-        }
-        if self
-            .glyph_atlas
-            .cursor_y
-            .checked_add(padded_height)
-            .is_none_or(|bottom| bottom > GLYPH_ATLAS_SIZE)
-        {
-            return Err(Error::FrameTooComplex);
-        }
-        let bounds = PixelBounds {
-            x: self.glyph_atlas.cursor_x,
-            y: self.glyph_atlas.cursor_y,
-            width,
-            height,
         };
-        self.glyph_atlas.entries.push(GlyphTexture {
+        atlas.entries.push(GlyphTexture {
             key,
             x: bounds.x,
             y: bounds.y,
             width,
             height,
         });
-        self.glyph_atlas.cursor_x = self
-            .glyph_atlas
-            .cursor_x
-            .checked_add(padded_width)
-            .ok_or(Error::FrameTooComplex)?;
-        self.glyph_atlas.row_height = self.glyph_atlas.row_height.max(padded_height);
-        Ok((self.glyph_atlas.texture, bounds, true))
+        Ok((atlas.texture, bounds, true))
     }
 
     fn icon_texture(
@@ -1502,77 +1645,83 @@ impl RenderSession {
         width: u32,
         height: u32,
     ) -> Result<(TextureId, PixelBounds, bool)> {
-        if let Some(entry) = self
-            .glyph_atlas
-            .icon_entries
-            .iter()
-            .find(|entry| entry.key == key && entry.width == width && entry.height == height)
-        {
-            return Ok((
-                self.glyph_atlas.texture,
-                PixelBounds {
+        for atlas in &mut self.glyph_atlases {
+            if let Some(entry) = atlas
+                .icon_entries
+                .iter()
+                .find(|entry| entry.key == key && entry.width == width && entry.height == height)
+            {
+                let bounds = PixelBounds {
                     x: entry.x,
                     y: entry.y,
                     width: entry.width,
                     height: entry.height,
-                },
-                false,
-            ));
+                };
+                atlas.used_frame = self.frame_serial;
+                return Ok((atlas.texture, bounds, false));
+            }
         }
-        if self.glyph_atlas.icon_entries.len() >= MAX_ICON_ENTRIES {
+
+        let atlas_index = self.glyph_atlas_for_insert(AtlasEntryKind::Icon, width, height)?;
+        let atlas = &mut self.glyph_atlases[atlas_index];
+        atlas
+            .icon_entries
+            .try_reserve(1)
+            .map_err(|_| Error::FrameTooComplex)?;
+        let Some(bounds) = atlas.allocate(AtlasEntryKind::Icon, width, height) else {
+            self.glyph_atlas_rebuild_required = true;
             return Err(Error::FrameTooComplex);
-        }
-        let padded_width = width
-            .checked_add(GLYPH_ATLAS_PADDING)
-            .ok_or(Error::FrameTooComplex)?;
-        let padded_height = height
-            .checked_add(GLYPH_ATLAS_PADDING)
-            .ok_or(Error::FrameTooComplex)?;
-        if padded_width > GLYPH_ATLAS_SIZE || padded_height > GLYPH_ATLAS_SIZE {
-            return Err(Error::FrameTooComplex);
-        }
-        if self
-            .glyph_atlas
-            .cursor_x
-            .checked_add(padded_width)
-            .is_none_or(|right| right > GLYPH_ATLAS_SIZE)
-        {
-            self.glyph_atlas.cursor_x = 0;
-            self.glyph_atlas.cursor_y = self
-                .glyph_atlas
-                .cursor_y
-                .checked_add(self.glyph_atlas.row_height)
-                .ok_or(Error::FrameTooComplex)?;
-            self.glyph_atlas.row_height = 0;
-        }
-        if self
-            .glyph_atlas
-            .cursor_y
-            .checked_add(padded_height)
-            .is_none_or(|bottom| bottom > GLYPH_ATLAS_SIZE)
-        {
-            return Err(Error::FrameTooComplex);
-        }
-        let bounds = PixelBounds {
-            x: self.glyph_atlas.cursor_x,
-            y: self.glyph_atlas.cursor_y,
-            width,
-            height,
         };
-        self.glyph_atlas.icon_entries.push(IconTexture {
+        atlas.icon_entries.push(IconTexture {
             key,
             x: bounds.x,
             y: bounds.y,
             width,
             height,
         });
-        self.glyph_atlas.cursor_x = self
-            .glyph_atlas
-            .cursor_x
-            .checked_add(padded_width)
-            .ok_or(Error::FrameTooComplex)?;
-        self.glyph_atlas.row_height = self.glyph_atlas.row_height.max(padded_height);
-        Ok((self.glyph_atlas.texture, bounds, true))
+        Ok((atlas.texture, bounds, true))
+    }
+
+    fn glyph_atlas_for_insert(
+        &mut self,
+        kind: AtlasEntryKind,
+        width: u32,
+        height: u32,
+    ) -> Result<usize> {
+        let action = glyph_atlas_cache_action(
+            &self.glyph_atlases,
+            self.frame_serial,
+            kind,
+            width,
+            height,
+            MAX_GLYPH_ATLASES,
+        );
+        let Some(action) = action else {
+            self.glyph_atlas_rebuild_required = true;
+            return Err(Error::FrameTooComplex);
+        };
+        match action {
+            GlyphAtlasCacheAction::Append(index) => Ok(index),
+            GlyphAtlasCacheAction::Recycle(index) => {
+                self.glyph_atlases[index].reset(self.frame_serial);
+                Ok(index)
+            }
+            GlyphAtlasCacheAction::Create => {
+                self.glyph_atlases
+                    .try_reserve(1)
+                    .map_err(|_| Error::FrameTooComplex)?;
+                let texture = define_sampled_texture(
+                    &self.table,
+                    TextureFormat::R8Unorm,
+                    GLYPH_ATLAS_SIZE,
+                    GLYPH_ATLAS_SIZE,
+                )?;
+                let mut atlas = GlyphAtlas::new(texture);
+                atlas.reset(self.frame_serial);
+                self.glyph_atlases.push(atlas);
+                Ok(self.glyph_atlases.len() - 1)
+            }
+        }
     }
 
     fn submit(
@@ -1584,6 +1733,11 @@ impl RenderSession {
         render_areas: &[PixelBounds],
         frame: &LoweredFrame<'_>,
     ) -> Result<()> {
+        if frame.draws.is_empty() {
+            return Ok(());
+        }
+        self.submit_texture_uploads(context, queue, frame)?;
+
         let table = Rc::clone(&self.table);
         let target = table
             .texture_ref(target_id)
@@ -1628,23 +1782,6 @@ impl RenderSession {
                     encoder
                         .write_buffer(vertex_buffer, 0, &frame.vertex_bytes)
                         .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                    for upload in &frame.uploads {
-                        let texture = table
-                            .texture_ref(upload.texture)
-                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                        let destination =
-                            PixelRect::new(upload.x, upload.y, upload.width, upload.height)
-                                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                        let write = TextureWrite::new(
-                            destination,
-                            upload.bytes_per_row,
-                            upload.bytes.as_slice(),
-                        )
-                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                        encoder
-                            .write_texture(texture, write)
-                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                    }
                 }
                 let load = if first_pass {
                     LoadOp::Clear(clear_color)
@@ -1738,6 +1875,38 @@ impl RenderSession {
             }
         }
         Ok(())
+    }
+
+    fn submit_texture_uploads(
+        &mut self,
+        context: &Context,
+        queue: &Queue,
+        frame: &LoweredFrame<'_>,
+    ) -> Result<()> {
+        if frame.uploads.is_empty() {
+            return Ok(());
+        }
+        let table = Rc::clone(&self.table);
+        let mut encoder = CommandEncoder::new(&table);
+        for upload in &frame.uploads {
+            let texture = table
+                .texture_ref(upload.texture)
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            let destination = PixelRect::new(upload.x, upload.y, upload.width, upload.height)
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            let write =
+                TextureWrite::new(destination, upload.bytes_per_row, upload.bytes.as_slice())
+                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            encoder
+                .write_texture(texture, write)
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+        }
+        let commands = encoder
+            .finish()
+            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+        queue
+            .submit_ir(context, &mut self.cache, &commands)
+            .map_err(|_| Error::sgfx(Stage::SubmitCommands))
     }
 }
 
@@ -2100,6 +2269,25 @@ mod tests {
     use super::*;
     use crate::canvas::{SgfxCanvasDraw, SgfxCanvasVertex, SgfxMeshHandle};
 
+    fn test_glyph_atlas(table: &ResourceTable, used_frame: u64) -> GlyphAtlas {
+        let texture = define_sampled_texture(
+            table,
+            TextureFormat::R8Unorm,
+            GLYPH_ATLAS_SIZE,
+            GLYPH_ATLAS_SIZE,
+        )
+        .unwrap();
+        let mut atlas = GlyphAtlas::new(texture);
+        atlas.used_frame = used_frame;
+        atlas
+    }
+
+    fn fill_atlas_shelf(atlas: &mut GlyphAtlas) {
+        atlas.cursor_x = 0;
+        atlas.cursor_y = GLYPH_ATLAS_SIZE;
+        atlas.row_height = 0;
+    }
+
     fn triangle(z: f32) -> Vec<SgfxCanvasVertex> {
         alloc::vec![
             SgfxCanvasVertex::new([0.0, 0.0, z, 1.0], [1.0; 4]),
@@ -2125,6 +2313,94 @@ mod tests {
         assert_eq!(
             canvas_mesh_cache_action(5, 16, 6, 3).unwrap(),
             CanvasMeshCacheAction::Upload
+        );
+    }
+
+    #[test]
+    fn glyph_atlas_reset_discards_history_and_restarts_shelf() {
+        let table = ResourceTable::new();
+        let mut atlas = test_glyph_atlas(&table, 3);
+        let first = atlas
+            .allocate(
+                AtlasEntryKind::Glyph,
+                GLYPH_ATLAS_SIZE - GLYPH_ATLAS_PADDING,
+                10,
+            )
+            .unwrap();
+        let second = atlas.allocate(AtlasEntryKind::Glyph, 8, 6).unwrap();
+        assert_eq!((first.x, first.y), (0, 0));
+        assert_eq!((second.x, second.y), (0, 11));
+        atlas.entries.push(GlyphTexture {
+            key: GlyphRasterKey {
+                codepoint: 'A' as u32,
+                size_px: 16,
+                font_stack_id: 1,
+                font_slot: 0,
+            },
+            x: second.x,
+            y: second.y,
+            width: second.width,
+            height: second.height,
+        });
+
+        atlas.reset(4);
+
+        assert!(atlas.entries.is_empty());
+        assert!(atlas.icon_entries.is_empty());
+        assert_eq!(atlas.cursor_x, 0);
+        assert_eq!(atlas.cursor_y, 0);
+        assert_eq!(atlas.row_height, 0);
+        assert_eq!(atlas.used_frame, 4);
+    }
+
+    #[test]
+    fn glyph_atlas_cache_prefers_current_page_with_room() {
+        let table = ResourceTable::new();
+        let active = test_glyph_atlas(&table, 7);
+        let stale = test_glyph_atlas(&table, 6);
+
+        assert_eq!(
+            glyph_atlas_cache_action(&[active, stale], 7, AtlasEntryKind::Glyph, 16, 16, 2,),
+            Some(GlyphAtlasCacheAction::Append(0))
+        );
+    }
+
+    #[test]
+    fn glyph_atlas_cache_recycles_only_a_page_unused_by_current_frame() {
+        let table = ResourceTable::new();
+        let mut active = test_glyph_atlas(&table, 7);
+        let stale = test_glyph_atlas(&table, 6);
+        fill_atlas_shelf(&mut active);
+
+        assert_eq!(
+            glyph_atlas_cache_action(&[active, stale], 7, AtlasEntryKind::Glyph, 16, 16, 2,),
+            Some(GlyphAtlasCacheAction::Recycle(1))
+        );
+    }
+
+    #[test]
+    fn glyph_atlas_cache_creates_a_page_before_rejecting_current_frame() {
+        let table = ResourceTable::new();
+        let mut active = test_glyph_atlas(&table, 7);
+        fill_atlas_shelf(&mut active);
+
+        assert_eq!(
+            glyph_atlas_cache_action(&[active], 7, AtlasEntryKind::Glyph, 16, 16, 2,),
+            Some(GlyphAtlasCacheAction::Create)
+        );
+    }
+
+    #[test]
+    fn glyph_atlas_cache_rejects_only_when_all_current_pages_are_full() {
+        let table = ResourceTable::new();
+        let mut first = test_glyph_atlas(&table, 7);
+        let mut second = test_glyph_atlas(&table, 7);
+        fill_atlas_shelf(&mut first);
+        fill_atlas_shelf(&mut second);
+
+        assert_eq!(
+            glyph_atlas_cache_action(&[first, second], 7, AtlasEntryKind::Glyph, 16, 16, 2,),
+            None
         );
     }
 
