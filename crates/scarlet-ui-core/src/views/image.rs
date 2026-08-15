@@ -35,16 +35,16 @@ pub enum ImageSource {
 /// Decoded bitmap image data.
 #[derive(Clone)]
 pub struct BitmapImage {
-    data: Vec<u32>,
+    data: Arc<[u32]>,
     width: u32,
     height: u32,
 }
 
 impl BitmapImage {
-    /// Create a decoded bitmap from BGRA pixel data.
+    /// Create a decoded bitmap from shared BGRA pixel data.
     pub fn from_bgra(data: Vec<u32>, width: u32, height: u32) -> Self {
         Self {
-            data,
+            data: Arc::from(data.into_boxed_slice()),
             width,
             height,
         }
@@ -634,9 +634,25 @@ fn decode_jpeg(bytes: &[u8]) -> Option<BitmapImage> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ImageFit, ImageRenderObject};
+    use super::{BitmapImage, ImageFit, ImageRenderObject};
     use crate::element::LayoutConstraints;
     use crate::geometry::Size;
+    use crate::testing::alloc_counter::measure_allocations;
+
+    #[test]
+    fn bitmap_clone_shares_pixel_storage_without_allocating() {
+        let image = BitmapImage::from_bgra(vec![0xff00_0000; 4], 2, 2);
+        let mut cloned = None;
+
+        let allocations = measure_allocations(|| {
+            cloned = Some(image.clone());
+        });
+        let cloned = cloned.expect("bitmap clone should be captured");
+
+        assert_eq!(allocations.allocations, 0);
+        assert_eq!(allocations.allocated_bytes, 0);
+        assert!(core::ptr::eq(image.pixels(), cloned.pixels()));
+    }
 
     #[test]
     fn cover_respects_a_fixed_frame() {
