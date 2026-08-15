@@ -26,14 +26,14 @@ use crate::geometry::{
 };
 
 const VERTEX_STRIDE: u32 = 16;
-// VirGL accepts a 64 KiB opaque stream. Canonical vertices are 32 bytes, while
+// VirGL accepts a 64 KiB opaque stream. Canonical vertices are 40 bytes, while
 // draw state is about 200 bytes for solid draws and at most 260 bytes for a
 // textured draw that also initializes a new sampler view. Pack against that
 // byte budget instead of imposing an unrelated fixed draw limit.
-const MAX_PASS_VERTICES: u32 = 1_920;
+const MAX_PASS_VERTICES: u32 = 1_440;
 const MAX_OPAQUE_COMMAND_BYTES: u32 = 65_536;
 const PASS_FIXED_COMMAND_BYTES: u32 = 2_112;
-const CANONICAL_VERTEX_BYTES: u32 = 32;
+const CANONICAL_VERTEX_BYTES: u32 = 40;
 const SOLID_DRAW_COMMAND_BYTES: u32 = 200;
 const TEXTURED_DRAW_COMMAND_BYTES: u32 = 260;
 const GLYPH_ATLAS_SIZE: u32 = 2_048;
@@ -2032,7 +2032,8 @@ fn define_canvas_texture_pipeline(
         CANVAS_VERTEX_STRIDE,
         alloc::vec![
             VertexAttribute::new(0, VertexFormat::Float32x4, 0),
-            VertexAttribute::new(1, VertexFormat::Float32x2, 32),
+            VertexAttribute::new(1, VertexFormat::Float32x4, 16),
+            VertexAttribute::new(2, VertexFormat::Float32x2, 32),
         ],
     )
     .map_err(|_| Error::sgfx(Stage::DefineResources))?;
@@ -2040,7 +2041,7 @@ fn define_canvas_texture_pipeline(
         TextureFormat::Bgra8Unorm,
         PrimitiveTopology::TriangleList,
         layout,
-        FragmentProgram::Texture(TextureSampleMode::Rgba),
+        FragmentProgram::TextureVertexColor(TextureSampleMode::Rgba),
         BlendState::SOURCE_OVER_STRAIGHT_ALPHA,
         RasterState::new(sgfx::ir::CullMode::Back, FrontFace::CounterClockwise),
     )
