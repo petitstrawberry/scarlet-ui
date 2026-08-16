@@ -328,7 +328,7 @@ impl ApplicationRunner {
 
             for slot in slots.iter_mut() {
                 slot.presented_this_cycle = false;
-                let mut pending_trackpad_moved = None;
+                let mut pending_mouse_motion = None;
                 let mut slot_closing = false;
                 for _ in 0..MAX_EVENTS_PER_WINDOW_PER_TICK {
                     let Some(event) = slot.window.poll_event() else {
@@ -336,13 +336,18 @@ impl ApplicationRunner {
                     };
                     any_event = true;
                     let Some(event) = coalesce_trackpad_moved_for_batch(
-                        &mut pending_trackpad_moved,
+                        &mut pending_mouse_motion,
                         event,
                         app_wheel_coalesce_enabled,
                     ) else {
                         continue;
                     };
-                    if let Some(pending) = pending_trackpad_moved.take() {
+                    let Some(event) =
+                        coalesce_relative_motion_for_batch(&mut pending_mouse_motion, event)
+                    else {
+                        continue;
+                    };
+                    if let Some(pending) = pending_mouse_motion.take() {
                         if handle_window_event(app, slot, pending, &mut close_ids)? {
                             slot_closing = true;
                             break;
@@ -353,7 +358,7 @@ impl ApplicationRunner {
                         break;
                     }
                 }
-                if !slot_closing && let Some(pending) = pending_trackpad_moved.take() {
+                if !slot_closing && let Some(pending) = pending_mouse_motion.take() {
                     let _ = handle_window_event(app, slot, pending, &mut close_ids)?;
                 }
             }
@@ -576,6 +581,9 @@ fn coalesce_trackpad_moved_for_batch(
             );
         }
     } else {
+        if pending.is_some() {
+            return Some(event);
+        }
         *pending = Some(Event::Mouse(MouseEvent::Wheel {
             delta_x,
             delta_y,
@@ -584,6 +592,27 @@ fn coalesce_trackpad_moved_for_batch(
             phase: WheelPhase::Moved,
             source: ScrollSource::Trackpad,
         }));
+    }
+
+    None
+}
+
+fn coalesce_relative_motion_for_batch(pending: &mut Option<Event>, event: Event) -> Option<Event> {
+    let Event::Mouse(MouseEvent::RelativeMotion { dx, dy }) = event else {
+        return Some(event);
+    };
+
+    if let Some(Event::Mouse(MouseEvent::RelativeMotion {
+        dx: pending_dx,
+        dy: pending_dy,
+    })) = pending.as_mut()
+    {
+        *pending_dx = pending_dx.saturating_add(dx);
+        *pending_dy = pending_dy.saturating_add(dy);
+    } else if pending.is_some() {
+        return Some(event);
+    } else {
+        *pending = Some(Event::Mouse(MouseEvent::RelativeMotion { dx, dy }));
     }
 
     None
@@ -1073,6 +1102,43 @@ mod tests {
             phase: WheelPhase::Moved,
             source: ScrollSource::Trackpad,
         })
+    }
+
+    fn relative_motion(dx: i32, dy: i32) -> Event {
+        Event::Mouse(MouseEvent::RelativeMotion { dx, dy })
+    }
+
+    #[test]
+    fn app_loop_coalesces_consecutive_relative_motion_events() {
+        let mut pending = None;
+
+        assert!(coalesce_relative_motion_for_batch(&mut pending, relative_motion(3, -2)).is_none());
+        assert!(coalesce_relative_motion_for_batch(&mut pending, relative_motion(-1, 5)).is_none());
+
+        assert!(matches!(
+            pending.take(),
+            Some(Event::Mouse(MouseEvent::RelativeMotion { dx: 2, dy: 3 }))
+        ));
+    }
+
+    #[test]
+    fn app_loop_keeps_relative_motion_ordered_around_other_events() {
+        let mut pending = Some(relative_motion(4, 1));
+        let button = Event::Mouse(MouseEvent::ButtonPressed {
+            button: crate::event::MouseButton::Left,
+            x: 10,
+            y: 20,
+            click_count: 1,
+        });
+
+        assert!(matches!(
+            coalesce_relative_motion_for_batch(&mut pending, button.clone()),
+            Some(Event::Mouse(MouseEvent::ButtonPressed { .. }))
+        ));
+        assert!(matches!(
+            pending,
+            Some(Event::Mouse(MouseEvent::RelativeMotion { dx: 4, dy: 1 }))
+        ));
     }
 
     #[test]
