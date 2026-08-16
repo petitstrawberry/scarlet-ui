@@ -36,6 +36,7 @@ const PASS_FIXED_COMMAND_BYTES: u32 = 2_112;
 const CANONICAL_VERTEX_BYTES: u32 = 40;
 const SOLID_DRAW_COMMAND_BYTES: u32 = 200;
 const TEXTURED_DRAW_COMMAND_BYTES: u32 = 260;
+const CANVAS_VERTEX_BIND_COMMAND_BYTES: u32 = 16;
 const GLYPH_ATLAS_SIZE: u32 = 2_048;
 const GLYPH_ATLAS_PADDING: u32 = 1;
 const MAX_GLYPH_ENTRIES: usize = 1_024;
@@ -320,45 +321,26 @@ fn validate_depth_support(requested: bool, supported: bool) -> Result<()> {
 }
 
 fn canvas_pass_reaches_frame_end(
-    meshes: &[CanvasMesh],
     mesh_indices: &[usize],
     texture_indices: &[Option<usize>],
     mut draw_index: usize,
-    mut draw_offset: u32,
 ) -> bool {
-    let mut pass_vertices = 0u32;
     let mut estimated_bytes = PASS_FIXED_COMMAND_BYTES;
-    while draw_index < mesh_indices.len() && pass_vertices < MAX_PASS_VERTICES {
-        let Some(cached) = mesh_indices
-            .get(draw_index)
-            .and_then(|index| meshes.get(*index))
-        else {
+    while draw_index < mesh_indices.len() {
+        if mesh_indices.get(draw_index).is_none() {
             return false;
-        };
+        }
         let draw_bytes = if texture_indices.get(draw_index).copied().flatten().is_some() {
             TEXTURED_DRAW_COMMAND_BYTES
         } else {
             SOLID_DRAW_COMMAND_BYTES
-        };
-        let available_bytes = MAX_OPAQUE_COMMAND_BYTES
-            .saturating_sub(estimated_bytes)
-            .saturating_sub(draw_bytes);
-        let available_vertices =
-            (MAX_PASS_VERTICES - pass_vertices).min(available_bytes / CANONICAL_VERTEX_BYTES);
-        let remaining = cached.vertex_count.saturating_sub(draw_offset);
-        let chunk = remaining.min(available_vertices) / 3 * 3;
-        if chunk == 0 {
+        }
+        .saturating_add(CANVAS_VERTEX_BIND_COMMAND_BYTES);
+        if estimated_bytes.saturating_add(draw_bytes) > MAX_OPAQUE_COMMAND_BYTES {
             return false;
         }
-        pass_vertices = pass_vertices.saturating_add(chunk);
-        estimated_bytes = estimated_bytes
-            .saturating_add(draw_bytes)
-            .saturating_add(chunk.saturating_mul(CANONICAL_VERTEX_BYTES));
-        draw_offset = draw_offset.saturating_add(chunk);
-        if draw_offset == cached.vertex_count {
-            draw_index += 1;
-            draw_offset = 0;
-        }
+        estimated_bytes = estimated_bytes.saturating_add(draw_bytes);
+        draw_index += 1;
     }
     draw_index == mesh_indices.len()
 }
@@ -1317,7 +1299,6 @@ impl RenderSession {
                 .map_err(|_| Error::sgfx(Stage::SubmitCommands))?;
         } else {
             let mut draw_index = 0usize;
-            let mut draw_offset = 0u32;
             let mut first_submission = true;
             while draw_index < frame.draws.len() {
                 let mut encoder = CommandEncoder::new(&table);
@@ -1357,17 +1338,12 @@ impl RenderSession {
                 } else {
                     LoadOp::Load
                 };
-                let depth_store = if canvas_pass_reaches_frame_end(
-                    &self.canvas_meshes,
-                    &mesh_indices,
-                    &texture_indices,
-                    draw_index,
-                    draw_offset,
-                ) {
-                    StoreOp::DontCare
-                } else {
-                    StoreOp::Store
-                };
+                let depth_store =
+                    if canvas_pass_reaches_frame_end(&mesh_indices, &texture_indices, draw_index) {
+                        StoreOp::DontCare
+                    } else {
+                        StoreOp::Store
+                    };
                 let descriptor = RenderPassDesc::new(&table, target, area, load, StoreOp::Store)
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                 let descriptor = if let Some(depth) = depth {
@@ -1385,27 +1361,20 @@ impl RenderSession {
                 let mut pass = encoder
                     .begin_render_pass(descriptor)
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                let mut pass_vertices = 0u32;
                 let mut estimated_bytes = PASS_FIXED_COMMAND_BYTES;
 
-                while draw_index < frame.draws.len() && pass_vertices < MAX_PASS_VERTICES {
+                while draw_index < frame.draws.len() {
                     let draw = &frame.draws[draw_index];
                     let mesh_index = mesh_indices[draw_index];
                     let texture_index = texture_indices[draw_index];
                     let cached = &self.canvas_meshes[mesh_index];
-                    let remaining = cached.vertex_count.saturating_sub(draw_offset);
                     let draw_bytes = if texture_index.is_some() {
                         TEXTURED_DRAW_COMMAND_BYTES
                     } else {
                         SOLID_DRAW_COMMAND_BYTES
-                    };
-                    let available_bytes = MAX_OPAQUE_COMMAND_BYTES
-                        .saturating_sub(estimated_bytes)
-                        .saturating_sub(draw_bytes);
-                    let available_vertices = (MAX_PASS_VERTICES - pass_vertices)
-                        .min(available_bytes / CANONICAL_VERTEX_BYTES);
-                    let chunk = remaining.min(available_vertices) / 3 * 3;
-                    if chunk == 0 {
+                    }
+                    .saturating_add(CANVAS_VERTEX_BIND_COMMAND_BYTES);
+                    if estimated_bytes.saturating_add(draw_bytes) > MAX_OPAQUE_COMMAND_BYTES {
                         break;
                     }
 
@@ -1438,20 +1407,13 @@ impl RenderSession {
                         .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                     pass.set_uniforms(DrawUniforms::new(transform, tint))
                         .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                    pass.draw(chunk, draw_offset)
+                    pass.draw(cached.vertex_count, 0)
                         .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
 
-                    pass_vertices = pass_vertices.saturating_add(chunk);
-                    estimated_bytes = estimated_bytes
-                        .saturating_add(draw_bytes)
-                        .saturating_add(chunk.saturating_mul(CANONICAL_VERTEX_BYTES));
-                    draw_offset = draw_offset.saturating_add(chunk);
-                    if draw_offset == cached.vertex_count {
-                        draw_index += 1;
-                        draw_offset = 0;
-                    }
+                    estimated_bytes = estimated_bytes.saturating_add(draw_bytes);
+                    draw_index += 1;
                 }
-                if pass_vertices == 0 {
+                if estimated_bytes == PASS_FIXED_COMMAND_BYTES {
                     return Err(Error::FrameTooComplex);
                 }
                 pass.end().map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -2424,33 +2386,20 @@ mod tests {
     }
 
     #[test]
-    fn split_canvas_pass_stores_depth_until_the_final_chunk() {
-        let table = ResourceTable::new();
-        let buffer = table
-            .define_buffer(
-                BufferDesc::new(
-                    u64::from(3_000 * CANVAS_VERTEX_STRIDE),
-                    BufferUsage::VERTEX | BufferUsage::COPY_DST,
-                )
-                .unwrap(),
-            )
-            .unwrap()
-            .id();
-        let meshes = [CanvasMesh {
-            handle_id: 1,
-            revision: 1,
-            buffer,
-            vertex_count: 3_000,
-            capacity_vertices: 3_000,
-            uploaded: true,
-        }];
-        assert!(!canvas_pass_reaches_frame_end(&meshes, &[0], &[None], 0, 0,));
-        assert!(canvas_pass_reaches_frame_end(
-            &meshes,
-            &[0],
-            &[None],
+    fn retained_canvas_pass_is_limited_by_draw_state_not_vertex_payload() {
+        let max_textured_draws = ((MAX_OPAQUE_COMMAND_BYTES - PASS_FIXED_COMMAND_BYTES)
+            / (TEXTURED_DRAW_COMMAND_BYTES + CANVAS_VERTEX_BIND_COMMAND_BYTES))
+            as usize;
+        let meshes = vec![0; max_textured_draws];
+        let textures = vec![Some(0); max_textured_draws];
+        assert!(canvas_pass_reaches_frame_end(&meshes, &textures, 0));
+
+        let too_many_meshes = vec![0; max_textured_draws + 1];
+        let too_many_textures = vec![Some(0); max_textured_draws + 1];
+        assert!(!canvas_pass_reaches_frame_end(
+            &too_many_meshes,
+            &too_many_textures,
             0,
-            1_920,
         ));
     }
 

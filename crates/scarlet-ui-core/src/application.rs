@@ -6,7 +6,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::marker::PhantomData;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::command::{self, ApplicationCommand};
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult, WindowSizeLimits};
@@ -24,6 +24,7 @@ use crate::state::{InvalidationKind, StateId, SubscriptionId};
 use crate::view::View;
 
 const MAX_EVENTS_PER_WINDOW_PER_TICK: usize = 64;
+const PRESENT_INTERVAL: Duration = Duration::from_micros(16_667);
 
 #[cfg(feature = "std")]
 fn wheel_log_env_enabled() -> bool {
@@ -145,6 +146,12 @@ pub trait Application: Clone + 'static {
 
     /// Handle idle ticks on the application main thread.
     fn on_idle(&mut self) {}
+
+    /// Observe a frame after its renderer and platform presentation completed.
+    ///
+    /// Unlike [`Application::on_idle`], this is called only when a CPU or
+    /// external paint backend actually submitted a frame for the window.
+    fn on_frame_presented(&mut self, _ctx: &WindowContext) {}
 
     /// Exit when all windows are closed.
     fn exit_when_all_windows_closed(&self) -> bool {
@@ -314,6 +321,7 @@ impl ApplicationRunner {
         // transport is degraded and the loop would otherwise pin a full core.
         let mut spin_without_present: u32 = 0;
         loop {
+            let cycle_started = Instant::now();
             let mut any_event = false;
             let mut any_presented = false;
             let mut close_ids = Vec::new();
@@ -372,6 +380,7 @@ impl ApplicationRunner {
                 {
                     slot.presented_this_cycle = true;
                     any_presented = true;
+                    app.on_frame_presented(&slot.context);
                 }
             }
 
@@ -382,10 +391,14 @@ impl ApplicationRunner {
                 // A frame was presented. Cap the presentation rate at ~60 fps
                 // so a pipeline that keeps marking itself dirty (e.g. during
                 // window close when SWS echoes frame acknowledgements) cannot
-                // pin a full core. wait_for_next_event returns early if a new
-                // event arrives, so genuine animation stays responsive.
+                // pin a full core. Rendering time counts toward the frame
+                // interval instead of being followed by an unconditional
+                // extra 16 ms delay.
                 spin_without_present = 0;
-                wait_for_next_event(slots, Duration::from_millis(16));
+                let remaining = PRESENT_INTERVAL.saturating_sub(cycle_started.elapsed());
+                if !remaining.is_zero() {
+                    wait_for_next_event(slots, remaining);
+                }
             } else {
                 // Events arrived (or the pipeline stayed dirty) but nothing
                 // was presented. Give a brief grace window for the next frame
