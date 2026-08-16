@@ -19,7 +19,7 @@ use sgfx::ir::{
 };
 use sgfx::{Context, Image, IrResources, Queue};
 
-use crate::canvas::{SgfxCanvasFrame, SgfxCanvasPaint, SgfxMesh, SgfxTexture};
+use crate::canvas::{SgfxCanvasFrame, SgfxCanvasPaint, SgfxCanvasVertex, SgfxMesh, SgfxTexture};
 use crate::error::{Error, Result, Stage};
 use crate::geometry::{
     FloatRect, GeometryRange, MAX_FRAME_VERTICES, PixelBounds, Tessellator, Vertex,
@@ -1258,6 +1258,14 @@ impl RenderSession {
         let clear = ir_color(ui_color(frame.clear_color, 1.0)?)?;
         if frame.draws.is_empty() {
             let mut encoder = CommandEncoder::new(&table);
+            let dummy_vertices = canvas_dummy_vertices();
+            let dummy_bytes = encode_canvas_vertex_slice(&dummy_vertices)?;
+            let dummy = table
+                .buffer_ref(self.canvas_dummy_buffer)
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            encoder
+                .write_buffer(dummy, 0, &dummy_bytes)
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
             let descriptor =
                 RenderPassDesc::new(&table, target, area, LoadOp::Clear(clear), StoreOp::Store)
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -1277,9 +1285,6 @@ impl RenderSession {
                 .begin_render_pass(descriptor)
                 .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
             pass.set_pipeline(color_pipeline)
-                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-            let dummy = table
-                .buffer_ref(self.canvas_dummy_buffer)
                 .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
             pass.set_vertex_buffer(dummy, 0)
                 .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -2104,8 +2109,11 @@ fn encode_vertices(vertices: &[Vertex]) -> Result<Vec<u8>> {
 }
 
 fn encode_canvas_vertices(mesh: &SgfxMesh) -> Result<Vec<u8>> {
-    let capacity = mesh
-        .vertices
+    encode_canvas_vertex_slice(&mesh.vertices)
+}
+
+fn encode_canvas_vertex_slice(vertices: &[SgfxCanvasVertex]) -> Result<Vec<u8>> {
+    let capacity = vertices
         .len()
         .checked_mul(CANVAS_VERTEX_STRIDE as usize)
         .ok_or(Error::FrameTooComplex)?;
@@ -2113,7 +2121,7 @@ fn encode_canvas_vertices(mesh: &SgfxMesh) -> Result<Vec<u8>> {
     bytes
         .try_reserve_exact(capacity)
         .map_err(|_| Error::FrameTooComplex)?;
-    for vertex in mesh.vertices.iter() {
+    for vertex in vertices {
         for component in vertex.position {
             bytes.extend_from_slice(&component.to_le_bytes());
         }
@@ -2125,6 +2133,10 @@ fn encode_canvas_vertices(mesh: &SgfxMesh) -> Result<Vec<u8>> {
         }
     }
     Ok(bytes)
+}
+
+fn canvas_dummy_vertices() -> [SgfxCanvasVertex; 3] {
+    [SgfxCanvasVertex::new([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]); 3]
 }
 
 fn physical_canvas_extent(logical: f32, scale: f32) -> Result<u32> {
@@ -2257,6 +2269,22 @@ mod tests {
             SgfxCanvasVertex::new([1.0, 0.0, z, 1.0], [1.0; 4]),
             SgfxCanvasVertex::new([0.0, 1.0, z, 1.0], [1.0; 4]),
         ]
+    }
+
+    #[test]
+    fn empty_canvas_dummy_buffer_contains_three_valid_vertices() {
+        let vertices = canvas_dummy_vertices();
+        let bytes = encode_canvas_vertex_slice(&vertices).unwrap();
+
+        assert_eq!(bytes.len(), CANVAS_VERTEX_STRIDE as usize * 3);
+        assert!(vertices.iter().all(|vertex| {
+            vertex.position.iter().all(|value| value.is_finite())
+                && vertex
+                    .color
+                    .iter()
+                    .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+                && vertex.tex_coord.iter().all(|value| value.is_finite())
+        }));
     }
 
     #[test]
