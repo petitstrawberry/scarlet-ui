@@ -2,8 +2,8 @@
 
 use core::fmt;
 
+use scarlet_sgfx_virgl::Image;
 use scarlet_ui_core::compositor::DamageRect;
-use sgfx::Image;
 
 /// Complete identity of one SWS shared SGFX buffer registration.
 ///
