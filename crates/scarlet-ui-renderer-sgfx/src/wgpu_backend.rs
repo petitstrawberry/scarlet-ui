@@ -6,8 +6,7 @@ use alloc::vec::Vec;
 
 use scarlet_ui_core::color::Color;
 use scarlet_ui_core::compositor::DamageRect;
-use scarlet_ui_core::geometry::{Rect, Size};
-use scarlet_ui_core::renderer::{BackendFrame, PaintBackend, PaintContext};
+use scarlet_ui_core::renderer::PaintContext;
 use sgfx::ir::{CommandBuffer, ResourceTable, TextureId};
 
 use crate::error::{Error, Result, Stage};
@@ -17,11 +16,11 @@ use crate::lowering::{RenderBackend, RenderSession};
 struct WgpuBackend;
 
 impl RenderBackend for WgpuBackend {
-    type Context = sgfx::wgpu::Context;
-    type Queue = sgfx::wgpu::Queue;
-    type Image = sgfx::wgpu::Image;
-    type ImageHandle = Arc<sgfx::wgpu::Image>;
-    type Resources = sgfx::wgpu::Resources;
+    type Context = sgfx_backend_wgpu::Context;
+    type Queue = sgfx_backend_wgpu::Queue;
+    type Image = sgfx_backend_wgpu::Image;
+    type ImageHandle = Arc<sgfx_backend_wgpu::Image>;
+    type Resources = sgfx_backend_wgpu::Resources;
 
     fn create_image(context: &Self::Context, width: u32, height: u32) -> Result<Self::ImageHandle> {
         context
@@ -70,8 +69,8 @@ impl RenderBackend for WgpuBackend {
 /// logical target so a platform adapter can copy or sample it into its WGPU
 /// surface.
 pub struct WgpuSgfxSession {
-    context: sgfx::wgpu::Context,
-    queue: sgfx::wgpu::Queue,
+    context: sgfx_backend_wgpu::Context,
+    queue: sgfx_backend_wgpu::Queue,
     session: RenderSession<WgpuBackend>,
     width: u32,
     height: u32,
@@ -100,7 +99,7 @@ impl WgpuSgfxSession {
         height: u32,
         supports_depth: bool,
     ) -> Result<Self> {
-        let device = sgfx::wgpu::Device::new(device, queue);
+        let device = sgfx_backend_wgpu::Device::new(device, queue);
         let context = device.create_context();
         let queue = context.create_queue();
         let session = RenderSession::new(&context, width, height, supports_depth)?;
@@ -270,7 +269,7 @@ impl WgpuSgfxSession {
     ///
     /// The target selected by the previous render call, or `None` before the
     /// first render.
-    pub fn image(&self) -> Option<&sgfx::wgpu::Image> {
+    pub fn image(&self) -> Option<&sgfx_backend_wgpu::Image> {
         self.last_slot.and_then(|slot| self.session.image(slot))
     }
 
@@ -282,254 +281,6 @@ impl WgpuSgfxSession {
     pub const fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
     }
-}
-
-/// WGPU paint backend that executes SGFX IR and presents through a WGPU
-/// surface.
-///
-/// This is the platform-facing layer above [`WgpuSgfxSession`]. SGFX renders
-/// into a persistent offscreen image, then this adapter performs one fullscreen
-/// WGPU blit into the acquired surface frame. The IR lowering remains shared
-/// with the native SWS backend, while surface ownership stays with the caller.
-pub struct WgpuPaintBackend {
-    surface: wgpu::Surface<'static>,
-    /// Keep the WGPU instance alive for the lifetime of the surface.
-    _instance: wgpu::Instance,
-    config: wgpu::SurfaceConfiguration,
-    session: WgpuSgfxSession,
-    sampler: wgpu::Sampler,
-    blit_pipeline: wgpu::RenderPipeline,
-    supports_depth: bool,
-    scale_milli: u32,
-}
-
-impl WgpuPaintBackend {
-    /// Create a WGPU paint backend from an already-selected device and surface.
-    ///
-    /// The surface is configured here and must use a format supported by the
-    /// WGPU adapter that created `device`. The caller retains ownership of the
-    /// native window; the backend retains the WGPU instance and surface.
-    ///
-    /// # Arguments
-    ///
-    /// * `instance` - WGPU instance that created `surface`.
-    /// * `surface` - Surface with a `'static` lifetime obtained from a native
-    ///   window handle.
-    /// * `device` - WGPU device used for SGFX and surface presentation.
-    /// * `queue` - Queue paired with `device`.
-    /// * `config` - Surface configuration, including format and present mode.
-    /// * `width` - Initial physical width in pixels.
-    /// * `height` - Initial physical height in pixels.
-    /// * `supports_depth` - Whether `SgfxCanvas` depth passes may be used.
-    ///
-    /// # Returns
-    ///
-    /// A configured WGPU paint backend or an initialization error.
-    pub fn new(
-        instance: wgpu::Instance,
-        surface: wgpu::Surface<'static>,
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        mut config: wgpu::SurfaceConfiguration,
-        width: u32,
-        height: u32,
-        supports_depth: bool,
-    ) -> Result<Self> {
-        let width = width.max(1);
-        let height = height.max(1);
-        config.width = width;
-        config.height = height;
-        let session = WgpuSgfxSession::new(device, queue, width, height, supports_depth)?;
-        surface.configure(session.raw_device(), &config);
-        let sampler = session
-            .raw_device()
-            .create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("scarlet-ui sgfx wgpu blit sampler"),
-                address_mode_u: wgpu::AddressMode::ClampToEdge,
-                address_mode_v: wgpu::AddressMode::ClampToEdge,
-                address_mode_w: wgpu::AddressMode::ClampToEdge,
-                mag_filter: wgpu::FilterMode::Nearest,
-                min_filter: wgpu::FilterMode::Nearest,
-                mipmap_filter: wgpu::FilterMode::Nearest,
-                ..Default::default()
-            });
-        let blit_pipeline = create_blit_pipeline(session.raw_device(), config.format);
-        Ok(Self {
-            surface,
-            _instance: instance,
-            config,
-            session,
-            sampler,
-            blit_pipeline,
-            supports_depth,
-            scale_milli: 1000,
-        })
-    }
-
-    /// Borrow the SGFX/WGPU session for platform-specific inspection.
-    ///
-    /// # Returns
-    ///
-    /// The persistent session used by this paint backend.
-    pub fn session(&self) -> &WgpuSgfxSession {
-        &self.session
-    }
-
-    fn resize_physical(&mut self, width: u32, height: u32) {
-        let width = width.max(1);
-        let height = height.max(1);
-        if self.config.width == width && self.config.height == height {
-            return;
-        }
-        if self
-            .session
-            .resize(width, height, self.supports_depth)
-            .is_err()
-        {
-            return;
-        }
-        self.config.width = width;
-        self.config.height = height;
-        self.surface
-            .configure(self.session.raw_device(), &self.config);
-    }
-
-    fn present(&mut self) -> Result<()> {
-        let image = self.session.image().ok_or(Error::InvalidFrame)?;
-        let frame = self
-            .surface
-            .get_current_texture()
-            .map_err(|_| Error::sgfx(Stage::AcquireSurfaceFrame))?;
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = self
-            .session
-            .raw_device()
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("scarlet-ui sgfx wgpu blit bind group"),
-                layout: &self.blit_pipeline.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(image.raw_view()),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                ],
-            });
-        let mut encoder =
-            self.session
-                .raw_device()
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("scarlet-ui sgfx wgpu presentation encoder"),
-                });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("scarlet-ui sgfx wgpu presentation pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.blit_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        self.session
-            .raw_queue()
-            .submit(core::iter::once(encoder.finish()));
-        frame.present();
-        let _ = self.session.raw_device().poll(wgpu::Maintain::Poll);
-        Ok(())
-    }
-}
-
-impl PaintBackend for WgpuPaintBackend {
-    fn resize(&mut self, size: Size, scale_milli: u32) {
-        self.scale_milli = scale_milli.max(1);
-        let width = physical_dimension(size.width, scale_milli);
-        let height = physical_dimension(size.height, scale_milli);
-        self.resize_physical(width, height);
-    }
-
-    fn render<'a>(
-        &'a mut self,
-        context: &PaintContext<'_>,
-        background_color: Color,
-        _logical_damage: Option<&[Rect]>,
-        physical_damage: Option<&[DamageRect]>,
-    ) -> scarlet_ui_core::Result<BackendFrame<'a>> {
-        self.session
-            .render_with_damage(context, background_color, self.scale_milli, physical_damage)
-            .map_err(|error| {
-                eprintln!("[ScarletUI] SGFX/WGPU render failed: {error}");
-                scarlet_ui_core::error::Error::RenderError
-            })?;
-        self.present().map_err(|error| {
-            eprintln!("[ScarletUI] SGFX/WGPU present failed: {error}");
-            scarlet_ui_core::error::Error::RenderError
-        })?;
-        Ok(BackendFrame::External)
-    }
-}
-
-fn create_blit_pipeline(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("scarlet-ui sgfx wgpu blit shader"),
-        source: wgpu::ShaderSource::Wgsl(BLIT_SHADER.into()),
-    });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("scarlet-ui sgfx wgpu blit pipeline"),
-        layout: None,
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs_main"),
-            compilation_options: Default::default(),
-            buffers: &[],
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    })
-}
-
-fn physical_dimension(value: f32, scale_milli: u32) -> u32 {
-    if !value.is_finite() || value <= 0.0 {
-        return 1;
-    }
-    let logical = value as u32;
-    if logical == 0 {
-        return 1;
-    }
-    let scale = u64::from(scale_milli.max(1));
-    ((u64::from(logical).saturating_mul(scale).saturating_add(999) / 1000)
-        .min(u64::from(u32::MAX))
-        .max(1)) as u32
 }
 
 fn clamp_damage(damage: DamageRect, frame_width: u32, frame_height: u32) -> Option<DamageRect> {
@@ -562,39 +313,6 @@ fn select_render_slot(
         None => Err(Error::InvalidFrame),
     }
 }
-
-const BLIT_SHADER: &str = r#"
-struct VertexOut {
-    @builtin(position) position: vec4f,
-    @location(0) uv: vec2f,
-};
-
-@vertex
-fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOut {
-    var positions = array<vec2f, 3>(
-        vec2f(-1.0, -1.0),
-        vec2f( 3.0, -1.0),
-        vec2f(-1.0,  3.0),
-    );
-    var uvs = array<vec2f, 3>(
-        vec2f(0.0, 1.0),
-        vec2f(2.0, 1.0),
-        vec2f(0.0, -1.0),
-    );
-    var out: VertexOut;
-    out.position = vec4f(positions[vid], 0.0, 1.0);
-    out.uv = uvs[vid];
-    return out;
-}
-
-@group(0) @binding(0) var t_frame: texture_2d<f32>;
-@group(0) @binding(1) var s_frame: sampler;
-
-@fragment
-fn fs_main(in: VertexOut) -> @location(0) vec4f {
-    return textureSample(t_frame, s_frame, in.uv);
-}
-"#;
 
 #[cfg(test)]
 mod tests {

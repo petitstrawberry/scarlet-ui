@@ -1,3 +1,5 @@
+#![cfg(not(target_os = "scarlet"))]
+
 extern crate alloc;
 
 use alloc::boxed::Box;
@@ -19,13 +21,13 @@ use scarlet_ui_core::geometry::{Point, Size};
 use scarlet_ui_core::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
 #[cfg(feature = "wgpu")]
 use scarlet_ui_core::renderer::PaintBackend;
-#[cfg(feature = "wgpu")]
-use scarlet_ui_renderer_sgfx::WgpuPaintBackend;
 pub use scarlet_ui_renderer_sgfx::{
     SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
     SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
 };
 use std::time::{Duration, Instant};
+#[cfg(feature = "wgpu")]
+use wgpu_renderer::WgpuPaintBackend;
 
 use ::winit::application::ApplicationHandler;
 use ::winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, Position};
@@ -39,6 +41,9 @@ use ::winit::platform::pump_events::EventLoopExtPumpEvents;
 use ::winit::window::{
     CursorGrabMode, Fullscreen, Window as WinitWindow, WindowAttributes, WindowId,
 };
+
+#[cfg(feature = "wgpu")]
+mod wgpu_renderer;
 
 type SoftbufferContext = softbuffer::Context<::winit::event_loop::OwnedDisplayHandle>;
 type SoftbufferSurface =

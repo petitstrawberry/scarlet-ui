@@ -3,13 +3,13 @@
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 
+use scarlet_sgfx_virgl::{Context, Device, Image, Queue};
 use scarlet_ui_core::color::Color;
 use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::error::Error as UiError;
 use scarlet_ui_core::geometry::{Rect, Size};
 use scarlet_ui_core::renderer::{BackendFrame, PaintBackend, PaintContext};
 use sgfx::ir::{CommandBuffer, ResourceTable, TextureId};
-use sgfx::{Context, Device, Image, Queue};
 
 use crate::error::{Error, Result, Stage};
 use crate::geometry::PixelBounds;
@@ -26,7 +26,7 @@ impl RenderBackend for NativeSgfxBackend {
     type Queue = Queue;
     type Image = Image;
     type ImageHandle = Rc<Image>;
-    type Resources = sgfx::IrResources;
+    type Resources = scarlet_sgfx_virgl::IrResources;
 
     fn create_image(context: &Self::Context, width: u32, height: u32) -> Result<Rc<Self::Image>> {
         Ok(Rc::new(
