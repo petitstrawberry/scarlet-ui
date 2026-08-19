@@ -6,8 +6,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::marker::PhantomData;
-use std::time::{Duration, Instant};
+use core::time::Duration;
 
+use crate::clock::Instant;
 use crate::command::{self, ApplicationCommand};
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult, WindowSizeLimits};
 use crate::error::{Error, Result};
