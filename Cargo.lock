@@ -743,6 +743,7 @@ name = "gpu-raw"
 version = "0.16.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#2ee7dbe891c44b15bf6ee88abdb39f1ac3bad223"
 dependencies = [
+ "scarlet-os 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend)",
  "scarlet-std 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend)",
 ]
 
@@ -1764,6 +1765,7 @@ version = "0.16.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#2ee7dbe891c44b15bf6ee88abdb39f1ac3bad223"
 dependencies = [
  "gpu-raw",
+ "scarlet-os 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend)",
  "scarlet-std 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend)",
  "sgfx-backend-virgl",
  "sgfx-core",

@@ -7,14 +7,13 @@ edition = "2024"
 default = ["std"]
 legacy-scarlet-std = [
     "scarlet-ui-core/legacy-scarlet-std",
-    "native-scarlet",
     "scarlet-sgfx-virgl/scarlet-std",
 ]
 std = [
     "scarlet-ui-core/std",
+    "scarlet-sgfx-virgl/std",
     "sgfx/std",
 ]
-native-scarlet = ["dep:scarlet-sgfx-virgl"]
 wgpu = [
     "std",
     "dep:sgfx-backend-wgpu",
@@ -29,7 +28,7 @@ sgfx-backend-wgpu = { git = "https://github.com/petitstrawberry/Scarlet", branch
 wgpu = { version = "24", optional = true }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
-scarlet-sgfx-virgl = { git = "https://github.com/petitstrawberry/Scarlet", branch = "feature/sgfx-wgpu-backend", package = "scarlet-sgfx-virgl", default-features = false, optional = true }
+scarlet-sgfx-virgl = { git = "https://github.com/petitstrawberry/Scarlet", branch = "feature/sgfx-wgpu-backend", package = "scarlet-sgfx-virgl", default-features = false }
 
 [dev-dependencies]
 pollster = "0.4"

@@ -14,27 +14,27 @@ compile_error!("either `std` or `legacy-scarlet-std` must be enabled");
 
 extern crate alloc;
 
-#[cfg(all(feature = "native-scarlet", target_os = "scarlet"))]
+#[cfg(target_os = "scarlet")]
 mod backend;
 mod canvas;
 mod error;
 mod geometry;
 mod lowering;
-#[cfg(all(feature = "native-scarlet", target_os = "scarlet"))]
+#[cfg(target_os = "scarlet")]
 mod sink;
 #[cfg(feature = "wgpu")]
 mod wgpu_backend;
 
-#[cfg(all(feature = "native-scarlet", target_os = "scarlet"))]
+#[cfg(target_os = "scarlet")]
 pub use backend::{DEFAULT_GPU_DEVICE, SgfxPaintBackend};
 pub use canvas::{
     SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
     SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
 };
 pub use error::{Error, Result, Stage};
-#[cfg(all(feature = "native-scarlet", target_os = "scarlet"))]
+#[cfg(target_os = "scarlet")]
 pub use scarlet_sgfx_virgl::Image as SgfxImage;
-#[cfg(all(feature = "native-scarlet", target_os = "scarlet"))]
+#[cfg(target_os = "scarlet")]
 pub use sink::{
     SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkResult,
     SgfxSinkStatus,

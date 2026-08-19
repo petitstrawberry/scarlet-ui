@@ -14,7 +14,6 @@ legacy-scarlet-std = [
 ]
 std = [
     "scarlet-ui-core/std",
-    "scarlet-ui-renderer-sgfx/native-scarlet",
     "scarlet-ui-renderer-sgfx/std",
     "sws-client/std",
     "sws-protocol/std",
