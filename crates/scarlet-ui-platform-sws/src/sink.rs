@@ -1,9 +1,9 @@
-//! Shared-image presentation contract implemented by an SWS platform backend.
+//! Shared-image presentation contract implemented by the SWS platform backend.
 
 use core::fmt;
 
-use scarlet_sgfx_virgl::Image;
 use scarlet_ui_core::compositor::DamageRect;
+use sgfx::Image;
 
 /// Complete identity of one SWS shared SGFX buffer registration.
 ///
@@ -80,12 +80,12 @@ impl fmt::Display for SgfxSinkError {
 /// Result returned by a shared-image frame sink.
 pub type SgfxSinkResult<T> = core::result::Result<T, SgfxSinkError>;
 
-/// Presentation half of the SGFX renderer.
+/// Presentation half of the native SGFX paint backend.
 ///
-/// `scarlet-ui-platform-sws` implements this trait with the same accepted SWS
-/// connection that created `window_id`; opening a second connection would fail
-/// SWS's window-ownership check. Implementations must route asynchronous buffer
-/// release and backend-loss messages without consuming normal UI input events.
+/// Implementations use the same accepted SWS connection that created
+/// `window_id`; opening a second connection would fail SWS's window-ownership
+/// check. They must route asynchronous buffer release and backend-loss messages
+/// without consuming normal UI input events.
 pub trait SgfxFrameSink {
     /// Return the window owned by this sink.
     ///
@@ -109,7 +109,7 @@ pub trait SgfxFrameSink {
     /// # Arguments
     ///
     /// * `identity` - Complete registration identity.
-    /// * `image` - Shared SGFX image retained by the renderer.
+    /// * `image` - Shared SGFX image retained by the backend session.
     ///
     /// # Returns
     ///

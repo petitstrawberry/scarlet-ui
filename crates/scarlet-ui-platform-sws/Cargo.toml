@@ -9,12 +9,14 @@ legacy-scarlet-std = [
     "scarlet-ui-core/legacy-scarlet-std",
     "scarlet-ui-renderer-sgfx/legacy-scarlet-std",
     "dep:scarlet-std",
+    "sgfx/scarlet-std",
     "sws-client/legacy-scarlet-std",
     "sws-protocol/legacy-scarlet-std",
 ]
 std = [
     "scarlet-ui-core/std",
     "scarlet-ui-renderer-sgfx/std",
+    "sgfx/std",
     "sws-client/std",
     "sws-protocol/std",
 ]
@@ -25,6 +27,7 @@ scarlet-ui-renderer-sgfx = { path = "../scarlet-ui-renderer-sgfx", default-featu
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
 scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "scarlet-std", optional = true }
+sgfx = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "sgfx", default-features = false }
 sws-client = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "sws-client", default-features = false }
 sws-protocol = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "sws-protocol", default-features = false }
 
