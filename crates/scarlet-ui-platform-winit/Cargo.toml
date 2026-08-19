@@ -18,7 +18,7 @@ winit = "0.30.13"
 raw-window-handle = "0.6"
 pollster = { version = "0.4", optional = true }
 wgpu = { version = "24", optional = true }
-sgfx-backend-wgpu = { git = "https://github.com/petitstrawberry/Scarlet", branch = "feature/sgfx-backend-contract", package = "sgfx-backend-wgpu", optional = true }
+sgfx-backend-wgpu = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "sgfx-backend-wgpu", optional = true }
 
 [lib]
 name = "scarlet_ui_platform_winit"
