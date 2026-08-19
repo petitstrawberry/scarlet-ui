@@ -9,10 +9,17 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 extern crate scarlet_std as std;
 
+mod backend;
+mod sink;
+
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+pub use backend::{
+    DEFAULT_GPU_DEVICE, Error as SgfxPaintError, Result as SgfxPaintResult, SgfxPaintBackend,
+    Stage as SgfxPaintStage,
+};
 use core::sync::atomic::{AtomicBool, Ordering};
 use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::color::Color;
@@ -29,13 +36,14 @@ use scarlet_ui_core::platform::{
 use scarlet_ui_core::renderer::{
     BackendFrame, CompositorBackendKind, PaintBackend, PaintContext, RendererBackendKind,
 };
-use scarlet_ui_renderer_sgfx::{
-    SgfxBufferIdentity as RendererSgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxImage,
-    SgfxPaintBackend, SgfxSinkError, SgfxSinkResult, SgfxSinkStatus,
-};
 pub use scarlet_ui_renderer_sgfx::{
     SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
     SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
+};
+use sgfx::Image;
+pub use sink::{
+    SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkResult,
+    SgfxSinkStatus,
 };
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code, rel_code};
 use sws_client as sws;
@@ -73,6 +81,10 @@ const KEY_RIGHTALT: u16 = 0x64;
 const KEY_LEFTMETA: u16 = 0x7d;
 const KEY_RIGHTMETA: u16 = 0x7e;
 const KEY_GRAVE: u16 = 0x29;
+
+fn sgfx_event_epoch_is_stale(backend_lost: Option<u32>, event_epoch: u32) -> bool {
+    backend_lost.is_some_and(|lost_epoch| event_epoch < lost_epoch)
+}
 
 #[cfg(feature = "std")]
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
@@ -171,7 +183,7 @@ impl SwsSgfxFrameSink {
         }
     }
 
-    fn validate_identity(&self, identity: RendererSgfxBufferIdentity) -> SgfxSinkResult<()> {
+    fn validate_identity(&self, identity: SgfxBufferIdentity) -> SgfxSinkResult<()> {
         if identity.window_id != self.window_id
             || identity.compositor_epoch != self.compositor_epoch
         {
@@ -183,7 +195,7 @@ impl SwsSgfxFrameSink {
         Ok(())
     }
 
-    fn client_identity(identity: RendererSgfxBufferIdentity) -> sws::SgfxBufferIdentity {
+    fn client_identity(identity: SgfxBufferIdentity) -> sws::SgfxBufferIdentity {
         sws::SgfxBufferIdentity {
             window_id: identity.window_id,
             buffer_id: identity.buffer_id,
@@ -212,13 +224,12 @@ impl SwsSgfxFrameSink {
     }
 
     fn event_is_stale(&self, compositor_epoch: u32) -> bool {
-        self.backend_lost
-            .is_some_and(|lost_epoch| compositor_epoch < lost_epoch)
+        sgfx_event_epoch_is_stale(self.backend_lost, compositor_epoch)
     }
 
     fn next_commit_token(
         &mut self,
-        identity: RendererSgfxBufferIdentity,
+        identity: SgfxBufferIdentity,
     ) -> SgfxSinkResult<SgfxCommitToken> {
         let commit_serial = self.next_commit_serial;
         self.next_commit_serial = commit_serial
@@ -238,6 +249,14 @@ impl SwsSgfxFrameSink {
         Some(self.rejected.remove(index).1)
     }
 
+    fn release_retained(retained: &mut Vec<SgfxCommitToken>, token: SgfxCommitToken) -> bool {
+        let Some(index) = retained.iter().position(|candidate| *candidate == token) else {
+            return false;
+        };
+        retained.remove(index);
+        true
+    }
+
     fn handle_lifecycle_event(&mut self, event: SwsEvent) {
         match event {
             SwsEvent::SgfxFrameRejected {
@@ -252,7 +271,7 @@ impl SwsSgfxFrameSink {
                     return;
                 }
                 let token = SgfxCommitToken {
-                    identity: RendererSgfxBufferIdentity {
+                    identity: SgfxBufferIdentity {
                         window_id,
                         buffer_id,
                         generation,
@@ -260,12 +279,7 @@ impl SwsSgfxFrameSink {
                     },
                     commit_serial,
                 };
-                if let Some(index) = self
-                    .retained
-                    .iter()
-                    .position(|candidate| *candidate == token)
-                {
-                    self.retained.remove(index);
+                if Self::release_retained(&mut self.retained, token) {
                     self.rejected.push((token, Self::map_error_code(code)));
                 } else {
                     self.lifecycle_error = Some(SgfxSinkError::Protocol);
@@ -282,7 +296,7 @@ impl SwsSgfxFrameSink {
                     return;
                 }
                 let token = SgfxCommitToken {
-                    identity: RendererSgfxBufferIdentity {
+                    identity: SgfxBufferIdentity {
                         window_id,
                         buffer_id,
                         generation,
@@ -290,13 +304,7 @@ impl SwsSgfxFrameSink {
                     },
                     commit_serial,
                 };
-                if let Some(index) = self
-                    .retained
-                    .iter()
-                    .position(|candidate| *candidate == token)
-                {
-                    self.retained.remove(index);
-                } else {
+                if !Self::release_retained(&mut self.retained, token) {
                     self.lifecycle_error = Some(SgfxSinkError::Protocol);
                 }
             }
@@ -384,8 +392,8 @@ impl SgfxFrameSink for SwsSgfxFrameSink {
 
     fn register_shared_image(
         &mut self,
-        identity: RendererSgfxBufferIdentity,
-        image: &SgfxImage,
+        identity: SgfxBufferIdentity,
+        image: &Image,
     ) -> SgfxSinkResult<()> {
         self.pump_lifecycle()?;
         self.validate_identity(identity)?;
@@ -418,7 +426,7 @@ impl SgfxFrameSink for SwsSgfxFrameSink {
 
     fn commit_shared_image(
         &mut self,
-        identity: RendererSgfxBufferIdentity,
+        identity: SgfxBufferIdentity,
         damage: &[DamageRect],
     ) -> SgfxSinkResult<SgfxCommitToken> {
         self.pump_lifecycle()?;
@@ -443,7 +451,7 @@ impl SgfxFrameSink for SwsSgfxFrameSink {
         Ok(token)
     }
 
-    fn destroy_shared_image(&mut self, identity: RendererSgfxBufferIdentity) -> SgfxSinkResult<()> {
+    fn destroy_shared_image(&mut self, identity: SgfxBufferIdentity) -> SgfxSinkResult<()> {
         self.pump_lifecycle()?;
         self.validate_identity(identity)?;
         if self.retained.iter().any(|token| token.identity == identity) {
@@ -2489,5 +2497,52 @@ mod tests {
         assert_eq!(normalize_discrete_wheel_delta(10), WHEEL_LINE_DELTA);
         assert_eq!(normalize_discrete_wheel_delta(-10), -WHEEL_LINE_DELTA);
         assert_eq!(normalize_discrete_wheel_delta(1), WHEEL_LINE_DELTA);
+    }
+
+    #[test]
+    fn delayed_release_cannot_release_a_new_generation_or_commit() {
+        let identity = SgfxBufferIdentity {
+            window_id: 7,
+            buffer_id: 1,
+            generation: 3,
+            compositor_epoch: 5,
+        };
+        let current = SgfxCommitToken {
+            identity,
+            commit_serial: 12,
+        };
+        let mut retained = vec![current];
+
+        let delayed_commit = SgfxCommitToken {
+            identity,
+            commit_serial: 11,
+        };
+        assert!(!SwsSgfxFrameSink::release_retained(
+            &mut retained,
+            delayed_commit,
+        ));
+
+        let delayed_generation = SgfxCommitToken {
+            identity: SgfxBufferIdentity {
+                generation: 2,
+                ..identity
+            },
+            commit_serial: 12,
+        };
+        assert!(!SwsSgfxFrameSink::release_retained(
+            &mut retained,
+            delayed_generation,
+        ));
+        assert_eq!(retained, vec![current]);
+        assert!(SwsSgfxFrameSink::release_retained(&mut retained, current,));
+        assert!(retained.is_empty());
+    }
+
+    #[test]
+    fn stale_epoch_is_ignored_only_after_backend_loss() {
+        assert!(!sgfx_event_epoch_is_stale(None, 4));
+        assert!(sgfx_event_epoch_is_stale(Some(5), 4));
+        assert!(!sgfx_event_epoch_is_stale(Some(5), 5));
+        assert!(!sgfx_event_epoch_is_stale(Some(5), 6));
     }
 }

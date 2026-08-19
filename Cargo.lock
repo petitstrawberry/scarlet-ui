@@ -599,6 +599,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
+name = "framebuffer"
+version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract#ecb69ebee8aa8f680b6815d3812641d52bfa5f64"
+dependencies = [
+ "scarlet-os 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
+ "scarlet-std 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -741,10 +750,10 @@ dependencies = [
 [[package]]
 name = "gpu-raw"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#515818e86efa33dd464a4c0609a3fe6c035808e8"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract#ecb69ebee8aa8f680b6815d3812641d52bfa5f64"
 dependencies = [
- "scarlet-os",
- "scarlet-std",
+ "scarlet-os 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
+ "scarlet-std 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
 ]
 
 [[package]]
@@ -1713,13 +1722,28 @@ version = "0.16.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#515818e86efa33dd464a4c0609a3fe6c035808e8"
 
 [[package]]
+name = "scarlet-abi"
+version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract#ecb69ebee8aa8f680b6815d3812641d52bfa5f64"
+
+[[package]]
 name = "scarlet-os"
 version = "0.16.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#515818e86efa33dd464a4c0609a3fe6c035808e8"
 dependencies = [
- "scarlet-abi",
- "scarlet-rt",
- "scarlet-sys",
+ "scarlet-abi 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=dev)",
+ "scarlet-rt 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=dev)",
+ "scarlet-sys 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=dev)",
+]
+
+[[package]]
+name = "scarlet-os"
+version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract#ecb69ebee8aa8f680b6815d3812641d52bfa5f64"
+dependencies = [
+ "scarlet-abi 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
+ "scarlet-rt 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
+ "scarlet-sys 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
 ]
 
 [[package]]
@@ -1728,21 +1752,20 @@ version = "0.16.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#515818e86efa33dd464a4c0609a3fe6c035808e8"
 dependencies = [
  "lock_api",
- "scarlet-sys",
+ "scarlet-sys 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=dev)",
  "spin",
  "talc",
 ]
 
 [[package]]
-name = "scarlet-sgfx-virgl"
+name = "scarlet-rt"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#515818e86efa33dd464a4c0609a3fe6c035808e8"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract#ecb69ebee8aa8f680b6815d3812641d52bfa5f64"
 dependencies = [
- "gpu-raw",
- "scarlet-os",
- "scarlet-std",
- "sgfx-backend-virgl",
- "sgfx-core",
+ "lock_api",
+ "scarlet-sys 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
+ "spin",
+ "talc",
 ]
 
 [[package]]
@@ -1751,10 +1774,23 @@ version = "0.16.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#515818e86efa33dd464a4c0609a3fe6c035808e8"
 dependencies = [
  "hashbrown 0.15.5",
- "scarlet-abi",
- "scarlet-os",
- "scarlet-rt",
- "scarlet-sys",
+ "scarlet-abi 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=dev)",
+ "scarlet-os 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=dev)",
+ "scarlet-rt 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=dev)",
+ "scarlet-sys 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=dev)",
+ "spin",
+]
+
+[[package]]
+name = "scarlet-std"
+version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract#ecb69ebee8aa8f680b6815d3812641d52bfa5f64"
+dependencies = [
+ "hashbrown 0.15.5",
+ "scarlet-abi 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
+ "scarlet-os 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
+ "scarlet-rt 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
+ "scarlet-sys 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
  "spin",
 ]
 
@@ -1763,7 +1799,15 @@ name = "scarlet-sys"
 version = "0.16.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#515818e86efa33dd464a4c0609a3fe6c035808e8"
 dependencies = [
- "scarlet-abi",
+ "scarlet-abi 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=dev)",
+]
+
+[[package]]
+name = "scarlet-sys"
+version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract#ecb69ebee8aa8f680b6815d3812641d52bfa5f64"
+dependencies = [
+ "scarlet-abi 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
 ]
 
 [[package]]
@@ -1790,7 +1834,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "raw-window-handle",
- "scarlet-std",
+ "scarlet-std 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=dev)",
  "scarlet-ui-icons-tabler",
  "scarlet-ui-macros",
  "syn 2.0.119",
@@ -1818,9 +1862,10 @@ dependencies = [
 name = "scarlet-ui-platform-sws"
 version = "0.1.0"
 dependencies = [
- "scarlet-std",
+ "scarlet-std 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
  "scarlet-ui-core",
  "scarlet-ui-renderer-sgfx",
+ "sgfx",
  "sws-client",
  "sws-protocol",
 ]
@@ -1833,6 +1878,7 @@ dependencies = [
  "raw-window-handle",
  "scarlet-ui-core",
  "scarlet-ui-renderer-sgfx",
+ "sgfx-backend-wgpu",
  "softbuffer",
  "wgpu",
  "winit",
@@ -1862,12 +1908,8 @@ name = "scarlet-ui-renderer-sgfx"
 version = "0.1.0"
 dependencies = [
  "libm",
- "pollster",
- "scarlet-sgfx-virgl",
  "scarlet-ui-core",
- "sgfx-backend-wgpu",
  "sgfx-core",
- "wgpu",
 ]
 
 [[package]]
@@ -1964,17 +2006,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "sgfx-backend-virgl"
+name = "sgfx"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#515818e86efa33dd464a4c0609a3fe6c035808e8"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract#ecb69ebee8aa8f680b6815d3812641d52bfa5f64"
 dependencies = [
+ "framebuffer",
+ "sgfx-backend-scarlet-virgl",
+]
+
+[[package]]
+name = "sgfx-backend-scarlet-virgl"
+version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract#ecb69ebee8aa8f680b6815d3812641d52bfa5f64"
+dependencies = [
+ "gpu-raw",
+ "scarlet-os 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
+ "scarlet-std 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
  "sgfx-core",
+ "sgfx-virgl-codegen",
 ]
 
 [[package]]
 name = "sgfx-backend-wgpu"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#515818e86efa33dd464a4c0609a3fe6c035808e8"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract#ecb69ebee8aa8f680b6815d3812641d52bfa5f64"
 dependencies = [
  "bytemuck",
  "sgfx-core",
@@ -1984,7 +2039,15 @@ dependencies = [
 [[package]]
 name = "sgfx-core"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#515818e86efa33dd464a4c0609a3fe6c035808e8"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract#ecb69ebee8aa8f680b6815d3812641d52bfa5f64"
+
+[[package]]
+name = "sgfx-virgl-codegen"
+version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract#ecb69ebee8aa8f680b6815d3812641d52bfa5f64"
+dependencies = [
+ "sgfx-core",
+]
 
 [[package]]
 name = "shlex"
@@ -2172,19 +2235,19 @@ dependencies = [
 [[package]]
 name = "sws-client"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#515818e86efa33dd464a4c0609a3fe6c035808e8"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract#ecb69ebee8aa8f680b6815d3812641d52bfa5f64"
 dependencies = [
- "scarlet-os",
- "scarlet-std",
+ "scarlet-os 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
+ "scarlet-std 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
  "sws-protocol",
 ]
 
 [[package]]
 name = "sws-protocol"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#515818e86efa33dd464a4c0609a3fe6c035808e8"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract#ecb69ebee8aa8f680b6815d3812641d52bfa5f64"
 dependencies = [
- "scarlet-std",
+ "scarlet-std 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-backend-contract)",
 ]
 
 [[package]]

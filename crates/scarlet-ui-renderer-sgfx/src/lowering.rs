@@ -6,36 +6,30 @@ use alloc::vec::Vec;
 
 use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::color::Color as UiColor;
+use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::graphics::{GlyphRasterKey, rasterize_text};
 use scarlet_ui_core::icon::{IconMaskKey, rasterize_icon};
 use scarlet_ui_core::renderer::{BufferHandle, PaintCommand, PaintContext};
+use sgfx::backend::CommandExecutor;
 use sgfx::ir::{
-    AddressMode, BlendState, BufferDesc, BufferId, BufferUsage, Color, CommandBuffer,
-    CommandEncoder, CompareFunction, DepthLoadOp, DepthState, DrawUniforms, Extent2D, FilterMode,
-    FragmentProgram, FrontFace, LoadOp, PixelRect, PrimitiveTopology, RasterState, RenderPassDesc,
+    AddressMode, BlendState, BufferDesc, BufferId, BufferUsage, Color, CommandEncoder,
+    CompareFunction, DepthLoadOp, DepthState, DrawUniforms, Extent2D, FilterMode, FragmentProgram,
+    FrontFace, LoadOp, MAX_COMMANDS, PixelRect, PrimitiveTopology, RasterState, RenderPassDesc,
     RenderPipelineDesc, RenderPipelineId, ResourceTable, SamplerDesc, SamplerId, StoreOp,
     TextureDesc, TextureFormat, TextureId, TextureSampleMode, TextureUsage, TextureWrite,
     Transform, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 use crate::canvas::{SgfxCanvasFrame, SgfxCanvasPaint, SgfxCanvasVertex, SgfxMesh, SgfxTexture};
-use crate::error::{Error, Result, Stage};
+use crate::error::{Error, FrameError, Result, Stage};
 use crate::geometry::{
     FloatRect, GeometryRange, MAX_FRAME_VERTICES, PixelBounds, Tessellator, Vertex,
 };
 
 const VERTEX_STRIDE: u32 = 16;
-// VirGL accepts a 64 KiB opaque stream. Canonical vertices are 40 bytes, while
-// draw state is about 200 bytes for solid draws and at most 260 bytes for a
-// textured draw that also initializes a new sampler view. Pack against that
-// byte budget instead of imposing an unrelated fixed draw limit.
-const MAX_PASS_VERTICES: u32 = 1_440;
-const MAX_OPAQUE_COMMAND_BYTES: u32 = 65_536;
-const PASS_FIXED_COMMAND_BYTES: u32 = 2_112;
-const CANONICAL_VERTEX_BYTES: u32 = 40;
-const SOLID_DRAW_COMMAND_BYTES: u32 = 200;
-const TEXTURED_DRAW_COMMAND_BYTES: u32 = 260;
-const CANVAS_VERTEX_BIND_COMMAND_BYTES: u32 = 16;
+const PASS_COMMANDS: usize = 2;
+const MAX_PAINT_DRAW_COMMANDS: usize = 7;
+const MAX_CANVAS_DRAW_COMMANDS: usize = 6;
 const GLYPH_ATLAS_SIZE: u32 = 2_048;
 const GLYPH_ATLAS_PADDING: u32 = 1;
 const MAX_GLYPH_ENTRIES: usize = 1_024;
@@ -49,52 +43,6 @@ const MAX_CANVAS_TEXTURES: usize = 128;
 const MAX_CANVAS_DRAWS: usize = 240;
 
 const CANVAS_TARGET_TEX_COORDS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-
-/// Backend operations required by the shared ScarletUI-to-SGFX lowering.
-///
-/// The lowering owns the logical resource table and command recording. A
-/// concrete backend only supplies physical image creation, resource-cache
-/// creation, image mapping, and command submission. This keeps the VirGL
-/// transport out of the WGPU migration path.
-pub(crate) trait RenderBackend {
-    /// Backend context used to create physical resources.
-    type Context;
-    /// Backend queue used to submit encoded command buffers.
-    type Queue;
-    /// Physical presentation image type.
-    type Image;
-    /// Shared ownership handle for a physical presentation image.
-    type ImageHandle: Clone;
-    /// Persistent backend materialization cache type.
-    type Resources;
-
-    /// Create one physical render target for a logical target slot.
-    fn create_image(context: &Self::Context, width: u32, height: u32) -> Result<Self::ImageHandle>;
-
-    /// Create the persistent materialization cache for one logical table.
-    fn create_resources(
-        context: &Self::Context,
-        resources: Rc<ResourceTable>,
-    ) -> Result<Self::Resources>;
-
-    /// Associate one logical presentation texture with one physical image.
-    fn map_image(
-        resources: &mut Self::Resources,
-        texture: TextureId,
-        image: Self::ImageHandle,
-    ) -> Result<()>;
-
-    /// Borrow the physical image behind a shared ownership handle.
-    fn image_ref(image: &Self::ImageHandle) -> &Self::Image;
-
-    /// Submit one fully recorded logical command buffer.
-    fn submit<'r, 'data>(
-        context: &Self::Context,
-        queue: &Self::Queue,
-        resources: &mut Self::Resources,
-        commands: &CommandBuffer<'r, 'data>,
-    ) -> Result<()>;
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DrawSource {
@@ -140,6 +88,26 @@ struct LoweredFrame<'frame> {
     uploads: Vec<TextureUpload<'frame>>,
 }
 
+fn texture_upload_scheduled(
+    uploads: &[TextureUpload<'_>],
+    texture: TextureId,
+    bounds: PixelBounds,
+) -> bool {
+    uploads.iter().any(|upload| {
+        upload.texture == texture
+            && upload.x == bounds.x
+            && upload.y == bounds.y
+            && upload.width == bounds.width
+            && upload.height == bounds.height
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextureUploadState {
+    Pending,
+    Uploaded,
+}
+
 #[derive(Clone, Copy)]
 struct BufferTexture {
     texture: TextureId,
@@ -148,6 +116,7 @@ struct BufferTexture {
     width: u32,
     height: u32,
     used_frame: u64,
+    upload_state: TextureUploadState,
 }
 
 struct GlyphTexture {
@@ -156,6 +125,7 @@ struct GlyphTexture {
     y: u32,
     width: u32,
     height: u32,
+    upload_state: TextureUploadState,
 }
 
 struct IconTexture {
@@ -164,6 +134,7 @@ struct IconTexture {
     y: u32,
     width: u32,
     height: u32,
+    upload_state: TextureUploadState,
 }
 
 struct GlyphAtlas {
@@ -367,24 +338,18 @@ fn validate_depth_support(requested: bool, supported: bool) -> Result<()> {
 
 fn canvas_pass_reaches_frame_end(
     mesh_indices: &[usize],
-    texture_indices: &[Option<usize>],
     mut draw_index: usize,
+    prefix_commands: usize,
 ) -> bool {
-    let mut estimated_bytes = PASS_FIXED_COMMAND_BYTES;
+    let mut command_count = prefix_commands.saturating_add(PASS_COMMANDS);
     while draw_index < mesh_indices.len() {
         if mesh_indices.get(draw_index).is_none() {
             return false;
         }
-        let draw_bytes = if texture_indices.get(draw_index).copied().flatten().is_some() {
-            TEXTURED_DRAW_COMMAND_BYTES
-        } else {
-            SOLID_DRAW_COMMAND_BYTES
-        }
-        .saturating_add(CANVAS_VERTEX_BIND_COMMAND_BYTES);
-        if estimated_bytes.saturating_add(draw_bytes) > MAX_OPAQUE_COMMAND_BYTES {
+        if command_count.saturating_add(MAX_CANVAS_DRAW_COMMANDS) > MAX_COMMANDS {
             return false;
         }
-        estimated_bytes = estimated_bytes.saturating_add(draw_bytes);
+        command_count = command_count.saturating_add(MAX_CANVAS_DRAW_COMMANDS);
         draw_index += 1;
     }
     draw_index == mesh_indices.len()
@@ -397,11 +362,12 @@ struct CanvasTexture {
     uploaded: bool,
 }
 
-/// Persistent resources for one two-image allocation generation.
-pub(crate) struct RenderSession<B: RenderBackend> {
+/// Persistent logical SGFX resources and retained ScarletUI paint caches.
+///
+/// Physical images and all execution state remain owned by SGFX backend
+/// sessions composed around this encoder.
+pub struct SgfxPaintEncoder {
     table: Rc<ResourceTable>,
-    cache: B::Resources,
-    images: Vec<B::ImageHandle>,
     targets: Vec<TextureId>,
     vertex_buffer: BufferId,
     solid_pipeline: RenderPipelineId,
@@ -425,13 +391,20 @@ pub(crate) struct RenderSession<B: RenderBackend> {
     supports_depth: bool,
 }
 
-impl<B: RenderBackend> RenderSession<B> {
-    pub(crate) fn new(
-        context: &B::Context,
-        width: u32,
-        height: u32,
-        supports_depth: bool,
-    ) -> Result<Self> {
+impl SgfxPaintEncoder {
+    /// Define the persistent logical resources for a two-slot encoder.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Physical target width in pixels.
+    /// * `height` - Physical target height in pixels.
+    /// * `supports_depth` - Whether retained canvases may request depth testing.
+    ///
+    /// # Returns
+    ///
+    /// A logical encoder, or a lowering error for invalid dimensions or SGFX
+    /// resource-definition failure.
+    pub fn new(width: u32, height: u32, supports_depth: bool) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(Error::InvalidFrame);
         }
@@ -444,11 +417,7 @@ impl<B: RenderBackend> RenderSession<B> {
             | TextureUsage::PRESENT;
 
         let mut targets = Vec::new();
-        let mut images = Vec::new();
         targets
-            .try_reserve_exact(2)
-            .map_err(|_| Error::FrameTooComplex)?;
-        images
             .try_reserve_exact(2)
             .map_err(|_| Error::FrameTooComplex)?;
         for _ in 0..2 {
@@ -459,10 +428,7 @@ impl<B: RenderBackend> RenderSession<B> {
                 )
                 .map_err(|_| Error::sgfx(Stage::DefineResources))?
                 .id();
-            let image = B::create_image(context, width, height)
-                .map_err(|_| Error::sgfx(Stage::CreateSharedImage))?;
             targets.push(target);
-            images.push(image);
         }
 
         let vertex_bytes = u64::try_from(MAX_FRAME_VERTICES)
@@ -518,17 +484,8 @@ impl<B: RenderBackend> RenderSession<B> {
             .map_err(|_| Error::sgfx(Stage::DefineResources))?
             .id();
 
-        let mut cache = B::create_resources(context, Rc::clone(&table))
-            .map_err(|_| Error::sgfx(Stage::CreateIrResources))?;
-        for index in 0..2 {
-            B::map_image(&mut cache, targets[index], images[index].clone())
-                .map_err(|_| Error::sgfx(Stage::MapSharedImage))?;
-        }
-
         Ok(Self {
             table,
-            cache,
-            images,
             targets,
             vertex_buffer,
             solid_pipeline,
@@ -553,73 +510,93 @@ impl<B: RenderBackend> RenderSession<B> {
         })
     }
 
-    pub(crate) fn image(&self, slot: usize) -> Option<&B::Image> {
-        self.images.get(slot).map(B::image_ref)
+    /// Clone the resource table shared with a backend executor.
+    ///
+    /// # Returns
+    ///
+    /// Shared ownership of this encoder's logical resource table.
+    pub fn resource_table(&self) -> Rc<ResourceTable> {
+        Rc::clone(&self.table)
     }
 
-    pub(crate) fn into_images(self) -> Vec<B::ImageHandle> {
-        let Self {
-            cache,
-            images,
-            table,
-            targets: _,
-            vertex_buffer: _,
-            solid_pipeline: _,
-            texture_pipeline: _,
-            glyph_pipeline: _,
-            sampler: _,
-            buffer_textures: _,
-            glyph_atlases: _,
-            glyph_atlas_rebuild_required: _,
-            canvas_pipeline: _,
-            canvas_texture_pipeline: _,
-            canvas_depth_pipeline: _,
-            canvas_depth_texture_pipeline: _,
-            canvas_dummy_buffer: _,
-            canvas_targets: _,
-            canvas_meshes: _,
-            canvas_textures: _,
-            frame_serial: _,
-            width: _,
-            height: _,
-            supports_depth: _,
-        } = self;
-        drop(cache);
-        drop(table);
-        images
+    /// Return the logical presentation texture for a target slot.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - Logical target slot, in the range `0..2`.
+    ///
+    /// # Returns
+    ///
+    /// The slot's texture identifier, or `None` for an invalid slot.
+    pub fn target_texture(&self, slot: usize) -> Option<TextureId> {
+        self.targets.get(slot).copied()
     }
 
-    pub(crate) fn render(
+    /// Return the physical width encoded into logical target resources.
+    ///
+    /// # Returns
+    ///
+    /// Target width in pixels.
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Return the physical height encoded into logical target resources.
+    ///
+    /// # Returns
+    ///
+    /// Target height in pixels.
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Encode and synchronously execute one ScarletUI frame.
+    ///
+    /// # Arguments
+    ///
+    /// * `executor` - Backend-owned executor supplied by the composition root
+    ///   and bound to this encoder's resources.
+    /// * `slot` - Logical destination target slot.
+    /// * `copy_from` - Optional distinct source slot copied before painting.
+    /// * `paint` - Backend-neutral paint commands and borrowed buffer data.
+    /// * `background` - Straight-alpha background clear color.
+    /// * `scale_milli` - Physical scale in milli-units.
+    /// * `render_areas` - Physical `(x, y, width, height)` regions to redraw.
+    ///
+    /// # Returns
+    ///
+    /// Success after all ordered command buffers execute, a portable lowering
+    /// error, or the executor's backend-owned error.
+    pub fn encode_frame<E: CommandExecutor>(
         &mut self,
-        context: &B::Context,
-        queue: &B::Queue,
+        executor: &mut E,
         slot: usize,
         copy_from: Option<usize>,
         paint: &PaintContext<'_>,
         background: UiColor,
         scale_milli: u32,
-        render_areas: &[PixelBounds],
-    ) -> Result<()> {
+        render_areas: &[DamageRect],
+    ) -> core::result::Result<(), FrameError<E::Error>> {
+        let render_areas = self.validate_render_areas(render_areas)?;
         let target = *self.targets.get(slot).ok_or(Error::InvalidFrame)?;
         if let Some(source_slot) = copy_from {
-            self.copy_target(context, queue, source_slot, slot)?;
+            self.copy_target(executor, source_slot, slot)?;
         }
-        let render_bounds = bounding_area(render_areas).ok_or(Error::InvalidFrame)?;
+        let render_bounds = bounding_area(&render_areas).ok_or(Error::InvalidFrame)?;
         self.advance_frame_serial();
-        self.prepare_canvases(context, queue, paint, scale_milli)?;
+        self.prepare_canvases(executor, paint, scale_milli)?;
         let lowered = self.lower(paint, scale_milli, render_bounds)?;
-        self.submit(context, queue, target, background, render_areas, &lowered)
+        self.submit(executor, target, background, &render_areas, &lowered)
     }
 
-    fn copy_target(
+    fn copy_target<E: CommandExecutor>(
         &mut self,
-        context: &B::Context,
-        queue: &B::Queue,
+        executor: &mut E,
         source_slot: usize,
         destination_slot: usize,
-    ) -> Result<()> {
+    ) -> core::result::Result<(), FrameError<E::Error>> {
         if source_slot == destination_slot {
-            return Err(Error::InvalidFrame);
+            return Err(FrameError::Lowering(Error::InvalidFrame));
         }
         let table = Rc::clone(&self.table);
         let source = table
@@ -642,8 +619,7 @@ impl<B: RenderBackend> RenderSession<B> {
         let commands = encoder
             .finish()
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-        B::submit(context, queue, &mut self.cache, &commands)
-            .map_err(|_| Error::sgfx(Stage::SubmitCommands))
+        executor.execute(&commands).map_err(FrameError::Execution)
     }
 
     fn advance_frame_serial(&mut self) {
@@ -656,6 +632,31 @@ impl<B: RenderBackend> RenderSession<B> {
             for atlas in &mut self.glyph_atlases {
                 atlas.used_frame = 0;
             }
+        }
+    }
+
+    fn validate_render_areas(&self, areas: &[DamageRect]) -> Result<Vec<PixelBounds>> {
+        let mut validated = Vec::new();
+        validated
+            .try_reserve_exact(areas.len())
+            .map_err(|_| Error::FrameTooComplex)?;
+        for &(x, y, width, height) in areas {
+            if width == 0 || height == 0 || x >= self.width || y >= self.height {
+                continue;
+            }
+            let right = x.saturating_add(width).min(self.width);
+            let bottom = y.saturating_add(height).min(self.height);
+            validated.push(PixelBounds {
+                x,
+                y,
+                width: right - x,
+                height: bottom - y,
+            });
+        }
+        if validated.is_empty() {
+            Err(Error::InvalidFrame)
+        } else {
+            Ok(validated)
         }
     }
 
@@ -692,7 +693,7 @@ impl<B: RenderBackend> RenderSession<B> {
                 {
                     // The first lowering pass never submitted this new texture. Keep
                     // the resource reusable, but force the retry to upload its pixels.
-                    texture.revision = texture.revision.wrapping_add(1);
+                    texture.upload_state = TextureUploadState::Pending;
                     texture.used_frame = 0;
                 }
                 self.glyph_atlas_rebuild_required = false;
@@ -815,7 +816,9 @@ impl<B: RenderBackend> RenderSession<B> {
                         }
                         let (texture, atlas_bounds, upload_required) =
                             self.glyph_texture(glyph.key, glyph.width, glyph.height)?;
-                        if upload_required {
+                        if upload_required
+                            && !texture_upload_scheduled(&uploads, texture, atlas_bounds)
+                        {
                             uploads.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
                             uploads.push(TextureUpload {
                                 texture,
@@ -859,7 +862,8 @@ impl<B: RenderBackend> RenderSession<B> {
                     let raster = rasterize_icon(*icon, pixel_size, *style);
                     let (texture, atlas_bounds, upload_required) =
                         self.icon_texture(raster.key, raster.width, raster.height)?;
-                    if upload_required {
+                    if upload_required && !texture_upload_scheduled(&uploads, texture, atlas_bounds)
+                    {
                         uploads.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
                         uploads.push(TextureUpload {
                             texture,
@@ -1016,13 +1020,12 @@ impl<B: RenderBackend> RenderSession<B> {
         })
     }
 
-    fn prepare_canvases(
+    fn prepare_canvases<E: CommandExecutor>(
         &mut self,
-        context: &B::Context,
-        queue: &B::Queue,
+        executor: &mut E,
         paint: &PaintContext<'_>,
         scale_milli: u32,
-    ) -> Result<()> {
+    ) -> core::result::Result<(), FrameError<E::Error>> {
         let scale = scale_milli.max(1) as f32 / 1000.0;
         for command in paint.commands() {
             let PaintCommand::Extension { rect, payload } = command else {
@@ -1042,7 +1045,7 @@ impl<B: RenderBackend> RenderSession<B> {
             if unchanged {
                 continue;
             }
-            self.render_canvas(context, queue, target_index, &canvas.frame)?;
+            self.render_canvas(executor, target_index, &canvas.frame)?;
             let target = &mut self.canvas_targets[target_index];
             target.revision = canvas.frame.revision;
             target.initialized = true;
@@ -1222,18 +1225,17 @@ impl<B: RenderBackend> RenderSession<B> {
         Ok(self.canvas_textures.len() - 1)
     }
 
-    fn render_canvas(
+    fn render_canvas<E: CommandExecutor>(
         &mut self,
-        context: &B::Context,
-        queue: &B::Queue,
+        executor: &mut E,
         target_index: usize,
         frame: &SgfxCanvasFrame,
-    ) -> Result<()> {
+    ) -> core::result::Result<(), FrameError<E::Error>> {
         if frame.draws.len() > MAX_CANVAS_DRAWS {
-            return Err(Error::FrameTooComplex);
+            return Err(FrameError::Lowering(Error::FrameTooComplex));
         }
         if canvas_frame_has_revision_conflict(frame) {
-            return Err(Error::InvalidFrame);
+            return Err(FrameError::Lowering(Error::InvalidFrame));
         }
         if frame.depth_test {
             self.ensure_canvas_depth_pipelines()?;
@@ -1353,13 +1355,17 @@ impl<B: RenderBackend> RenderSession<B> {
             let commands = encoder
                 .finish()
                 .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-            B::submit(context, queue, &mut self.cache, &commands)
-                .map_err(|_| Error::sgfx(Stage::SubmitCommands))?;
+            executor.execute(&commands).map_err(FrameError::Execution)?;
         } else {
             let mut draw_index = 0usize;
             let mut first_submission = true;
             while draw_index < frame.draws.len() {
                 let mut encoder = CommandEncoder::new(&table);
+                let prefix_commands = if first_submission {
+                    uploads.len().saturating_add(texture_uploads.len())
+                } else {
+                    0
+                };
                 if first_submission {
                     for (mesh_index, bytes) in &uploads {
                         let cached = &self.canvas_meshes[*mesh_index];
@@ -1397,7 +1403,7 @@ impl<B: RenderBackend> RenderSession<B> {
                     LoadOp::Load
                 };
                 let depth_store =
-                    if canvas_pass_reaches_frame_end(&mesh_indices, &texture_indices, draw_index) {
+                    if canvas_pass_reaches_frame_end(&mesh_indices, draw_index, prefix_commands) {
                         StoreOp::DontCare
                     } else {
                         StoreOp::Store
@@ -1419,20 +1425,14 @@ impl<B: RenderBackend> RenderSession<B> {
                 let mut pass = encoder
                     .begin_render_pass(descriptor)
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                let mut estimated_bytes = PASS_FIXED_COMMAND_BYTES;
+                let mut command_count = prefix_commands.saturating_add(PASS_COMMANDS);
 
                 while draw_index < frame.draws.len() {
                     let draw = &frame.draws[draw_index];
                     let mesh_index = mesh_indices[draw_index];
                     let texture_index = texture_indices[draw_index];
                     let cached = &self.canvas_meshes[mesh_index];
-                    let draw_bytes = if texture_index.is_some() {
-                        TEXTURED_DRAW_COMMAND_BYTES
-                    } else {
-                        SOLID_DRAW_COMMAND_BYTES
-                    }
-                    .saturating_add(CANVAS_VERTEX_BIND_COMMAND_BYTES);
-                    if estimated_bytes.saturating_add(draw_bytes) > MAX_OPAQUE_COMMAND_BYTES {
+                    if command_count.saturating_add(MAX_CANVAS_DRAW_COMMANDS) > MAX_COMMANDS {
                         break;
                     }
 
@@ -1468,18 +1468,17 @@ impl<B: RenderBackend> RenderSession<B> {
                     pass.draw(cached.vertex_count, 0)
                         .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
 
-                    estimated_bytes = estimated_bytes.saturating_add(draw_bytes);
+                    command_count = command_count.saturating_add(MAX_CANVAS_DRAW_COMMANDS);
                     draw_index += 1;
                 }
-                if estimated_bytes == PASS_FIXED_COMMAND_BYTES {
-                    return Err(Error::FrameTooComplex);
+                if command_count == prefix_commands.saturating_add(PASS_COMMANDS) {
+                    return Err(Error::FrameTooComplex.into());
                 }
                 pass.end().map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                 let commands = encoder
                     .finish()
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                B::submit(context, queue, &mut self.cache, &commands)
-                    .map_err(|_| Error::sgfx(Stage::SubmitCommands))?;
+                executor.execute(&commands).map_err(FrameError::Execution)?;
                 first_submission = false;
             }
         }
@@ -1584,7 +1583,11 @@ impl<B: RenderBackend> RenderSession<B> {
                 && texture.width == width
                 && texture.height == height
         }) {
-            let upload_required = texture.revision != revision;
+            let upload_required =
+                texture.revision != revision || texture.upload_state == TextureUploadState::Pending;
+            if texture.revision != revision {
+                texture.upload_state = TextureUploadState::Pending;
+            }
             texture.revision = revision;
             texture.used_frame = self.frame_serial;
             return Ok((texture.texture, upload_required));
@@ -1597,6 +1600,7 @@ impl<B: RenderBackend> RenderSession<B> {
             texture.buffer_identity = buffer_identity;
             texture.revision = revision;
             texture.used_frame = self.frame_serial;
+            texture.upload_state = TextureUploadState::Pending;
             return Ok((texture.texture, true));
         }
         if self.buffer_textures.len() >= MAX_BUFFER_TEXTURES {
@@ -1611,6 +1615,7 @@ impl<B: RenderBackend> RenderSession<B> {
             width,
             height,
             used_frame: self.frame_serial,
+            upload_state: TextureUploadState::Pending,
         });
         Ok((texture, true))
     }
@@ -1634,7 +1639,11 @@ impl<B: RenderBackend> RenderSession<B> {
                     height: entry.height,
                 };
                 atlas.used_frame = self.frame_serial;
-                return Ok((atlas.texture, bounds, false));
+                return Ok((
+                    atlas.texture,
+                    bounds,
+                    entry.upload_state == TextureUploadState::Pending,
+                ));
             }
         }
 
@@ -1654,6 +1663,7 @@ impl<B: RenderBackend> RenderSession<B> {
             y: bounds.y,
             width,
             height,
+            upload_state: TextureUploadState::Pending,
         });
         Ok((atlas.texture, bounds, true))
     }
@@ -1677,7 +1687,11 @@ impl<B: RenderBackend> RenderSession<B> {
                     height: entry.height,
                 };
                 atlas.used_frame = self.frame_serial;
-                return Ok((atlas.texture, bounds, false));
+                return Ok((
+                    atlas.texture,
+                    bounds,
+                    entry.upload_state == TextureUploadState::Pending,
+                ));
             }
         }
 
@@ -1697,6 +1711,7 @@ impl<B: RenderBackend> RenderSession<B> {
             y: bounds.y,
             width,
             height,
+            upload_state: TextureUploadState::Pending,
         });
         Ok((atlas.texture, bounds, true))
     }
@@ -1743,19 +1758,18 @@ impl<B: RenderBackend> RenderSession<B> {
         }
     }
 
-    fn submit(
+    fn submit<E: CommandExecutor>(
         &mut self,
-        context: &B::Context,
-        queue: &B::Queue,
+        executor: &mut E,
         target_id: TextureId,
         background: UiColor,
         render_areas: &[PixelBounds],
         frame: &LoweredFrame<'_>,
-    ) -> Result<()> {
+    ) -> core::result::Result<(), FrameError<E::Error>> {
         if frame.draws.is_empty() {
             return Ok(());
         }
-        self.submit_texture_uploads(context, queue, frame)?;
+        self.submit_texture_uploads(executor, frame)?;
 
         let table = Rc::clone(&self.table);
         let target = table
@@ -1789,13 +1803,10 @@ impl<B: RenderBackend> RenderSession<B> {
             )
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
             let mut draw_index = 0usize;
-            let mut draw_offset = 0u32;
             let mut first_pass = true;
             while draw_index < frame.draws.len() {
-                // Keep each render pass in its own command buffer and account
-                // for vertex plus per-draw state against the backend's opaque
-                // byte limit. Separate submissions retain paint order through
-                // LoadOp::Load.
+                // Each draw remains intact. Split only to respect SGFX IR's
+                // fixed command capacity, preserving order with LoadOp::Load.
                 let mut encoder = CommandEncoder::new(&table);
                 if first_submission {
                     encoder
@@ -1812,31 +1823,16 @@ impl<B: RenderBackend> RenderSession<B> {
                 let mut pass = encoder
                     .begin_render_pass(descriptor)
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                let mut pass_vertices = 0u32;
-                let mut estimated_bytes = PASS_FIXED_COMMAND_BYTES;
+                let mut command_count = PASS_COMMANDS + usize::from(first_submission);
 
-                while draw_index < frame.draws.len() && pass_vertices < MAX_PASS_VERTICES {
+                while draw_index < frame.draws.len() {
                     let draw = frame.draws[draw_index];
                     let Some(scissor) = intersect_bounds(draw.geometry.scissor, *render_area)
                     else {
                         draw_index += 1;
-                        draw_offset = 0;
                         continue;
                     };
-                    let remaining = draw.geometry.vertex_count.saturating_sub(draw_offset);
-                    let draw_bytes = match draw.source {
-                        DrawSource::Solid => SOLID_DRAW_COMMAND_BYTES,
-                        DrawSource::Texture(_) | DrawSource::Glyph(_) => {
-                            TEXTURED_DRAW_COMMAND_BYTES
-                        }
-                    };
-                    let available_bytes = MAX_OPAQUE_COMMAND_BYTES
-                        .saturating_sub(estimated_bytes)
-                        .saturating_sub(draw_bytes);
-                    let available = (MAX_PASS_VERTICES - pass_vertices)
-                        .min(available_bytes / CANONICAL_VERTEX_BYTES);
-                    let chunk = remaining.min(available) / 3 * 3;
-                    if chunk == 0 {
+                    if command_count.saturating_add(MAX_PAINT_DRAW_COMMANDS) > MAX_COMMANDS {
                         break;
                     }
                     let (pipeline, texture) = match draw.source {
@@ -1864,30 +1860,19 @@ impl<B: RenderBackend> RenderSession<B> {
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                     pass.set_scissor(Some(scissor))
                         .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                    pass.draw(
-                        chunk,
-                        draw.geometry.first_vertex.saturating_add(draw_offset),
-                    )
-                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                    pass_vertices += chunk;
-                    estimated_bytes = estimated_bytes
-                        .saturating_add(draw_bytes)
-                        .saturating_add(chunk.saturating_mul(CANONICAL_VERTEX_BYTES));
-                    draw_offset += chunk;
-                    if draw_offset == draw.geometry.vertex_count {
-                        draw_index += 1;
-                        draw_offset = 0;
-                    }
+                    pass.draw(draw.geometry.vertex_count, draw.geometry.first_vertex)
+                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                    command_count = command_count.saturating_add(MAX_PAINT_DRAW_COMMANDS);
+                    draw_index += 1;
                 }
-                if pass_vertices == 0 {
-                    return Err(Error::FrameTooComplex);
+                if command_count == PASS_COMMANDS + usize::from(first_submission) {
+                    return Err(Error::FrameTooComplex.into());
                 }
                 pass.end().map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                 let commands = encoder
                     .finish()
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                B::submit(context, queue, &mut self.cache, &commands)
-                    .map_err(|_| Error::sgfx(Stage::SubmitCommands))?;
+                executor.execute(&commands).map_err(FrameError::Execution)?;
                 first_submission = false;
                 first_pass = false;
             }
@@ -1895,12 +1880,11 @@ impl<B: RenderBackend> RenderSession<B> {
         Ok(())
     }
 
-    fn submit_texture_uploads(
+    fn submit_texture_uploads<E: CommandExecutor>(
         &mut self,
-        context: &B::Context,
-        queue: &B::Queue,
+        executor: &mut E,
         frame: &LoweredFrame<'_>,
-    ) -> Result<()> {
+    ) -> core::result::Result<(), FrameError<E::Error>> {
         if frame.uploads.is_empty() {
             return Ok(());
         }
@@ -1922,8 +1906,45 @@ impl<B: RenderBackend> RenderSession<B> {
         let commands = encoder
             .finish()
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-        B::submit(context, queue, &mut self.cache, &commands)
-            .map_err(|_| Error::sgfx(Stage::SubmitCommands))
+        executor.execute(&commands).map_err(FrameError::Execution)?;
+        self.commit_texture_uploads(frame);
+        Ok(())
+    }
+
+    fn commit_texture_uploads(&mut self, frame: &LoweredFrame<'_>) {
+        for upload in &frame.uploads {
+            for texture in &mut self.buffer_textures {
+                if texture.texture == upload.texture
+                    && upload.x == 0
+                    && upload.y == 0
+                    && texture.width == upload.width
+                    && texture.height == upload.height
+                {
+                    texture.upload_state = TextureUploadState::Uploaded;
+                }
+            }
+            for atlas in &mut self.glyph_atlases {
+                if atlas.texture != upload.texture {
+                    continue;
+                }
+                if let Some(entry) = atlas.entries.iter_mut().find(|entry| {
+                    entry.x == upload.x
+                        && entry.y == upload.y
+                        && entry.width == upload.width
+                        && entry.height == upload.height
+                }) {
+                    entry.upload_state = TextureUploadState::Uploaded;
+                }
+                if let Some(entry) = atlas.icon_entries.iter_mut().find(|entry| {
+                    entry.x == upload.x
+                        && entry.y == upload.y
+                        && entry.width == upload.width
+                        && entry.height == upload.height
+                }) {
+                    entry.upload_state = TextureUploadState::Uploaded;
+                }
+            }
+        }
     }
 }
 
@@ -2293,6 +2314,79 @@ fn truncated(value: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::canvas::{SgfxCanvasDraw, SgfxCanvasVertex, SgfxMeshHandle};
+    use scarlet_ui_core::geometry::{Point, Rect, Size};
+    use scarlet_ui_core::icon::{ALL_ICONS, IconStyle};
+    use sgfx::ir::{Command, CommandBuffer};
+
+    #[derive(Default)]
+    struct RecordingExecutor {
+        command_kinds: Vec<Vec<&'static str>>,
+        draw_vertices: Vec<u32>,
+    }
+
+    impl CommandExecutor for RecordingExecutor {
+        type Error = ();
+
+        fn execute<'r, 'data>(
+            &mut self,
+            commands: &CommandBuffer<'r, 'data>,
+        ) -> core::result::Result<(), Self::Error> {
+            let mut kinds = Vec::new();
+            for command in commands.commands() {
+                let kind = match command {
+                    Command::WriteBuffer { .. } => "write-buffer",
+                    Command::WriteTexture { .. } => "write-texture",
+                    Command::CopyTextureToTexture { .. } => "copy",
+                    Command::BeginRenderPass(_) => "begin-pass",
+                    Command::EndRenderPass => "end-pass",
+                    Command::SetPipeline(_) => "set-pipeline",
+                    Command::SetVertexBuffer { .. } => "set-vertex-buffer",
+                    Command::SetIndexBuffer { .. } => "set-index-buffer",
+                    Command::SetTexture(_) => "set-texture",
+                    Command::SetSampler(_) => "set-sampler",
+                    Command::SetUniforms(_) => "set-uniforms",
+                    Command::SetScissor(_) => "set-scissor",
+                    Command::Draw { vertex_count, .. } => {
+                        self.draw_vertices.push(*vertex_count);
+                        "draw"
+                    }
+                    Command::DrawIndexed { .. } => "draw-indexed",
+                };
+                kinds.push(kind);
+            }
+            self.command_kinds.push(kinds);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FailOnceExecutor {
+        fail_next: bool,
+        texture_write_counts: Vec<usize>,
+    }
+
+    impl CommandExecutor for FailOnceExecutor {
+        type Error = &'static str;
+
+        fn execute<'r, 'data>(
+            &mut self,
+            commands: &CommandBuffer<'r, 'data>,
+        ) -> core::result::Result<(), Self::Error> {
+            self.texture_write_counts.push(
+                commands
+                    .commands()
+                    .iter()
+                    .filter(|command| matches!(command, Command::WriteTexture { .. }))
+                    .count(),
+            );
+            if self.fail_next {
+                self.fail_next = false;
+                Err("injected upload failure")
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     fn test_glyph_atlas(table: &ResourceTable, used_frame: u64) -> GlyphAtlas {
         let texture = define_sampled_texture(
@@ -2382,6 +2476,7 @@ mod tests {
             y: second.y,
             width: second.width,
             height: second.height,
+            upload_state: TextureUploadState::Uploaded,
         });
 
         atlas.reset(4);
@@ -2464,21 +2559,237 @@ mod tests {
     }
 
     #[test]
-    fn retained_canvas_pass_is_limited_by_draw_state_not_vertex_payload() {
-        let max_textured_draws = ((MAX_OPAQUE_COMMAND_BYTES - PASS_FIXED_COMMAND_BYTES)
-            / (TEXTURED_DRAW_COMMAND_BYTES + CANVAS_VERTEX_BIND_COMMAND_BYTES))
-            as usize;
-        let meshes = vec![0; max_textured_draws];
-        let textures = vec![Some(0); max_textured_draws];
-        assert!(canvas_pass_reaches_frame_end(&meshes, &textures, 0));
+    fn retained_canvas_pass_is_limited_only_by_ir_commands() {
+        let max_draws = (MAX_COMMANDS - PASS_COMMANDS) / MAX_CANVAS_DRAW_COMMANDS;
+        let meshes = vec![0; max_draws];
+        assert!(canvas_pass_reaches_frame_end(&meshes, 0, 0));
 
-        let too_many_meshes = vec![0; max_textured_draws + 1];
-        let too_many_textures = vec![Some(0); max_textured_draws + 1];
-        assert!(!canvas_pass_reaches_frame_end(
-            &too_many_meshes,
-            &too_many_textures,
-            0,
+        let too_many_meshes = vec![0; max_draws + 1];
+        assert!(!canvas_pass_reaches_frame_end(&too_many_meshes, 0, 0));
+    }
+
+    #[test]
+    fn executor_receives_copy_then_unchunked_large_draw() {
+        let mut paint = PaintContext::new();
+        let mut polygon = Vec::new();
+        for index in 0..600 {
+            let angle = core::f32::consts::TAU * index as f32 / 600.0;
+            polygon.push(Point::new(
+                64.0 + libm::cosf(angle) * 60.0,
+                64.0 + libm::sinf(angle) * 60.0,
+            ));
+        }
+        paint.fill_path(polygon, UiColor::WHITE);
+
+        let mut encoder = SgfxPaintEncoder::new(128, 128, false).unwrap();
+        let mut executor = RecordingExecutor::default();
+        encoder
+            .encode_frame(
+                &mut executor,
+                1,
+                Some(0),
+                &paint,
+                UiColor::BLACK,
+                1_000,
+                &[(0, 0, 128, 128)],
+            )
+            .unwrap();
+
+        assert_eq!(executor.command_kinds.len(), 2);
+        assert_eq!(executor.command_kinds[0], ["copy"]);
+        assert_eq!(executor.command_kinds[1][0], "write-buffer");
+        assert!(executor.command_kinds[1].contains(&"begin-pass"));
+        assert_eq!(executor.command_kinds[1].last(), Some(&"end-pass"));
+        assert!(executor.draw_vertices.iter().any(|count| *count > 1_440));
+    }
+
+    #[test]
+    fn failed_buffer_upload_is_retried_then_committed() {
+        let buffer = Buffer::from_dimensions(2, 2);
+        let mut paint = PaintContext::new();
+        paint.draw_buffer_ref(
+            Rect::new(Point::new(0.0, 0.0), Size::new(2.0, 2.0)),
+            &buffer,
+        );
+        let mut encoder = SgfxPaintEncoder::new(8, 8, false).unwrap();
+        let mut executor = FailOnceExecutor {
+            fail_next: true,
+            texture_write_counts: Vec::new(),
+        };
+
+        assert!(matches!(
+            encoder.encode_frame(
+                &mut executor,
+                0,
+                None,
+                &paint,
+                UiColor::BLACK,
+                1_000,
+                &[(0, 0, 8, 8)],
+            ),
+            Err(FrameError::Execution("injected upload failure"))
         ));
+        encoder
+            .encode_frame(
+                &mut executor,
+                0,
+                None,
+                &paint,
+                UiColor::BLACK,
+                1_000,
+                &[(0, 0, 8, 8)],
+            )
+            .unwrap();
+        encoder
+            .encode_frame(
+                &mut executor,
+                0,
+                None,
+                &paint,
+                UiColor::BLACK,
+                1_000,
+                &[(0, 0, 8, 8)],
+            )
+            .unwrap();
+
+        assert_eq!(executor.texture_write_counts, [1, 1, 0, 0]);
+    }
+
+    fn assert_encode_frame_texture_upload_retry(paint: &PaintContext<'_>) {
+        let mut encoder = SgfxPaintEncoder::new(64, 64, false).unwrap();
+        let mut executor = FailOnceExecutor {
+            fail_next: true,
+            texture_write_counts: Vec::new(),
+        };
+        assert!(matches!(
+            encoder.encode_frame(
+                &mut executor,
+                0,
+                None,
+                paint,
+                UiColor::BLACK,
+                1_000,
+                &[(0, 0, 64, 64)],
+            ),
+            Err(FrameError::Execution("injected upload failure"))
+        ));
+        encoder
+            .encode_frame(
+                &mut executor,
+                0,
+                None,
+                paint,
+                UiColor::BLACK,
+                1_000,
+                &[(0, 0, 64, 64)],
+            )
+            .unwrap();
+        encoder
+            .encode_frame(
+                &mut executor,
+                0,
+                None,
+                paint,
+                UiColor::BLACK,
+                1_000,
+                &[(0, 0, 64, 64)],
+            )
+            .unwrap();
+
+        let first_upload_count = executor.texture_write_counts[0];
+        assert!(first_upload_count > 0);
+        assert_eq!(
+            executor.texture_write_counts,
+            [first_upload_count, first_upload_count, 0, 0]
+        );
+    }
+
+    #[test]
+    fn failed_text_upload_is_retried_through_encode_frame() {
+        let mut paint = PaintContext::new();
+        paint.draw_text(Point::new(4.0, 24.0), "A", UiColor::WHITE, 16.0);
+        assert_encode_frame_texture_upload_retry(&paint);
+    }
+
+    #[test]
+    fn failed_icon_upload_is_retried_through_encode_frame() {
+        let mut paint = PaintContext::new();
+        paint.draw_icon(
+            Rect::new(Point::new(4.0, 4.0), Size::new(20.0, 20.0)),
+            ALL_ICONS[0],
+            IconStyle::default(),
+            UiColor::WHITE,
+        );
+        assert_encode_frame_texture_upload_retry(&paint);
+    }
+
+    #[test]
+    fn glyph_and_icon_uploads_remain_pending_until_committed() {
+        let mut encoder = SgfxPaintEncoder::new(32, 32, false).unwrap();
+        let glyph_key = GlyphRasterKey {
+            codepoint: 'A' as u32,
+            size_px: 16,
+            font_stack_id: 1,
+            font_slot: 0,
+        };
+        let (glyph_texture, glyph_bounds, glyph_upload) =
+            encoder.glyph_texture(glyph_key, 4, 5).unwrap();
+        assert!(glyph_upload);
+        assert!(encoder.glyph_texture(glyph_key, 4, 5).unwrap().2);
+
+        let icon_key = IconMaskKey {
+            icon: ALL_ICONS[0],
+            pixel_size: 16,
+            style: IconStyle::default(),
+        };
+        let (icon_texture, icon_bounds, icon_upload) =
+            encoder.icon_texture(icon_key, 6, 7).unwrap();
+        assert!(icon_upload);
+        assert!(encoder.icon_texture(icon_key, 6, 7).unwrap().2);
+
+        let glyph_bytes = Arc::<[u8]>::from(alloc::vec![0; 20]);
+        let icon_bytes = Arc::<[u8]>::from(alloc::vec![0; 42]);
+        let frame = LoweredFrame {
+            vertex_bytes: Vec::new(),
+            draws: Vec::new(),
+            uploads: alloc::vec![
+                TextureUpload {
+                    texture: glyph_texture,
+                    x: glyph_bounds.x,
+                    y: glyph_bounds.y,
+                    width: glyph_bounds.width,
+                    height: glyph_bounds.height,
+                    bytes_per_row: glyph_bounds.width,
+                    bytes: UploadBytes::Shared(glyph_bytes),
+                },
+                TextureUpload {
+                    texture: icon_texture,
+                    x: icon_bounds.x,
+                    y: icon_bounds.y,
+                    width: icon_bounds.width,
+                    height: icon_bounds.height,
+                    bytes_per_row: icon_bounds.width,
+                    bytes: UploadBytes::Shared(icon_bytes),
+                },
+            ],
+        };
+        let mut executor = FailOnceExecutor {
+            fail_next: true,
+            texture_write_counts: Vec::new(),
+        };
+        assert!(matches!(
+            encoder.submit_texture_uploads(&mut executor, &frame),
+            Err(FrameError::Execution("injected upload failure"))
+        ));
+        assert!(encoder.glyph_texture(glyph_key, 4, 5).unwrap().2);
+        assert!(encoder.icon_texture(icon_key, 6, 7).unwrap().2);
+        encoder
+            .submit_texture_uploads(&mut executor, &frame)
+            .unwrap();
+
+        assert!(!encoder.glyph_texture(glyph_key, 4, 5).unwrap().2);
+        assert!(!encoder.icon_texture(icon_key, 6, 7).unwrap().2);
+        assert_eq!(executor.texture_write_counts, [2, 2]);
     }
 
     #[test]

@@ -5,23 +5,28 @@ use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::geometry::{Rect, Size};
 use scarlet_ui_core::renderer::{BackendFrame, PaintBackend, PaintContext};
 use scarlet_ui_core::{Error, Result};
-use scarlet_ui_renderer_sgfx::WgpuSgfxSession;
+use scarlet_ui_renderer_sgfx::SgfxPaintEncoder;
+use sgfx_backend_wgpu::{Context, MappedTargetSession};
 
-/// Platform composition of an SGFX/WGPU session and a Winit WGPU surface.
+/// Platform composition of backend-owned SGFX targets and a Winit WGPU surface.
 pub(crate) struct WgpuPaintBackend {
     surface: wgpu::Surface<'static>,
     /// Keep the instance alive until after the surface is dropped.
     _instance: wgpu::Instance,
     config: wgpu::SurfaceConfiguration,
-    session: WgpuSgfxSession,
+    context: Context,
+    session: MappedTargetSession,
+    encoder: SgfxPaintEncoder,
     sampler: wgpu::Sampler,
     blit_pipeline: wgpu::RenderPipeline,
     supports_depth: bool,
     scale_milli: u32,
+    next_slot: usize,
+    last_slot: Option<usize>,
 }
 
 impl WgpuPaintBackend {
-    /// Compose an SGFX/WGPU renderer with a platform-owned presentation surface.
+    /// Compose SGFX mapped targets with a platform-owned presentation surface.
     ///
     /// # Arguments
     ///
@@ -51,7 +56,16 @@ impl WgpuPaintBackend {
         let height = height.max(1);
         config.width = width;
         config.height = height;
-        let session = WgpuSgfxSession::new(device, queue, width, height, supports_depth)
+        let device = sgfx_backend_wgpu::Device::new(device, queue);
+        let context = device.create_context();
+        let encoder =
+            SgfxPaintEncoder::new(width, height, supports_depth).map_err(|_| Error::RenderError)?;
+        let targets = [
+            encoder.target_texture(0).ok_or(Error::RenderError)?,
+            encoder.target_texture(1).ok_or(Error::RenderError)?,
+        ];
+        let session = context
+            .create_mapped_target_session(encoder.resource_table(), &targets)
             .map_err(|_| Error::RenderError)?;
         surface.configure(session.raw_device(), &config);
         let sampler = session
@@ -71,11 +85,15 @@ impl WgpuPaintBackend {
             surface,
             _instance: instance,
             config,
+            context,
             session,
+            encoder,
             sampler,
             blit_pipeline,
             supports_depth,
             scale_milli: 1_000,
+            next_slot: 0,
+            last_slot: None,
         })
     }
 
@@ -85,21 +103,37 @@ impl WgpuPaintBackend {
         if self.config.width == width && self.config.height == height {
             return;
         }
-        if self
-            .session
-            .resize(width, height, self.supports_depth)
-            .is_err()
-        {
+        let Ok(encoder) = SgfxPaintEncoder::new(width, height, self.supports_depth) else {
             return;
-        }
+        };
+        let (Some(first_target), Some(second_target)) =
+            (encoder.target_texture(0), encoder.target_texture(1))
+        else {
+            return;
+        };
+        let targets = [first_target, second_target];
+        let Ok(session) = self
+            .context
+            .create_mapped_target_session(encoder.resource_table(), &targets)
+        else {
+            return;
+        };
         self.config.width = width;
         self.config.height = height;
+        self.encoder = encoder;
+        self.session = session;
+        self.next_slot = 0;
+        self.last_slot = None;
         self.surface
             .configure(self.session.raw_device(), &self.config);
     }
 
-    fn present(&mut self) -> Result<()> {
-        let image = self.session.image().ok_or(Error::RenderError)?;
+    fn present(&mut self, slot: usize) -> Result<()> {
+        let target = self
+            .encoder
+            .target_texture(slot)
+            .ok_or(Error::RenderError)?;
+        let image = self.session.image(target).map_err(|_| Error::RenderError)?;
         let frame = self
             .surface
             .get_current_texture()
@@ -156,6 +190,24 @@ impl WgpuPaintBackend {
         let _ = self.session.raw_device().poll(wgpu::Maintain::Poll);
         Ok(())
     }
+
+    fn render_areas(&self, physical_damage: Option<&[DamageRect]>) -> Result<Vec<DamageRect>> {
+        let full = (0, 0, self.encoder.width(), self.encoder.height());
+        let Some(damage) = physical_damage else {
+            return Ok(vec![full]);
+        };
+        let mut areas = Vec::with_capacity(damage.len());
+        for &damage in damage {
+            if let Some(area) = clamp_damage(damage, self.encoder.width(), self.encoder.height()) {
+                areas.push(area);
+            }
+        }
+        if areas.is_empty() {
+            Err(Error::RenderError)
+        } else {
+            Ok(areas)
+        }
+    }
 }
 
 impl PaintBackend for WgpuPaintBackend {
@@ -174,17 +226,108 @@ impl PaintBackend for WgpuPaintBackend {
         _logical_damage: Option<&[Rect]>,
         physical_damage: Option<&[DamageRect]>,
     ) -> Result<BackendFrame<'a>> {
-        self.session
-            .render_with_damage(context, background_color, self.scale_milli, physical_damage)
-            .map_err(|error| {
-                eprintln!("[ScarletUI] SGFX/WGPU render failed: {error}");
-                Error::RenderError
-            })?;
-        self.present().map_err(|error| {
+        let render_areas = self.render_areas(physical_damage)?;
+        let slot = select_render_slot(
+            physical_damage.is_some(),
+            self.next_slot,
+            self.last_slot,
+            &render_areas,
+            (0, 0, self.encoder.width(), self.encoder.height()),
+        )
+        .ok_or(Error::RenderError)?;
+        {
+            let mut executor = self.session.executor();
+            self.encoder
+                .encode_frame(
+                    &mut executor,
+                    slot,
+                    None,
+                    context,
+                    background_color,
+                    self.scale_milli,
+                    &render_areas,
+                )
+                .map_err(|error| {
+                    eprintln!("[ScarletUI] SGFX/WGPU render failed: {error}");
+                    Error::RenderError
+                })?;
+        }
+        self.present(slot).map_err(|error| {
             eprintln!("[ScarletUI] SGFX/WGPU present failed: {error}");
             Error::RenderError
         })?;
+        self.next_slot = (slot + 1) % 2;
+        self.last_slot = Some(slot);
         Ok(BackendFrame::External)
+    }
+}
+
+fn clamp_damage(damage: DamageRect, width: u32, height: u32) -> Option<DamageRect> {
+    let (x, y, damage_width, damage_height) = damage;
+    if damage_width == 0 || damage_height == 0 || x >= width || y >= height {
+        return None;
+    }
+    let right = x.saturating_add(damage_width).min(width);
+    let bottom = y.saturating_add(damage_height).min(height);
+    (right > x && bottom > y).then_some((x, y, right - x, bottom - y))
+}
+
+fn select_render_slot(
+    partial_damage: bool,
+    next_slot: usize,
+    last_slot: Option<usize>,
+    render_areas: &[DamageRect],
+    full_bounds: DamageRect,
+) -> Option<usize> {
+    if !partial_damage {
+        return Some(next_slot);
+    }
+    last_slot.or_else(|| {
+        (render_areas.len() == 1 && render_areas[0] == full_bounds).then_some(next_slot)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FULL: DamageRect = (0, 0, 800, 600);
+
+    #[test]
+    fn partial_damage_reuses_the_presented_target() {
+        assert_eq!(
+            select_render_slot(true, 1, Some(0), &[(100, 100, 20, 20)], FULL),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn initial_full_damage_uses_the_next_target() {
+        assert_eq!(select_render_slot(true, 1, None, &[FULL], FULL), Some(1));
+    }
+
+    #[test]
+    fn initial_partial_damage_requires_a_presented_target() {
+        assert_eq!(
+            select_render_slot(true, 0, None, &[(100, 100, 20, 20)], FULL),
+            None
+        );
+    }
+
+    #[test]
+    fn full_repaint_rotates_between_targets() {
+        assert_eq!(
+            select_render_slot(false, 1, Some(0), &[FULL], FULL),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn damage_is_clamped_to_the_render_target() {
+        assert_eq!(
+            clamp_damage((790, 590, 20, 20), 800, 600),
+            Some((790, 590, 10, 10))
+        );
     }
 }
 
