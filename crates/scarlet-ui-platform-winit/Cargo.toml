@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["std", "wgpu"]
+default = ["std", "sgfx"]
 std = ["scarlet-ui-core/std"]
-wgpu = ["dep:pollster", "dep:sgfx-backend-wgpu", "dep:wgpu"]
+sgfx = ["dep:raw-window-handle", "dep:sgfx"]
+# Compatibility alias for callers that enabled the former concrete backend.
+wgpu = ["sgfx"]
 
 [dependencies]
 scarlet-ui-core = { path = "../scarlet-ui-core", default-features = false, features = ["std"] }
@@ -15,10 +17,8 @@ scarlet-ui-renderer-sgfx = { path = "../scarlet-ui-renderer-sgfx", default-featu
 [target.'cfg(not(target_os = "scarlet"))'.dependencies]
 softbuffer = "0.4.8"
 winit = "0.30.13"
-raw-window-handle = "0.6"
-pollster = { version = "0.4", optional = true }
-wgpu = { version = "24", optional = true }
-sgfx-backend-wgpu = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "sgfx-backend-wgpu", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+sgfx = { git = "https://github.com/petitstrawberry/Scarlet", branch = "feature/sgfx-facade-backend-selection", package = "sgfx", default-features = false, features = ["std", "backend-wgpu"], optional = true }
 
 [lib]
 name = "scarlet_ui_platform_winit"

@@ -3,7 +3,7 @@
 use core::fmt;
 
 use scarlet_ui_core::compositor::DamageRect;
-use sgfx::Image;
+use sgfx::ImageRef;
 
 /// Complete identity of one SWS shared SGFX buffer registration.
 ///
@@ -109,7 +109,7 @@ pub trait SgfxFrameSink {
     /// # Arguments
     ///
     /// * `identity` - Complete registration identity.
-    /// * `image` - Shared SGFX image retained by the backend session.
+    /// * `image` - Borrowed shared-image view retained by the backend session.
     ///
     /// # Returns
     ///
@@ -117,7 +117,7 @@ pub trait SgfxFrameSink {
     fn register_shared_image(
         &mut self,
         identity: SgfxBufferIdentity,
-        image: &Image,
+        image: ImageRef<'_>,
     ) -> SgfxSinkResult<()>;
 
     /// Wait until SWS no longer retains a previously committed image.

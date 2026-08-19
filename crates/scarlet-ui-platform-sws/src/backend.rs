@@ -8,7 +8,7 @@ use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::geometry::{Rect, Size};
 use scarlet_ui_core::renderer::{BackendFrame, PaintBackend, PaintContext};
 use scarlet_ui_renderer_sgfx::SgfxPaintEncoder;
-use sgfx::{Context, Device, MappedTargetSession};
+use sgfx::{BackendKind, Context, Device, MappedTargetSession};
 
 use crate::{SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkStatus};
 
@@ -116,6 +116,7 @@ pub struct SgfxPaintBackend<S> {
     next_slot: usize,
     front_slot: Option<usize>,
     supports_depth: bool,
+    backend_kind: BackendKind,
 }
 
 impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
@@ -154,6 +155,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
     ) -> Result<Self> {
         let device = Device::open(device_path).map_err(|_| Error::Sgfx(Stage::OpenDevice))?;
         let capabilities = device.capabilities();
+        let backend_kind = device.backend();
         if !capabilities.supports_rendering() || !capabilities.supports_presentation() {
             return Err(Error::Sgfx(Stage::OpenDevice));
         }
@@ -176,6 +178,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             next_slot: 0,
             front_slot: None,
             supports_depth: capabilities.supports_depth(),
+            backend_kind,
         };
         backend.initialize_shared_images()?;
         Ok(backend)
@@ -188,6 +191,15 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
     /// Shared reference to the sink.
     pub const fn sink(&self) -> &S {
         &self.sink
+    }
+
+    /// Return the complete SGFX backend selected for this platform renderer.
+    ///
+    /// # Returns
+    ///
+    /// Stable backend identity selected by the SGFX frontend.
+    pub const fn backend_kind(&self) -> BackendKind {
+        self.backend_kind
     }
 
     /// Mutably borrow the platform frame sink.
