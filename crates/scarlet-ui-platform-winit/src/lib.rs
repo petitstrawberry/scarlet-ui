@@ -110,6 +110,21 @@ fn winit_renderer_preference() -> WinitRendererPreference {
 }
 
 #[cfg(feature = "wgpu")]
+fn select_wgpu_surface_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat> {
+    formats
+        .iter()
+        .copied()
+        .find(|format| {
+            matches!(
+                format,
+                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+            )
+        })
+        .or_else(|| formats.iter().copied().find(|format| !format.is_srgb()))
+        .or_else(|| formats.first().copied())
+}
+
+#[cfg(feature = "wgpu")]
 fn create_wgpu_backend(window: &WinitWindow, width: u32, height: u32) -> Result<WgpuPaintBackend> {
     use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
@@ -150,13 +165,11 @@ fn create_wgpu_backend(window: &WinitWindow, width: u32, height: u32) -> Result<
         eprintln!("[ScarletUI] uncaptured WGPU error: {error}");
     }));
     let capabilities = surface.get_capabilities(&adapter);
-    let format = capabilities
-        .formats
-        .iter()
-        .copied()
-        .find(wgpu::TextureFormat::is_srgb)
-        .or_else(|| capabilities.formats.first().copied())
-        .ok_or(Error::SurfaceCreationFailed)?;
+    // ScarletUI and SGFX retain colors as display-ready UNORM values, matching
+    // the CPU framebuffer path. Presenting those values through an sRGB target
+    // would gamma-encode them a second time and wash out the entire frame.
+    let format =
+        select_wgpu_surface_format(&capabilities.formats).ok_or(Error::SurfaceCreationFailed)?;
     let alpha_mode = capabilities
         .alpha_modes
         .first()
@@ -1452,6 +1465,32 @@ fn map_wheel_phase(phase: TouchPhase) -> WheelPhase {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "wgpu")]
+    #[test]
+    fn wgpu_surface_prefers_raw_unorm_over_srgb() {
+        let formats = [
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Bgra8Unorm,
+        ];
+
+        assert_eq!(
+            select_wgpu_surface_format(&formats),
+            Some(wgpu::TextureFormat::Bgra8Unorm)
+        );
+    }
+
+    #[cfg(feature = "wgpu")]
+    #[test]
+    fn wgpu_surface_uses_srgb_when_it_is_the_only_choice() {
+        let formats = [wgpu::TextureFormat::Bgra8UnormSrgb];
+
+        assert_eq!(
+            select_wgpu_surface_format(&formats),
+            Some(wgpu::TextureFormat::Bgra8UnormSrgb)
+        );
+    }
 
     fn wheel(delta_y: i32, phase: WheelPhase, source: ScrollSource) -> Event {
         Event::Mouse(MouseEvent::Wheel {
