@@ -14,7 +14,7 @@ platform-sws = ["dep:scarlet-ui-platform-sws"]
 platform-winit = [
     "std",
     "dep:scarlet-ui-platform-winit",
-    "scarlet-ui-platform-winit/wgpu",
+    "scarlet-ui-platform-winit/sgfx",
 ]
 preview = ["std", "scarlet-ui-core/preview"]
 

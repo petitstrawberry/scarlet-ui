@@ -40,7 +40,7 @@ pub use scarlet_ui_renderer_sgfx::{
     SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
     SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
 };
-use sgfx::Image;
+use sgfx::ImageRef;
 pub use sink::{
     SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkResult,
     SgfxSinkStatus,
@@ -124,6 +124,13 @@ fn renderer_backend_environment_value() -> Option<String> {
 #[cfg(not(feature = "std"))]
 fn renderer_backend_environment_value() -> Option<String> {
     std::env::var("SCARLET_UI_BACKEND")
+}
+
+fn sgfx_backend_override_requested() -> bool {
+    !matches!(
+        sgfx::BackendPreference::from_environment(),
+        Ok(sgfx::BackendPreference::Auto)
+    )
 }
 
 #[cfg(feature = "std")]
@@ -393,7 +400,7 @@ impl SgfxFrameSink for SwsSgfxFrameSink {
     fn register_shared_image(
         &mut self,
         identity: SgfxBufferIdentity,
-        image: &Image,
+        image: ImageRef<'_>,
     ) -> SgfxSinkResult<()> {
         self.pump_lifecycle()?;
         self.validate_identity(identity)?;
@@ -1647,10 +1654,17 @@ impl PlatformWindow for SWSPlatformWindow {
         );
         match SgfxPaintBackend::new(sink, self.current_size, self.scale_milli) {
             Ok(backend) => {
+                logln!(
+                    "[ScarletUI] platform-sws renderer=sgfx backend={}",
+                    backend.backend_kind()
+                );
                 self.renderer_backend = RendererBackendKind::Sgfx;
                 Ok(Some(Box::new(SwsSgfxPaintBackend { backend })))
             }
-            Err(error) if self.requested_renderer_backend == RequestedRendererBackend::Auto => {
+            Err(error)
+                if self.requested_renderer_backend == RequestedRendererBackend::Auto
+                    && !sgfx_backend_override_requested() =>
+            {
                 logln!("[ScarletUI SGFX] initialization failed: {}", error);
                 self.renderer_backend = RendererBackendKind::Cpu;
                 Ok(None)

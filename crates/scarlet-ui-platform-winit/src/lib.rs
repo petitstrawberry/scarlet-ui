@@ -19,15 +19,15 @@ use scarlet_ui_core::event::{
 };
 use scarlet_ui_core::geometry::{Point, Size};
 use scarlet_ui_core::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
-#[cfg(feature = "wgpu")]
+#[cfg(feature = "sgfx")]
 use scarlet_ui_core::renderer::PaintBackend;
 pub use scarlet_ui_renderer_sgfx::{
     SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
     SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
 };
+#[cfg(feature = "sgfx")]
+use sgfx_renderer::SgfxWindowPaintBackend;
 use std::time::{Duration, Instant};
-#[cfg(feature = "wgpu")]
-use wgpu_renderer::WgpuPaintBackend;
 
 use ::winit::application::ApplicationHandler;
 use ::winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, Position};
@@ -42,15 +42,12 @@ use ::winit::window::{
     CursorGrabMode, Fullscreen, Window as WinitWindow, WindowAttributes, WindowId,
 };
 
-#[cfg(feature = "wgpu")]
-mod wgpu_renderer;
+#[cfg(feature = "sgfx")]
+mod sgfx_renderer;
 
 type SoftbufferContext = softbuffer::Context<::winit::event_loop::OwnedDisplayHandle>;
 type SoftbufferSurface =
     softbuffer::Surface<::winit::event_loop::OwnedDisplayHandle, Rc<WinitWindow>>;
-
-#[cfg(feature = "wgpu")]
-type WgpuSurface = wgpu::Surface<'static>;
 
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_DISTANCE: i32 = 5;
@@ -92,7 +89,7 @@ fn env_flag_enabled(value: &str) -> bool {
     matches!(value, "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
 }
 
-#[cfg(feature = "wgpu")]
+#[cfg(feature = "sgfx")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WinitRendererPreference {
     Auto,
@@ -100,7 +97,7 @@ enum WinitRendererPreference {
     Sgfx,
 }
 
-#[cfg(feature = "wgpu")]
+#[cfg(feature = "sgfx")]
 fn winit_renderer_preference() -> WinitRendererPreference {
     match std::env::var("SCARLET_UI_WINIT_RENDERER").ok().as_deref() {
         Some("cpu") | Some("CPU") => WinitRendererPreference::Cpu,
@@ -109,26 +106,22 @@ fn winit_renderer_preference() -> WinitRendererPreference {
     }
 }
 
-#[cfg(feature = "wgpu")]
-fn select_wgpu_surface_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat> {
-    formats
-        .iter()
-        .copied()
-        .find(|format| {
-            matches!(
-                format,
-                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
-            )
-        })
-        .or_else(|| formats.iter().copied().find(|format| !format.is_srgb()))
-        .or_else(|| formats.first().copied())
+#[cfg(feature = "sgfx")]
+fn sgfx_backend_override_requested() -> bool {
+    !matches!(
+        sgfx::BackendPreference::from_environment(),
+        Ok(sgfx::BackendPreference::Auto)
+    )
 }
 
-#[cfg(feature = "wgpu")]
-fn create_wgpu_backend(window: &WinitWindow, width: u32, height: u32) -> Result<WgpuPaintBackend> {
+#[cfg(feature = "sgfx")]
+fn create_sgfx_backend(
+    window: &WinitWindow,
+    width: u32,
+    height: u32,
+) -> Result<SgfxWindowPaintBackend> {
     use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     let raw_window_handle = window
         .window_handle()
         .map_err(|_| Error::SurfaceCreationFailed)?
@@ -137,58 +130,16 @@ fn create_wgpu_backend(window: &WinitWindow, width: u32, height: u32) -> Result<
         .display_handle()
         .map_err(|_| Error::SurfaceCreationFailed)?
         .as_raw();
-    // SAFETY: the Winit window and display handles remain valid until the
-    // WGPU backend is dropped. `WinitPlatformWindow` declares the backend
-    // before its window, and the application drops the rendering pipeline
-    // before the platform window, so the surface cannot outlive its handles.
-    let surface: WgpuSurface = unsafe {
-        instance
-            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle,
-                raw_window_handle,
-            })
-            .map_err(|_| Error::SurfaceCreationFailed)?
-    };
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        force_fallback_adapter: false,
-        compatible_surface: Some(&surface),
-    }))
-    .ok_or(Error::RenderError)?;
-    let (device, queue) = pollster::block_on(async {
-        adapter
-            .request_device(&wgpu::DeviceDescriptor::default(), None)
-            .await
-    })
-    .map_err(|_| Error::RenderError)?;
-    device.on_uncaptured_error(Box::new(|error| {
-        eprintln!("[ScarletUI] uncaptured WGPU error: {error}");
-    }));
-    let capabilities = surface.get_capabilities(&adapter);
-    // ScarletUI and SGFX retain colors as display-ready UNORM values, matching
-    // the CPU framebuffer path. Presenting those values through an sRGB target
-    // would gamma-encode them a second time and wash out the entire frame.
-    let format =
-        select_wgpu_surface_format(&capabilities.formats).ok_or(Error::SurfaceCreationFailed)?;
-    let alpha_mode = capabilities
-        .alpha_modes
-        .first()
-        .copied()
-        .ok_or(Error::SurfaceCreationFailed)?;
-    let config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format,
-        width: width.max(1),
-        height: height.max(1),
-        present_mode: wgpu::PresentMode::AutoVsync,
-        desired_maximum_frame_latency: 2,
-        alpha_mode,
-        view_formats: vec![],
-    };
-    WgpuPaintBackend::new(
-        instance, surface, device, queue, config, width, height, true,
-    )
-    .map_err(|_| Error::RenderError)
+    let instance = sgfx::Instance::new().map_err(|_| Error::RenderError)?;
+    let backend = instance.backend();
+    // SAFETY: `WinitPlatformWindow` declares its SGFX backend before `window`,
+    // and the application drops the paint backend before the platform window.
+    let window_context = unsafe {
+        instance.create_window_context(raw_display_handle, raw_window_handle, width, height)
+    }
+    .map_err(|_| Error::SurfaceCreationFailed)?;
+    println!("[ScarletUI] platform-winit renderer=sgfx backend={backend}");
+    SgfxWindowPaintBackend::new(window_context, width, height)
 }
 
 impl PlatformBackend for WinitBackend {
@@ -924,10 +875,10 @@ fn mark_pointer_lock_released(state: &mut WinitEventState) {
 
 pub struct WinitPlatformWindow {
     shared: Rc<WinitSharedState>,
-    #[cfg(feature = "wgpu")]
-    wgpu_backend: Option<WgpuPaintBackend>,
-    #[cfg(feature = "wgpu")]
-    using_wgpu: bool,
+    #[cfg(feature = "sgfx")]
+    sgfx_backend: Option<SgfxWindowPaintBackend>,
+    #[cfg(feature = "sgfx")]
+    using_sgfx: bool,
     window: Rc<WinitWindow>,
     surface: SoftbufferSurface,
     state: Rc<RefCell<WinitEventState>>,
@@ -986,18 +937,18 @@ impl WinitPlatformWindow {
         let inner_size = window.inner_size();
         let surface =
             SoftbufferSurface::new(&context, window.clone()).map_err(|_| Error::IoError)?;
-        #[cfg(feature = "wgpu")]
-        let wgpu_backend = match winit_renderer_preference() {
+        #[cfg(feature = "sgfx")]
+        let sgfx_backend = match winit_renderer_preference() {
             WinitRendererPreference::Cpu => None,
             preference @ (WinitRendererPreference::Auto | WinitRendererPreference::Sgfx) => {
-                match create_wgpu_backend(&window, inner_size.width, inner_size.height) {
-                    Ok(backend) => {
-                        println!("[ScarletUI] platform-winit renderer=sgfx-wgpu");
-                        Some(backend)
-                    }
-                    Err(error) if preference == WinitRendererPreference::Auto => {
+                match create_sgfx_backend(&window, inner_size.width, inner_size.height) {
+                    Ok(backend) => Some(backend),
+                    Err(error)
+                        if preference == WinitRendererPreference::Auto
+                            && !sgfx_backend_override_requested() =>
+                    {
                         eprintln!(
-                            "[ScarletUI] SGFX/WGPU initialization failed ({error}); falling back to CPU"
+                            "[ScarletUI] SGFX initialization failed ({error}); falling back to CPU"
                         );
                         None
                     }
@@ -1016,10 +967,10 @@ impl WinitPlatformWindow {
         );
         Ok(Self {
             shared,
-            #[cfg(feature = "wgpu")]
-            using_wgpu: wgpu_backend.is_some(),
-            #[cfg(feature = "wgpu")]
-            wgpu_backend,
+            #[cfg(feature = "sgfx")]
+            using_sgfx: sgfx_backend.is_some(),
+            #[cfg(feature = "sgfx")]
+            sgfx_backend,
             window,
             surface,
             state,
@@ -1118,17 +1069,17 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn renderer_backend(&self) -> scarlet_ui_core::renderer::RendererBackendKind {
-        #[cfg(feature = "wgpu")]
-        if self.using_wgpu {
+        #[cfg(feature = "sgfx")]
+        if self.using_sgfx {
             return scarlet_ui_core::renderer::RendererBackendKind::Sgfx;
         }
         scarlet_ui_core::renderer::RendererBackendKind::Cpu
     }
 
-    #[cfg(feature = "wgpu")]
+    #[cfg(feature = "sgfx")]
     fn take_paint_backend(&mut self) -> Result<Option<Box<dyn PaintBackend>>> {
         Ok(self
-            .wgpu_backend
+            .sgfx_backend
             .take()
             .map(|backend| Box::new(backend) as Box<dyn PaintBackend>))
     }
@@ -1465,32 +1416,6 @@ fn map_wheel_phase(phase: TouchPhase) -> WheelPhase {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(feature = "wgpu")]
-    #[test]
-    fn wgpu_surface_prefers_raw_unorm_over_srgb() {
-        let formats = [
-            wgpu::TextureFormat::Rgba16Float,
-            wgpu::TextureFormat::Bgra8UnormSrgb,
-            wgpu::TextureFormat::Bgra8Unorm,
-        ];
-
-        assert_eq!(
-            select_wgpu_surface_format(&formats),
-            Some(wgpu::TextureFormat::Bgra8Unorm)
-        );
-    }
-
-    #[cfg(feature = "wgpu")]
-    #[test]
-    fn wgpu_surface_uses_srgb_when_it_is_the_only_choice() {
-        let formats = [wgpu::TextureFormat::Bgra8UnormSrgb];
-
-        assert_eq!(
-            select_wgpu_surface_format(&formats),
-            Some(wgpu::TextureFormat::Bgra8UnormSrgb)
-        );
-    }
 
     fn wheel(delta_y: i32, phase: WheelPhase, source: ScrollSource) -> Event {
         Event::Mouse(MouseEvent::Wheel {

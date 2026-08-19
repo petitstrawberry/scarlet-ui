@@ -3,44 +3,11 @@
 //! EventDispatcher implements hit testing and event routing through
 //! the element tree with three-phase event dispatching.
 
+use crate::clock::Instant;
 use crate::element::{Element, ElementId, ElementTree};
 use crate::event::Event;
 use crate::geometry::Point;
 use alloc::vec::Vec;
-
-/// Monotonic clock for expiring idle wheel gestures.
-///
-/// `scarlet_std` exposes only `core::time` (no `Instant`), so on the `no_std`
-/// target there is no monotonic clock available and `elapsed_since` returns
-/// `Duration::ZERO` (idle never expires). Discrete-wheel locking then falls
-/// back to pointer-based release via `dispatch_mouse`.
-mod wheel_clock {
-    #[cfg(feature = "std")]
-    pub use std::time::Instant;
-
-    #[cfg(not(feature = "std"))]
-    #[derive(Clone, Copy)]
-    pub struct Instant;
-
-    #[cfg(not(feature = "std"))]
-    impl Instant {
-        pub fn now() -> Self {
-            Self
-        }
-    }
-
-    #[cfg(feature = "std")]
-    pub fn elapsed_since(instant: Instant) -> core::time::Duration {
-        Instant::now().duration_since(instant)
-    }
-
-    #[cfg(not(feature = "std"))]
-    pub fn elapsed_since(_instant: Instant) -> core::time::Duration {
-        core::time::Duration::ZERO
-    }
-}
-
-use wheel_clock::Instant;
 
 /// Discrete mouse wheels carry no gesture phase, so this idle window acts as
 /// the gesture boundary that decides when a locked scroll target may be
@@ -1152,7 +1119,7 @@ impl EventDispatcher {
 
     fn wheel_idle_expired(&self) -> bool {
         self.wheel_last_event_at
-            .is_some_and(|last| wheel_clock::elapsed_since(last) > WHEEL_GESTURE_IDLE)
+            .is_some_and(|last| last.elapsed() > WHEEL_GESTURE_IDLE)
     }
 
     fn wheel_phase_finished(&self, event: &crate::event::MouseEvent) -> bool {

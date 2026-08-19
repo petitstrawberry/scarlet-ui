@@ -42,6 +42,7 @@ extern crate scarlet_ui_macros;
 
 pub mod application;
 pub mod buffer;
+mod clock;
 pub mod color;
 pub mod command;
 pub mod compositor;
