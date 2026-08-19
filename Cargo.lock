@@ -541,7 +541,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -597,14 +597,6 @@ name = "foreign-types-shared"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
-
-[[package]]
-name = "framebuffer"
-version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#549ab843bcd69cf924b48483cfdcca329cebb421"
-dependencies = [
- "scarlet-std 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend)",
-]
 
 [[package]]
 name = "futures-core"
@@ -749,7 +741,7 @@ dependencies = [
 [[package]]
 name = "gpu-raw"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#549ab843bcd69cf924b48483cfdcca329cebb421"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#2ee7dbe891c44b15bf6ee88abdb39f1ac3bad223"
 dependencies = [
  "scarlet-std 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend)",
 ]
@@ -1683,7 +1675,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1696,7 +1688,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1722,7 +1714,7 @@ source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#08d5d90740d2
 [[package]]
 name = "scarlet-abi"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#549ab843bcd69cf924b48483cfdcca329cebb421"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#2ee7dbe891c44b15bf6ee88abdb39f1ac3bad223"
 
 [[package]]
 name = "scarlet-os"
@@ -1737,7 +1729,7 @@ dependencies = [
 [[package]]
 name = "scarlet-os"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#549ab843bcd69cf924b48483cfdcca329cebb421"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#2ee7dbe891c44b15bf6ee88abdb39f1ac3bad223"
 dependencies = [
  "scarlet-abi 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend)",
  "scarlet-rt 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend)",
@@ -1758,7 +1750,7 @@ dependencies = [
 [[package]]
 name = "scarlet-rt"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#549ab843bcd69cf924b48483cfdcca329cebb421"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#2ee7dbe891c44b15bf6ee88abdb39f1ac3bad223"
 dependencies = [
  "lock_api",
  "scarlet-sys 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend)",
@@ -1769,9 +1761,8 @@ dependencies = [
 [[package]]
 name = "scarlet-sgfx-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#549ab843bcd69cf924b48483cfdcca329cebb421"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#2ee7dbe891c44b15bf6ee88abdb39f1ac3bad223"
 dependencies = [
- "framebuffer",
  "gpu-raw",
  "scarlet-std 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend)",
  "sgfx-backend-virgl",
@@ -1794,7 +1785,7 @@ dependencies = [
 [[package]]
 name = "scarlet-std"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#549ab843bcd69cf924b48483cfdcca329cebb421"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#2ee7dbe891c44b15bf6ee88abdb39f1ac3bad223"
 dependencies = [
  "hashbrown 0.15.5",
  "scarlet-abi 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend)",
@@ -1815,7 +1806,7 @@ dependencies = [
 [[package]]
 name = "scarlet-sys"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#549ab843bcd69cf924b48483cfdcca329cebb421"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#2ee7dbe891c44b15bf6ee88abdb39f1ac3bad223"
 dependencies = [
  "scarlet-abi 0.16.0 (git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend)",
 ]
@@ -2020,7 +2011,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#549ab843bcd69cf924b48483cfdcca329cebb421"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#2ee7dbe891c44b15bf6ee88abdb39f1ac3bad223"
 dependencies = [
  "sgfx-core",
 ]
@@ -2028,7 +2019,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-wgpu"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#549ab843bcd69cf924b48483cfdcca329cebb421"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#2ee7dbe891c44b15bf6ee88abdb39f1ac3bad223"
 dependencies = [
  "bytemuck",
  "sgfx-core",
@@ -2038,7 +2029,7 @@ dependencies = [
 [[package]]
 name = "sgfx-core"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#549ab843bcd69cf924b48483cfdcca329cebb421"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-wgpu-backend#2ee7dbe891c44b15bf6ee88abdb39f1ac3bad223"
 
 [[package]]
 name = "shlex"
@@ -2768,7 +2759,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2846,15 +2837,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets",
 ]
