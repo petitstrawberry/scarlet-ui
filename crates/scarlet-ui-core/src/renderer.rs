@@ -112,6 +112,11 @@ pub enum PaintCommand {
         path: Path,
         color: Color,
     },
+    FillRoundedRect {
+        rect: Rect,
+        corner_radius: f32,
+        color: Color,
+    },
     StrokePath {
         path: Path,
         stroke_width: f32,
@@ -240,7 +245,11 @@ impl<'a> PaintContext<'a> {
     }
 
     pub fn fill_rounded_rect(&mut self, rect: Rect, corner_radius: f32, color: Color) {
-        self.fill_path(path_rounded_rect(rect, corner_radius), color);
+        self.commands.push(PaintCommand::FillRoundedRect {
+            rect,
+            corner_radius,
+            color,
+        });
     }
 
     pub fn stroke_path(&mut self, path: impl Into<Path>, stroke_width: f32, color: Color) {
@@ -972,6 +981,38 @@ impl CpuPaintRenderer {
         );
     }
 
+    fn rebuild_scaled_rounded_rect(&mut self, rect: Rect, corner_radius: f32) {
+        let radius = corner_radius
+            .min(rect.size.width / 2.0)
+            .min(rect.size.height / 2.0);
+        let corner_segments = (libm::ceilf(radius * 0.75) as usize).clamp(8, 32);
+        let x0 = rect.origin.x;
+        let y0 = rect.origin.y;
+        let x1 = rect.origin.x + rect.size.width;
+        let y1 = rect.origin.y + rect.size.height;
+        let corners = [
+            (x1 - radius, y1 - radius, 0.0),
+            (x0 + radius, y1 - radius, core::f32::consts::FRAC_PI_2),
+            (x0 + radius, y0 + radius, core::f32::consts::PI),
+            (x1 - radius, y0 + radius, 3.0 * core::f32::consts::FRAC_PI_2),
+        ];
+        let scale = self.scale_milli as f32 / 1000.0;
+        self.scratch.scaled_points.clear();
+        self.scratch
+            .scaled_points
+            .reserve(corner_segments.saturating_mul(4));
+        for (center_x, center_y, start_angle) in corners {
+            for index in 0..corner_segments {
+                let angle = start_angle
+                    + core::f32::consts::FRAC_PI_2 * index as f32 / corner_segments as f32;
+                self.scratch.scaled_points.push(Point::new(
+                    (center_x + radius * libm::cosf(angle)) * scale,
+                    (center_y + radius * libm::sinf(angle)) * scale,
+                ));
+            }
+        }
+    }
+
     fn fill_scaled_path(&mut self, color: Color, clip: Option<ClipRegion>) {
         let scratch = &mut self.scratch;
         let path = &scratch.scaled_points;
@@ -1065,6 +1106,29 @@ impl CpuPaintRenderer {
             match cmd {
                 PaintCommand::FillPath { path, color } => {
                     self.rebuild_scaled_points(path);
+                    match self.rebuild_effective_clip_rects(damage_rects) {
+                        EffectiveClipRects::Unclipped => {
+                            self.fill_scaled_path(*color, None);
+                        }
+                        EffectiveClipRects::Empty => {}
+                        EffectiveClipRects::Rects => {
+                            for index in 0..self.scratch.clip_rects.len() {
+                                let rect = self.scratch.clip_rects[index];
+                                let clip = ClipRegion {
+                                    rect: self.scale_rect(rect),
+                                    corner_radius: 0.0,
+                                };
+                                self.fill_scaled_path(*color, Some(clip));
+                            }
+                        }
+                    }
+                }
+                PaintCommand::FillRoundedRect {
+                    rect,
+                    corner_radius,
+                    color,
+                } => {
+                    self.rebuild_scaled_rounded_rect(*rect, *corner_radius);
                     match self.rebuild_effective_clip_rects(damage_rects) {
                         EffectiveClipRects::Unclipped => {
                             self.fill_scaled_path(*color, None);

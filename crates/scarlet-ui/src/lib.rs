@@ -37,7 +37,10 @@ pub use scarlet_ui_platform_sws::{
     SgfxCanvasRenderObject, SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture, SwsBackend,
 };
 #[cfg(feature = "platform-winit")]
-pub use scarlet_ui_platform_winit::{WinitBackend, WinitPlatformWindow};
+pub use scarlet_ui_platform_winit::{
+    SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
+    SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture, WinitBackend, WinitPlatformWindow,
+};
 
 /// Extension methods for running applications with the selected backend.
 pub trait ApplicationRunExt: Application {
@@ -87,6 +90,11 @@ pub mod prelude {
 
     pub use crate::ApplicationRunExt;
     #[cfg(feature = "platform-sws")]
+    pub use crate::{
+        SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh,
+        SgfxMeshHandle, SgfxTexture,
+    };
+    #[cfg(feature = "platform-winit")]
     pub use crate::{
         SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh,
         SgfxMeshHandle, SgfxTexture,

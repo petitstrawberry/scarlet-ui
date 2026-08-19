@@ -11,7 +11,11 @@ legacy-scarlet-std = [
 ]
 std = ["scarlet-ui-core/std", "scarlet-ui-platform-sws?/std", "scarlet-ui-platform-winit?/std"]
 platform-sws = ["dep:scarlet-ui-platform-sws"]
-platform-winit = ["std", "dep:scarlet-ui-platform-winit"]
+platform-winit = [
+    "std",
+    "dep:scarlet-ui-platform-winit",
+    "scarlet-ui-platform-winit/wgpu",
+]
 preview = ["std", "scarlet-ui-core/preview"]
 
 [dependencies]

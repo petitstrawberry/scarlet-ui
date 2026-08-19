@@ -574,6 +574,10 @@ impl ElementRenderObject for SgfxCanvasRenderObject {
         true
     }
 
+    fn emits_paint_extension(&self) -> bool {
+        true
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

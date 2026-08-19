@@ -25,6 +25,10 @@ pub enum Stage {
     EncodeCommands,
     /// Submitting logical IR to SGFX.
     SubmitCommands,
+    /// Acquiring a WGPU surface frame.
+    AcquireSurfaceFrame,
+    /// Presenting a WGPU surface frame.
+    PresentSurfaceFrame,
     /// Registering a shared image with the frame sink.
     RegisterImage,
     /// Waiting for a retained image to be released.

@@ -20,6 +20,8 @@ mod error;
 mod geometry;
 mod lowering;
 mod sink;
+#[cfg(feature = "wgpu")]
+mod wgpu_backend;
 
 pub use backend::{DEFAULT_GPU_DEVICE, SgfxPaintBackend};
 pub use canvas::{
@@ -32,3 +34,5 @@ pub use sink::{
     SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkResult,
     SgfxSinkStatus,
 };
+#[cfg(feature = "wgpu")]
+pub use wgpu_backend::{WgpuPaintBackend, WgpuSgfxSession};

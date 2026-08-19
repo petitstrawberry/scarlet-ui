@@ -289,6 +289,27 @@ impl Tessellator {
         self.finish_range(start)
     }
 
+    pub(crate) fn fill_rounded_rect(
+        &mut self,
+        rect: Rect,
+        corner_radius: f32,
+    ) -> Result<Option<GeometryRange>> {
+        if !corner_radius.is_finite() {
+            return Err(Error::InvalidFrame);
+        }
+        let bounds = FloatRect::from_logical(rect, self.scale);
+        if bounds.is_empty() {
+            return Ok(None);
+        }
+        let radius = (corner_radius.max(0.0) * self.scale)
+            .min(bounds.width * 0.5)
+            .min(bounds.height * 0.5);
+        let points = rounded_rect_points(bounds, radius);
+        let start = self.vertices.len();
+        self.tessellate_even_odd(&points)?;
+        self.finish_range(start)
+    }
+
     pub(crate) fn stroke_path(
         &mut self,
         path: &[Point],

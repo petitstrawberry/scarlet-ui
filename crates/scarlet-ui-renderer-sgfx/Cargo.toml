@@ -13,12 +13,25 @@ std = [
     "scarlet-ui-core/std",
     "sgfx/std",
 ]
+wgpu = [
+    "std",
+    "sgfx/wgpu",
+    "dep:wgpu",
+]
 
 [dependencies]
 libm = { version = "0.2", default-features = false }
 scarlet-ui-core = { path = "../scarlet-ui-core", default-features = false }
-sgfx = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "sgfx", default-features = false }
+sgfx = { git = "https://github.com/petitstrawberry/Scarlet", branch = "feature/sgfx-wgpu-backend", package = "sgfx", default-features = false }
+wgpu = { version = "24", optional = true }
+
+[dev-dependencies]
+pollster = "0.4"
 
 [lib]
 name = "scarlet_ui_renderer_sgfx"
 path = "src/lib.rs"
+
+[[example]]
+name = "backend-bench"
+required-features = ["wgpu"]
