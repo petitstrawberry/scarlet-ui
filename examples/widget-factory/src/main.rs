@@ -8,9 +8,10 @@ use scarlet_ui::NavigationLink;
 use scarlet_ui::hstack;
 use scarlet_ui::prelude::*;
 use scarlet_ui::vstack;
-use scarlet_ui_macros::View;
+use std::sync::Arc;
+use std::time::Instant;
 
-#[derive(View, Clone)]
+#[derive(Clone)]
 struct WidgetFactory {
     slider_value: State<f32>,
     toggle_on: State<bool>,
@@ -18,10 +19,16 @@ struct WidgetFactory {
     selected: State<usize>,
     text_document: State<TextDocument>,
     text_selection: State<TextSelection>,
+    cube_canvas: SgfxCanvasHandle,
+    cube_frame: State<Arc<SgfxCanvasFrame>>,
+    cube_mesh: Arc<SgfxMesh>,
+    cube_started_at: Instant,
+    cube_revision: u64,
 }
 
 impl WidgetFactory {
     fn new() -> Self {
+        let cube_mesh = cube_mesh();
         Self {
             slider_value: State::new(StateId::new(20), 0.42),
             toggle_on: State::new(StateId::new(21), true),
@@ -34,6 +41,11 @@ impl WidgetFactory {
                 ),
             ),
             text_selection: State::new(StateId::new(25), TextSelection::collapsed(0)),
+            cube_canvas: SgfxCanvasHandle::new(),
+            cube_frame: State::new(StateId::new(26), cube_frame(0, 0.0, Arc::clone(&cube_mesh))),
+            cube_mesh,
+            cube_started_at: Instant::now(),
+            cube_revision: 0,
         }
     }
 
@@ -49,7 +61,9 @@ impl WidgetFactory {
 
     fn row<V: View + Clone>(&self, name: &str, control: V) -> impl View + Clone + use<V> {
         hstack! {
-            Text::new(name.to_owned()).font_size(14.0).frame(150.0, 32.0),
+            Text::new(name.to_owned())
+                .font_size(14.0)
+                .frame_width(150.0),
             control,
         }
         .spacing(18.0)
@@ -96,6 +110,10 @@ impl WidgetFactory {
 
     fn divider(&self) -> impl View + Clone + use<> {
         Divider::new().frame(220.0, 1.0)
+    }
+
+    fn sgfx_cube(&self) -> impl View + Clone + use<> {
+        SgfxCanvas::from_state(self.cube_canvas, 320.0, 220.0, self.cube_frame.clone())
     }
 
     fn text_view(&self) -> impl View + Clone + use<> {
@@ -221,6 +239,16 @@ impl WidgetFactory {
         self.scroll_page(content, 760.0)
     }
 
+    fn sgfx_page(&self) -> impl View + Clone + use<> {
+        vstack! {
+            Text::new("SGFX").font_size(28.0),
+            Text::new("SGFX retained canvas").font_size(15.0),
+            self.sgfx_cube(),
+        }
+        .spacing(16.0)
+        .padding(24.0)
+    }
+
     fn controls_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
             Text::new("Controls").font_size(24.0),
@@ -293,9 +321,31 @@ impl WidgetFactory {
     }
 }
 
+impl View for WidgetFactory {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(scarlet_ui::ComponentElement::new(self.clone()))
+    }
+
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        vec![
+            &self.slider_value,
+            &self.toggle_on,
+            &self.text_value,
+            &self.selected,
+            &self.text_document,
+            &self.text_selection,
+        ]
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
 impl Application for WidgetFactory {
     fn scenes(&self) -> impl Scene {
         let overview = self.clone();
+        let sgfx = self.clone();
         let controls = self.clone();
         let inputs = self.clone();
         let display = self.clone();
@@ -309,15 +359,173 @@ impl Application for WidgetFactory {
                     NavigationLink::new("Controls", move || controls.controls_page()),
                     NavigationLink::new("Inputs", move || inputs.inputs_page()),
                     NavigationLink::new("Display", move || display.display_page()),
+                    NavigationLink::new("SGFX", move || sgfx.sgfx_page()),
                 }
                 .sidebar_width(190.0),
             )
             .size(Size::new(860.0, 560.0)),
         )
     }
+
+    fn on_idle(&mut self) {
+        self.cube_revision = self.cube_revision.wrapping_add(1);
+        let angle = self.cube_started_at.elapsed().as_secs_f32();
+        self.cube_frame.set(cube_frame(
+            self.cube_revision,
+            angle,
+            Arc::clone(&self.cube_mesh),
+        ));
+    }
 }
 
 fn main() -> scarlet_ui::Result<()> {
     let mut app = WidgetFactory::new();
     app.run()
+}
+
+fn cube_frame(revision: u64, angle: f32, mesh: Arc<SgfxMesh>) -> Arc<SgfxCanvasFrame> {
+    let aspect = 320.0 / 220.0;
+    let projection = perspective_matrix(core::f32::consts::FRAC_PI_4, aspect, 0.1, 20.0);
+    let model = mat4_mul(
+        translation_matrix(0.0, 0.0, -5.0),
+        mat4_mul(
+            rotation_y_matrix(angle * 0.9 + 0.72),
+            rotation_x_matrix(angle * 0.55 - 0.48),
+        ),
+    );
+    let transform = mat4_mul(projection, model);
+    Arc::new(
+        SgfxCanvasFrame::new(revision, Color::rgb(10u8, 16u8, 30u8))
+            .depth_tested()
+            .reference_aspect(aspect)
+            .draw(SgfxCanvasDraw::new(mesh, transform)),
+    )
+}
+
+fn cube_mesh() -> Arc<SgfxMesh> {
+    let mut vertices = Vec::with_capacity(36);
+    push_cube_face(
+        &mut vertices,
+        [
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+        ],
+        [0.98, 0.28, 0.34, 1.0],
+    );
+    push_cube_face(
+        &mut vertices,
+        [
+            [-1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [1.0, -1.0, -1.0],
+        ],
+        [0.28, 0.52, 0.98, 1.0],
+    );
+    push_cube_face(
+        &mut vertices,
+        [
+            [1.0, -1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [1.0, 1.0, 1.0],
+            [1.0, -1.0, 1.0],
+        ],
+        [0.32, 0.86, 0.62, 1.0],
+    );
+    push_cube_face(
+        &mut vertices,
+        [
+            [-1.0, -1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+            [-1.0, 1.0, -1.0],
+        ],
+        [0.98, 0.70, 0.25, 1.0],
+    );
+    push_cube_face(
+        &mut vertices,
+        [
+            [-1.0, 1.0, -1.0],
+            [-1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, -1.0],
+        ],
+        [0.72, 0.38, 0.96, 1.0],
+    );
+    push_cube_face(
+        &mut vertices,
+        [
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, -1.0, 1.0],
+            [-1.0, -1.0, 1.0],
+        ],
+        [0.24, 0.78, 0.92, 1.0],
+    );
+    SgfxMesh::new(vertices)
+}
+
+fn push_cube_face(vertices: &mut Vec<SgfxCanvasVertex>, corners: [[f32; 3]; 4], color: [f32; 4]) {
+    for index in [0usize, 1, 2, 0, 2, 3] {
+        let [x, y, z] = corners[index];
+        vertices.push(SgfxCanvasVertex::new([x, y, z, 1.0], color));
+    }
+}
+
+fn mat4_mul(lhs: [f32; 16], rhs: [f32; 16]) -> [f32; 16] {
+    let mut result = [0.0; 16];
+    for column in 0..4 {
+        for row in 0..4 {
+            let mut value = 0.0;
+            for inner in 0..4 {
+                value += lhs[inner * 4 + row] * rhs[column * 4 + inner];
+            }
+            result[column * 4 + row] = value;
+        }
+    }
+    result
+}
+
+fn translation_matrix(x: f32, y: f32, z: f32) -> [f32; 16] {
+    [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, x, y, z, 1.0,
+    ]
+}
+
+fn rotation_x_matrix(angle: f32) -> [f32; 16] {
+    let (sin, cos) = angle.sin_cos();
+    [
+        1.0, 0.0, 0.0, 0.0, 0.0, cos, sin, 0.0, 0.0, -sin, cos, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ]
+}
+
+fn rotation_y_matrix(angle: f32) -> [f32; 16] {
+    let (sin, cos) = angle.sin_cos();
+    [
+        cos, 0.0, -sin, 0.0, 0.0, 1.0, 0.0, 0.0, sin, 0.0, cos, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ]
+}
+
+fn perspective_matrix(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
+    let focal = 1.0 / (fov_y * 0.5).tan();
+    [
+        focal / aspect,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        focal,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        far / (near - far),
+        -1.0,
+        0.0,
+        0.0,
+        (near * far) / (near - far),
+        0.0,
+    ]
 }

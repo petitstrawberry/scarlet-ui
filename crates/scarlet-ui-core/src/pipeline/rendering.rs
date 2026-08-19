@@ -444,6 +444,13 @@ impl RenderingPipeline {
         let size = self.window_size;
         let scale = self.scale_milli;
         let creating_renderer = self.paint_renderer.is_none();
+        let has_paint_extensions = self
+            .element_tree
+            .root()
+            .is_some_and(Self::subtree_emits_paint_extension);
+        let repaint_composite_damage = has_paint_extensions
+            && self.pipeline_owner.last_paint_ids().is_empty()
+            && !self.pipeline_owner.last_composite_ids().is_empty();
 
         if self.paint_renderer.is_none() {
             self.paint_renderer = Some(CpuPaintRenderer::new(size, scale, background_color));
@@ -454,7 +461,8 @@ impl RenderingPipeline {
             || self.paint_background_color != Some(background_color)
             || self.last_paint_ids_require_full_refresh();
 
-        if !force_full
+        if !has_paint_extensions
+            && !force_full
             && self.pipeline_owner.last_paint_ids().is_empty()
             && !self.pipeline_owner.last_composite_ids().is_empty()
         {
@@ -490,6 +498,11 @@ impl RenderingPipeline {
         self.dirty_scratch
             .ids
             .extend_from_slice(self.pipeline_owner.last_paint_ids());
+        if repaint_composite_damage {
+            self.dirty_scratch
+                .ids
+                .extend_from_slice(self.pipeline_owner.last_composite_ids());
+        }
         self.dirty_scratch.ids.sort_unstable();
         self.dirty_scratch.ids.dedup();
 
@@ -570,7 +583,7 @@ impl RenderingPipeline {
         self.paint_background_color = Some(background_color);
         self.last_paint_bounds.clear();
         if let Some(root) = self.element_tree.root() {
-            Self::collect_paint_bounds(root, Point::ZERO, &mut self.last_paint_bounds);
+            Self::collect_paint_bounds(root, Point::ZERO, None, &mut self.last_paint_bounds);
         }
 
         if !should_render {
@@ -628,17 +641,11 @@ impl RenderingPipeline {
                 }
                 return false;
             }
-            if let Some((element, absolute_origin)) = self
+            if self
                 .element_tree
                 .element_and_absolute_origin_for_path(&self.dirty_scratch.path)
+                .is_none()
             {
-                self.dirty_scratch
-                    .rects
-                    .push(Self::element_paint_bounds(element, absolute_origin));
-                if let Some(old_bounds) = self.last_paint_bounds.get(&dirty_id) {
-                    self.dirty_scratch.rects.push(*old_bounds);
-                }
-            } else {
                 if crate::debug::repaint_boundary_log_enabled() {
                     crate::logln!(
                         "[RetainedComposite] fail reason=origin-resolution dirty_id={}",
@@ -646,6 +653,16 @@ impl RenderingPipeline {
                     );
                 }
                 return false;
+            }
+            if let Some(current_bounds) =
+                Self::element_paint_bounds_for_path(&self.element_tree, &self.dirty_scratch.path)
+            {
+                self.dirty_scratch.rects.push(current_bounds);
+            }
+            if let Some(old_bounds) = self.last_paint_bounds.get(&dirty_id)
+                && !Self::paint_bounds_is_empty(*old_bounds)
+            {
+                self.dirty_scratch.rects.push(*old_bounds);
             }
             if Self::sync_retained_layer_offsets_for_path_target(
                 root,
@@ -888,6 +905,10 @@ impl RenderingPipeline {
         layer_generation: u64,
         #[cfg(test)] paint_test_counters: &mut PaintTestCounters,
     ) -> bool {
+        if Self::subtree_emits_paint_extension(element) {
+            paint_caches.remove(&element.id());
+            return false;
+        }
         let Some(render_object) = element.render_object() else {
             return false;
         };
@@ -1980,6 +2001,16 @@ impl RenderingPipeline {
         false
     }
 
+    fn subtree_emits_paint_extension(element: &dyn Element) -> bool {
+        element
+            .render_object()
+            .is_some_and(|render_object| render_object.emits_paint_extension())
+            || element
+                .children()
+                .iter()
+                .any(|child| Self::subtree_emits_paint_extension(child.as_ref()))
+    }
+
     fn paint_element_overlay<'a>(
         ctx: &mut PaintContext<'a>,
         element: &'a dyn Element,
@@ -2078,13 +2109,14 @@ impl RenderingPipeline {
             if !element_tree.find_path_ids_into(*dirty_id, path_scratch) {
                 continue;
             }
-            let Some((element, absolute_origin)) =
-                element_tree.element_and_absolute_origin_for_path(path_scratch)
-            else {
-                continue;
-            };
-            rects.push(Self::element_paint_bounds(element, absolute_origin));
-            if let Some(old_bounds) = last_paint_bounds.get(dirty_id) {
+            if let Some(current_bounds) =
+                Self::element_paint_bounds_for_path(element_tree, path_scratch)
+            {
+                rects.push(current_bounds);
+            }
+            if let Some(old_bounds) = last_paint_bounds.get(dirty_id)
+                && !Self::paint_bounds_is_empty(*old_bounds)
+            {
                 rects.push(*old_bounds);
             }
         }
@@ -2093,17 +2125,92 @@ impl RenderingPipeline {
     fn collect_paint_bounds(
         element: &dyn Element,
         origin: Point,
+        active_clip: Option<Rect>,
         bounds: &mut BTreeMap<ElementId, Rect>,
     ) {
         let abs = Point::new(
             origin.x + element.position().x,
             origin.y + element.position().y,
         );
-        bounds.insert(element.id(), Self::element_paint_bounds(element, abs));
+        let paint_bounds = Self::element_paint_bounds(element, abs);
+        let visible_bounds = active_clip
+            .and_then(|clip| Self::intersect_paint_bounds(paint_bounds, clip))
+            .unwrap_or_else(|| {
+                if active_clip.is_some() {
+                    Rect::from_xywh(abs.x, abs.y, 0.0, 0.0)
+                } else {
+                    paint_bounds
+                }
+            });
+        bounds.insert(element.id(), visible_bounds);
+
+        let child_clip = match (active_clip, Self::clip_for_element(element, abs)) {
+            (Some(active), Some((clip, _))) => Some(
+                Self::intersect_paint_bounds(active, clip)
+                    .unwrap_or_else(|| Rect::from_xywh(abs.x, abs.y, 0.0, 0.0)),
+            ),
+            (Some(active), None) => Some(active),
+            (None, Some((clip, _))) => Some(clip),
+            (None, None) => None,
+        };
 
         for child in element.children() {
-            Self::collect_paint_bounds(child.as_ref(), abs, bounds);
+            Self::collect_paint_bounds(child.as_ref(), abs, child_clip, bounds);
         }
+    }
+
+    fn element_paint_bounds_for_path(
+        element_tree: &crate::element::ElementTree,
+        path: &[ElementId],
+    ) -> Option<Rect> {
+        let mut element = element_tree.root()?;
+        let mut origin = Point::ZERO;
+        let mut active_clip = None;
+
+        for (index, id) in path.iter().copied().enumerate() {
+            if element.id() != id {
+                return None;
+            }
+            let abs = Point::new(
+                origin.x + element.position().x,
+                origin.y + element.position().y,
+            );
+            if index + 1 == path.len() {
+                let paint_bounds = Self::element_paint_bounds(element, abs);
+                return match active_clip {
+                    Some(clip) => Self::intersect_paint_bounds(paint_bounds, clip),
+                    None => Some(paint_bounds),
+                };
+            }
+
+            if let Some((clip, _)) = Self::clip_for_element(element, abs) {
+                active_clip = match active_clip {
+                    Some(active) => Self::intersect_paint_bounds(active, clip),
+                    None => Some(clip),
+                };
+                active_clip?;
+            }
+            let next_id = path[index + 1];
+            element = element
+                .children()
+                .iter()
+                .find(|child| child.id() == next_id)?
+                .as_ref();
+            origin = abs;
+        }
+        None
+    }
+
+    fn intersect_paint_bounds(left: Rect, right: Rect) -> Option<Rect> {
+        let x = left.left().max(right.left());
+        let y = left.top().max(right.top());
+        let right_edge = left.right().min(right.right());
+        let bottom = left.bottom().min(right.bottom());
+        (right_edge > x && bottom > y).then(|| Rect::from_xywh(x, y, right_edge - x, bottom - y))
+    }
+
+    fn paint_bounds_is_empty(bounds: Rect) -> bool {
+        bounds.size.width <= 0.0 || bounds.size.height <= 0.0
     }
 
     fn update_paint_bounds_for_ids(
@@ -2117,10 +2224,14 @@ impl RenderingPipeline {
             if !element_tree.find_path_ids_into(*id, path_scratch) {
                 continue;
             }
-            if let Some((element, absolute_origin)) =
-                element_tree.element_and_absolute_origin_for_path(path_scratch)
-            {
-                bounds.insert(*id, Self::element_paint_bounds(element, absolute_origin));
+            let visible_bounds = Self::element_paint_bounds_for_path(element_tree, path_scratch)
+                .or_else(|| {
+                    element_tree
+                        .element_and_absolute_origin_for_path(path_scratch)
+                        .map(|(_, origin)| Rect::from_xywh(origin.x, origin.y, 0.0, 0.0))
+                });
+            if let Some(visible_bounds) = visible_bounds {
+                bounds.insert(*id, visible_bounds);
             }
         }
     }
@@ -2406,6 +2517,56 @@ mod tests {
     };
     use core::cell::Cell;
     use std::rc::Rc;
+
+    #[derive(Clone)]
+    struct PaintExtensionProbe;
+
+    impl View for PaintExtensionProbe {
+        fn create_element(&self) -> Box<dyn Element> {
+            Box::new(crate::element::RenderElement::new(
+                self.clone(),
+                PaintExtensionProbeRenderObject { size: Size::ZERO },
+            ))
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+    }
+
+    struct PaintExtensionProbeRenderObject {
+        size: Size,
+    }
+
+    impl crate::element::ElementRenderObject for PaintExtensionProbeRenderObject {
+        fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+            self.size = constraints.constrain(Size::new(1.0, 1.0));
+            self.size
+        }
+
+        fn size(&self) -> Size {
+            self.size
+        }
+
+        fn render(&mut self) {}
+
+        fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
+            ctx.draw_extension(Rect::new(origin, self.size), Arc::new(0u8));
+            true
+        }
+
+        fn emits_paint_extension(&self) -> bool {
+            true
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+            self
+        }
+    }
 
     #[derive(Clone)]
     struct LauncherInputHarness {
@@ -2858,6 +3019,50 @@ mod tests {
         assert_eq!(counters.retained_sync_visits, 0);
         assert_eq!(counters.localized_retained_syncs, 1);
         assert_eq!(counters.retained_sync_fallbacks, 0);
+    }
+
+    #[test]
+    fn nested_scroll_content_stays_clipped_when_outer_scrolls() {
+        let red = crate::color::Color::rgb(255, 0, 0);
+        let inner = ScrollView::new(Rectangle::new().fill(red).frame(200.0, 240.0))
+            .content_size(200.0, 240.0)
+            .scrollbar_visibility(ScrollbarVisibility::Always)
+            .frame(200.0, 80.0);
+        let content = crate::vstack! {
+            inner,
+            crate::views::Spacer::new().frame(200.0, 220.0),
+            PaintExtensionProbe.frame(1.0, 1.0),
+        }
+        .spacing(0.0);
+        let mut pipeline = RenderingPipeline::new();
+        let root = ScrollView::new(content)
+            .content_size(200.0, 300.0)
+            .wheel_sensitivity(1.0)
+            .scrollbar_visibility(ScrollbarVisibility::Always)
+            .frame(200.0, 150.0)
+            .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+
+        let initial_outside = pipeline
+            .render_with_damage()
+            .and_then(|(buffer, _)| buffer.get_pixel(100, 90))
+            .expect("initial pixel outside the inner viewport should exist");
+        assert_ne!(initial_outside, red.to_bgra());
+
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: 40,
+            x: 100,
+            y: 120,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Wheel,
+        })));
+        let after_outer_scroll = pipeline
+            .render_with_damage()
+            .and_then(|(buffer, _)| buffer.get_pixel(100, 50))
+            .expect("pixel below the moved inner viewport should exist");
+        assert_ne!(after_outer_scroll, red.to_bgra());
     }
 
     #[test]
@@ -3895,6 +4100,41 @@ mod tests {
         );
         assert_eq!(inside, Some(red.to_bgra()));
         assert_ne!(outside, Some(red.to_bgra()));
+    }
+
+    #[test]
+    fn damage_bounds_respect_scroll_ancestor_clip() {
+        let mut pipeline = RenderingPipeline::new();
+        let root = crate::vstack! {
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(40, 80, 180))
+                .frame(200.0, 40.0),
+            ScrollView::new(
+                Rectangle::new()
+                    .fill(crate::color::Color::rgb(220, 40, 40))
+                    .frame(200.0, 300.0),
+            )
+            .content_size(200.0, 300.0)
+            .frame(200.0, 150.0),
+        }
+        .spacing(0.0)
+        .create_element();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        let boundary_id = scroll_content_boundary_id(&pipeline);
+        let mut path = Vec::new();
+        assert!(
+            pipeline
+                .element_tree
+                .find_path_ids_into(boundary_id, &mut path)
+        );
+        let bounds =
+            RenderingPipeline::element_paint_bounds_for_path(&pipeline.element_tree, &path)
+                .expect("scroll content should intersect its viewport");
+
+        assert_eq!(bounds, Rect::from_xywh(300.0, 40.0, 200.0, 150.0));
     }
 
     #[test]

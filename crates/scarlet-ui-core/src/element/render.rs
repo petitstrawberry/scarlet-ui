@@ -63,6 +63,18 @@ pub trait RenderObject: Any {
         false
     }
 
+    /// Return whether this render object emits renderer-specific paint extensions.
+    ///
+    /// Repaint boundaries backed by CPU buffers cannot flatten such content;
+    /// the paint pipeline keeps the containing subtree as live paint commands.
+    ///
+    /// # Returns
+    ///
+    /// `true` when [`Self::paint`] may append a renderer-specific extension.
+    fn emits_paint_extension(&self) -> bool {
+        false
+    }
+
     /// Return true when this render object must refresh its legacy buffer
     /// before its PaintCommand implementation can draw correctly.
     fn requires_buffer_render_for_paint(&self) -> bool {

@@ -4,14 +4,20 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["std"]
+default = ["std", "wgpu"]
 std = ["scarlet-ui-core/std"]
+wgpu = ["dep:pollster", "dep:wgpu", "scarlet-ui-renderer-sgfx/wgpu"]
 
 [dependencies]
 scarlet-ui-core = { path = "../scarlet-ui-core", default-features = false, features = ["std"] }
+scarlet-ui-renderer-sgfx = { path = "../scarlet-ui-renderer-sgfx", default-features = false, features = ["std"] }
+
+[target.'cfg(not(target_os = "scarlet"))'.dependencies]
 softbuffer = "0.4.8"
 winit = "0.30.13"
 raw-window-handle = "0.6"
+pollster = { version = "0.4", optional = true }
+wgpu = { version = "24", optional = true }
 
 [lib]
 name = "scarlet_ui_platform_winit"

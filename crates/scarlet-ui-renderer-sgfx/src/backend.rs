@@ -3,19 +3,73 @@
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 
+use scarlet_sgfx_virgl::{Context, Device, Image, Queue};
 use scarlet_ui_core::color::Color;
 use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::error::Error as UiError;
 use scarlet_ui_core::geometry::{Rect, Size};
 use scarlet_ui_core::renderer::{BackendFrame, PaintBackend, PaintContext};
-use sgfx::{Context, Device, Image, Queue};
+use sgfx::ir::{CommandBuffer, ResourceTable, TextureId};
 
 use crate::error::{Error, Result, Stage};
 use crate::geometry::PixelBounds;
-use crate::lowering::RenderSession;
+use crate::lowering::{RenderBackend, RenderSession};
 use crate::sink::{
     SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkStatus,
 };
+
+/// Native SGFX transport adapter used by the shared paint lowering.
+pub(crate) struct NativeSgfxBackend;
+
+impl RenderBackend for NativeSgfxBackend {
+    type Context = Context;
+    type Queue = Queue;
+    type Image = Image;
+    type ImageHandle = Rc<Image>;
+    type Resources = scarlet_sgfx_virgl::IrResources;
+
+    fn create_image(context: &Self::Context, width: u32, height: u32) -> Result<Rc<Self::Image>> {
+        Ok(Rc::new(
+            context
+                .create_shared_image(width, height)
+                .map_err(|_| Error::sgfx(Stage::CreateSharedImage))?,
+        ))
+    }
+
+    fn create_resources(
+        context: &Self::Context,
+        resources: Rc<ResourceTable>,
+    ) -> Result<Self::Resources> {
+        context
+            .create_ir_resources(resources)
+            .map_err(|_| Error::sgfx(Stage::CreateIrResources))
+    }
+
+    fn map_image(
+        resources: &mut Self::Resources,
+        texture: TextureId,
+        image: Rc<Self::Image>,
+    ) -> Result<()> {
+        resources
+            .map_image(texture, image)
+            .map_err(|_| Error::sgfx(Stage::MapSharedImage))
+    }
+
+    fn image_ref(image: &Self::ImageHandle) -> &Self::Image {
+        image.as_ref()
+    }
+
+    fn submit<'r, 'data>(
+        context: &Self::Context,
+        queue: &Self::Queue,
+        resources: &mut Self::Resources,
+        commands: &CommandBuffer<'r, 'data>,
+    ) -> Result<()> {
+        queue
+            .submit_ir(context, resources, commands)
+            .map_err(|_| Error::sgfx(Stage::SubmitCommands))
+    }
+}
 
 /// Default Scarlet graphics device used by the UI renderer.
 pub const DEFAULT_GPU_DEVICE: &str = "/dev/gpu0";
@@ -53,7 +107,7 @@ pub struct SgfxPaintBackend<S> {
     // Rust drops fields in declaration order. Keep every object owned by the
     // SGFX context ahead of the queue and the context itself so closing and
     // reopening a window cannot tear down the context before its images.
-    session: Option<RenderSession>,
+    session: Option<RenderSession<NativeSgfxBackend>>,
     slots: Vec<SlotState>,
     retired: Vec<RetiredImage>,
     queue: Queue,

@@ -43,6 +43,7 @@ pub enum Error {
     /// A fallible SGFX operation failed.
     Sgfx(Stage),
     /// A frame-sink operation failed.
+    #[cfg(target_os = "scarlet")]
     Sink {
         /// Operation that was in progress.
         stage: Stage,
@@ -64,6 +65,7 @@ impl Error {
         Self::Sgfx(stage)
     }
 
+    #[cfg(target_os = "scarlet")]
     pub(crate) const fn sink(stage: Stage, source: crate::sink::SgfxSinkError) -> Self {
         Self::Sink { stage, source }
     }
@@ -73,6 +75,7 @@ impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sgfx(stage) => write!(formatter, "SGFX operation failed at {stage:?}"),
+            #[cfg(target_os = "scarlet")]
             Self::Sink { stage, source } => {
                 write!(formatter, "SGFX sink failed at {stage:?}: {source}")
             }

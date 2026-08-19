@@ -1,3 +1,5 @@
+#![cfg(not(target_os = "scarlet"))]
+
 extern crate alloc;
 
 use alloc::boxed::Box;
@@ -17,7 +19,15 @@ use scarlet_ui_core::event::{
 };
 use scarlet_ui_core::geometry::{Point, Size};
 use scarlet_ui_core::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
+#[cfg(feature = "wgpu")]
+use scarlet_ui_core::renderer::PaintBackend;
+pub use scarlet_ui_renderer_sgfx::{
+    SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
+    SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
+};
 use std::time::{Duration, Instant};
+#[cfg(feature = "wgpu")]
+use wgpu_renderer::WgpuPaintBackend;
 
 use ::winit::application::ApplicationHandler;
 use ::winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, Position};
@@ -32,9 +42,15 @@ use ::winit::window::{
     CursorGrabMode, Fullscreen, Window as WinitWindow, WindowAttributes, WindowId,
 };
 
+#[cfg(feature = "wgpu")]
+mod wgpu_renderer;
+
 type SoftbufferContext = softbuffer::Context<::winit::event_loop::OwnedDisplayHandle>;
 type SoftbufferSurface =
     softbuffer::Surface<::winit::event_loop::OwnedDisplayHandle, Rc<WinitWindow>>;
+
+#[cfg(feature = "wgpu")]
+type WgpuSurface = wgpu::Surface<'static>;
 
 const DOUBLE_CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_DISTANCE: i32 = 5;
@@ -74,6 +90,92 @@ fn winit_wheel_coalesce_env_enabled() -> bool {
 
 fn env_flag_enabled(value: &str) -> bool {
     matches!(value, "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+}
+
+#[cfg(feature = "wgpu")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WinitRendererPreference {
+    Auto,
+    Cpu,
+    Sgfx,
+}
+
+#[cfg(feature = "wgpu")]
+fn winit_renderer_preference() -> WinitRendererPreference {
+    match std::env::var("SCARLET_UI_WINIT_RENDERER").ok().as_deref() {
+        Some("cpu") | Some("CPU") => WinitRendererPreference::Cpu,
+        Some("sgfx") | Some("SGFX") | Some("wgpu") | Some("WGPU") => WinitRendererPreference::Sgfx,
+        _ => WinitRendererPreference::Auto,
+    }
+}
+
+#[cfg(feature = "wgpu")]
+fn create_wgpu_backend(window: &WinitWindow, width: u32, height: u32) -> Result<WgpuPaintBackend> {
+    use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let raw_window_handle = window
+        .window_handle()
+        .map_err(|_| Error::SurfaceCreationFailed)?
+        .as_raw();
+    let raw_display_handle = window
+        .display_handle()
+        .map_err(|_| Error::SurfaceCreationFailed)?
+        .as_raw();
+    // SAFETY: the Winit window and display handles remain valid until the
+    // WGPU backend is dropped. `WinitPlatformWindow` declares the backend
+    // before its window, and the application drops the rendering pipeline
+    // before the platform window, so the surface cannot outlive its handles.
+    let surface: WgpuSurface = unsafe {
+        instance
+            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle,
+                raw_window_handle,
+            })
+            .map_err(|_| Error::SurfaceCreationFailed)?
+    };
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        force_fallback_adapter: false,
+        compatible_surface: Some(&surface),
+    }))
+    .ok_or(Error::RenderError)?;
+    let (device, queue) = pollster::block_on(async {
+        adapter
+            .request_device(&wgpu::DeviceDescriptor::default(), None)
+            .await
+    })
+    .map_err(|_| Error::RenderError)?;
+    device.on_uncaptured_error(Box::new(|error| {
+        eprintln!("[ScarletUI] uncaptured WGPU error: {error}");
+    }));
+    let capabilities = surface.get_capabilities(&adapter);
+    let format = capabilities
+        .formats
+        .iter()
+        .copied()
+        .find(wgpu::TextureFormat::is_srgb)
+        .or_else(|| capabilities.formats.first().copied())
+        .ok_or(Error::SurfaceCreationFailed)?;
+    let alpha_mode = capabilities
+        .alpha_modes
+        .first()
+        .copied()
+        .ok_or(Error::SurfaceCreationFailed)?;
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: width.max(1),
+        height: height.max(1),
+        present_mode: wgpu::PresentMode::AutoVsync,
+        desired_maximum_frame_latency: 2,
+        alpha_mode,
+        view_formats: vec![],
+    };
+    WgpuPaintBackend::new(
+        instance, surface, device, queue, config, width, height, true,
+    )
+    .map_err(|_| Error::RenderError)
 }
 
 impl PlatformBackend for WinitBackend {
@@ -809,6 +911,10 @@ fn mark_pointer_lock_released(state: &mut WinitEventState) {
 
 pub struct WinitPlatformWindow {
     shared: Rc<WinitSharedState>,
+    #[cfg(feature = "wgpu")]
+    wgpu_backend: Option<WgpuPaintBackend>,
+    #[cfg(feature = "wgpu")]
+    using_wgpu: bool,
     window: Rc<WinitWindow>,
     surface: SoftbufferSurface,
     state: Rc<RefCell<WinitEventState>>,
@@ -867,6 +973,25 @@ impl WinitPlatformWindow {
         let inner_size = window.inner_size();
         let surface =
             SoftbufferSurface::new(&context, window.clone()).map_err(|_| Error::IoError)?;
+        #[cfg(feature = "wgpu")]
+        let wgpu_backend = match winit_renderer_preference() {
+            WinitRendererPreference::Cpu => None,
+            preference @ (WinitRendererPreference::Auto | WinitRendererPreference::Sgfx) => {
+                match create_wgpu_backend(&window, inner_size.width, inner_size.height) {
+                    Ok(backend) => {
+                        println!("[ScarletUI] platform-winit renderer=sgfx-wgpu");
+                        Some(backend)
+                    }
+                    Err(error) if preference == WinitRendererPreference::Auto => {
+                        eprintln!(
+                            "[ScarletUI] SGFX/WGPU initialization failed ({error}); falling back to CPU"
+                        );
+                        None
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        };
         let surface_id = next_surface_id();
         let state = Rc::new(RefCell::new(WinitEventState::new(scale_factor)));
         shared.windows.borrow_mut().insert(
@@ -878,6 +1003,10 @@ impl WinitPlatformWindow {
         );
         Ok(Self {
             shared,
+            #[cfg(feature = "wgpu")]
+            using_wgpu: wgpu_backend.is_some(),
+            #[cfg(feature = "wgpu")]
+            wgpu_backend,
             window,
             surface,
             state,
@@ -973,6 +1102,22 @@ impl PlatformWindow for WinitPlatformWindow {
 
     fn output_scale_milli(&self) -> u32 {
         scale_factor_to_milli(self.window.scale_factor())
+    }
+
+    fn renderer_backend(&self) -> scarlet_ui_core::renderer::RendererBackendKind {
+        #[cfg(feature = "wgpu")]
+        if self.using_wgpu {
+            return scarlet_ui_core::renderer::RendererBackendKind::Sgfx;
+        }
+        scarlet_ui_core::renderer::RendererBackendKind::Cpu
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn take_paint_backend(&mut self) -> Result<Option<Box<dyn PaintBackend>>> {
+        Ok(self
+            .wgpu_backend
+            .take()
+            .map(|backend| Box::new(backend) as Box<dyn PaintBackend>))
     }
 
     fn present(&mut self, buffer: &Buffer) {

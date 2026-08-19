@@ -2,6 +2,7 @@
 //!
 //! This implementation uses the sws-client library to create and manage windows.
 
+#![cfg(target_os = "scarlet")]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;

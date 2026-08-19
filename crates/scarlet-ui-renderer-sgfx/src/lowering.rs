@@ -10,14 +10,13 @@ use scarlet_ui_core::graphics::{GlyphRasterKey, rasterize_text};
 use scarlet_ui_core::icon::{IconMaskKey, rasterize_icon};
 use scarlet_ui_core::renderer::{BufferHandle, PaintCommand, PaintContext};
 use sgfx::ir::{
-    AddressMode, BlendState, BufferDesc, BufferId, BufferUsage, Color, CommandEncoder,
-    CompareFunction, DepthLoadOp, DepthState, DrawUniforms, Extent2D, FilterMode, FragmentProgram,
-    FrontFace, LoadOp, PixelRect, PrimitiveTopology, RasterState, RenderPassDesc,
+    AddressMode, BlendState, BufferDesc, BufferId, BufferUsage, Color, CommandBuffer,
+    CommandEncoder, CompareFunction, DepthLoadOp, DepthState, DrawUniforms, Extent2D, FilterMode,
+    FragmentProgram, FrontFace, LoadOp, PixelRect, PrimitiveTopology, RasterState, RenderPassDesc,
     RenderPipelineDesc, RenderPipelineId, ResourceTable, SamplerDesc, SamplerId, StoreOp,
     TextureDesc, TextureFormat, TextureId, TextureSampleMode, TextureUsage, TextureWrite,
     Transform, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
-use sgfx::{Context, Image, IrResources, Queue};
 
 use crate::canvas::{SgfxCanvasFrame, SgfxCanvasPaint, SgfxCanvasVertex, SgfxMesh, SgfxTexture};
 use crate::error::{Error, Result, Stage};
@@ -50,6 +49,52 @@ const MAX_CANVAS_TEXTURES: usize = 128;
 const MAX_CANVAS_DRAWS: usize = 240;
 
 const CANVAS_TARGET_TEX_COORDS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+
+/// Backend operations required by the shared ScarletUI-to-SGFX lowering.
+///
+/// The lowering owns the logical resource table and command recording. A
+/// concrete backend only supplies physical image creation, resource-cache
+/// creation, image mapping, and command submission. This keeps the VirGL
+/// transport out of the WGPU migration path.
+pub(crate) trait RenderBackend {
+    /// Backend context used to create physical resources.
+    type Context;
+    /// Backend queue used to submit encoded command buffers.
+    type Queue;
+    /// Physical presentation image type.
+    type Image;
+    /// Shared ownership handle for a physical presentation image.
+    type ImageHandle: Clone;
+    /// Persistent backend materialization cache type.
+    type Resources;
+
+    /// Create one physical render target for a logical target slot.
+    fn create_image(context: &Self::Context, width: u32, height: u32) -> Result<Self::ImageHandle>;
+
+    /// Create the persistent materialization cache for one logical table.
+    fn create_resources(
+        context: &Self::Context,
+        resources: Rc<ResourceTable>,
+    ) -> Result<Self::Resources>;
+
+    /// Associate one logical presentation texture with one physical image.
+    fn map_image(
+        resources: &mut Self::Resources,
+        texture: TextureId,
+        image: Self::ImageHandle,
+    ) -> Result<()>;
+
+    /// Borrow the physical image behind a shared ownership handle.
+    fn image_ref(image: &Self::ImageHandle) -> &Self::Image;
+
+    /// Submit one fully recorded logical command buffer.
+    fn submit<'r, 'data>(
+        context: &Self::Context,
+        queue: &Self::Queue,
+        resources: &mut Self::Resources,
+        commands: &CommandBuffer<'r, 'data>,
+    ) -> Result<()>;
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DrawSource {
@@ -353,10 +398,10 @@ struct CanvasTexture {
 }
 
 /// Persistent resources for one two-image allocation generation.
-pub(crate) struct RenderSession {
+pub(crate) struct RenderSession<B: RenderBackend> {
     table: Rc<ResourceTable>,
-    cache: IrResources,
-    images: Vec<Rc<Image>>,
+    cache: B::Resources,
+    images: Vec<B::ImageHandle>,
     targets: Vec<TextureId>,
     vertex_buffer: BufferId,
     solid_pipeline: RenderPipelineId,
@@ -380,9 +425,9 @@ pub(crate) struct RenderSession {
     supports_depth: bool,
 }
 
-impl RenderSession {
+impl<B: RenderBackend> RenderSession<B> {
     pub(crate) fn new(
-        context: &Context,
+        context: &B::Context,
         width: u32,
         height: u32,
         supports_depth: bool,
@@ -414,11 +459,8 @@ impl RenderSession {
                 )
                 .map_err(|_| Error::sgfx(Stage::DefineResources))?
                 .id();
-            let image = Rc::new(
-                context
-                    .create_shared_image(width, height)
-                    .map_err(|_| Error::sgfx(Stage::CreateSharedImage))?,
-            );
+            let image = B::create_image(context, width, height)
+                .map_err(|_| Error::sgfx(Stage::CreateSharedImage))?;
             targets.push(target);
             images.push(image);
         }
@@ -476,12 +518,10 @@ impl RenderSession {
             .map_err(|_| Error::sgfx(Stage::DefineResources))?
             .id();
 
-        let mut cache = context
-            .create_ir_resources(Rc::clone(&table))
+        let mut cache = B::create_resources(context, Rc::clone(&table))
             .map_err(|_| Error::sgfx(Stage::CreateIrResources))?;
         for index in 0..2 {
-            cache
-                .map_image(targets[index], Rc::clone(&images[index]))
+            B::map_image(&mut cache, targets[index], images[index].clone())
                 .map_err(|_| Error::sgfx(Stage::MapSharedImage))?;
         }
 
@@ -513,11 +553,11 @@ impl RenderSession {
         })
     }
 
-    pub(crate) fn image(&self, slot: usize) -> Option<&Image> {
-        self.images.get(slot).map(Rc::as_ref)
+    pub(crate) fn image(&self, slot: usize) -> Option<&B::Image> {
+        self.images.get(slot).map(B::image_ref)
     }
 
-    pub(crate) fn into_images(self) -> Vec<Rc<Image>> {
+    pub(crate) fn into_images(self) -> Vec<B::ImageHandle> {
         let Self {
             cache,
             images,
@@ -551,8 +591,8 @@ impl RenderSession {
 
     pub(crate) fn render(
         &mut self,
-        context: &Context,
-        queue: &Queue,
+        context: &B::Context,
+        queue: &B::Queue,
         slot: usize,
         copy_from: Option<usize>,
         paint: &PaintContext<'_>,
@@ -573,8 +613,8 @@ impl RenderSession {
 
     fn copy_target(
         &mut self,
-        context: &Context,
-        queue: &Queue,
+        context: &B::Context,
+        queue: &B::Queue,
         source_slot: usize,
         destination_slot: usize,
     ) -> Result<()> {
@@ -602,8 +642,7 @@ impl RenderSession {
         let commands = encoder
             .finish()
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-        queue
-            .submit_ir(context, &mut self.cache, &commands)
+        B::submit(context, queue, &mut self.cache, &commands)
             .map_err(|_| Error::sgfx(Stage::SubmitCommands))
     }
 
@@ -687,6 +726,20 @@ impl RenderSession {
             match command {
                 PaintCommand::FillPath { path, color } => {
                     if let Some(geometry) = tessellator.fill_path(path)? {
+                        push_draw(
+                            &mut draws,
+                            geometry,
+                            ui_color(*color, opacity)?,
+                            DrawSource::Solid,
+                        )?;
+                    }
+                }
+                PaintCommand::FillRoundedRect {
+                    rect,
+                    corner_radius,
+                    color,
+                } => {
+                    if let Some(geometry) = tessellator.fill_rounded_rect(*rect, *corner_radius)? {
                         push_draw(
                             &mut draws,
                             geometry,
@@ -910,7 +963,8 @@ impl RenderSession {
                 PaintCommand::PopClip => tessellator.pop_clip(),
                 PaintCommand::SetOpacity { opacity: _ } => {}
                 PaintCommand::Extension { rect, payload } => {
-                    let Some(canvas) = payload.as_any().downcast_ref::<SgfxCanvasPaint>() else {
+                    let Some(canvas) = payload.as_ref().as_any().downcast_ref::<SgfxCanvasPaint>()
+                    else {
                         continue;
                     };
                     let canvas_width = physical_canvas_extent(rect.size.width, scale)?;
@@ -964,8 +1018,8 @@ impl RenderSession {
 
     fn prepare_canvases(
         &mut self,
-        context: &Context,
-        queue: &Queue,
+        context: &B::Context,
+        queue: &B::Queue,
         paint: &PaintContext<'_>,
         scale_milli: u32,
     ) -> Result<()> {
@@ -974,7 +1028,7 @@ impl RenderSession {
             let PaintCommand::Extension { rect, payload } = command else {
                 continue;
             };
-            let Some(canvas) = payload.as_any().downcast_ref::<SgfxCanvasPaint>() else {
+            let Some(canvas) = payload.as_ref().as_any().downcast_ref::<SgfxCanvasPaint>() else {
                 continue;
             };
             let width = physical_canvas_extent(rect.size.width, scale)?;
@@ -1170,8 +1224,8 @@ impl RenderSession {
 
     fn render_canvas(
         &mut self,
-        context: &Context,
-        queue: &Queue,
+        context: &B::Context,
+        queue: &B::Queue,
         target_index: usize,
         frame: &SgfxCanvasFrame,
     ) -> Result<()> {
@@ -1299,8 +1353,7 @@ impl RenderSession {
             let commands = encoder
                 .finish()
                 .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-            queue
-                .submit_ir(context, &mut self.cache, &commands)
+            B::submit(context, queue, &mut self.cache, &commands)
                 .map_err(|_| Error::sgfx(Stage::SubmitCommands))?;
         } else {
             let mut draw_index = 0usize;
@@ -1425,8 +1478,7 @@ impl RenderSession {
                 let commands = encoder
                     .finish()
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                queue
-                    .submit_ir(context, &mut self.cache, &commands)
+                B::submit(context, queue, &mut self.cache, &commands)
                     .map_err(|_| Error::sgfx(Stage::SubmitCommands))?;
                 first_submission = false;
             }
@@ -1693,8 +1745,8 @@ impl RenderSession {
 
     fn submit(
         &mut self,
-        context: &Context,
-        queue: &Queue,
+        context: &B::Context,
+        queue: &B::Queue,
         target_id: TextureId,
         background: UiColor,
         render_areas: &[PixelBounds],
@@ -1834,8 +1886,7 @@ impl RenderSession {
                 let commands = encoder
                     .finish()
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                queue
-                    .submit_ir(context, &mut self.cache, &commands)
+                B::submit(context, queue, &mut self.cache, &commands)
                     .map_err(|_| Error::sgfx(Stage::SubmitCommands))?;
                 first_submission = false;
                 first_pass = false;
@@ -1846,8 +1897,8 @@ impl RenderSession {
 
     fn submit_texture_uploads(
         &mut self,
-        context: &Context,
-        queue: &Queue,
+        context: &B::Context,
+        queue: &B::Queue,
         frame: &LoweredFrame<'_>,
     ) -> Result<()> {
         if frame.uploads.is_empty() {
@@ -1871,8 +1922,7 @@ impl RenderSession {
         let commands = encoder
             .finish()
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-        queue
-            .submit_ir(context, &mut self.cache, &commands)
+        B::submit(context, queue, &mut self.cache, &commands)
             .map_err(|_| Error::sgfx(Stage::SubmitCommands))
     }
 }
