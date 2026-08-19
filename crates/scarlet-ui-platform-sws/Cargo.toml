@@ -26,10 +26,10 @@ scarlet-ui-core = { path = "../scarlet-ui-core", default-features = false }
 scarlet-ui-renderer-sgfx = { path = "../scarlet-ui-renderer-sgfx", default-features = false }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
-scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", branch = "feature/sgfx-facade-backend-selection", package = "scarlet-std", optional = true }
-sgfx = { git = "https://github.com/petitstrawberry/Scarlet", branch = "feature/sgfx-facade-backend-selection", package = "sgfx", default-features = false, features = ["backend-scarlet-virgl"] }
-sws-client = { git = "https://github.com/petitstrawberry/Scarlet", branch = "feature/sgfx-facade-backend-selection", package = "sws-client", default-features = false }
-sws-protocol = { git = "https://github.com/petitstrawberry/Scarlet", branch = "feature/sgfx-facade-backend-selection", package = "sws-protocol", default-features = false }
+scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "scarlet-std", optional = true }
+sgfx = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "sgfx", default-features = false, features = ["backend-scarlet-virgl"] }
+sws-client = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "sws-client", default-features = false }
+sws-protocol = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "sws-protocol", default-features = false }
 
 [lib]
 name = "scarlet_ui_platform_sws"

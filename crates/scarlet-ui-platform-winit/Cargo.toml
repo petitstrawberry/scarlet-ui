@@ -18,7 +18,7 @@ scarlet-ui-renderer-sgfx = { path = "../scarlet-ui-renderer-sgfx", default-featu
 softbuffer = "0.4.8"
 winit = "0.30.13"
 raw-window-handle = { version = "0.6", optional = true }
-sgfx = { git = "https://github.com/petitstrawberry/Scarlet", branch = "feature/sgfx-facade-backend-selection", package = "sgfx", default-features = false, features = ["std", "backend-wgpu"], optional = true }
+sgfx = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "sgfx", default-features = false, features = ["std", "backend-wgpu"], optional = true }
 
 [lib]
 name = "scarlet_ui_platform_winit"

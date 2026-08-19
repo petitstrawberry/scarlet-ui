@@ -541,7 +541,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -741,7 +741,7 @@ dependencies = [
 [[package]]
 name = "gpu-raw"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-facade-backend-selection#1a4b573489386c0fa790e0f36c5d9beebf0d190b"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#29beb860fd8899338655b5d4cf1f7716ca918119"
 dependencies = [
  "scarlet-os",
  "scarlet-std",
@@ -1689,7 +1689,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1710,12 +1710,12 @@ dependencies = [
 [[package]]
 name = "scarlet-abi"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-facade-backend-selection#1a4b573489386c0fa790e0f36c5d9beebf0d190b"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#29beb860fd8899338655b5d4cf1f7716ca918119"
 
 [[package]]
 name = "scarlet-os"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-facade-backend-selection#1a4b573489386c0fa790e0f36c5d9beebf0d190b"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#29beb860fd8899338655b5d4cf1f7716ca918119"
 dependencies = [
  "scarlet-abi",
  "scarlet-rt",
@@ -1725,7 +1725,7 @@ dependencies = [
 [[package]]
 name = "scarlet-rt"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-facade-backend-selection#1a4b573489386c0fa790e0f36c5d9beebf0d190b"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#29beb860fd8899338655b5d4cf1f7716ca918119"
 dependencies = [
  "lock_api",
  "scarlet-sys",
@@ -1736,7 +1736,7 @@ dependencies = [
 [[package]]
 name = "scarlet-std"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-facade-backend-selection#1a4b573489386c0fa790e0f36c5d9beebf0d190b"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#29beb860fd8899338655b5d4cf1f7716ca918119"
 dependencies = [
  "hashbrown 0.15.5",
  "scarlet-abi",
@@ -1749,7 +1749,7 @@ dependencies = [
 [[package]]
 name = "scarlet-sys"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-facade-backend-selection#1a4b573489386c0fa790e0f36c5d9beebf0d190b"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#29beb860fd8899338655b5d4cf1f7716ca918119"
 dependencies = [
  "scarlet-abi",
 ]
@@ -1950,7 +1950,7 @@ dependencies = [
 [[package]]
 name = "sgfx"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-facade-backend-selection#1a4b573489386c0fa790e0f36c5d9beebf0d190b"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#29beb860fd8899338655b5d4cf1f7716ca918119"
 dependencies = [
  "raw-window-handle",
  "scarlet-std",
@@ -1962,7 +1962,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-scarlet-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-facade-backend-selection#1a4b573489386c0fa790e0f36c5d9beebf0d190b"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#29beb860fd8899338655b5d4cf1f7716ca918119"
 dependencies = [
  "gpu-raw",
  "scarlet-os",
@@ -1974,7 +1974,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-wgpu"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-facade-backend-selection#1a4b573489386c0fa790e0f36c5d9beebf0d190b"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#29beb860fd8899338655b5d4cf1f7716ca918119"
 dependencies = [
  "bytemuck",
  "pollster",
@@ -1986,7 +1986,7 @@ dependencies = [
 [[package]]
 name = "sgfx-codegen-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-facade-backend-selection#1a4b573489386c0fa790e0f36c5d9beebf0d190b"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#29beb860fd8899338655b5d4cf1f7716ca918119"
 dependencies = [
  "sgfx-core",
 ]
@@ -1994,7 +1994,7 @@ dependencies = [
 [[package]]
 name = "sgfx-core"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-facade-backend-selection#1a4b573489386c0fa790e0f36c5d9beebf0d190b"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#29beb860fd8899338655b5d4cf1f7716ca918119"
 
 [[package]]
 name = "shlex"
@@ -2182,7 +2182,7 @@ dependencies = [
 [[package]]
 name = "sws-client"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-facade-backend-selection#1a4b573489386c0fa790e0f36c5d9beebf0d190b"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#29beb860fd8899338655b5d4cf1f7716ca918119"
 dependencies = [
  "scarlet-os",
  "scarlet-std",
@@ -2192,7 +2192,7 @@ dependencies = [
 [[package]]
 name = "sws-protocol"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=feature%2Fsgfx-facade-backend-selection#1a4b573489386c0fa790e0f36c5d9beebf0d190b"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#29beb860fd8899338655b5d4cf1f7716ca918119"
 dependencies = [
  "scarlet-std",
 ]
@@ -2724,7 +2724,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
