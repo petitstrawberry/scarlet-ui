@@ -113,6 +113,15 @@ impl<V: View + Clone> ComponentElement<V> {
         let mount_context = self.mounted.then(|| MountContext::new(self.pipeline_id));
         crate::element::update_child(&mut self.child, Some(child_view.as_ref()), mount_context)
     }
+
+    fn finish_reconciliation(&self, result: UpdateResult) -> UpdateResult {
+        if self.mounted && matches!(result, UpdateResult::Updated) {
+            crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
+            UpdateResult::NoChange
+        } else {
+            result
+        }
+    }
 }
 
 fn default_component_child<V: View + Clone>(view: &V) -> Box<dyn View> {
@@ -167,7 +176,7 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         if self.mounted {
             self.subscribe_view_listenables();
         }
-        result
+        self.finish_reconciliation(result)
     }
 
     fn rebuild(&mut self) -> UpdateResult {
@@ -178,7 +187,7 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         if self.mounted {
             self.subscribe_view_listenables();
         }
-        result
+        self.finish_reconciliation(result)
     }
 
     fn mount(&mut self, ctx: &MountContext) {

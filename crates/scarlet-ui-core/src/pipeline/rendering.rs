@@ -512,6 +512,7 @@ impl RenderingPipeline {
                 &self.element_tree,
                 &self.last_paint_bounds,
                 &self.dirty_scratch.ids,
+                self.pipeline_owner.last_self_paint_ids(),
                 &mut self.dirty_scratch.path,
                 &mut self.dirty_scratch.rects,
             );
@@ -2096,6 +2097,7 @@ impl RenderingPipeline {
         element_tree: &crate::element::ElementTree,
         last_paint_bounds: &BTreeMap<ElementId, Rect>,
         dirty_ids: &[ElementId],
+        self_paint_ids: &[ElementId],
         path_scratch: &mut Vec<ElementId>,
         rects: &mut Vec<Rect>,
     ) {
@@ -2109,12 +2111,17 @@ impl RenderingPipeline {
             if !element_tree.find_path_ids_into(*dirty_id, path_scratch) {
                 continue;
             }
-            if let Some(current_bounds) =
+            let self_paint_only = self_paint_ids.binary_search(dirty_id).is_ok();
+            let current_bounds = if self_paint_only {
+                Self::element_self_paint_bounds_for_path(element_tree, path_scratch)
+            } else {
                 Self::element_paint_bounds_for_path(element_tree, path_scratch)
-            {
+            };
+            if let Some(current_bounds) = current_bounds {
                 rects.push(current_bounds);
             }
-            if let Some(old_bounds) = last_paint_bounds.get(dirty_id)
+            if !self_paint_only
+                && let Some(old_bounds) = last_paint_bounds.get(dirty_id)
                 && !Self::paint_bounds_is_empty(*old_bounds)
             {
                 rects.push(*old_bounds);
@@ -2177,6 +2184,51 @@ impl RenderingPipeline {
             );
             if index + 1 == path.len() {
                 let paint_bounds = Self::element_paint_bounds(element, abs);
+                return match active_clip {
+                    Some(clip) => Self::intersect_paint_bounds(paint_bounds, clip),
+                    None => Some(paint_bounds),
+                };
+            }
+
+            if let Some((clip, _)) = Self::clip_for_element(element, abs) {
+                active_clip = match active_clip {
+                    Some(active) => Self::intersect_paint_bounds(active, clip),
+                    None => Some(clip),
+                };
+                active_clip?;
+            }
+            let next_id = path[index + 1];
+            element = element
+                .children()
+                .iter()
+                .find(|child| child.id() == next_id)?
+                .as_ref();
+            origin = abs;
+        }
+        None
+    }
+
+    fn element_self_paint_bounds_for_path(
+        element_tree: &crate::element::ElementTree,
+        path: &[ElementId],
+    ) -> Option<Rect> {
+        let mut element = element_tree.root()?;
+        let mut origin = Point::ZERO;
+        let mut active_clip = None;
+
+        for (index, id) in path.iter().copied().enumerate() {
+            if element.id() != id {
+                return None;
+            }
+            let abs = Point::new(
+                origin.x + element.position().x,
+                origin.y + element.position().y,
+            );
+            if index + 1 == path.len() {
+                let paint_bounds = element
+                    .render_object()
+                    .and_then(|render_object| render_object.self_paint_bounds(abs))
+                    .unwrap_or_else(|| Self::element_paint_bounds(element, abs));
                 return match active_clip {
                     Some(clip) => Self::intersect_paint_bounds(paint_bounds, clip),
                     None => Some(paint_bounds),
@@ -2569,6 +2621,97 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct PaintOnlyComponentHarness {
+        color: State<crate::color::Color>,
+    }
+
+    fn build_paint_only_patch(view: &PaintOnlyComponentHarness) -> Box<dyn View> {
+        Box::new(PaintOnlyPatch {
+            color: view.color.get(),
+        })
+    }
+
+    impl View for PaintOnlyComponentHarness {
+        fn create_element(&self) -> Box<dyn Element> {
+            Box::new(ComponentElement::new_with_builder(
+                self.clone(),
+                build_paint_only_patch,
+            ))
+        }
+
+        fn listenables(&self) -> Vec<&dyn crate::state::Listenable> {
+            alloc::vec![&self.color]
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+    }
+
+    #[derive(Clone)]
+    struct PaintOnlyPatch {
+        color: crate::color::Color,
+    }
+
+    impl View for PaintOnlyPatch {
+        fn create_element(&self) -> Box<dyn Element> {
+            Box::new(crate::element::RenderElement::new(
+                self.clone(),
+                PaintOnlyPatchRenderObject {
+                    color: self.color,
+                    size: Size::ZERO,
+                },
+            ))
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+    }
+
+    struct PaintOnlyPatchRenderObject {
+        color: crate::color::Color,
+        size: Size,
+    }
+
+    impl crate::element::ElementRenderObject for PaintOnlyPatchRenderObject {
+        fn layout(&mut self, _constraints: LayoutConstraints) -> Size {
+            self.size = Size::new(40.0, 40.0);
+            self.size
+        }
+
+        fn size(&self) -> Size {
+            self.size
+        }
+
+        fn render(&mut self) {}
+
+        fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
+            ctx.fill_rect(Rect::new(origin, self.size), self.color);
+            true
+        }
+
+        fn update(&mut self, new_view: &dyn View) -> crate::element::UpdateResult {
+            let Some(patch) = new_view.as_any().downcast_ref::<PaintOnlyPatch>() else {
+                return crate::element::UpdateResult::Replaced;
+            };
+            if self.color == patch.color {
+                return crate::element::UpdateResult::NoChange;
+            }
+            self.color = patch.color;
+            crate::element::UpdateResult::Updated
+        }
+
+        fn as_any(&self) -> &dyn core::any::Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+            self
+        }
+    }
+
+    #[derive(Clone)]
     struct LauncherInputHarness {
         query: State<alloc::string::String>,
         focus_requested: State<bool>,
@@ -2617,6 +2760,64 @@ mod tests {
         fn as_any(&self) -> &dyn core::any::Any {
             self
         }
+    }
+
+    #[test]
+    fn paint_only_reconciliation_does_not_damage_full_ancestor() {
+        let color = State::new(
+            crate::state::generate_state_id(),
+            crate::color::Color::rgb(220, 40, 40),
+        );
+        let root = PaintOnlyComponentHarness {
+            color: color.clone(),
+        }
+        .frame(800.0, 600.0)
+        .create_element();
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        color.set(crate::color::Color::rgb(40, 80, 220));
+        let (_, damage) = pipeline
+            .render_with_damage()
+            .expect("paint-only state update should render a frame");
+        let damage = damage.expect("paint-only state update should remain partial");
+
+        assert!(!damage.is_empty());
+        assert!(damage.iter().all(|&(x, y, width, height)| {
+            x.saturating_add(width) <= 40 && y.saturating_add(height) <= 40
+        }));
+    }
+
+    #[test]
+    fn navigation_hover_damages_only_changed_sidebar_rows() {
+        let root = NavigationView::new((
+            NavigationLink::new("First", || Text::new("first page")),
+            NavigationLink::new("Second", || Text::new("second page")),
+        ))
+        .sidebar_width(150.0)
+        .create_element();
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 10, y: 10 })));
+        let (_, damage) = pipeline
+            .render_with_damage()
+            .expect("navigation hover should render a frame");
+        let damage = damage.expect("navigation hover should remain partial");
+
+        assert_eq!(damage, &[(0, 0, 150, 40)]);
+
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 10, y: 50 })));
+        let (_, damage) = pipeline
+            .render_with_damage()
+            .expect("moving hover between rows should render a frame");
+        let damage = damage.expect("moving hover between rows should remain partial");
+
+        assert_eq!(damage, &[(0, 0, 150, 80)]);
     }
 
     #[test]
@@ -4058,6 +4259,7 @@ mod tests {
             &pipeline.element_tree,
             &pipeline.last_paint_bounds,
             &pipeline.dirty_scratch.ids,
+            &[],
             &mut pipeline.dirty_scratch.path,
             &mut pipeline.dirty_scratch.rects,
         );
@@ -4067,6 +4269,7 @@ mod tests {
                 &pipeline.element_tree,
                 &pipeline.last_paint_bounds,
                 &pipeline.dirty_scratch.ids,
+                &[],
                 &mut pipeline.dirty_scratch.path,
                 &mut pipeline.dirty_scratch.rects,
             );

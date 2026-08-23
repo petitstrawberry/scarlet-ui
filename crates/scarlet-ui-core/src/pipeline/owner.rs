@@ -170,6 +170,8 @@ pub struct PipelineOwner {
     dirty_composite: alloc::vec::Vec<ElementId>,
     /// Elements repainted in the last flush
     last_paint_ids: alloc::vec::Vec<ElementId>,
+    /// Elements receiving only a self-paint in the last flush
+    last_self_paint_ids: alloc::vec::Vec<ElementId>,
     /// Elements recomposited in the last flush
     last_composite_ids: alloc::vec::Vec<ElementId>,
     /// State registry for managing State instances
@@ -192,6 +194,7 @@ impl PipelineOwner {
             dirty_self_paint: BTreeSet::new(),
             dirty_composite: alloc::vec::Vec::new(),
             last_paint_ids: alloc::vec::Vec::new(),
+            last_self_paint_ids: alloc::vec::Vec::new(),
             last_composite_ids: alloc::vec::Vec::new(),
             state_registry: StateRegistry::new(),
         }
@@ -421,9 +424,16 @@ impl PipelineOwner {
         let dirty_paint = core::mem::take(&mut self.dirty_paint);
         let dirty_self_paint = core::mem::take(&mut self.dirty_self_paint);
         self.last_paint_ids.clear();
+        self.last_self_paint_ids.clear();
         self.last_composite_ids.clear();
         self.last_paint_ids.extend(dirty_paint.iter().copied());
         self.last_paint_ids.extend(dirty_self_paint.iter().copied());
+        self.last_self_paint_ids.extend(
+            dirty_self_paint
+                .iter()
+                .copied()
+                .filter(|id| !dirty_paint.contains(id)),
+        );
         self.last_composite_ids.extend(
             self.dirty_composite
                 .iter()
@@ -439,8 +449,16 @@ impl PipelineOwner {
                 }
             }
             for id in dirty_self_paint.iter().copied() {
+                if dirty_paint.contains(&id) {
+                    continue;
+                }
                 if let Some(element) = element_tree.find_element_mut(id) {
-                    Self::render_paint_buffers_recursive(element);
+                    let requires_buffer = element.render_object().is_some_and(|render_object| {
+                        render_object.requires_buffer_render_for_paint()
+                    });
+                    if requires_buffer {
+                        element.render();
+                    }
                 }
             }
             return;
@@ -568,6 +586,16 @@ impl PipelineOwner {
     /// Get the IDs repainted in the last flush.
     pub fn last_paint_ids(&self) -> &[ElementId] {
         &self.last_paint_ids
+    }
+
+    /// Get the IDs whose last repaint affected only their own rendered pixels.
+    ///
+    /// # Returns
+    ///
+    /// Element IDs that were self-painted without also receiving a regular
+    /// subtree paint in the last flush.
+    pub fn last_self_paint_ids(&self) -> &[ElementId] {
+        &self.last_self_paint_ids
     }
 
     /// Get the IDs recomposited in the last flush.

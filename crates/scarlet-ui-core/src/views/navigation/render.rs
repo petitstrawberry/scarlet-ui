@@ -19,6 +19,7 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::Any;
+use core::cell::Cell;
 use libm;
 
 /// NavigationView RenderObject - handles rendering and layout
@@ -47,6 +48,8 @@ pub struct NavigationViewRenderObject {
     header_height: f32,
     /// Currently hovered link index (if any)
     hovered_index: Option<usize>,
+    /// Hover state represented by the most recently emitted paint commands.
+    last_painted_hovered_index: Cell<Option<usize>>,
     /// Height of each navigation item
     item_height: f32,
     /// Total size of the NavigationView
@@ -103,6 +106,7 @@ impl NavigationViewRenderObject {
             icon_color,
             header_height: header_height.max(0.0),
             hovered_index: None,
+            last_painted_hovered_index: Cell::new(None),
             item_height: 40.0,
             size: Size::ZERO,
             buffer: None,
@@ -370,6 +374,31 @@ impl ElementRenderObject for NavigationViewRenderObject {
         self.size
     }
 
+    fn self_paint_bounds(&self, origin: Point) -> Option<Rect> {
+        let previous = self.last_painted_hovered_index.get();
+        let current = self.hovered_index;
+        let (first, last) = match (previous, current) {
+            (Some(previous), Some(current)) => (previous.min(current), previous.max(current)),
+            (Some(index), None) | (None, Some(index)) => (index, index),
+            (None, None) => {
+                return Some(Rect::from_xywh(
+                    origin.x,
+                    origin.y,
+                    self.sidebar_width.max(0.0),
+                    self.size.height.max(0.0),
+                ));
+            }
+        };
+        let y = first as f32 * self.item_height;
+        let height = (last - first + 1) as f32 * self.item_height;
+        Some(Rect::from_xywh(
+            origin.x,
+            origin.y + y,
+            self.sidebar_width.max(0.0),
+            height,
+        ))
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -534,6 +563,7 @@ impl ElementRenderObject for NavigationViewRenderObject {
             ),
             palette.border(),
         );
+        self.last_painted_hovered_index.set(self.hovered_index);
         true
     }
 

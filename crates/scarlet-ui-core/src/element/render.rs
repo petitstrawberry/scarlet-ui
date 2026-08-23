@@ -195,6 +195,24 @@ pub trait RenderObject: Any {
         false
     }
 
+    /// Return the absolute bounds affected by repainting only this render object.
+    ///
+    /// This hook is used for self-paint invalidations, where descendants and
+    /// layout are unchanged. The returned rectangle must conservatively cover
+    /// every pixel that can differ between the previous and current self paint.
+    /// Returning `None` falls back to the element's complete paint bounds.
+    ///
+    /// # Arguments
+    ///
+    /// * `origin` - Absolute origin of this element in the window.
+    ///
+    /// # Returns
+    ///
+    /// The absolute self-paint bounds, or `None` to use the full element bounds.
+    fn self_paint_bounds(&self, _origin: Point) -> Option<Rect> {
+        None
+    }
+
     /// Return an element-local clip region for this render object.
     ///
     /// # Arguments
@@ -586,7 +604,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             self.unsubscribe_view_listenables();
         }
         self.view = typed_view.clone();
-        let (render_result, _) = self.update_render_object_from_view();
+        let (render_result, render_needs_layout) = self.update_render_object_from_view();
         if matches!(render_result, UpdateResult::Replaced) {
             if self.mounted {
                 self.subscribe_view_listenables();
@@ -598,9 +616,16 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             self.subscribe_view_listenables();
         }
 
-        if matches!(render_result, UpdateResult::Updated)
-            || matches!(child_result, UpdateResult::Updated)
-        {
+        let needs_layout = matches!(child_result, UpdateResult::Updated)
+            || (matches!(render_result, UpdateResult::Updated) && render_needs_layout);
+        if self.mounted {
+            if needs_layout {
+                crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
+            } else if matches!(render_result, UpdateResult::Updated) {
+                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+            }
+            UpdateResult::NoChange
+        } else if needs_layout || matches!(render_result, UpdateResult::Updated) {
             UpdateResult::Updated
         } else {
             UpdateResult::NoChange
@@ -613,13 +638,20 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             return UpdateResult::Replaced;
         }
         let child_result = self.update_children_from_view();
-        if matches!(child_result, UpdateResult::Updated) || render_needs_layout {
-            return UpdateResult::Updated;
+        let needs_layout = matches!(child_result, UpdateResult::Updated)
+            || (matches!(render_result, UpdateResult::Updated) && render_needs_layout);
+        if self.mounted {
+            if needs_layout {
+                crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
+            } else if matches!(render_result, UpdateResult::Updated) {
+                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+            }
+            UpdateResult::NoChange
+        } else if needs_layout || matches!(render_result, UpdateResult::Updated) {
+            UpdateResult::Updated
+        } else {
+            UpdateResult::NoChange
         }
-        if matches!(render_result, UpdateResult::Updated) {
-            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
-        }
-        UpdateResult::NoChange
     }
 
     fn mount(&mut self, ctx: &MountContext) {
@@ -1544,7 +1576,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                                 && render_object.hovered_index() != Some(index)
                             {
                                 render_object.set_hovered_index(Some(index));
-                                crate::pipeline::mark_element_needs_paint(
+                                crate::pipeline::mark_element_needs_self_paint(
                                     self.pipeline_id,
                                     self.id,
                                 );
@@ -1552,7 +1584,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         } else {
                             if render_object.hovered_index().is_some() {
                                 render_object.set_hovered_index(None);
-                                crate::pipeline::mark_element_needs_paint(
+                                crate::pipeline::mark_element_needs_self_paint(
                                     self.pipeline_id,
                                     self.id,
                                 );
@@ -1561,7 +1593,10 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     } else {
                         if render_object.hovered_index().is_some() {
                             render_object.set_hovered_index(None);
-                            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                            crate::pipeline::mark_element_needs_self_paint(
+                                self.pipeline_id,
+                                self.id,
+                            );
                         }
                         return false;
                     }
@@ -1570,7 +1605,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 MouseEvent::Exited { .. } => {
                     if render_object.hovered_index().is_some() {
                         render_object.set_hovered_index(None);
-                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        crate::pipeline::mark_element_needs_self_paint(self.pipeline_id, self.id);
                     }
                     return true;
                 }
