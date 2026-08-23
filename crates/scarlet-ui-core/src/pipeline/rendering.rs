@@ -2818,6 +2818,14 @@ mod tests {
         let damage = damage.expect("moving hover between rows should remain partial");
 
         assert_eq!(damage, &[(0, 0, 150, 80)]);
+
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 200, y: 50 }));
+        let (_, damage) = pipeline
+            .render_with_damage()
+            .expect("leaving the sidebar should clear its hover");
+        let damage = damage.expect("clearing sidebar hover should remain partial");
+
+        assert_eq!(damage, &[(0, 40, 150, 40)]);
     }
 
     #[test]

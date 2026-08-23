@@ -1556,49 +1556,19 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             }
         }
 
-        // Handle NavigationView events - check render object directly
+        // Navigation sidebar is a real hit-test child, so Entered/Exited come
+        // from EventDispatcher's hover-path diff at the sidebar/content edge.
         if let Some(render_object) =
             self.render_object
                 .as_any_mut()
-                .downcast_mut::<crate::views::navigation::NavigationViewRenderObject>()
+                .downcast_mut::<crate::views::navigation::NavigationSidebarRenderObject>()
         {
             match mouse_event {
                 MouseEvent::Entered { x, y } | MouseEvent::Moved { x, y } => {
-                    // Coordinates are already localized by EventDispatcher
-                    let local_x = *x as f32;
-                    let local_y = *y as f32;
-
-                    // Check if point is within sidebar
-                    if local_x >= 0.0 && local_x <= render_object.sidebar_width() {
-                        // Calculate which item is being hovered
-                        if let Some(index) = render_object.index_at_y(local_y) {
-                            if index < render_object.link_count()
-                                && render_object.hovered_index() != Some(index)
-                            {
-                                render_object.set_hovered_index(Some(index));
-                                crate::pipeline::mark_element_needs_self_paint(
-                                    self.pipeline_id,
-                                    self.id,
-                                );
-                            }
-                        } else {
-                            if render_object.hovered_index().is_some() {
-                                render_object.set_hovered_index(None);
-                                crate::pipeline::mark_element_needs_self_paint(
-                                    self.pipeline_id,
-                                    self.id,
-                                );
-                            }
-                        }
-                    } else {
-                        if render_object.hovered_index().is_some() {
-                            render_object.set_hovered_index(None);
-                            crate::pipeline::mark_element_needs_self_paint(
-                                self.pipeline_id,
-                                self.id,
-                            );
-                        }
-                        return false;
+                    let hovered = render_object.index_at_point(*x as f32, *y as f32);
+                    if render_object.hovered_index() != hovered {
+                        render_object.set_hovered_index(hovered);
+                        crate::pipeline::mark_element_needs_self_paint(self.pipeline_id, self.id);
                     }
                     return true;
                 }
@@ -1615,26 +1585,16 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     y,
                     ..
                 } => {
-                    // Coordinates are already localized by EventDispatcher
-                    let local_x = *x as f32;
-                    let local_y = *y as f32;
-
-                    // Check if click is within sidebar
-                    if local_x >= 0.0 && local_x <= render_object.sidebar_width() {
-                        if let Some(index) = render_object.index_at_y(local_y) {
-                            if index < render_object.link_count() {
-                                // Update selected index
-                                let selected_state = render_object.selected_index();
-                                let current = selected_state.get();
-
-                                if current != index {
-                                    selected_state.set(index);
-                                    crate::pipeline::mark_element_dirty(self.pipeline_id, self.id);
-                                    if let Some(callback) = render_object.selection_callback(index)
-                                    {
-                                        callback();
-                                    }
-                                }
+                    if let Some(index) = render_object.index_at_point(*x as f32, *y as f32) {
+                        let selected_state = render_object.selected_index();
+                        if selected_state.get() != index {
+                            selected_state.set(index);
+                            crate::pipeline::mark_element_needs_self_paint(
+                                self.pipeline_id,
+                                self.id,
+                            );
+                            if let Some(callback) = render_object.selection_callback(index) {
+                                callback();
                             }
                         }
                         return true;

@@ -3,8 +3,7 @@
 use crate::element::{ComponentElement, Element, RenderElement};
 use crate::state::Listenable;
 use crate::view::View;
-use crate::views::Spacer;
-use crate::views::navigation::render::NavigationViewRenderObject;
+use crate::views::navigation::render::{NavigationSidebar, NavigationViewRenderObject};
 use crate::views::navigation::tuple::NavigationLinkTuple;
 use crate::views::navigation::view::NavigationView;
 use alloc::boxed::Box;
@@ -62,30 +61,24 @@ fn update_navigation_render_object<T>(
 where
     T: NavigationLinkTuple + Clone + 'static,
 {
-    let mut labels = Vec::new();
-    let mut icons = Vec::new();
-    let mut selection_callbacks = Vec::new();
-    for index in 0..content.nav.links().count() {
-        labels.push(content.nav.links().get_label(index).to_string());
-        icons.push(content.nav.links().get_icon(index));
-        selection_callbacks.push(content.nav.links().get_on_select(index));
-    }
-
     render_object.update_configuration(
-        labels,
-        icons,
-        content.nav.selected_index_state().clone(),
         content.nav.get_sidebar_width(),
-        content.nav.get_shows_icons(),
-        content.nav.get_icon_style(),
-        content.nav.get_icon_color(),
         content.nav.get_header_height(),
-        selection_callbacks,
     );
     crate::element::UpdateResult::Updated
 }
 
 fn navigation_render_object<T>(content: &NavigationContent<T>) -> NavigationViewRenderObject
+where
+    T: NavigationLinkTuple + Clone + 'static,
+{
+    NavigationViewRenderObject::new(
+        content.nav.get_sidebar_width(),
+        content.nav.get_header_height(),
+    )
+}
+
+fn navigation_sidebar<T>(content: &NavigationContent<T>) -> NavigationSidebar
 where
     T: NavigationLinkTuple + Clone + 'static,
 {
@@ -98,16 +91,14 @@ where
         selection_callbacks.push(content.nav.links().get_on_select(index));
     }
 
-    NavigationViewRenderObject::new(
+    NavigationSidebar::new(
         labels,
         icons,
+        selection_callbacks,
         content.nav.selected_index_state().clone(),
-        content.nav.get_sidebar_width(),
         content.nav.get_shows_icons(),
         content.nav.get_icon_style(),
         content.nav.get_icon_color(),
-        content.nav.get_header_height(),
-        selection_callbacks,
     )
 }
 
@@ -117,7 +108,7 @@ where
 {
     let selected = content.nav.selected_index_state().get();
     let mut children: Vec<Box<dyn View>> = Vec::new();
-    children.push(Box::new(Spacer::new()));
+    children.push(Box::new(navigation_sidebar(content)));
     if let Some(header_builder) = content.nav.header_builder() {
         children.push(header_builder());
     }
