@@ -323,7 +323,7 @@ impl RenderingPipeline {
         if let Some(root) = self.element_tree.root()
             && let Some(window_info) = self.find_window_view(root)
         {
-            return window_info.root_clear_color();
+            return window_info.background_color;
         }
         crate::color::ColorPalette::light().window_background()
     }
@@ -350,7 +350,7 @@ impl RenderingPipeline {
         self.renderer = Some(Box::new(CpuRenderer::new(
             window_size,
             self.scale_milli,
-            window_info.root_clear_color(),
+            window_info.background_color,
         )));
         self.window_size = window_size;
         self.paint_backend.resize(window_size, self.scale_milli);
