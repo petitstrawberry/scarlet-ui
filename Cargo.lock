@@ -23,6 +23,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "adreno-a6xx-pm4"
+version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#a144ff7685d62596dd7ab3055492b1ac49587552"
+
+[[package]]
+name = "adreno-a6xx-shader-pack"
+version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#a144ff7685d62596dd7ab3055492b1ac49587552"
+
+[[package]]
+name = "adreno-a6xx-submit-wire"
+version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#a144ff7685d62596dd7ab3055492b1ac49587552"
+dependencies = [
+ "adreno-a6xx-shader-pack",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -741,7 +759,7 @@ dependencies = [
 [[package]]
 name = "gpu-raw"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#fbe82a75c6c36c8a98c4ff86b62d6857b5b4103d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#a2a91f5130c4e57dd62e6fb197ac7ff7c8ea49ad"
 dependencies = [
  "scarlet-os",
  "scarlet-std",
@@ -1710,12 +1728,12 @@ dependencies = [
 [[package]]
 name = "scarlet-abi"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#fbe82a75c6c36c8a98c4ff86b62d6857b5b4103d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#a2a91f5130c4e57dd62e6fb197ac7ff7c8ea49ad"
 
 [[package]]
 name = "scarlet-os"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#fbe82a75c6c36c8a98c4ff86b62d6857b5b4103d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#a2a91f5130c4e57dd62e6fb197ac7ff7c8ea49ad"
 dependencies = [
  "scarlet-abi",
  "scarlet-rt",
@@ -1725,7 +1743,7 @@ dependencies = [
 [[package]]
 name = "scarlet-rt"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#fbe82a75c6c36c8a98c4ff86b62d6857b5b4103d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#a2a91f5130c4e57dd62e6fb197ac7ff7c8ea49ad"
 dependencies = [
  "lock_api",
  "scarlet-sys",
@@ -1736,7 +1754,7 @@ dependencies = [
 [[package]]
 name = "scarlet-std"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#fbe82a75c6c36c8a98c4ff86b62d6857b5b4103d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#a2a91f5130c4e57dd62e6fb197ac7ff7c8ea49ad"
 dependencies = [
  "hashbrown 0.15.5",
  "scarlet-abi",
@@ -1749,7 +1767,7 @@ dependencies = [
 [[package]]
 name = "scarlet-sys"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#fbe82a75c6c36c8a98c4ff86b62d6857b5b4103d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#a2a91f5130c4e57dd62e6fb197ac7ff7c8ea49ad"
 dependencies = [
  "scarlet-abi",
 ]
@@ -1950,17 +1968,34 @@ dependencies = [
 [[package]]
 name = "sgfx"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#fbe82a75c6c36c8a98c4ff86b62d6857b5b4103d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#a2a91f5130c4e57dd62e6fb197ac7ff7c8ea49ad"
 dependencies = [
+ "gpu-raw",
+ "raw-window-handle",
  "scarlet-std",
+ "sgfx-backend-scarlet-adreno",
  "sgfx-backend-scarlet-virgl",
+ "sgfx-backend-wgpu",
+ "sgfx-core",
+]
+
+[[package]]
+name = "sgfx-backend-scarlet-adreno"
+version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#a144ff7685d62596dd7ab3055492b1ac49587552"
+dependencies = [
+ "adreno-a6xx-submit-wire",
+ "gpu-raw",
+ "scarlet-os",
+ "scarlet-std",
+ "sgfx-codegen-adreno-a6xx",
  "sgfx-core",
 ]
 
 [[package]]
 name = "sgfx-backend-scarlet-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#fbe82a75c6c36c8a98c4ff86b62d6857b5b4103d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#a2a91f5130c4e57dd62e6fb197ac7ff7c8ea49ad"
 dependencies = [
  "gpu-raw",
  "scarlet-os",
@@ -1970,9 +2005,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "sgfx-backend-wgpu"
+version = "0.16.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#a2a91f5130c4e57dd62e6fb197ac7ff7c8ea49ad"
+dependencies = [
+ "bytemuck",
+ "pollster",
+ "raw-window-handle",
+ "sgfx-core",
+ "wgpu",
+]
+
+[[package]]
+name = "sgfx-codegen-adreno-a6xx"
+version = "0.1.0"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#a144ff7685d62596dd7ab3055492b1ac49587552"
+dependencies = [
+ "adreno-a6xx-pm4",
+ "adreno-a6xx-shader-pack",
+ "sgfx-core",
+]
+
+[[package]]
 name = "sgfx-codegen-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#fbe82a75c6c36c8a98c4ff86b62d6857b5b4103d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#a2a91f5130c4e57dd62e6fb197ac7ff7c8ea49ad"
 dependencies = [
  "sgfx-core",
 ]
@@ -1980,7 +2037,7 @@ dependencies = [
 [[package]]
 name = "sgfx-core"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#fbe82a75c6c36c8a98c4ff86b62d6857b5b4103d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#a2a91f5130c4e57dd62e6fb197ac7ff7c8ea49ad"
 
 [[package]]
 name = "shlex"
@@ -2168,7 +2225,7 @@ dependencies = [
 [[package]]
 name = "sws-client"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#fbe82a75c6c36c8a98c4ff86b62d6857b5b4103d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#a2a91f5130c4e57dd62e6fb197ac7ff7c8ea49ad"
 dependencies = [
  "scarlet-os",
  "scarlet-std",
@@ -2178,7 +2235,7 @@ dependencies = [
 [[package]]
 name = "sws-protocol"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#fbe82a75c6c36c8a98c4ff86b62d6857b5b4103d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#a2a91f5130c4e57dd62e6fb197ac7ff7c8ea49ad"
 dependencies = [
  "scarlet-std",
 ]
