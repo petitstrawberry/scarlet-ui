@@ -453,8 +453,10 @@ impl SgfxPaintEncoder {
         .id();
         let sampler = table
             .define_sampler(SamplerDesc::new(
-                FilterMode::Nearest,
-                FilterMode::Nearest,
+                // Keep text, icons, and retained surfaces smooth when a
+                // logical frame is sampled at a non-integer output scale.
+                FilterMode::Linear,
+                FilterMode::Linear,
                 AddressMode::ClampToEdge,
                 AddressMode::ClampToEdge,
             ))
@@ -720,7 +722,7 @@ impl SgfxPaintEncoder {
         let mut draws = Vec::new();
         let mut uploads = Vec::new();
         let mut buffer_mappings: Vec<(u64, TextureId)> = Vec::new();
-        let opacity = 1.0f32;
+        let mut opacity = 1.0f32;
         let scale = scale_milli.max(1) as f32 / 1000.0;
 
         for command in paint.commands() {
@@ -965,7 +967,11 @@ impl SgfxPaintEncoder {
                     corner_radius,
                 } => tessellator.push_clip(*rect, *corner_radius)?,
                 PaintCommand::PopClip => tessellator.pop_clip(),
-                PaintCommand::SetOpacity { opacity: _ } => {}
+                PaintCommand::SetOpacity {
+                    opacity: next_opacity,
+                } => {
+                    opacity = finite_unit(*next_opacity)?;
+                }
                 PaintCommand::Extension { rect, payload } => {
                     let Some(canvas) = payload.as_ref().as_any().downcast_ref::<SgfxCanvasPaint>()
                     else {

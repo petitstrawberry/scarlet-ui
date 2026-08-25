@@ -1102,13 +1102,18 @@ impl CpuPaintRenderer {
         }
         self.recycle_active_layers();
 
+        // Opacity is part of the backend-neutral paint stream. Keeping it as
+        // state here makes translucent focus/selection layers match SGFX.
+        let mut opacity = 1.0f32;
+
         for cmd in ctx.commands() {
             match cmd {
                 PaintCommand::FillPath { path, color } => {
+                    let color = color.with_opacity(color.a * opacity);
                     self.rebuild_scaled_points(path);
                     match self.rebuild_effective_clip_rects(damage_rects) {
                         EffectiveClipRects::Unclipped => {
-                            self.fill_scaled_path(*color, None);
+                            self.fill_scaled_path(color, None);
                         }
                         EffectiveClipRects::Empty => {}
                         EffectiveClipRects::Rects => {
@@ -1118,7 +1123,7 @@ impl CpuPaintRenderer {
                                     rect: self.scale_rect(rect),
                                     corner_radius: 0.0,
                                 };
-                                self.fill_scaled_path(*color, Some(clip));
+                                self.fill_scaled_path(color, Some(clip));
                             }
                         }
                     }
@@ -1128,10 +1133,11 @@ impl CpuPaintRenderer {
                     corner_radius,
                     color,
                 } => {
+                    let color = color.with_opacity(color.a * opacity);
                     self.rebuild_scaled_rounded_rect(*rect, *corner_radius);
                     match self.rebuild_effective_clip_rects(damage_rects) {
                         EffectiveClipRects::Unclipped => {
-                            self.fill_scaled_path(*color, None);
+                            self.fill_scaled_path(color, None);
                         }
                         EffectiveClipRects::Empty => {}
                         EffectiveClipRects::Rects => {
@@ -1141,7 +1147,7 @@ impl CpuPaintRenderer {
                                     rect: self.scale_rect(rect),
                                     corner_radius: 0.0,
                                 };
-                                self.fill_scaled_path(*color, Some(clip));
+                                self.fill_scaled_path(color, Some(clip));
                             }
                         }
                     }
@@ -1151,6 +1157,7 @@ impl CpuPaintRenderer {
                     stroke_width,
                     color,
                 } => {
+                    let color = color.with_opacity(color.a * opacity);
                     let rect = self.scale_rect(*rect);
                     let stroke_width = self.scale_f32(stroke_width.max(1.0));
                     match self.rebuild_effective_clip_rects(damage_rects) {
@@ -1159,7 +1166,7 @@ impl CpuPaintRenderer {
                             rect,
                             0.0,
                             stroke_width,
-                            *color,
+                            color,
                             None,
                         ),
                         EffectiveClipRects::Empty => {}
@@ -1175,7 +1182,7 @@ impl CpuPaintRenderer {
                                     rect,
                                     0.0,
                                     stroke_width,
-                                    *color,
+                                    color,
                                     Some(clip),
                                 );
                             }
@@ -1188,6 +1195,7 @@ impl CpuPaintRenderer {
                     stroke_width,
                     color,
                 } => {
+                    let color = color.with_opacity(color.a * opacity);
                     let rect = self.scale_rect(*rect);
                     let radius = self.scale_f32(*corner_radius);
                     let stroke_width = self.scale_f32(stroke_width.max(1.0));
@@ -1197,7 +1205,7 @@ impl CpuPaintRenderer {
                             rect,
                             radius,
                             stroke_width,
-                            *color,
+                            color,
                             None,
                         ),
                         EffectiveClipRects::Empty => {}
@@ -1213,7 +1221,7 @@ impl CpuPaintRenderer {
                                     rect,
                                     radius,
                                     stroke_width,
-                                    *color,
+                                    color,
                                     Some(clip),
                                 );
                             }
@@ -1225,18 +1233,19 @@ impl CpuPaintRenderer {
                     stroke_width,
                     color,
                 } => {
+                    let color = color.with_opacity(color.a * opacity);
                     let scaled_width = self.scale_f32(stroke_width.max(1.0));
                     self.rebuild_scaled_points(path);
                     match self.rebuild_effective_clip_rects(damage_rects) {
                         EffectiveClipRects::Unclipped => {
-                            self.draw_scaled_path_stroke(scaled_width, *color, None);
+                            self.draw_scaled_path_stroke(scaled_width, color, None);
                         }
                         EffectiveClipRects::Empty => {}
                         EffectiveClipRects::Rects => {
                             for index in 0..self.scratch.clip_rects.len() {
                                 let clip_rect = self.scratch.clip_rects[index];
                                 let clip = self.scale_rect(clip_rect);
-                                self.draw_scaled_path_stroke(scaled_width, *color, Some(clip));
+                                self.draw_scaled_path_stroke(scaled_width, color, Some(clip));
                             }
                         }
                     }
@@ -1246,42 +1255,46 @@ impl CpuPaintRenderer {
                     text,
                     color,
                     font_size_px,
-                } => match self.rebuild_effective_clip_rects(damage_rects) {
-                    EffectiveClipRects::Unclipped => {
-                        let mut canvas =
-                            crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
-                        canvas.draw_text_sized(
-                            position.x as i32,
-                            position.y as i32,
-                            text,
-                            *color,
-                            *font_size_px,
-                        );
-                    }
-                    EffectiveClipRects::Empty => {}
-                    EffectiveClipRects::Rects => {
-                        for index in 0..self.scratch.clip_rects.len() {
-                            let rect = self.scratch.clip_rects[index];
+                } => {
+                    let color = color.with_opacity(color.a * opacity);
+                    match self.rebuild_effective_clip_rects(damage_rects) {
+                        EffectiveClipRects::Unclipped => {
                             let mut canvas =
                                 crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
-                            canvas.draw_text_sized_clipped(
+                            canvas.draw_text_sized(
                                 position.x as i32,
                                 position.y as i32,
                                 text,
-                                *color,
+                                color,
                                 *font_size_px,
-                                rect,
-                                0.0,
                             );
                         }
+                        EffectiveClipRects::Empty => {}
+                        EffectiveClipRects::Rects => {
+                            for index in 0..self.scratch.clip_rects.len() {
+                                let rect = self.scratch.clip_rects[index];
+                                let mut canvas =
+                                    crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
+                                canvas.draw_text_sized_clipped(
+                                    position.x as i32,
+                                    position.y as i32,
+                                    text,
+                                    color,
+                                    *font_size_px,
+                                    rect,
+                                    0.0,
+                                );
+                            }
+                        }
                     }
-                },
+                }
                 PaintCommand::DrawIcon {
                     rect,
                     icon,
                     style,
                     color,
                 } => {
+                    let color = color.with_opacity(color.a * opacity);
                     let destination = self.scale_rect(*rect);
                     let pixel_size =
                         libm::ceilf(destination.size.width.min(destination.size.height).max(1.0))
@@ -1297,7 +1310,7 @@ impl CpuPaintRenderer {
                                 raster.height,
                                 destination_x,
                                 destination_y,
-                                *color,
+                                color,
                                 None,
                             );
                         }
@@ -1311,7 +1324,7 @@ impl CpuPaintRenderer {
                                     raster.height,
                                     destination_x,
                                     destination_y,
-                                    *color,
+                                    color,
                                     Some(clip),
                                 );
                             }
@@ -1325,7 +1338,8 @@ impl CpuPaintRenderer {
                         let dst_y = dst.origin.y as i32;
                         match self.rebuild_effective_clip_rects(damage_rects) {
                             EffectiveClipRects::Unclipped => {
-                                self.current_buffer_mut().composite(src, dst_x, dst_y, 1.0);
+                                self.current_buffer_mut()
+                                    .composite(src, dst_x, dst_y, opacity);
                             }
                             EffectiveClipRects::Empty => {}
                             EffectiveClipRects::Rects => {
@@ -1336,7 +1350,7 @@ impl CpuPaintRenderer {
                                         src,
                                         dst_x,
                                         dst_y,
-                                        1.0,
+                                        opacity,
                                         clip.origin.x as i32,
                                         clip.origin.y as i32,
                                         clip.size.width as i32,
@@ -1351,7 +1365,7 @@ impl CpuPaintRenderer {
                     dst,
                     src,
                     buffer_idx,
-                    opacity,
+                    opacity: command_opacity,
                 } => {
                     if let Some(buf) = ctx.buffer(BufferHandle(*buffer_idx)) {
                         let dst = self.scale_rect(*dst);
@@ -1365,7 +1379,14 @@ impl CpuPaintRenderer {
                         match self.rebuild_effective_clip_rects(damage_rects) {
                             EffectiveClipRects::Unclipped => {
                                 self.current_buffer_mut().composite_rect(
-                                    buf, src_x, src_y, src_w, src_h, dst_x, dst_y, *opacity,
+                                    buf,
+                                    src_x,
+                                    src_y,
+                                    src_w,
+                                    src_h,
+                                    dst_x,
+                                    dst_y,
+                                    *command_opacity * opacity,
                                 );
                             }
                             EffectiveClipRects::Empty => {}
@@ -1381,7 +1402,7 @@ impl CpuPaintRenderer {
                                         src_h,
                                         dst_x,
                                         dst_y,
-                                        *opacity,
+                                        *command_opacity * opacity,
                                         clip.origin.x as i32,
                                         clip.origin.y as i32,
                                         clip.size.width as i32,
@@ -1404,7 +1425,15 @@ impl CpuPaintRenderer {
                 PaintCommand::PopClip => {
                     self.pop_clip(damage_rects);
                 }
-                PaintCommand::SetOpacity { opacity: _ } => {}
+                PaintCommand::SetOpacity {
+                    opacity: next_opacity,
+                } => {
+                    opacity = if next_opacity.is_finite() {
+                        next_opacity.clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                }
                 PaintCommand::Extension {
                     rect: _,
                     payload: _,
@@ -1878,6 +1907,20 @@ mod tests {
         let mut r = CpuPaintRenderer::new(Size::new(20.0, 20.0), 1000, bg);
         r.execute(&ctx);
         assert_eq!(r.buffer().get_pixel(5, 5).unwrap(), bg.to_bgra());
+    }
+
+    #[test]
+    fn paint_opacity_modulates_solid_commands() {
+        let mut ctx = PaintContext::new();
+        ctx.set_opacity(0.5);
+        ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 4.0, 4.0), Color::rgb(255, 0, 0));
+        let mut renderer = CpuPaintRenderer::new(Size::new(8.0, 8.0), 1000, Color::BLACK);
+        renderer.execute(&ctx);
+
+        let pixel = Color::from_bgra(renderer.buffer().get_pixel(1, 1).unwrap());
+        assert!((pixel.r - 0.5).abs() < 0.01);
+        assert!(pixel.g < 0.01);
+        assert!(pixel.b < 0.01);
     }
 
     #[test]
