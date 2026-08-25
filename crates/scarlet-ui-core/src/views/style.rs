@@ -27,6 +27,19 @@ const FLOATING_KEY_BLUR: f32 = 10.0;
 const FLOATING_KEY_OPACITY: f32 = 0.75;
 const FLOATING_OUTSETS: EdgeInsets = EdgeInsets::new(10.0, 6.0, 10.0, 14.0);
 
+const RAISED_SHADOW_OFFSET: Offset = Offset::new(0.0, 1.0);
+const RAISED_SHADOW_BLUR: f32 = 4.0;
+const RAISED_SHADOW_OPACITY: f32 = 0.40;
+const RAISED_OUTSETS: EdgeInsets = EdgeInsets::new(4.0, 3.0, 4.0, 5.0);
+
+const OVERLAY_AMBIENT_OFFSET: Offset = Offset::new(0.0, 2.0);
+const OVERLAY_AMBIENT_BLUR: f32 = 8.0;
+const OVERLAY_AMBIENT_OPACITY: f32 = 0.65;
+const OVERLAY_KEY_OFFSET: Offset = Offset::new(0.0, 12.0);
+const OVERLAY_KEY_BLUR: f32 = 24.0;
+const OVERLAY_KEY_OPACITY: f32 = 0.85;
+const OVERLAY_OUTSETS: EdgeInsets = EdgeInsets::new(24.0, 12.0, 24.0, 36.0);
+
 /// Desktop visual metrics shared by built-in widgets.
 ///
 /// These are deliberately private. Future input adaptation must be supplied
@@ -80,29 +93,61 @@ const VISUAL_METRICS: VisualMetrics = VisualMetrics {
     chrome_title_font_size: 14.0,
 };
 
-/// Tonal surface hierarchy shared by built-in widgets.
+/// Tonal surface hierarchy shared by built-in widgets and containers.
 ///
 /// The hierarchy describes containment, not interaction state or elevation.
 /// Raised and floating effects are applied separately so selected navigation
 /// rows and tabs never accidentally acquire depth.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SurfaceLevel {
+pub enum SurfaceRole {
+    /// The application's base content plane.
     Canvas,
+    /// Persistent structural chrome such as sidebars and tab bars.
     Structural,
+    /// A grouped region within the current content plane.
     Section,
+    /// Transient content such as menus and popovers.
     Floating,
+    /// Modal content such as dialogs and sheets.
+    Overlay,
+}
+
+/// Visual elevation independent from a surface's tonal role.
+///
+/// `Flat` is the default for structural and section surfaces. Applications
+/// opt into depth only where the interaction model requires it: raised cards,
+/// transient floating content, or modal overlays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ElevationRole {
+    /// No shadow. Used by canvas, structural, and ordinary section surfaces.
+    #[default]
+    Flat,
+    /// A card-like surface resting just above its parent plane.
+    Raised,
+    /// Menus, popovers, and expanded selects.
+    Floating,
+    /// Dialogs and modal sheets.
+    Overlay,
 }
 
 pub(crate) const fn metrics() -> VisualMetrics {
     VISUAL_METRICS
 }
 
-pub(crate) fn surface_color(palette: &ColorPalette, level: SurfaceLevel) -> Color {
-    match level {
-        SurfaceLevel::Canvas => palette.background(),
-        SurfaceLevel::Structural => palette.background_secondary(),
-        SurfaceLevel::Section => palette.background_tertiary(),
-        SurfaceLevel::Floating => palette.surface(),
+pub(crate) fn surface_color(palette: &ColorPalette, role: SurfaceRole) -> Color {
+    match role {
+        SurfaceRole::Canvas => palette.background(),
+        SurfaceRole::Structural => palette.background_secondary(),
+        SurfaceRole::Section => palette.background_tertiary(),
+        SurfaceRole::Floating | SurfaceRole::Overlay => palette.surface(),
+    }
+}
+
+pub(crate) fn surface_radius(role: SurfaceRole) -> f32 {
+    match role {
+        SurfaceRole::Canvas | SurfaceRole::Structural => 0.0,
+        SurfaceRole::Section | SurfaceRole::Floating => metrics().popover_radius,
+        SurfaceRole::Overlay => 10.0,
     }
 }
 
@@ -188,28 +233,76 @@ pub(crate) fn selected_item_surface(accent: Color, surface: Color) -> Color {
         .blend_over(surface)
 }
 
-pub(crate) const fn floating_outsets() -> EdgeInsets {
-    FLOATING_OUTSETS
+pub(crate) const fn elevation_outsets(elevation: ElevationRole) -> EdgeInsets {
+    match elevation {
+        ElevationRole::Flat => EdgeInsets::ZERO,
+        ElevationRole::Raised => RAISED_OUTSETS,
+        ElevationRole::Floating => FLOATING_OUTSETS,
+        ElevationRole::Overlay => OVERLAY_OUTSETS,
+    }
+}
+
+pub(crate) fn elevation_shadow(
+    ctx: &mut PaintContext<'_>,
+    rect: Rect,
+    radius: f32,
+    shadow: Color,
+    elevation: ElevationRole,
+) {
+    let radius = radius_for(rect, radius);
+    match elevation {
+        ElevationRole::Flat => {}
+        ElevationRole::Raised => {
+            ctx.draw_rounded_rect_shadow(
+                rect,
+                radius,
+                RAISED_SHADOW_OFFSET,
+                RAISED_SHADOW_BLUR,
+                0.0,
+                shadow.with_opacity(shadow.a * RAISED_SHADOW_OPACITY),
+            );
+        }
+        ElevationRole::Floating => {
+            ctx.draw_rounded_rect_shadow(
+                rect,
+                radius,
+                FLOATING_AMBIENT_OFFSET,
+                FLOATING_AMBIENT_BLUR,
+                0.0,
+                shadow.with_opacity(shadow.a * FLOATING_AMBIENT_OPACITY),
+            );
+            ctx.draw_rounded_rect_shadow(
+                rect,
+                radius,
+                FLOATING_KEY_OFFSET,
+                FLOATING_KEY_BLUR,
+                0.0,
+                shadow.with_opacity(shadow.a * FLOATING_KEY_OPACITY),
+            );
+        }
+        ElevationRole::Overlay => {
+            ctx.draw_rounded_rect_shadow(
+                rect,
+                radius,
+                OVERLAY_AMBIENT_OFFSET,
+                OVERLAY_AMBIENT_BLUR,
+                0.0,
+                shadow.with_opacity(shadow.a * OVERLAY_AMBIENT_OPACITY),
+            );
+            ctx.draw_rounded_rect_shadow(
+                rect,
+                radius,
+                OVERLAY_KEY_OFFSET,
+                OVERLAY_KEY_BLUR,
+                0.0,
+                shadow.with_opacity(shadow.a * OVERLAY_KEY_OPACITY),
+            );
+        }
+    }
 }
 
 pub(crate) fn floating_shadow(ctx: &mut PaintContext<'_>, rect: Rect, radius: f32, shadow: Color) {
-    let radius = radius_for(rect, radius);
-    ctx.draw_rounded_rect_shadow(
-        rect,
-        radius,
-        FLOATING_AMBIENT_OFFSET,
-        FLOATING_AMBIENT_BLUR,
-        0.0,
-        shadow.with_opacity(shadow.a * FLOATING_AMBIENT_OPACITY),
-    );
-    ctx.draw_rounded_rect_shadow(
-        rect,
-        radius,
-        FLOATING_KEY_OFFSET,
-        FLOATING_KEY_BLUR,
-        0.0,
-        shadow.with_opacity(shadow.a * FLOATING_KEY_OPACITY),
-    );
+    elevation_shadow(ctx, rect, radius, shadow, ElevationRole::Floating);
 }
 
 pub(crate) fn popover_surface(
@@ -221,7 +314,7 @@ pub(crate) fn popover_surface(
 ) {
     let metrics = metrics();
     let radius = radius_for(rect, metrics.popover_radius);
-    floating_shadow(ctx, rect, radius, shadow);
+    elevation_shadow(ctx, rect, radius, shadow, ElevationRole::Floating);
     ctx.fill_rounded_rect(rect, radius, fill);
     ctx.stroke_rounded_rect(rect, radius, metrics.border_width, border);
 }
@@ -344,7 +437,10 @@ mod tests {
             ctx.commands()[3],
             PaintCommand::StrokeRoundedRect { .. }
         ));
-        assert_eq!(floating_outsets(), EdgeInsets::new(10.0, 6.0, 10.0, 14.0));
+        assert_eq!(
+            elevation_outsets(ElevationRole::Floating),
+            EdgeInsets::new(10.0, 6.0, 10.0, 14.0)
+        );
     }
 
     #[test]
@@ -366,19 +462,19 @@ mod tests {
         let palette = ColorPalette::default();
 
         assert_eq!(
-            surface_color(&palette, SurfaceLevel::Canvas),
+            surface_color(&palette, SurfaceRole::Canvas),
             palette.background()
         );
         assert_eq!(
-            surface_color(&palette, SurfaceLevel::Structural),
+            surface_color(&palette, SurfaceRole::Structural),
             palette.background_secondary()
         );
         assert_eq!(
-            surface_color(&palette, SurfaceLevel::Section),
+            surface_color(&palette, SurfaceRole::Section),
             palette.background_tertiary()
         );
         assert_eq!(
-            surface_color(&palette, SurfaceLevel::Floating),
+            surface_color(&palette, SurfaceRole::Floating),
             palette.surface()
         );
     }
@@ -386,7 +482,7 @@ mod tests {
     #[test]
     fn selected_item_surface_is_lighter_than_text_selection() {
         let palette = ColorPalette::default();
-        let surface = surface_color(&palette, SurfaceLevel::Floating);
+        let surface = surface_color(&palette, SurfaceRole::Floating);
         let item = selected_item_surface(palette.primary(), surface);
         let text = text_selection_highlight(palette.primary(), surface);
 

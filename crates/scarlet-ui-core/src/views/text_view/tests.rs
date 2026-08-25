@@ -262,7 +262,7 @@ fn text_view_default_selection_color_uses_palette_primary() {
             ColorPalette::default().primary(),
             crate::views::style::surface_color(
                 &ColorPalette::default(),
-                crate::views::style::SurfaceLevel::Canvas,
+                crate::views::style::SurfaceRole::Canvas,
             ),
         )
     );

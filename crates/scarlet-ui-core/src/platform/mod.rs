@@ -46,6 +46,8 @@ pub struct WindowCreateRequest {
     pub active_on_focus: bool,
     /// Whether the window contents are fully opaque.
     pub opaque: bool,
+    /// Outer radius requested by client-side window decoration.
+    pub corner_radius: f32,
     /// Initial placement hint passed to the window manager.
     pub placement: WindowPlacement,
 }

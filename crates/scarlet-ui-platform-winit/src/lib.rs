@@ -873,6 +873,41 @@ fn mark_pointer_lock_released(state: &mut WinitEventState) {
     state.push(Event::PointerLockChanged { locked: false });
 }
 
+#[cfg(all(target_os = "macos", feature = "sgfx"))]
+fn apply_native_window_corner_radius(window: &WinitWindow, corner_radius: f32) {
+    use ::winit::platform::macos::WindowExtMacOS;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let view = handle.ns_view.as_ptr().cast::<AnyObject>();
+    // SAFETY: raw-window-handle guarantees that the NSView remains valid for
+    // the lifetime of the Winit window. SGFX has already installed the view's
+    // backing layer before this function runs.
+    let layer: *mut objc2_quartz_core::CALayer = unsafe { objc2::msg_send![view, layer] };
+    let Some(layer) = (unsafe { layer.as_ref() }) else {
+        return;
+    };
+
+    let radius = corner_radius.max(0.0) as f64;
+    layer.setCornerRadius(radius);
+    layer.setMasksToBounds(radius > 0.0);
+    layer.setAllowsEdgeAntialiasing(true);
+    if radius > 0.0 {
+        // SAFETY: QuartzCore owns this process-lifetime constant.
+        layer.setCornerCurve(unsafe { objc2_quartz_core::kCACornerCurveContinuous });
+        window.set_has_shadow(true);
+    }
+}
+
+#[cfg(not(all(target_os = "macos", feature = "sgfx")))]
+fn apply_native_window_corner_radius(_window: &WinitWindow, _corner_radius: f32) {}
+
 pub struct WinitPlatformWindow {
     shared: Rc<WinitSharedState>,
     #[cfg(feature = "sgfx")]
@@ -890,6 +925,8 @@ pub struct WinitPlatformWindow {
 impl WinitPlatformWindow {
     fn create(shared: Rc<WinitSharedState>, request: WindowCreateRequest) -> Result<Self> {
         let placement = request.placement;
+        let corner_radius = request.corner_radius.max(0.0);
+        let transparent = !request.opaque || corner_radius > 0.0;
         let requested_position = match request.placement {
             scarlet_ui_core::platform::WindowPlacement::Default
             | scarlet_ui_core::platform::WindowPlacement::Centered => None,
@@ -900,6 +937,7 @@ impl WinitPlatformWindow {
         let mut attributes = WindowAttributes::default()
             .with_title(request.title)
             .with_decorations(false)
+            .with_transparent(transparent)
             .with_inner_size(LogicalSize::new(request.size.width, request.size.height));
         if let Some(position) = requested_position {
             attributes = attributes.with_position(position);
@@ -956,6 +994,7 @@ impl WinitPlatformWindow {
                 }
             }
         };
+        apply_native_window_corner_radius(&window, corner_radius);
         let surface_id = next_surface_id();
         let state = Rc::new(RefCell::new(WinitEventState::new(scale_factor)));
         shared.windows.borrow_mut().insert(
@@ -1033,6 +1072,7 @@ impl PlatformWindow for WinitPlatformWindow {
                 focus_on_create: true,
                 active_on_focus: true,
                 opaque: true,
+                corner_radius: 0.0,
                 placement: scarlet_ui_core::platform::WindowPlacement::Default,
             },
         )
@@ -1237,6 +1277,7 @@ impl PlatformWindow for WinitPlatformWindow {
                 focus_on_create: true,
                 active_on_focus: true,
                 opaque: true,
+                corner_radius: 0.0,
                 placement: scarlet_ui_core::platform::WindowPlacement::Default,
             },
         )

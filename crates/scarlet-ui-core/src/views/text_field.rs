@@ -58,7 +58,7 @@ impl TextField {
             on_empty: None,
             blur_on_submit: false,
             autofocus: false,
-            background_color: style::surface_color(&palette, style::SurfaceLevel::Canvas),
+            background_color: style::surface_color(&palette, style::SurfaceRole::Canvas),
             border_color: palette.divider(),
             focused_border_color: style::focus_highlight(&palette),
             text_color: palette.text(),
@@ -449,7 +449,7 @@ impl TextFieldRenderObject {
         let palette = ColorPalette::default();
         style::text_selection_highlight(
             palette.primary(),
-            style::surface_color(&palette, style::SurfaceLevel::Canvas),
+            style::surface_color(&palette, style::SurfaceRole::Canvas),
         )
     }
 }

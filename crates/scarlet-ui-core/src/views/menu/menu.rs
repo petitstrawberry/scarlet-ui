@@ -276,7 +276,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
     }
 
     fn paint_outsets(&self) -> EdgeInsets {
-        style::floating_outsets()
+        style::elevation_outsets(style::ElevationRole::Floating)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -297,7 +297,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
         }
 
         let palette = ColorPalette::default();
-        let bg_color = style::surface_color(&palette, style::SurfaceLevel::Floating);
+        let bg_color = style::surface_color(&palette, style::SurfaceRole::Floating);
         let border_color = palette.border();
         let text_color = palette.text_primary();
         let hover_color = palette.menu_hover();
@@ -371,7 +371,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let palette = ColorPalette::default();
-        let bg_color = style::surface_color(&palette, style::SurfaceLevel::Floating);
+        let bg_color = style::surface_color(&palette, style::SurfaceRole::Floating);
         let border_color = palette.border();
         let text_color = palette.text_primary();
         let hover_color = palette.menu_hover();

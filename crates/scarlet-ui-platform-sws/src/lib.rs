@@ -840,7 +840,7 @@ impl PlatformBackend for SwsBackend {
                 &request.menu_titles,
                 request.focus_on_create,
                 request.active_on_focus,
-                request.opaque,
+                request.opaque && request.corner_radius <= 0.0,
                 request.placement,
             )?,
         ))

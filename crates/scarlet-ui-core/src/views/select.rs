@@ -422,7 +422,7 @@ impl SelectRenderObject {
         let mut canvas = graphics::Canvas::for_buffer(buffer);
         let palette = ColorPalette::default();
         let background = palette.button_background();
-        let popup_background = style::surface_color(&palette, style::SurfaceLevel::Floating);
+        let popup_background = style::surface_color(&palette, style::SurfaceRole::Floating);
         let border = palette.border();
         let text = palette.text_primary();
         let subtle = palette.text_secondary();
@@ -495,7 +495,7 @@ impl ElementRenderObject for SelectRenderObject {
 
     fn paint_outsets(&self) -> EdgeInsets {
         if self.expanded {
-            style::floating_outsets()
+            style::elevation_outsets(style::ElevationRole::Floating)
         } else {
             EdgeInsets::ZERO
         }
@@ -545,7 +545,7 @@ impl ElementRenderObject for SelectRenderObject {
         let scroll_end = (scroll_start + visible).min(self.options.len());
         let palette = ColorPalette::default();
         let background = palette.button_background();
-        let popup_background = style::surface_color(&palette, style::SurfaceLevel::Floating);
+        let popup_background = style::surface_color(&palette, style::SurfaceRole::Floating);
         let border = palette.border();
         let text = palette.text_primary();
         let subtle = palette.text_secondary();

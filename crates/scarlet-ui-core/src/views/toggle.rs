@@ -10,7 +10,7 @@ use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::view::View;
-use crate::views::style::{self, SurfaceLevel};
+use crate::views::style::{self, SurfaceRole};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -66,7 +66,7 @@ impl ToggleRenderObject {
         let base_track = if self.is_on {
             palette.primary()
         } else {
-            style::surface_color(palette, SurfaceLevel::Section)
+            style::surface_color(palette, SurfaceRole::Section)
         };
         let track = if self.pressed {
             base_track.darken(0.035)
@@ -80,7 +80,7 @@ impl ToggleRenderObject {
         } else {
             palette.divider()
         };
-        let thumb = style::surface_color(palette, SurfaceLevel::Floating);
+        let thumb = style::surface_color(palette, SurfaceRole::Floating);
         let thumb_border = palette.divider();
         (track, track_border, thumb, thumb_border)
     }
@@ -470,7 +470,7 @@ mod tests {
         let palette = ColorPalette::default();
         assert_eq!(
             *color,
-            style::surface_color(&palette, SurfaceLevel::Section)
+            style::surface_color(&palette, SurfaceRole::Section)
         );
     }
 

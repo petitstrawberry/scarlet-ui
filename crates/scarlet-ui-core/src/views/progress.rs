@@ -112,7 +112,7 @@ impl ProgressViewRenderObject {
             let h = canvas.height();
 
             let palette = ColorPalette::default();
-            let bg_color = style::surface_color(&palette, style::SurfaceLevel::Section);
+            let bg_color = style::surface_color(&palette, style::SurfaceRole::Section);
             let fill_color = palette.primary();
 
             // Draw background
@@ -180,7 +180,7 @@ impl ElementRenderObject for ProgressViewRenderObject {
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let palette = ColorPalette::default();
-        let bg_color = style::surface_color(&palette, style::SurfaceLevel::Section);
+        let bg_color = style::surface_color(&palette, style::SurfaceRole::Section);
         let fill_color = palette.primary();
         style::track(ctx, Rect::new(origin, self.size), bg_color);
         let fill_width = self.size.width * self.value;

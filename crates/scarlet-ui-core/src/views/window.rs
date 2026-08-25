@@ -47,6 +47,8 @@ pub struct WindowInfo {
     pub active_on_focus: bool,
     pub background_color: Color,
     pub opaque: bool,
+    /// Requested outer corner radius for client-side window decoration.
+    pub corner_radius: f32,
     pub placement: WindowPlacement,
 }
 
@@ -73,7 +75,23 @@ impl WindowInfo {
             active_on_focus,
             background_color,
             opaque,
+            corner_radius: 0.0,
             placement,
+        }
+    }
+
+    /// Set the outer corner radius advertised to the platform backend.
+    pub fn with_corner_radius(mut self, corner_radius: f32) -> Self {
+        self.corner_radius = corner_radius.max(0.0);
+        self
+    }
+
+    /// Return the clear color required behind the root window surface.
+    pub fn root_clear_color(&self) -> Color {
+        if !self.opaque {
+            Color::TRANSPARENT
+        } else {
+            self.background_color
         }
     }
 }
@@ -83,7 +101,7 @@ const TITLEBAR_HEIGHT: u32 = 32;
 const CLOSE_BUTTON_SIZE: u32 = 18;
 const CLOSE_BUTTON_MARGIN: u32 = 8;
 const TITLEBAR_CONTROL_COUNT: u32 = 3;
-const WINDOW_CORNER_RADIUS: u32 = 0;
+const DEFAULT_WINDOW_CORNER_RADIUS: f32 = 10.0;
 const WINDOW_BORDER_WIDTH: u32 = 1;
 
 /// Layout metrics for the content area inside a top-level window.
@@ -105,11 +123,10 @@ impl WindowContentLayout {
     /// Content offset and total decoration size in ScarletUI logical pixels.
     pub const fn new(decorated: bool) -> Self {
         if decorated {
-            let border_width = WINDOW_BORDER_WIDTH as f32;
             let titlebar_height = TITLEBAR_HEIGHT as f32;
             Self {
-                offset: Point::new(border_width, titlebar_height),
-                decoration_size: Size::new(border_width * 2.0, titlebar_height + border_width),
+                offset: Point::new(0.0, titlebar_height),
+                decoration_size: Size::new(0.0, titlebar_height),
             }
         } else {
             Self {
@@ -151,6 +168,7 @@ pub struct Window<V: View> {
     resizable: bool,
     movable: bool,
     decorated: bool,
+    corner_radius: f32,
     background_color: Color,
     opaque: bool,
     window_type: u32,
@@ -228,6 +246,7 @@ impl<V: View> Window<V> {
             resizable: true,
             movable: true,
             decorated: true,
+            corner_radius: DEFAULT_WINDOW_CORNER_RADIUS,
             background_color: ColorPalette::light().window_background(),
             opaque: true,
             window_type: window_type::NORMAL,
@@ -287,6 +306,16 @@ impl<V: View> Window<V> {
     /// Set whether the window has decorations (title bar, borders)
     pub fn decorated(mut self, decorated: bool) -> Self {
         self.decorated = decorated;
+        self
+    }
+
+    /// Set the outer radius used by ScarletUI's client-side window chrome.
+    ///
+    /// Undecorated windows always expose a zero effective radius. Maximized and
+    /// fullscreen windows temporarily render square without changing this
+    /// configured value.
+    pub fn corner_radius(mut self, corner_radius: f32) -> Self {
+        self.corner_radius = corner_radius.max(0.0);
         self
     }
 
@@ -391,6 +420,11 @@ impl<V: View> Window<V> {
     pub fn is_opaque(&self) -> bool {
         self.opaque
     }
+
+    /// Get the configured client-side window corner radius.
+    pub fn get_corner_radius(&self) -> f32 {
+        self.corner_radius
+    }
 }
 
 impl<V: View + Clone> Clone for Window<V> {
@@ -404,6 +438,7 @@ impl<V: View + Clone> Clone for Window<V> {
             resizable: self.resizable,
             movable: self.movable,
             decorated: self.decorated,
+            corner_radius: self.corner_radius,
             background_color: self.background_color,
             opaque: self.opaque,
             window_type: self.window_type,
@@ -432,6 +467,11 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
             self.opaque,
             self.placement,
         )
+        .with_corner_radius(if self.decorated {
+            self.corner_radius
+        } else {
+            0.0
+        })
     }
 
     fn window_size_limits(&self) -> WindowSizeLimits {
@@ -467,6 +507,11 @@ impl<V: View + Clone + 'static> View for Window<V> {
             self.size,
             self.decorated,
             self.background_color,
+            if self.decorated {
+                self.corner_radius
+            } else {
+                0.0
+            },
         );
 
         // Create child elements. The titlebar is a separate render element so
@@ -764,22 +809,6 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
             ),
             titlebar_border,
         );
-        if width > 0.0 {
-            let outer_border_color = palette.window_border();
-            let titlebar_height = TITLEBAR_HEIGHT as f32;
-            ctx.fill_rect(
-                Rect::from_xywh(origin.x, origin.y, width, 1.0),
-                outer_border_color,
-            );
-            ctx.fill_rect(
-                Rect::from_xywh(origin.x, origin.y, 1.0, titlebar_height),
-                outer_border_color,
-            );
-            ctx.fill_rect(
-                Rect::from_xywh(origin.x + width - 1.0, origin.y, 1.0, titlebar_height),
-                outer_border_color,
-            );
-        }
         true
     }
 
@@ -897,6 +926,7 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
             crate::pipeline::mark_element_needs_paint(self.pipeline_id, titlebar.id());
         }
     }
+
 }
 
 impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
@@ -1254,15 +1284,27 @@ pub struct WindowRenderObject {
     size: Size,
     decorated: bool,
     background_color: Color,
+    corner_radius: f32,
     buffer: Option<Buffer>,
 }
 
 impl WindowRenderObject {
-    pub fn new(_title: String, size: Size, decorated: bool, background_color: Color) -> Self {
+    pub fn new(
+        _title: String,
+        size: Size,
+        decorated: bool,
+        background_color: Color,
+        corner_radius: f32,
+    ) -> Self {
         Self {
             size,
             decorated,
             background_color,
+            corner_radius: if decorated {
+                corner_radius.max(0.0)
+            } else {
+                0.0
+            },
             buffer: None,
         }
     }
@@ -1272,14 +1314,29 @@ impl WindowRenderObject {
         self.background_color
     }
 
+    /// Return the radius currently used for painting and descendant clipping.
+    pub fn effective_corner_radius(&self) -> f32 {
+        if self.decorated {
+            self.corner_radius.max(0.0)
+        } else {
+            0.0
+        }
+    }
+
     fn update_from_window_info(&mut self, info: &WindowInfo, decorated: bool) -> UpdateResult {
         let changed = self.size != info.size
             || self.decorated != decorated
-            || self.background_color != info.background_color;
+            || self.background_color != info.background_color
+            || self.corner_radius != info.corner_radius;
 
         self.size = info.size;
         self.decorated = decorated;
         self.background_color = info.background_color;
+        self.corner_radius = if decorated {
+            info.corner_radius.max(0.0)
+        } else {
+            0.0
+        };
 
         if changed {
             UpdateResult::Updated
@@ -1355,7 +1412,10 @@ impl WindowRenderObject {
             let w = canvas.width();
             let h = canvas.height();
 
-            // Fill background with the specified color, including explicit transparency.
+            // The PaintCommand path supplies the antialiased rounded shape.
+            // CPU fallback intentionally remains a simple rectangular fill;
+            // native layer clipping still provides the outer window mask on
+            // platforms that support it.
             canvas.fill_rect(0, 0, w, h, self.background_color);
 
             // Draw border
@@ -1406,7 +1466,6 @@ impl WindowRenderObject {
 
         // Draw titlebar with button colors
         for y in 0..TITLEBAR_HEIGHT {
-            // No corner rounding (WINDOW_CORNER_RADIUS = 0)
             canvas.fill_rect(0, y as i32, width, 1, base_color);
             canvas.fill_rect(
                 close_rect.origin.x as i32,
@@ -1537,20 +1596,6 @@ impl WindowRenderObject {
             border_color,
         );
 
-        // The titlebar is composited above the window background, so it must
-        // carry the border segments that overlap its own bounds.
-        if width > 0 {
-            let outer_border_color = palette.window_border();
-            canvas.draw_line(0, 0, width as i32 - 1, 0, outer_border_color);
-            canvas.draw_line(0, 0, 0, TITLEBAR_HEIGHT as i32 - 1, outer_border_color);
-            canvas.draw_line(
-                width as i32 - 1,
-                0,
-                width as i32 - 1,
-                TITLEBAR_HEIGHT as i32 - 1,
-                outer_border_color,
-            );
-        }
     }
 
     /// Static helper for button rect calculation
@@ -1725,32 +1770,37 @@ impl ElementRenderObject for WindowRenderObject {
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let width = libm::ceilf(self.size.width.max(0.0));
         let height = libm::ceilf(self.size.height.max(0.0));
+        if width <= 0.0 || height <= 0.0 {
+            return false;
+        }
         let rect = Rect::from_xywh(origin.x, origin.y, width, height);
-        ctx.fill_rect(rect, self.background_color);
+        let radius = style::radius_for(rect, self.effective_corner_radius());
+        if radius > 0.0 {
+            ctx.fill_rounded_rect(rect, radius, self.background_color);
+        } else {
+            ctx.fill_rect(rect, self.background_color);
+        }
         true
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext<'_>, origin: Point) -> bool {
         let width = libm::ceilf(self.size.width.max(0.0));
         let height = libm::ceilf(self.size.height.max(0.0));
-        if self.decorated && width > 0.0 && height > 0.0 {
+        if self.decorated
+            && self.effective_corner_radius() <= 0.0
+            && width > 0.0
+            && height > 0.0
+        {
             let border_color = ColorPalette::default().window_border();
-            ctx.fill_rect(
-                Rect::from_xywh(origin.x, origin.y, width, 1.0),
-                border_color,
-            );
-            ctx.fill_rect(
-                Rect::from_xywh(origin.x, origin.y + height - 1.0, width, 1.0),
-                border_color,
-            );
-            ctx.fill_rect(
-                Rect::from_xywh(origin.x, origin.y, 1.0, height),
-                border_color,
-            );
-            ctx.fill_rect(
-                Rect::from_xywh(origin.x + width - 1.0, origin.y, 1.0, height),
-                border_color,
-            );
+            let half = WINDOW_BORDER_WIDTH as f32 * 0.5;
+            let rect = Rect::from_xywh(origin.x, origin.y, width, height)
+                .inset(crate::geometry::EdgeInsets::all(half));
+            let radius = (self.effective_corner_radius() - half).max(0.0);
+            if radius > 0.0 {
+                ctx.stroke_rounded_rect(rect, radius, WINDOW_BORDER_WIDTH as f32, border_color);
+            } else {
+                ctx.stroke_rect(rect, WINDOW_BORDER_WIDTH as f32, border_color);
+            }
             return true;
         }
         false
@@ -1761,7 +1811,7 @@ impl ElementRenderObject for WindowRenderObject {
         let height = libm::ceilf(self.size.height.max(0.0));
         Some((
             Rect::from_xywh(origin.x, origin.y, width, height),
-            WINDOW_CORNER_RADIUS as f32,
+            self.effective_corner_radius(),
         ))
     }
 

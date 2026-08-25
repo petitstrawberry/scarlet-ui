@@ -287,9 +287,9 @@ impl SliderRenderObject {
             let fill_width = (normalized_value * track_width) as u32;
 
             let palette = ColorPalette::default();
-            let track_color = style::surface_color(&palette, style::SurfaceLevel::Section);
+            let track_color = style::surface_color(&palette, style::SurfaceRole::Section);
             let fill_color = palette.primary();
-            let thumb_color = style::surface_color(&palette, style::SurfaceLevel::Floating);
+            let thumb_color = style::surface_color(&palette, style::SurfaceRole::Floating);
             let thumb_border = if self.dragging {
                 style::focus_highlight(&palette)
             } else {
@@ -394,9 +394,9 @@ impl ElementRenderObject for SliderRenderObject {
         };
         let fill_width = normalized_value * track_width;
         let palette = ColorPalette::default();
-        let track_color = style::surface_color(&palette, style::SurfaceLevel::Section);
+        let track_color = style::surface_color(&palette, style::SurfaceRole::Section);
         let fill_color = palette.primary();
-        let thumb_color = style::surface_color(&palette, style::SurfaceLevel::Floating);
+        let thumb_color = style::surface_color(&palette, style::SurfaceRole::Floating);
         let thumb_border = if self.dragging {
             style::focus_highlight(&palette)
         } else {

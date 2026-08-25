@@ -270,6 +270,7 @@ impl ApplicationRunner {
             focus_on_create: window_info.focus_on_create,
             active_on_focus: window_info.active_on_focus,
             opaque: window_info.opaque,
+            corner_radius: window_info.corner_radius,
             placement: window_info.placement,
         };
 

@@ -12,7 +12,7 @@ use crate::element::{
 use crate::geometry::{Point, Size};
 use crate::renderer::PaintContext;
 use crate::view::View;
-use crate::views::style::{self, SurfaceLevel};
+use crate::views::style::{self, SurfaceRole};
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -46,7 +46,7 @@ impl<C: View + Clone> HeaderBar<C> {
         Self {
             content,
             height: 48.0,
-            background: style::surface_color(&palette, SurfaceLevel::Structural),
+            background: style::surface_color(&palette, SurfaceRole::Structural),
             border: palette.divider(),
         }
     }
