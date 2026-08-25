@@ -28,32 +28,88 @@ pub enum WindowPlacement {
     At { x: i32, y: i32 },
 }
 
-/// Selects who owns the visible frame around a top-level window.
+/// Selects who owns the outer frame around a top-level window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum WindowDecoration {
-    /// ScarletUI draws the titlebar, controls, and border inside the window.
+pub enum WindowFrame {
+    /// ScarletUI draws the frame inside the window surface.
     #[default]
     Custom,
-    /// The platform window manager draws its standard window frame.
+    /// The platform window manager draws its standard frame.
     System,
-    /// Neither ScarletUI nor the platform window manager draws a frame.
+    /// No outer frame is drawn.
     None,
 }
 
-impl WindowDecoration {
-    /// Return whether ScarletUI owns and draws the window frame.
+impl WindowFrame {
+    /// Return whether ScarletUI owns and draws the frame.
     pub const fn is_custom(self) -> bool {
         matches!(self, Self::Custom)
     }
 
-    /// Return whether the platform window manager owns the window frame.
+    /// Return whether the platform window manager owns the frame.
     pub const fn is_system(self) -> bool {
         matches!(self, Self::System)
     }
+}
 
-    /// Return whether either owner draws a visible window frame.
+/// Selects who owns the titlebar of a top-level window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowTitleBar {
+    /// ScarletUI draws the titlebar and window controls.
+    #[default]
+    Custom,
+    /// The platform window manager draws its standard titlebar and controls.
+    System,
+    /// No titlebar is drawn.
+    None,
+}
+
+impl WindowTitleBar {
+    /// Return whether ScarletUI owns and draws the titlebar.
+    pub const fn is_custom(self) -> bool {
+        matches!(self, Self::Custom)
+    }
+
+    /// Return whether the platform window manager owns the titlebar.
+    pub const fn is_system(self) -> bool {
+        matches!(self, Self::System)
+    }
+}
+
+/// Independent frame and titlebar ownership for a top-level window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowDecoration {
+    pub frame: WindowFrame,
+    pub title_bar: WindowTitleBar,
+}
+
+impl WindowDecoration {
+    /// ScarletUI draws both the frame and titlebar.
+    pub const CUSTOM: Self = Self::new(WindowFrame::Custom, WindowTitleBar::Custom);
+    /// The platform window manager draws both the frame and titlebar.
+    pub const SYSTEM: Self = Self::new(WindowFrame::System, WindowTitleBar::System);
+    /// Neither a frame nor titlebar is drawn.
+    pub const NONE: Self = Self::new(WindowFrame::None, WindowTitleBar::None);
+
+    /// Create a decoration configuration with independent ownership.
+    pub const fn new(frame: WindowFrame, title_bar: WindowTitleBar) -> Self {
+        Self { frame, title_bar }
+    }
+
+    /// Return whether ScarletUI draws any window chrome.
+    pub const fn has_custom_chrome(self) -> bool {
+        self.frame.is_custom() || self.title_bar.is_custom()
+    }
+
+    /// Return whether any visible frame or titlebar is configured.
     pub const fn is_visible(self) -> bool {
-        !matches!(self, Self::None)
+        !matches!(self.frame, WindowFrame::None) || !matches!(self.title_bar, WindowTitleBar::None)
+    }
+}
+
+impl Default for WindowDecoration {
+    fn default() -> Self {
+        Self::CUSTOM
     }
 }
 

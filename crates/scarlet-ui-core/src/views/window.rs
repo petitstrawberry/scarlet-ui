@@ -21,7 +21,7 @@ use crate::element::{
 use crate::geometry::{Point, Rect, Size};
 use crate::menu_model::MenuBarModel;
 use crate::pipeline::{MountContext, PipelineId};
-use crate::platform::{WindowDecoration, WindowPlacement};
+use crate::platform::{WindowDecoration, WindowFrame, WindowPlacement, WindowTitleBar};
 use crate::renderer::PaintContext;
 use crate::state::Listenable;
 use crate::view::View;
@@ -74,7 +74,7 @@ impl WindowInfo {
             active_on_focus,
             background_color,
             opaque,
-            decoration: WindowDecoration::Custom,
+            decoration: WindowDecoration::CUSTOM,
             placement,
         }
     }
@@ -113,23 +113,36 @@ impl WindowContentLayout {
     /// Content offset and total decoration size in ScarletUI logical pixels.
     pub const fn new(decorated: bool) -> Self {
         if decorated {
-            let border_width = WINDOW_BORDER_WIDTH as f32;
-            let titlebar_height = TITLEBAR_HEIGHT as f32;
-            Self {
-                offset: Point::new(border_width, titlebar_height),
-                decoration_size: Size::new(border_width * 2.0, titlebar_height + border_width),
-            }
+            Self::for_decoration(WindowDecoration::CUSTOM)
         } else {
-            Self {
-                offset: Point::ZERO,
-                decoration_size: Size::ZERO,
-            }
+            Self::for_decoration(WindowDecoration::NONE)
         }
     }
 
     /// Create layout metrics for an explicit window decoration mode.
     pub const fn for_decoration(decoration: WindowDecoration) -> Self {
-        Self::new(decoration.is_custom())
+        let border_width = if decoration.frame.is_custom() {
+            WINDOW_BORDER_WIDTH as f32
+        } else {
+            0.0
+        };
+        let titlebar_height = if decoration.title_bar.is_custom() {
+            TITLEBAR_HEIGHT as f32
+        } else {
+            0.0
+        };
+        let top_border = if decoration.frame.is_custom() && !decoration.title_bar.is_custom() {
+            border_width
+        } else {
+            0.0
+        };
+        Self {
+            offset: Point::new(border_width, titlebar_height + top_border),
+            decoration_size: Size::new(
+                border_width * 2.0,
+                titlebar_height + top_border + border_width,
+            ),
+        }
     }
 
     /// Get the content area's origin relative to the window origin.
@@ -197,12 +210,17 @@ pub trait WindowViewInfo {
     ///
     /// The frame mode used by the platform and ScarletUI render tree.
     fn window_decoration(&self) -> WindowDecoration {
-        WindowDecoration::Custom
+        WindowDecoration::CUSTOM
     }
 
-    /// Return whether ScarletUI draws the titlebar and border.
-    fn uses_custom_decoration(&self) -> bool {
-        self.window_decoration().is_custom()
+    /// Return whether ScarletUI draws the titlebar.
+    fn uses_custom_title_bar(&self) -> bool {
+        self.window_decoration().title_bar.is_custom()
+    }
+
+    /// Return whether ScarletUI draws the outer frame.
+    fn uses_custom_frame(&self) -> bool {
+        self.window_decoration().frame.is_custom()
     }
 
     /// Return whether the window has either custom or system decorations.
@@ -250,7 +268,7 @@ impl<V: View> Window<V> {
             max_size: None,
             resizable: true,
             movable: true,
-            decoration: WindowDecoration::Custom,
+            decoration: WindowDecoration::CUSTOM,
             background_color: ColorPalette::light().window_background(),
             opaque: true,
             window_type: window_type::NORMAL,
@@ -313,16 +331,28 @@ impl<V: View> Window<V> {
         self
     }
 
+    /// Select who owns the outer window frame.
+    pub fn window_frame(mut self, frame: WindowFrame) -> Self {
+        self.decoration.frame = frame;
+        self
+    }
+
+    /// Select who owns the window titlebar.
+    pub fn window_title_bar(mut self, title_bar: WindowTitleBar) -> Self {
+        self.decoration.title_bar = title_bar;
+        self
+    }
+
     /// Set whether ScarletUI draws its custom titlebar and border.
     ///
-    /// This compatibility API maps `true` to [`WindowDecoration::Custom`]
-    /// and `false` to [`WindowDecoration::None`]. Use [`Self::decoration`]
+    /// This compatibility API maps `true` to [`WindowDecoration::CUSTOM`]
+    /// and `false` to [`WindowDecoration::NONE`]. Use [`Self::decoration`]
     /// to request the platform's standard window frame.
     pub fn decorated(mut self, decorated: bool) -> Self {
         self.decoration = if decorated {
-            WindowDecoration::Custom
+            WindowDecoration::CUSTOM
         } else {
-            WindowDecoration::None
+            WindowDecoration::NONE
         };
         self
     }
@@ -515,8 +545,11 @@ impl<V: View + Clone + 'static> View for Window<V> {
         // Create child elements. The titlebar is a separate render element so
         // content repaints do not repaint window decorations.
         let mut children = Vec::new();
-        if self.decoration.is_custom() {
-            children.push(WindowTitleBarView::new(self.title.clone()).create_element());
+        if self.decoration.title_bar.is_custom() {
+            children.push(
+                WindowTitleBarView::new(self.title.clone(), self.decoration.frame.is_custom())
+                    .create_element(),
+            );
         }
         children.push(self.content.create_element());
 
@@ -540,13 +573,15 @@ impl<V: View + Clone + 'static> View for Window<V> {
 struct WindowTitleBarView {
     title: String,
     focused: bool,
+    draw_frame_edges: bool,
 }
 
 impl WindowTitleBarView {
-    fn new(title: String) -> Self {
+    fn new(title: String, draw_frame_edges: bool) -> Self {
         Self {
             title,
             focused: true,
+            draw_frame_edges,
         }
     }
 }
@@ -555,7 +590,11 @@ impl View for WindowTitleBarView {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(crate::element::RenderElement::new(
             self.clone(),
-            WindowTitleBarRenderObject::new(self.title.clone(), self.focused),
+            WindowTitleBarRenderObject::new(
+                self.title.clone(),
+                self.focused,
+                self.draw_frame_edges,
+            ),
         ))
     }
 
@@ -567,6 +606,7 @@ impl View for WindowTitleBarView {
 struct WindowTitleBarRenderObject {
     title: String,
     focused: bool,
+    draw_frame_edges: bool,
     size: Size,
     buffer: Option<Buffer>,
     // Button hover states (0=none, 1=hover, 2=pressed)
@@ -576,10 +616,11 @@ struct WindowTitleBarRenderObject {
 }
 
 impl WindowTitleBarRenderObject {
-    fn new(title: String, focused: bool) -> Self {
+    fn new(title: String, focused: bool, draw_frame_edges: bool) -> Self {
         Self {
             title,
             focused,
+            draw_frame_edges,
             size: Size::new(0.0, TITLEBAR_HEIGHT as f32),
             buffer: None,
             close_button_state: 0,
@@ -661,6 +702,7 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
                 self.close_button_state,
                 self.maximize_button_state,
                 self.minimize_button_state,
+                self.draw_frame_edges,
             );
         }
     }
@@ -807,7 +849,7 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
             ),
             titlebar_border,
         );
-        if width > 0.0 {
+        if self.draw_frame_edges && width > 0.0 {
             let outer_border_color = palette.window_border();
             let titlebar_height = TITLEBAR_HEIGHT as f32;
             ctx.fill_rect(
@@ -831,12 +873,16 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
             return UpdateResult::Replaced;
         };
 
-        if self.title == titlebar.title && self.focused == titlebar.focused {
+        if self.title == titlebar.title
+            && self.focused == titlebar.focused
+            && self.draw_frame_edges == titlebar.draw_frame_edges
+        {
             return UpdateResult::NoChange;
         }
 
         self.title = titlebar.title.clone();
         self.focused = titlebar.focused;
+        self.draw_frame_edges = titlebar.draw_frame_edges;
         UpdateResult::Updated
     }
 }
@@ -911,7 +957,11 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
     }
 
     fn titlebar_child_index(&self) -> Option<usize> {
-        self.render_object.decoration.is_custom().then_some(0)
+        self.render_object
+            .decoration
+            .title_bar
+            .is_custom()
+            .then_some(0)
     }
 
     fn titlebar_render_object_mut(&mut self) -> Option<&mut WindowTitleBarRenderObject> {
@@ -985,8 +1035,11 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
 
         let window_info = typed_view.window_info();
         let mut child_views: Vec<Box<dyn View>> = Vec::new();
-        if typed_view.uses_custom_decoration() {
-            child_views.push(Box::new(WindowTitleBarView::new(window_info.title.clone())));
+        if typed_view.uses_custom_title_bar() {
+            child_views.push(Box::new(WindowTitleBarView::new(
+                window_info.title.clone(),
+                typed_view.uses_custom_frame(),
+            )));
         }
         if let Some(content) = typed_view.content_view() {
             child_views.push(content.clone_view());
@@ -1105,7 +1158,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
         }
 
         // System-owned and frameless windows have no ScarletUI titlebar controls.
-        if !self.render_object.decoration.is_custom() {
+        if !self.render_object.decoration.title_bar.is_custom() {
             return false;
         }
 
@@ -1379,7 +1432,7 @@ impl WindowRenderObject {
     fn draw(&mut self) {
         let width = libm::ceilf(self.size.width) as usize;
         let height = libm::ceilf(self.size.height) as usize;
-        let custom_decoration = self.decoration.is_custom();
+        let custom_frame = self.decoration.frame.is_custom();
 
         // Create or resize buffer
         let w = width as u32;
@@ -1405,7 +1458,7 @@ impl WindowRenderObject {
             canvas.fill_rect(0, 0, w, h, self.background_color);
 
             // Draw border
-            if custom_decoration {
+            if custom_frame {
                 Self::draw_border_canvas(&mut canvas, width as u32, height as u32);
             }
         }
@@ -1421,6 +1474,7 @@ impl WindowRenderObject {
         close_button_state: u8,
         maximize_button_state: u8,
         minimize_button_state: u8,
+        draw_frame_edges: bool,
     ) {
         if crate::debug::is_enabled() {
             crate::logln!(
@@ -1585,7 +1639,7 @@ impl WindowRenderObject {
 
         // The titlebar is composited above the window background, so it must
         // carry the border segments that overlap its own bounds.
-        if width > 0 {
+        if draw_frame_edges && width > 0 {
             let outer_border_color = palette.window_border();
             canvas.draw_line(0, 0, width as i32 - 1, 0, outer_border_color);
             canvas.draw_line(0, 0, 0, TITLEBAR_HEIGHT as i32 - 1, outer_border_color);
@@ -1697,14 +1751,18 @@ impl ElementRenderObject for WindowRenderObject {
             );
         }
 
-        if self.decoration.is_custom()
+        if self.decoration.title_bar.is_custom()
             && let Some(titlebar) = children.get_mut(0)
         {
             titlebar.layout(LayoutConstraints::tight(size.width, TITLEBAR_HEIGHT as f32));
             titlebar.set_position(Point::ZERO);
         }
 
-        let content_index = if self.decoration.is_custom() { 1 } else { 0 };
+        let content_index = if self.decoration.title_bar.is_custom() {
+            1
+        } else {
+            0
+        };
         if let Some(child) = children.get_mut(content_index) {
             let child_constraints = LayoutConstraints::loose(content_width, content_height);
             if crate::debug::is_enabled() {
@@ -1779,7 +1837,7 @@ impl ElementRenderObject for WindowRenderObject {
     fn paint_overlay(&self, ctx: &mut PaintContext<'_>, origin: Point) -> bool {
         let width = libm::ceilf(self.size.width.max(0.0));
         let height = libm::ceilf(self.size.height.max(0.0));
-        if self.decoration.is_custom() && width > 0.0 && height > 0.0 {
+        if self.decoration.frame.is_custom() && width > 0.0 && height > 0.0 {
             let border_color = ColorPalette::default().window_border();
             ctx.fill_rect(
                 Rect::from_xywh(origin.x, origin.y, width, 1.0),
@@ -1824,27 +1882,49 @@ mod tests {
     #[test]
     fn window_decoration_defaults_to_custom_and_legacy_api_remains_explicit() {
         let default_window = Window::new("Default", Text::new("Content"));
-        assert_eq!(default_window.get_decoration(), WindowDecoration::Custom);
+        assert_eq!(default_window.get_decoration(), WindowDecoration::CUSTOM);
         assert!(default_window.is_decorated());
 
         let frameless = default_window.clone().decorated(false);
-        assert_eq!(frameless.get_decoration(), WindowDecoration::None);
+        assert_eq!(frameless.get_decoration(), WindowDecoration::NONE);
         assert!(!frameless.is_decorated());
 
         let custom = frameless.decorated(true);
-        assert_eq!(custom.get_decoration(), WindowDecoration::Custom);
+        assert_eq!(custom.get_decoration(), WindowDecoration::CUSTOM);
     }
 
     #[test]
-    fn only_custom_decoration_consumes_scarletui_content_space() {
-        let custom = WindowContentLayout::for_decoration(WindowDecoration::Custom);
+    fn frame_and_titlebar_contribute_layout_independently() {
+        let custom = WindowContentLayout::for_decoration(WindowDecoration::CUSTOM);
         assert_eq!(custom.offset(), Point::new(1.0, TITLEBAR_HEIGHT as f32));
         assert_eq!(
             custom.decoration_size(),
             Size::new(2.0, TITLEBAR_HEIGHT as f32 + 1.0)
         );
 
-        for decoration in [WindowDecoration::System, WindowDecoration::None] {
+        let system_frame_custom_titlebar = WindowContentLayout::for_decoration(
+            WindowDecoration::new(WindowFrame::System, WindowTitleBar::Custom),
+        );
+        assert_eq!(
+            system_frame_custom_titlebar.offset(),
+            Point::new(0.0, TITLEBAR_HEIGHT as f32)
+        );
+        assert_eq!(
+            system_frame_custom_titlebar.decoration_size(),
+            Size::new(0.0, TITLEBAR_HEIGHT as f32)
+        );
+
+        let custom_frame_no_titlebar = WindowContentLayout::for_decoration(WindowDecoration::new(
+            WindowFrame::Custom,
+            WindowTitleBar::None,
+        ));
+        assert_eq!(custom_frame_no_titlebar.offset(), Point::new(1.0, 1.0));
+        assert_eq!(
+            custom_frame_no_titlebar.decoration_size(),
+            Size::new(2.0, 2.0)
+        );
+
+        for decoration in [WindowDecoration::SYSTEM, WindowDecoration::NONE] {
             let layout = WindowContentLayout::for_decoration(decoration);
             assert_eq!(layout.offset(), Point::ZERO);
             assert_eq!(layout.decoration_size(), Size::ZERO);
@@ -1854,12 +1934,24 @@ mod tests {
     #[test]
     fn system_decoration_omits_scarletui_titlebar_and_reaches_window_info() {
         let window =
-            Window::new("System", Text::new("Content")).decoration(WindowDecoration::System);
-        assert_eq!(window.get_decoration(), WindowDecoration::System);
+            Window::new("System", Text::new("Content")).decoration(WindowDecoration::SYSTEM);
+        assert_eq!(window.get_decoration(), WindowDecoration::SYSTEM);
         assert!(window.is_decorated());
-        assert_eq!(window.window_info().decoration, WindowDecoration::System);
+        assert_eq!(window.window_info().decoration, WindowDecoration::SYSTEM);
 
         let element = window.create_element();
         assert_eq!(element.children().len(), 1);
+    }
+
+    #[test]
+    fn frame_and_titlebar_builder_methods_do_not_overwrite_each_other() {
+        let window = Window::new("Mixed", Text::new("Content"))
+            .window_frame(WindowFrame::System)
+            .window_title_bar(WindowTitleBar::Custom);
+        assert_eq!(
+            window.get_decoration(),
+            WindowDecoration::new(WindowFrame::System, WindowTitleBar::Custom)
+        );
+        assert_eq!(window.create_element().children().len(), 2);
     }
 }

@@ -445,7 +445,7 @@ impl PreviewHost {
                 focus_on_create: true,
                 active_on_focus: true,
                 opaque: true,
-                decoration: crate::platform::WindowDecoration::Custom,
+                decoration: crate::platform::WindowDecoration::CUSTOM,
                 placement: crate::platform::WindowPlacement::Default,
             })
             .map_err(|error| error.to_string())?;

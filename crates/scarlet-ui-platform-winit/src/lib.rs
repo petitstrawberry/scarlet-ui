@@ -39,6 +39,8 @@ use ::winit::event::{
 };
 use ::winit::event_loop::{ActiveEventLoop, EventLoop};
 use ::winit::keyboard::{Key, ModifiersState, NamedKey};
+#[cfg(target_os = "macos")]
+use ::winit::platform::macos::WindowAttributesExtMacOS;
 use ::winit::platform::pump_events::EventLoopExtPumpEvents;
 use ::winit::window::{
     CursorGrabMode, Fullscreen, Window as WinitWindow, WindowAttributes, WindowId,
@@ -889,12 +891,49 @@ pub struct WinitPlatformWindow {
     surface_id: u32,
 }
 
+fn validate_window_decoration(decoration: WindowDecoration) -> Result<()> {
+    if decoration.title_bar.is_system() && !decoration.frame.is_system() {
+        return Err(Error::WindowDecorationUnsupported);
+    }
+    #[cfg(not(target_os = "macos"))]
+    if decoration.frame.is_system() && !decoration.title_bar.is_system() {
+        return Err(Error::WindowDecorationUnsupported);
+    }
+    Ok(())
+}
+
 fn system_window_decorations_enabled(decoration: WindowDecoration) -> bool {
-    decoration.is_system()
+    decoration.frame.is_system() || decoration.title_bar.is_system()
+}
+
+#[cfg(target_os = "macos")]
+fn apply_platform_window_decoration(
+    attributes: WindowAttributes,
+    decoration: WindowDecoration,
+) -> WindowAttributes {
+    if decoration.frame.is_system() && !decoration.title_bar.is_system() {
+        attributes
+            .with_titlebar_transparent(true)
+            .with_title_hidden(true)
+            .with_titlebar_buttons_hidden(true)
+            .with_fullsize_content_view(true)
+            .with_has_shadow(true)
+    } else {
+        attributes
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_platform_window_decoration(
+    attributes: WindowAttributes,
+    _decoration: WindowDecoration,
+) -> WindowAttributes {
+    attributes
 }
 
 impl WinitPlatformWindow {
     fn create(shared: Rc<WinitSharedState>, request: WindowCreateRequest) -> Result<Self> {
+        validate_window_decoration(request.decoration)?;
         let placement = request.placement;
         let requested_position = match request.placement {
             scarlet_ui_core::platform::WindowPlacement::Default
@@ -903,10 +942,11 @@ impl WinitPlatformWindow {
                 Some(Position::Logical(LogicalPosition::new(x as f64, y as f64)))
             }
         };
-        let mut attributes = WindowAttributes::default()
+        let attributes = WindowAttributes::default()
             .with_title(request.title)
             .with_decorations(system_window_decorations_enabled(request.decoration))
             .with_inner_size(LogicalSize::new(request.size.width, request.size.height));
+        let mut attributes = apply_platform_window_decoration(attributes, request.decoration);
         if let Some(position) = requested_position {
             attributes = attributes.with_position(position);
         }
@@ -1039,7 +1079,7 @@ impl PlatformWindow for WinitPlatformWindow {
                 focus_on_create: true,
                 active_on_focus: true,
                 opaque: true,
-                decoration: WindowDecoration::Custom,
+                decoration: WindowDecoration::CUSTOM,
                 placement: scarlet_ui_core::platform::WindowPlacement::Default,
             },
         )
@@ -1244,7 +1284,7 @@ impl PlatformWindow for WinitPlatformWindow {
                 focus_on_create: true,
                 active_on_focus: true,
                 opaque: true,
-                decoration: WindowDecoration::Custom,
+                decoration: WindowDecoration::CUSTOM,
                 placement: scarlet_ui_core::platform::WindowPlacement::Default,
             },
         )
@@ -1424,12 +1464,40 @@ fn map_wheel_phase(phase: TouchPhase) -> WheelPhase {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scarlet_ui_core::platform::{WindowFrame, WindowTitleBar};
 
     #[test]
-    fn only_system_mode_enables_platform_window_decorations() {
-        assert!(system_window_decorations_enabled(WindowDecoration::System));
-        assert!(!system_window_decorations_enabled(WindowDecoration::Custom));
-        assert!(!system_window_decorations_enabled(WindowDecoration::None));
+    fn system_owned_frame_or_titlebar_enables_platform_window_decorations() {
+        assert!(system_window_decorations_enabled(WindowDecoration::SYSTEM));
+        assert!(system_window_decorations_enabled(WindowDecoration::new(
+            WindowFrame::System,
+            WindowTitleBar::Custom,
+        )));
+        assert!(!system_window_decorations_enabled(WindowDecoration::CUSTOM));
+        assert!(!system_window_decorations_enabled(WindowDecoration::NONE));
+    }
+
+    #[test]
+    fn system_titlebar_requires_a_system_frame() {
+        assert_eq!(
+            validate_window_decoration(WindowDecoration::new(
+                WindowFrame::Custom,
+                WindowTitleBar::System,
+            )),
+            Err(Error::WindowDecorationUnsupported)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_supports_system_frame_with_custom_titlebar() {
+        assert_eq!(
+            validate_window_decoration(WindowDecoration::new(
+                WindowFrame::System,
+                WindowTitleBar::Custom,
+            )),
+            Ok(())
+        );
     }
 
     fn wheel(delta_y: i32, phase: WheelPhase, source: ScrollSource) -> Event {

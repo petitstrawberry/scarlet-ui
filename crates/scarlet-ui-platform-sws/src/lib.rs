@@ -849,8 +849,8 @@ impl PlatformBackend for SwsBackend {
 }
 
 fn validate_window_decoration(decoration: WindowDecoration) -> Result<()> {
-    if decoration == WindowDecoration::System {
-        Err(Error::SystemWindowDecorationUnsupported)
+    if decoration.frame.is_system() || decoration.title_bar.is_system() {
+        Err(Error::WindowDecorationUnsupported)
     } else {
         Ok(())
     }
@@ -2460,13 +2460,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn system_window_decoration_is_rejected_explicitly() {
+    fn system_owned_window_chrome_is_rejected_explicitly() {
         assert_eq!(
-            validate_window_decoration(WindowDecoration::System),
-            Err(Error::SystemWindowDecorationUnsupported)
+            validate_window_decoration(WindowDecoration::SYSTEM),
+            Err(Error::WindowDecorationUnsupported)
         );
-        assert_eq!(validate_window_decoration(WindowDecoration::Custom), Ok(()));
-        assert_eq!(validate_window_decoration(WindowDecoration::None), Ok(()));
+        assert_eq!(validate_window_decoration(WindowDecoration::CUSTOM), Ok(()));
+        assert_eq!(validate_window_decoration(WindowDecoration::NONE), Ok(()));
     }
 
     #[test]
