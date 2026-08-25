@@ -127,7 +127,9 @@ pub use menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
 pub use pipeline::{
     DirtyPhase, MountContext, PipelineId, PipelineOwner, RenderingPipeline, StateRegistry,
 };
-pub use platform::{PlatformBackend, PlatformWindow, WindowCreateRequest, WindowPlacement};
+pub use platform::{
+    PlatformBackend, PlatformWindow, WindowCreateRequest, WindowDecoration, WindowPlacement,
+};
 pub use render::{RenderNode, RenderTree};
 pub use renderer::{
     BackendFrame, CompositorBackendKind, CpuPaintBackend, PaintBackend, PresentedFrame,
@@ -182,6 +184,7 @@ pub mod prelude {
     };
     pub use crate::icon::{Icon, IconFill, IconSize, IconStyle, IconWeight};
     pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
+    pub use crate::platform::WindowDecoration;
     pub use crate::renderer::{CompositorBackendKind, RendererBackendKind};
     pub use crate::scene::{
         Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowGroup, WindowId,

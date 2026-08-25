@@ -21,7 +21,7 @@ use crate::element::{
 use crate::geometry::{Point, Rect, Size};
 use crate::menu_model::MenuBarModel;
 use crate::pipeline::{MountContext, PipelineId};
-use crate::platform::WindowPlacement;
+use crate::platform::{WindowDecoration, WindowPlacement};
 use crate::renderer::PaintContext;
 use crate::state::Listenable;
 use crate::view::View;
@@ -47,6 +47,7 @@ pub struct WindowInfo {
     pub active_on_focus: bool,
     pub background_color: Color,
     pub opaque: bool,
+    pub decoration: WindowDecoration,
     pub placement: WindowPlacement,
 }
 
@@ -73,8 +74,15 @@ impl WindowInfo {
             active_on_focus,
             background_color,
             opaque,
+            decoration: WindowDecoration::Custom,
             placement,
         }
+    }
+
+    /// Override who owns the visible frame around this window.
+    pub const fn with_decoration(mut self, decoration: WindowDecoration) -> Self {
+        self.decoration = decoration;
+        self
     }
 }
 
@@ -119,6 +127,11 @@ impl WindowContentLayout {
         }
     }
 
+    /// Create layout metrics for an explicit window decoration mode.
+    pub const fn for_decoration(decoration: WindowDecoration) -> Self {
+        Self::new(decoration.is_custom())
+    }
+
     /// Get the content area's origin relative to the window origin.
     ///
     /// # Returns
@@ -150,7 +163,7 @@ pub struct Window<V: View> {
     max_size: Option<Size>,
     resizable: bool,
     movable: bool,
-    decorated: bool,
+    decoration: WindowDecoration,
     background_color: Color,
     opaque: bool,
     window_type: u32,
@@ -178,13 +191,23 @@ pub trait WindowViewInfo {
     /// Minimum and maximum window sizes plus the resizable flag.
     fn window_size_limits(&self) -> WindowSizeLimits;
 
-    /// Return whether the window draws client-side decorations.
+    /// Return the selected owner of the visible window frame.
     ///
     /// # Returns
     ///
-    /// `true` when the window has a ScarletUI titlebar and border.
+    /// The frame mode used by the platform and ScarletUI render tree.
+    fn window_decoration(&self) -> WindowDecoration {
+        WindowDecoration::Custom
+    }
+
+    /// Return whether ScarletUI draws the titlebar and border.
+    fn uses_custom_decoration(&self) -> bool {
+        self.window_decoration().is_custom()
+    }
+
+    /// Return whether the window has either custom or system decorations.
     fn is_decorated(&self) -> bool {
-        true
+        self.window_decoration().is_visible()
     }
 
     /// Return the content view hosted by this window.
@@ -227,7 +250,7 @@ impl<V: View> Window<V> {
             max_size: None,
             resizable: true,
             movable: true,
-            decorated: true,
+            decoration: WindowDecoration::Custom,
             background_color: ColorPalette::light().window_background(),
             opaque: true,
             window_type: window_type::NORMAL,
@@ -284,9 +307,23 @@ impl<V: View> Window<V> {
         self
     }
 
-    /// Set whether the window has decorations (title bar, borders)
+    /// Select who owns the visible window frame.
+    pub fn decoration(mut self, decoration: WindowDecoration) -> Self {
+        self.decoration = decoration;
+        self
+    }
+
+    /// Set whether ScarletUI draws its custom titlebar and border.
+    ///
+    /// This compatibility API maps `true` to [`WindowDecoration::Custom`]
+    /// and `false` to [`WindowDecoration::None`]. Use [`Self::decoration`]
+    /// to request the platform's standard window frame.
     pub fn decorated(mut self, decorated: bool) -> Self {
-        self.decorated = decorated;
+        self.decoration = if decorated {
+            WindowDecoration::Custom
+        } else {
+            WindowDecoration::None
+        };
         self
     }
 
@@ -384,7 +421,12 @@ impl<V: View> Window<V> {
 
     /// Check if the window is decorated
     pub fn is_decorated(&self) -> bool {
-        self.decorated
+        self.decoration.is_visible()
+    }
+
+    /// Return the selected owner of the visible window frame.
+    pub fn get_decoration(&self) -> WindowDecoration {
+        self.decoration
     }
 
     /// Check if the window is fully opaque.
@@ -403,7 +445,7 @@ impl<V: View + Clone> Clone for Window<V> {
             max_size: self.max_size,
             resizable: self.resizable,
             movable: self.movable,
-            decorated: self.decorated,
+            decoration: self.decoration,
             background_color: self.background_color,
             opaque: self.opaque,
             window_type: self.window_type,
@@ -432,6 +474,7 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
             self.opaque,
             self.placement,
         )
+        .with_decoration(self.decoration)
     }
 
     fn window_size_limits(&self) -> WindowSizeLimits {
@@ -442,8 +485,8 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
         }
     }
 
-    fn is_decorated(&self) -> bool {
-        self.decorated
+    fn window_decoration(&self) -> WindowDecoration {
+        self.decoration
     }
 
     fn content_view(&self) -> Option<&dyn View> {
@@ -465,14 +508,14 @@ impl<V: View + Clone + 'static> View for Window<V> {
         let render_object = WindowRenderObject::new(
             self.title.clone(),
             self.size,
-            self.decorated,
+            self.decoration,
             self.background_color,
         );
 
         // Create child elements. The titlebar is a separate render element so
         // content repaints do not repaint window decorations.
         let mut children = Vec::new();
-        if self.decorated {
+        if self.decoration.is_custom() {
             children.push(WindowTitleBarView::new(self.title.clone()).create_element());
         }
         children.push(self.content.create_element());
@@ -868,7 +911,7 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
     }
 
     fn titlebar_child_index(&self) -> Option<usize> {
-        self.render_object.decorated.then_some(0)
+        self.render_object.decoration.is_custom().then_some(0)
     }
 
     fn titlebar_render_object_mut(&mut self) -> Option<&mut WindowTitleBarRenderObject> {
@@ -936,13 +979,13 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
         let Some(typed_view) = new_view.as_any().downcast_ref::<C>() else {
             return UpdateResult::Replaced;
         };
-        if typed_view.is_decorated() != self.render_object.decorated {
+        if typed_view.window_decoration() != self.render_object.decoration {
             return UpdateResult::Replaced;
         }
 
         let window_info = typed_view.window_info();
         let mut child_views: Vec<Box<dyn View>> = Vec::new();
-        if typed_view.is_decorated() {
+        if typed_view.uses_custom_decoration() {
             child_views.push(Box::new(WindowTitleBarView::new(window_info.title.clone())));
         }
         if let Some(content) = typed_view.content_view() {
@@ -950,9 +993,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
         }
 
         self.view = typed_view.clone();
-        let render_result = self
-            .render_object
-            .update_from_window_info(&window_info, typed_view.is_decorated());
+        let render_result = self.render_object.update_from_window_info(&window_info);
         let mount_context = self.mounted.then(|| MountContext::new(self.pipeline_id));
         let child_result =
             crate::element::update_children(&mut self.children, child_views, mount_context);
@@ -1063,8 +1104,8 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
             return false;
         }
 
-        // Only handle events on decorated windows
-        if !self.render_object.decorated {
+        // System-owned and frameless windows have no ScarletUI titlebar controls.
+        if !self.render_object.decoration.is_custom() {
             return false;
         }
 
@@ -1252,16 +1293,21 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
 /// - Window border (if decorated)
 pub struct WindowRenderObject {
     size: Size,
-    decorated: bool,
+    decoration: WindowDecoration,
     background_color: Color,
     buffer: Option<Buffer>,
 }
 
 impl WindowRenderObject {
-    pub fn new(_title: String, size: Size, decorated: bool, background_color: Color) -> Self {
+    pub fn new(
+        _title: String,
+        size: Size,
+        decoration: WindowDecoration,
+        background_color: Color,
+    ) -> Self {
         Self {
             size,
-            decorated,
+            decoration,
             background_color,
             buffer: None,
         }
@@ -1272,13 +1318,13 @@ impl WindowRenderObject {
         self.background_color
     }
 
-    fn update_from_window_info(&mut self, info: &WindowInfo, decorated: bool) -> UpdateResult {
+    fn update_from_window_info(&mut self, info: &WindowInfo) -> UpdateResult {
         let changed = self.size != info.size
-            || self.decorated != decorated
+            || self.decoration != info.decoration
             || self.background_color != info.background_color;
 
         self.size = info.size;
-        self.decorated = decorated;
+        self.decoration = info.decoration;
         self.background_color = info.background_color;
 
         if changed {
@@ -1333,7 +1379,7 @@ impl WindowRenderObject {
     fn draw(&mut self) {
         let width = libm::ceilf(self.size.width) as usize;
         let height = libm::ceilf(self.size.height) as usize;
-        let decorated = self.decorated;
+        let custom_decoration = self.decoration.is_custom();
 
         // Create or resize buffer
         let w = width as u32;
@@ -1359,7 +1405,7 @@ impl WindowRenderObject {
             canvas.fill_rect(0, 0, w, h, self.background_color);
 
             // Draw border
-            if decorated {
+            if custom_decoration {
                 Self::draw_border_canvas(&mut canvas, width as u32, height as u32);
             }
         }
@@ -1633,7 +1679,7 @@ impl ElementRenderObject for WindowRenderObject {
             );
         }
 
-        let content_layout = WindowContentLayout::new(self.decorated);
+        let content_layout = WindowContentLayout::for_decoration(self.decoration);
         let content_offset = content_layout.offset();
         let decoration_size = content_layout.decoration_size();
         let content_x = content_offset.x;
@@ -1651,14 +1697,14 @@ impl ElementRenderObject for WindowRenderObject {
             );
         }
 
-        if self.decorated
+        if self.decoration.is_custom()
             && let Some(titlebar) = children.get_mut(0)
         {
             titlebar.layout(LayoutConstraints::tight(size.width, TITLEBAR_HEIGHT as f32));
             titlebar.set_position(Point::ZERO);
         }
 
-        let content_index = if self.decorated { 1 } else { 0 };
+        let content_index = if self.decoration.is_custom() { 1 } else { 0 };
         if let Some(child) = children.get_mut(content_index) {
             let child_constraints = LayoutConstraints::loose(content_width, content_height);
             if crate::debug::is_enabled() {
@@ -1691,10 +1737,10 @@ impl ElementRenderObject for WindowRenderObject {
     fn render(&mut self) {
         if crate::debug::is_enabled() {
             crate::logln!(
-                "[WindowRenderObject] render: size={}x{}, decorated={}",
+                "[WindowRenderObject] render: size={}x{}, decoration={:?}",
                 self.size.width,
                 self.size.height,
-                self.decorated
+                self.decoration
             );
         }
         self.draw();
@@ -1733,7 +1779,7 @@ impl ElementRenderObject for WindowRenderObject {
     fn paint_overlay(&self, ctx: &mut PaintContext<'_>, origin: Point) -> bool {
         let width = libm::ceilf(self.size.width.max(0.0));
         let height = libm::ceilf(self.size.height.max(0.0));
-        if self.decorated && width > 0.0 && height > 0.0 {
+        if self.decoration.is_custom() && width > 0.0 && height > 0.0 {
             let border_color = ColorPalette::default().window_border();
             ctx.fill_rect(
                 Rect::from_xywh(origin.x, origin.y, width, 1.0),
@@ -1767,5 +1813,53 @@ impl ElementRenderObject for WindowRenderObject {
 
     fn update(&mut self, _new_view: &dyn View) -> UpdateResult {
         UpdateResult::NoChange
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::views::Text;
+
+    #[test]
+    fn window_decoration_defaults_to_custom_and_legacy_api_remains_explicit() {
+        let default_window = Window::new("Default", Text::new("Content"));
+        assert_eq!(default_window.get_decoration(), WindowDecoration::Custom);
+        assert!(default_window.is_decorated());
+
+        let frameless = default_window.clone().decorated(false);
+        assert_eq!(frameless.get_decoration(), WindowDecoration::None);
+        assert!(!frameless.is_decorated());
+
+        let custom = frameless.decorated(true);
+        assert_eq!(custom.get_decoration(), WindowDecoration::Custom);
+    }
+
+    #[test]
+    fn only_custom_decoration_consumes_scarletui_content_space() {
+        let custom = WindowContentLayout::for_decoration(WindowDecoration::Custom);
+        assert_eq!(custom.offset(), Point::new(1.0, TITLEBAR_HEIGHT as f32));
+        assert_eq!(
+            custom.decoration_size(),
+            Size::new(2.0, TITLEBAR_HEIGHT as f32 + 1.0)
+        );
+
+        for decoration in [WindowDecoration::System, WindowDecoration::None] {
+            let layout = WindowContentLayout::for_decoration(decoration);
+            assert_eq!(layout.offset(), Point::ZERO);
+            assert_eq!(layout.decoration_size(), Size::ZERO);
+        }
+    }
+
+    #[test]
+    fn system_decoration_omits_scarletui_titlebar_and_reaches_window_info() {
+        let window =
+            Window::new("System", Text::new("Content")).decoration(WindowDecoration::System);
+        assert_eq!(window.get_decoration(), WindowDecoration::System);
+        assert!(window.is_decorated());
+        assert_eq!(window.window_info().decoration, WindowDecoration::System);
+
+        let element = window.create_element();
+        assert_eq!(element.children().len(), 1);
     }
 }

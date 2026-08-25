@@ -25,13 +25,13 @@ use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::color::Color;
 use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::element::TextInputElementState;
-use scarlet_ui_core::error::Result;
+use scarlet_ui_core::error::{Error, Result};
 use scarlet_ui_core::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
 };
 use scarlet_ui_core::geometry::{Point, Rect, Size};
 use scarlet_ui_core::platform::{
-    PlatformBackend, PlatformWindow, WindowCreateRequest, WindowPlacement,
+    PlatformBackend, PlatformWindow, WindowCreateRequest, WindowDecoration, WindowPlacement,
 };
 use scarlet_ui_core::renderer::{
     BackendFrame, CompositorBackendKind, PaintBackend, PaintContext, RendererBackendKind,
@@ -829,6 +829,7 @@ impl PlatformBackend for SwsBackend {
     }
 
     fn create_window(&mut self, request: WindowCreateRequest) -> Result<Box<dyn PlatformWindow>> {
+        validate_window_decoration(request.decoration)?;
         let conn = self.connection()?;
         Ok(Box::new(
             SWSPlatformWindow::create_with_connection_and_policies(
@@ -844,6 +845,14 @@ impl PlatformBackend for SwsBackend {
                 request.placement,
             )?,
         ))
+    }
+}
+
+fn validate_window_decoration(decoration: WindowDecoration) -> Result<()> {
+    if decoration == WindowDecoration::System {
+        Err(Error::SystemWindowDecorationUnsupported)
+    } else {
+        Ok(())
     }
 }
 
@@ -2449,6 +2458,16 @@ impl SWSPlatformWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_window_decoration_is_rejected_explicitly() {
+        assert_eq!(
+            validate_window_decoration(WindowDecoration::System),
+            Err(Error::SystemWindowDecorationUnsupported)
+        );
+        assert_eq!(validate_window_decoration(WindowDecoration::Custom), Ok(()));
+        assert_eq!(validate_window_decoration(WindowDecoration::None), Ok(()));
+    }
 
     #[test]
     fn relative_motion_coalesces_axes_and_drains_without_syn() {

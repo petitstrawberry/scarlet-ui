@@ -18,7 +18,9 @@ use scarlet_ui_core::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
 };
 use scarlet_ui_core::geometry::{Point, Size};
-use scarlet_ui_core::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
+use scarlet_ui_core::platform::{
+    PlatformBackend, PlatformWindow, WindowCreateRequest, WindowDecoration,
+};
 #[cfg(feature = "sgfx")]
 use scarlet_ui_core::renderer::PaintBackend;
 pub use scarlet_ui_renderer_sgfx::{
@@ -887,6 +889,10 @@ pub struct WinitPlatformWindow {
     surface_id: u32,
 }
 
+fn system_window_decorations_enabled(decoration: WindowDecoration) -> bool {
+    decoration.is_system()
+}
+
 impl WinitPlatformWindow {
     fn create(shared: Rc<WinitSharedState>, request: WindowCreateRequest) -> Result<Self> {
         let placement = request.placement;
@@ -899,7 +905,7 @@ impl WinitPlatformWindow {
         };
         let mut attributes = WindowAttributes::default()
             .with_title(request.title)
-            .with_decorations(false)
+            .with_decorations(system_window_decorations_enabled(request.decoration))
             .with_inner_size(LogicalSize::new(request.size.width, request.size.height));
         if let Some(position) = requested_position {
             attributes = attributes.with_position(position);
@@ -1033,6 +1039,7 @@ impl PlatformWindow for WinitPlatformWindow {
                 focus_on_create: true,
                 active_on_focus: true,
                 opaque: true,
+                decoration: WindowDecoration::Custom,
                 placement: scarlet_ui_core::platform::WindowPlacement::Default,
             },
         )
@@ -1237,6 +1244,7 @@ impl PlatformWindow for WinitPlatformWindow {
                 focus_on_create: true,
                 active_on_focus: true,
                 opaque: true,
+                decoration: WindowDecoration::Custom,
                 placement: scarlet_ui_core::platform::WindowPlacement::Default,
             },
         )
@@ -1416,6 +1424,13 @@ fn map_wheel_phase(phase: TouchPhase) -> WheelPhase {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_system_mode_enables_platform_window_decorations() {
+        assert!(system_window_decorations_enabled(WindowDecoration::System));
+        assert!(!system_window_decorations_enabled(WindowDecoration::Custom));
+        assert!(!system_window_decorations_enabled(WindowDecoration::None));
+    }
 
     fn wheel(delta_y: i32, phase: WheelPhase, source: ScrollSource) -> Event {
         Event::Mouse(MouseEvent::Wheel {

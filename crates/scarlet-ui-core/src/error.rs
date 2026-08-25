@@ -12,6 +12,9 @@ pub enum Error {
     /// Window creation failed
     WindowCreationFailed,
 
+    /// The selected backend cannot provide a system-managed window frame.
+    SystemWindowDecorationUnsupported,
+
     /// Surface creation failed
     SurfaceCreationFailed,
 
@@ -50,6 +53,12 @@ impl fmt::Display for Error {
                 write!(f, "Invalid window size: {}x{}", width, height)
             }
             Error::WindowCreationFailed => write!(f, "Failed to create window"),
+            Error::SystemWindowDecorationUnsupported => {
+                write!(
+                    f,
+                    "System window decorations are not supported by this backend"
+                )
+            }
             Error::SurfaceCreationFailed => write!(f, "Failed to create surface"),
             Error::ConnectionFailed => write!(f, "Failed to connect to window server"),
             Error::IoError => write!(f, "IO error"),

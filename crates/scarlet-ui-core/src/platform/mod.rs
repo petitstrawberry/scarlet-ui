@@ -28,6 +28,35 @@ pub enum WindowPlacement {
     At { x: i32, y: i32 },
 }
 
+/// Selects who owns the visible frame around a top-level window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowDecoration {
+    /// ScarletUI draws the titlebar, controls, and border inside the window.
+    #[default]
+    Custom,
+    /// The platform window manager draws its standard window frame.
+    System,
+    /// Neither ScarletUI nor the platform window manager draws a frame.
+    None,
+}
+
+impl WindowDecoration {
+    /// Return whether ScarletUI owns and draws the window frame.
+    pub const fn is_custom(self) -> bool {
+        matches!(self, Self::Custom)
+    }
+
+    /// Return whether the platform window manager owns the window frame.
+    pub const fn is_system(self) -> bool {
+        matches!(self, Self::System)
+    }
+
+    /// Return whether either owner draws a visible window frame.
+    pub const fn is_visible(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 /// Parameters used by a backend to create a window.
 pub struct WindowCreateRequest {
     /// Stable application identifier.
@@ -46,6 +75,8 @@ pub struct WindowCreateRequest {
     pub active_on_focus: bool,
     /// Whether the window contents are fully opaque.
     pub opaque: bool,
+    /// Owner of the visible top-level window frame.
+    pub decoration: WindowDecoration,
     /// Initial placement hint passed to the window manager.
     pub placement: WindowPlacement,
 }
