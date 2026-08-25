@@ -15,6 +15,7 @@ use crate::renderer::PaintContext;
 use crate::state::{Listenable, State};
 use crate::view::View;
 use crate::views::modifiers::RepaintBoundary;
+use crate::views::style;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -26,9 +27,6 @@ const DEFAULT_AXIS_LOCK_MIN_DELTA: f32 = 2.0;
 const DEFAULT_EXCLUSIVE_AXIS_LOCK_RATIO: f32 = 4.0;
 const DEFAULT_EXCLUSIVE_AXIS_LOCK_MIN_DELTA: f32 = 1.0;
 const DEFAULT_WHEEL_SENSITIVITY: f32 = 0.25;
-const DEFAULT_SCROLLBAR_THICKNESS: f32 = 6.0;
-const DEFAULT_SCROLLBAR_INSET: f32 = 3.0;
-const DEFAULT_SCROLLBAR_MIN_THUMB_LEN: f32 = 24.0;
 const AUTO_REPAINT_BOUNDARY_MAX_PIXELS: u64 = 8_000_000;
 
 /// Scrollable axes for [`ScrollView`].
@@ -770,7 +768,7 @@ impl<V: View> ScrollViewRenderObject<V> {
         let show_horizontal = self.should_show_scrollbar(horizontal_scrollable);
         let show_vertical = self.should_show_scrollbar(vertical_scrollable);
         let color = self.scrollbar_color();
-        let radius = DEFAULT_SCROLLBAR_THICKNESS * 0.5;
+        let radius = style::metrics().scrollbar_thickness * 0.5;
         let horizontal = show_horizontal
             .then(|| self.horizontal_scrollbar_rect(origin, show_vertical))
             .flatten()
@@ -812,28 +810,29 @@ impl<V: View> ScrollViewRenderObject<V> {
     }
 
     fn horizontal_scrollbar_rect(&self, origin: Point, reserve_vertical: bool) -> Option<Rect> {
+        let metrics = style::metrics();
         let max_offset = self.max_offset_x();
         if max_offset <= 0.0 || self.viewport_size.width <= 0.0 || self.content_size.width <= 0.0 {
             return None;
         }
 
         let reserved = if reserve_vertical {
-            DEFAULT_SCROLLBAR_THICKNESS + DEFAULT_SCROLLBAR_INSET
+            metrics.scrollbar_thickness + metrics.scrollbar_inset
         } else {
             0.0
         };
-        let track_x = origin.x + DEFAULT_SCROLLBAR_INSET;
+        let track_x = origin.x + metrics.scrollbar_inset;
         let track_y = origin.y + self.viewport_size.height
-            - DEFAULT_SCROLLBAR_INSET
-            - DEFAULT_SCROLLBAR_THICKNESS;
+            - metrics.scrollbar_inset
+            - metrics.scrollbar_thickness;
         let track_w =
-            (self.viewport_size.width - DEFAULT_SCROLLBAR_INSET * 2.0 - reserved).max(0.0);
+            (self.viewport_size.width - metrics.scrollbar_inset * 2.0 - reserved).max(0.0);
         if track_w <= 0.0 || track_y < origin.y {
             return None;
         }
 
         let thumb_w = (self.viewport_size.width / self.content_size.width * track_w)
-            .max(DEFAULT_SCROLLBAR_MIN_THUMB_LEN.min(track_w))
+            .max(metrics.scrollbar_min_thumb_length.min(track_w))
             .min(track_w);
         let travel = (track_w - thumb_w).max(0.0);
         let progress = if max_offset > 0.0 {
@@ -845,11 +844,12 @@ impl<V: View> ScrollViewRenderObject<V> {
             track_x + travel * progress.clamp(0.0, 1.0),
             track_y,
             thumb_w,
-            DEFAULT_SCROLLBAR_THICKNESS,
+            metrics.scrollbar_thickness,
         ))
     }
 
     fn vertical_scrollbar_rect(&self, origin: Point, reserve_horizontal: bool) -> Option<Rect> {
+        let metrics = style::metrics();
         let max_offset = self.max_offset_y();
         if max_offset <= 0.0 || self.viewport_size.height <= 0.0 || self.content_size.height <= 0.0
         {
@@ -857,22 +857,22 @@ impl<V: View> ScrollViewRenderObject<V> {
         }
 
         let reserved = if reserve_horizontal {
-            DEFAULT_SCROLLBAR_THICKNESS + DEFAULT_SCROLLBAR_INSET
+            metrics.scrollbar_thickness + metrics.scrollbar_inset
         } else {
             0.0
         };
         let track_x = origin.x + self.viewport_size.width
-            - DEFAULT_SCROLLBAR_INSET
-            - DEFAULT_SCROLLBAR_THICKNESS;
-        let track_y = origin.y + DEFAULT_SCROLLBAR_INSET;
+            - metrics.scrollbar_inset
+            - metrics.scrollbar_thickness;
+        let track_y = origin.y + metrics.scrollbar_inset;
         let track_h =
-            (self.viewport_size.height - DEFAULT_SCROLLBAR_INSET * 2.0 - reserved).max(0.0);
+            (self.viewport_size.height - metrics.scrollbar_inset * 2.0 - reserved).max(0.0);
         if track_h <= 0.0 || track_x < origin.x {
             return None;
         }
 
         let thumb_h = (self.viewport_size.height / self.content_size.height * track_h)
-            .max(DEFAULT_SCROLLBAR_MIN_THUMB_LEN.min(track_h))
+            .max(metrics.scrollbar_min_thumb_length.min(track_h))
             .min(track_h);
         let travel = (track_h - thumb_h).max(0.0);
         let progress = if max_offset > 0.0 {
@@ -883,7 +883,7 @@ impl<V: View> ScrollViewRenderObject<V> {
         Some(Rect::from_xywh(
             track_x,
             track_y + travel * progress.clamp(0.0, 1.0),
-            DEFAULT_SCROLLBAR_THICKNESS,
+            metrics.scrollbar_thickness,
             thumb_h,
         ))
     }
@@ -1078,7 +1078,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         }
 
         let color = self.scrollbar_color();
-        let radius = DEFAULT_SCROLLBAR_THICKNESS * 0.5;
+        let radius = style::metrics().scrollbar_thickness * 0.5;
         if show_horizontal && let Some(rect) = self.horizontal_scrollbar_rect(origin, show_vertical)
         {
             ctx.fill_rounded_rect(rect, radius, color);

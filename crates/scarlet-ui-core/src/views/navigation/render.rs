@@ -11,6 +11,7 @@ use crate::icon::{Icon, IconStyle};
 use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::view::View;
+use crate::views::style;
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -209,7 +210,7 @@ impl NavigationSidebarRenderObject {
             icon_color: view.icon_color,
             hovered_index: None,
             last_painted_hovered_index: Cell::new(None),
-            item_height: 40.0,
+            item_height: style::metrics().navigation_item_height,
             size: Size::ZERO,
             buffer: None,
             font_size: 14.0,
@@ -244,6 +245,7 @@ impl NavigationSidebarRenderObject {
 
     fn paint_commands(&self, ctx: &mut PaintContext<'_>, origin: Point) {
         let palette = ColorPalette::default();
+        let metrics = style::metrics();
         let width = self.size.width.max(0.0);
         let height = self.size.height.max(0.0);
         ctx.fill_rect(
@@ -263,7 +265,12 @@ impl NavigationSidebarRenderObject {
             }
             if is_selected {
                 ctx.fill_rect(
-                    Rect::from_xywh(origin.x, origin.y + y, 3.0, self.item_height),
+                    Rect::from_xywh(
+                        origin.x,
+                        origin.y + y,
+                        metrics.navigation_indicator_width,
+                        self.item_height,
+                    ),
                     palette.primary(),
                 );
             }
@@ -357,6 +364,7 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
         self.shows_icons = view.shows_icons;
         self.icon_style = view.icon_style;
         self.icon_color = view.icon_color;
+        self.item_height = style::metrics().navigation_item_height;
         self.hovered_index = self
             .hovered_index
             .filter(|index| *index < self.labels.len());
@@ -367,6 +375,7 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
         if let Some(buffer) = self.buffer.as_mut() {
             let mut canvas = graphics::Canvas::for_buffer(buffer);
             let palette = ColorPalette::default();
+            let metrics = style::metrics();
             let width = canvas.width();
             let height = canvas.height();
             canvas.fill_rect(0, 0, width, height, palette.background_secondary());
@@ -377,7 +386,13 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
                     canvas.fill_rect(0, y, width, self.item_height as u32, palette.menu_hover());
                 }
                 if selected == index {
-                    canvas.fill_rect(0, y, 3, self.item_height as u32, palette.primary());
+                    canvas.fill_rect(
+                        0,
+                        y,
+                        metrics.navigation_indicator_width as u32,
+                        self.item_height as u32,
+                        palette.primary(),
+                    );
                 }
                 let color = if selected == index {
                     palette.primary()

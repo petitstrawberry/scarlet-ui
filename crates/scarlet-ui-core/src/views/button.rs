@@ -10,6 +10,7 @@ use crate::graphics;
 use crate::icon::{Icon, IconFill, IconStyle, IconWeight};
 use crate::renderer::PaintContext;
 use crate::view::View;
+use crate::views::style;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -427,7 +428,9 @@ impl ElementRenderObject for ButtonRenderObject {
         // For buttons, use the intrinsic size, but constrain within bounds
         // Buttons should NOT expand to fill min_width/min_height
         let mut width = intrinsic.width;
-        let mut height = intrinsic.height;
+        let mut height = intrinsic
+            .height
+            .max(style::metrics().minimum_control_height);
 
         // Apply max constraints (don't exceed maximum)
         if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
@@ -527,8 +530,7 @@ impl ElementRenderObject for ButtonRenderObject {
         let background = self.current_background();
         let border = self.current_border();
 
-        ctx.fill_rounded_rect(rect, 6.0, background);
-        ctx.stroke_rounded_rect(rect, 6.0, 1.0, border);
+        style::control_surface(ctx, rect, background, border);
 
         if let Some(icon) = self.icon {
             let icon_size = if self.label.is_empty() {

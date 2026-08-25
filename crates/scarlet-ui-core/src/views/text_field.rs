@@ -21,6 +21,7 @@ use crate::renderer::PaintContext;
 use crate::state::{Listenable, State};
 use crate::view::View;
 
+use super::style;
 use super::text_view::paint;
 use super::text_view::{
     TextDocument, TextPosition, TextSelection, TextViewLayout, TextViewScroll, WrapMode,
@@ -290,7 +291,7 @@ impl ElementRenderObject for TextFieldRenderObject {
         let line_height = graphics::line_height_sized(self.font_size).max(1) as f32;
         let intrinsic = Size::new(
             measured_width as f32 + preedit_width + self.padding * 2.0,
-            line_height + self.padding * 2.0,
+            (line_height + self.padding * 2.0).max(style::metrics().minimum_control_height),
         );
         self.size = constraints.constrain(intrinsic);
         self.compute_layout();
@@ -1028,14 +1029,20 @@ mod tests {
         let mut ctx = PaintContext::new();
         render_object.paint(&mut ctx, Point::ZERO);
 
-        let fill_count = ctx
-            .commands()
-            .iter()
-            .filter(|cmd| matches!(cmd, PaintCommand::FillPath { .. }))
-            .count();
         assert!(
-            fill_count >= 2,
-            "expected background fill plus preedit underline"
+            ctx.commands()
+                .iter()
+                .any(|command| matches!(command, PaintCommand::FillRoundedRect { .. }))
+        );
+        assert!(
+            ctx.commands()
+                .iter()
+                .any(|command| matches!(command, PaintCommand::FillPath { .. }))
+        );
+        assert!(
+            ctx.commands()
+                .iter()
+                .any(|command| matches!(command, PaintCommand::StrokeRoundedRect { .. }))
         );
     }
 

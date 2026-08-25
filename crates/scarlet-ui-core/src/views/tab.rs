@@ -13,6 +13,7 @@ use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::state::{Listenable, State};
 use crate::view::View;
+use crate::views::style;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
@@ -108,7 +109,7 @@ impl TabView {
         Self {
             tabs,
             selected_index,
-            tab_bar_height: 30.0,
+            tab_bar_height: style::metrics().tab_bar_height,
             tab_padding: 14.0,
             font_size: 13.0,
             background_color: palette.background_secondary(),
@@ -450,6 +451,7 @@ impl ElementRenderObject for TabViewRenderObject {
     }
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        let metrics = style::metrics();
         ctx.fill_rect(
             Rect::from_xywh(origin.x, origin.y, self.size.width, self.tab_bar_height),
             self.background_color,
@@ -498,6 +500,18 @@ impl ElementRenderObject for TabViewRenderObject {
             ),
             self.border_color,
         );
+        if selected < self.labels.len() {
+            let selected_rect = self.tab_rect(selected);
+            ctx.fill_rect(
+                Rect::from_xywh(
+                    origin.x + selected_rect.origin.x,
+                    origin.y + self.tab_bar_height - metrics.tab_indicator_height,
+                    selected_rect.size.width,
+                    metrics.tab_indicator_height,
+                ),
+                ColorPalette::default().primary(),
+            );
+        }
         true
     }
 
@@ -560,6 +574,7 @@ mod tests {
     use super::*;
     use crate::element::ComponentElement;
     use crate::pipeline::RenderingPipeline;
+    use crate::renderer::PaintCommand;
     use crate::state::State;
     use crate::view::ViewExt;
     use crate::views::{Rectangle, Spacer};
@@ -690,6 +705,38 @@ mod tests {
         ));
         assert_eq!(render_object.pressed_index(), None);
         assert_eq!(selected.get(), 0);
+    }
+
+    #[test]
+    fn selected_tab_keeps_a_line_indicator() {
+        let selected = State::initial(crate::state::generate_state_id());
+        let mut render_object = TabViewRenderObject::new(
+            vec![String::from("Mixer"), String::from("Editor")],
+            selected,
+            30.0,
+            12.0,
+            13.0,
+            ColorPalette::default().background_secondary(),
+            ColorPalette::default().surface(),
+            ColorPalette::default().menu_hover(),
+            ColorPalette::default().border(),
+            ColorPalette::default().text_secondary(),
+            ColorPalette::default().text(),
+        );
+        render_object.layout(LayoutConstraints::tight(300.0, 180.0));
+
+        let mut ctx = PaintContext::new();
+        render_object.paint(&mut ctx, Point::ZERO);
+        let primary = ColorPalette::default().primary();
+        let indicator = ctx.commands().iter().find_map(|command| match command {
+            PaintCommand::FillPath { path, color } if *color == primary => Some(path),
+            _ => None,
+        });
+
+        let indicator = indicator.expect("selected tab should emit a scarlet line indicator");
+        assert_eq!(indicator.len(), 4);
+        assert_eq!(indicator[0].y, 28.0);
+        assert_eq!(indicator[2].y, 30.0);
     }
 
     #[test]

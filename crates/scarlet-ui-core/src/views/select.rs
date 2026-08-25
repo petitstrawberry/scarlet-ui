@@ -19,6 +19,7 @@ use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::view::View;
+use crate::views::style;
 
 static SELECT_EXPANDED_REGISTRY: Mutex<BTreeMap<crate::state::StateId, State<bool>>> =
     Mutex::new(BTreeMap::new());
@@ -327,10 +328,11 @@ impl SelectRenderObject {
     ///
     /// Option index under the coordinate, or `None` outside option rows.
     pub fn option_index_at_y(&self, y: f32) -> Option<usize> {
-        if !self.expanded || y < self.row_height {
+        let row_height = self.effective_row_height();
+        if !self.expanded || y < row_height {
             return None;
         }
-        let index = ((y - self.row_height) / self.row_height) as usize + self.scroll_offset;
+        let index = ((y - row_height) / row_height) as usize + self.scroll_offset;
         if index < self.options.len() {
             Some(index)
         } else {
@@ -355,7 +357,11 @@ impl SelectRenderObject {
     }
 
     fn popup_height(&self) -> f32 {
-        self.row_height.max(24.0) * self.popup_row_count() as f32
+        self.effective_row_height() * self.popup_row_count() as f32
+    }
+
+    fn effective_row_height(&self) -> f32 {
+        self.row_height.max(style::metrics().minimum_control_height)
     }
 
     fn draw_label(
@@ -391,7 +397,7 @@ impl SelectRenderObject {
     fn draw_select(&mut self) {
         let w = libm::ceilf(self.size.width) as u32;
         let h = libm::ceilf(self.popup_height()) as u32;
-        let row_h = libm::ceilf(self.row_height) as u32;
+        let row_h = libm::ceilf(self.effective_row_height()) as u32;
         let selected_index = self.clamped_selected_index();
         let selected_label = self.options.get(selected_index).cloned();
         let options = self.options.clone();
@@ -417,18 +423,9 @@ impl SelectRenderObject {
         let palette = ColorPalette::default();
         let background = palette.button_background();
         let popup_background = palette.surface();
-        let selected_background = palette
-            .primary()
-            .with_opacity(0.13)
-            .blend_over(popup_background);
-        let hover_background = palette
-            .surface_variant()
-            .with_opacity(0.8)
-            .blend_over(popup_background);
         let border = palette.border();
         let text = palette.text_primary();
         let subtle = palette.text_secondary();
-
         canvas.fill_rect(0, 0, w, h, Color::rgba(0.0, 0.0, 0.0, 0.0));
         canvas.fill_rect(0, 0, w, row_h, background);
         canvas.draw_rect(0, 0, w, row_h, border);
@@ -478,7 +475,7 @@ impl ElementRenderObject for SelectRenderObject {
         if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
             width = width.min(constraints.max_width);
         }
-        let height = self.row_height.max(24.0);
+        let height = self.effective_row_height();
         self.size = Size { width, height };
 
         let w = libm::ceilf(width) as u32;
@@ -531,7 +528,7 @@ impl ElementRenderObject for SelectRenderObject {
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let w = self.size.width;
-        let row_h = self.row_height.max(24.0);
+        let row_h = self.effective_row_height();
         let h = self.popup_height();
         let selected_index = self.clamped_selected_index();
         let selected_label = self.options.get(selected_index);
@@ -546,10 +543,18 @@ impl ElementRenderObject for SelectRenderObject {
         let border = palette.border();
         let text = palette.text_primary();
         let subtle = palette.text_secondary();
+        let metrics = style::metrics();
 
-        ctx.fill_rect(Rect::new(origin, Size::new(w, h)), Color::TRANSPARENT);
-        ctx.fill_rect(Rect::from_xywh(origin.x, origin.y, w, row_h), background);
-        ctx.stroke_rect(Rect::from_xywh(origin.x, origin.y, w, row_h), 1.0, border);
+        let outer_rect = Rect::new(origin, Size::new(w, h));
+        let row_rect = Rect::from_xywh(origin.x, origin.y, w, row_h);
+        ctx.fill_rect(outer_rect, Color::TRANSPARENT);
+        if self.expanded {
+            ctx.push_rounded_clip(outer_rect, metrics.popover_radius);
+            ctx.fill_rect(outer_rect, popup_background);
+            ctx.fill_rect(row_rect, background);
+        } else {
+            style::control_surface(ctx, row_rect, background, border);
+        }
 
         let label = selected_label.map_or(self.placeholder.as_str(), String::as_str);
         let label_color = if selected_label.is_some() {
@@ -630,7 +635,13 @@ impl ElementRenderObject for SelectRenderObject {
                 }
                 y += row_h;
             }
-            ctx.stroke_rect(Rect::from_xywh(origin.x, origin.y, w, h), 1.0, border);
+            ctx.pop_clip();
+            ctx.stroke_rounded_rect(
+                outer_rect,
+                metrics.popover_radius,
+                metrics.border_width,
+                border,
+            );
         }
         true
     }

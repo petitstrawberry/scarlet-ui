@@ -9,6 +9,7 @@ use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::view::View;
+use crate::views::style;
 use alloc::boxed::Box;
 use core::any::Any;
 
@@ -181,13 +182,12 @@ impl ElementRenderObject for ProgressViewRenderObject {
         let palette = ColorPalette::default();
         let bg_color = palette.surface_variant();
         let fill_color = palette.primary();
-        let radius = self.size.height / 2.0;
-        ctx.fill_rounded_rect(Rect::new(origin, self.size), radius, bg_color);
+        style::track(ctx, Rect::new(origin, self.size), bg_color);
         let fill_width = self.size.width * self.value;
         if fill_width > 0.0 {
-            ctx.fill_rounded_rect(
+            style::track(
+                ctx,
                 Rect::from_xywh(origin.x, origin.y, fill_width, self.size.height),
-                radius,
                 fill_color,
             );
         }

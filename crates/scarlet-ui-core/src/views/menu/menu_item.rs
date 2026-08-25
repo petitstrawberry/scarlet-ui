@@ -10,6 +10,7 @@ use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::view::View;
+use crate::views::style;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -213,7 +214,9 @@ impl ElementRenderObject for MenuItemRenderObject {
 
         // For menu items, use the intrinsic size, but constrain within bounds
         let mut width = intrinsic.width;
-        let mut height = intrinsic.height;
+        let mut height = intrinsic
+            .height
+            .max(style::metrics().minimum_control_height);
 
         // Apply min/max constraints
         if constraints.min_width.is_finite() && constraints.min_width > 0.0 {
@@ -328,7 +331,16 @@ impl ElementRenderObject for MenuItemRenderObject {
         let text_color = palette.text_primary();
 
         if self.hovered || self.pressed || self.selected {
-            ctx.fill_rect(Rect::new(origin, self.size), background);
+            style::item_highlight(
+                ctx,
+                Rect::from_xywh(
+                    origin.x + 2.0,
+                    origin.y + 2.0,
+                    (self.size.width - 4.0).max(0.0),
+                    (self.size.height - 4.0).max(0.0),
+                ),
+                background,
+            );
         }
 
         let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);

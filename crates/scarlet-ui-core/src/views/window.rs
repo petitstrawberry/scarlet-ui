@@ -2,7 +2,7 @@
 //!
 //! Window is a View that provides window-level decorations including:
 //! - Title bar with close, maximize, minimize buttons
-//! - Window border with shadow
+//! - Window border
 //! - Proper event handling for window controls
 //! - Content area for child views
 
@@ -25,6 +25,7 @@ use crate::platform::WindowPlacement;
 use crate::renderer::PaintContext;
 use crate::state::Listenable;
 use crate::view::View;
+use crate::views::style;
 
 /// Window types (matching sws_protocol::window_types)
 pub mod window_type {
@@ -641,7 +642,8 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
         let width_px = libm::ceilf(self.size.width.max(0.0)) as u32;
         let width = width_px as f32;
         let titlebar_rect = Rect::from_xywh(origin.x, origin.y, width, TITLEBAR_HEIGHT as f32);
-        let base_color = Color::rgb(235u8, 235u8, 238u8);
+        let palette = ColorPalette::default();
+        let base_color = palette.window_titlebar_background();
         ctx.fill_rect(titlebar_rect, base_color);
 
         let close_rect = WindowRenderObject::control_button_rect_static(width_px, 0);
@@ -669,8 +671,12 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
 
         let title_x = 10.0;
         let title_y = 7.0;
-        let title_font_size = 18.0;
-        let title_color = Color::rgb(20u8, 20u8, 24u8);
+        let title_font_size = style::metrics().chrome_title_font_size;
+        let title_color = if self.focused {
+            palette.window_titlebar_text_active()
+        } else {
+            palette.window_titlebar_text_inactive()
+        };
         let available_width = if minimize_rect.origin.x > title_x {
             (minimize_rect.origin.x - title_x - 4.0).max(0.0) as u32
         } else {
@@ -746,7 +752,7 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
             icon_color,
         );
 
-        let titlebar_border = Color::rgb(180u8, 180u8, 185u8);
+        let titlebar_border = palette.window_titlebar_border();
         // Chrome lines are pixel strips, not centered strokes. This keeps the
         // retained paint path aligned with the Canvas-backed window renderer.
         ctx.fill_rect(
@@ -759,7 +765,7 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
             titlebar_border,
         );
         if width > 0.0 {
-            let outer_border_color = Color::rgb(100u8, 100u8, 105u8);
+            let outer_border_color = palette.window_border();
             let titlebar_height = TITLEBAR_HEIGHT as f32;
             ctx.fill_rect(
                 Rect::from_xywh(origin.x, origin.y, width, 1.0),
@@ -1359,10 +1365,10 @@ impl WindowRenderObject {
         }
     }
 
-    /// Draw titlebar using Canvas API (exact Scarlet_old design)
+    /// Draw the simplified titlebar fallback using the Canvas API.
     fn draw_titlebar_canvas_with_states(
         title: &str,
-        _focused: bool,
+        focused: bool,
         canvas: &mut crate::graphics::Canvas,
         width: u32,
         _height: u32,
@@ -1378,8 +1384,8 @@ impl WindowRenderObject {
             );
         }
 
-        // Title bar base color (exact Scarlet_old: rgb(235, 235, 238))
-        let base_color = Color::rgb(235u8, 235u8, 238u8);
+        let palette = ColorPalette::default();
+        let base_color = palette.window_titlebar_background();
 
         let close_rect = Self::control_button_rect_static(width, 0);
         let maximize_rect = Self::control_button_rect_static(width, 1);
@@ -1425,11 +1431,14 @@ impl WindowRenderObject {
             );
         }
 
-        // Title text (exact Scarlet_old: rgb(20, 20, 24))
         let title_x: i32 = 10;
         let title_y: i32 = 7;
-        let title_font_size: f32 = 18.0;
-        let title_color = Color::rgb(20u8, 20u8, 24u8);
+        let title_font_size = style::metrics().chrome_title_font_size;
+        let title_color = if focused {
+            palette.window_titlebar_text_active()
+        } else {
+            palette.window_titlebar_text_inactive()
+        };
         let title_padding_right: f32 = 4.0;
 
         // minimize is the leftmost control button (index_from_right=2)
@@ -1519,7 +1528,7 @@ impl WindowRenderObject {
         );
 
         // Draw border at bottom of titlebar (matching slint-scarlet)
-        let border_color = Color::rgb(180u8, 180u8, 185u8);
+        let border_color = palette.window_titlebar_border();
         canvas.draw_line(
             0,
             TITLEBAR_HEIGHT as i32 - 1,
@@ -1531,7 +1540,7 @@ impl WindowRenderObject {
         // The titlebar is composited above the window background, so it must
         // carry the border segments that overlap its own bounds.
         if width > 0 {
-            let outer_border_color = Color::rgb(100u8, 100u8, 105u8);
+            let outer_border_color = palette.window_border();
             canvas.draw_line(0, 0, width as i32 - 1, 0, outer_border_color);
             canvas.draw_line(0, 0, 0, TITLEBAR_HEIGHT as i32 - 1, outer_border_color);
             canvas.draw_line(
@@ -1573,7 +1582,7 @@ impl WindowRenderObject {
         }
 
         // Match the titlebar outline: one physical-looking stroke, no extra inner highlight.
-        let border_color = Color::rgb(100u8, 100u8, 105u8);
+        let border_color = ColorPalette::default().window_border();
         if width == 0 || height == 0 {
             return;
         }
@@ -1725,7 +1734,7 @@ impl ElementRenderObject for WindowRenderObject {
         let width = libm::ceilf(self.size.width.max(0.0));
         let height = libm::ceilf(self.size.height.max(0.0));
         if self.decorated && width > 0.0 && height > 0.0 {
-            let border_color = Color::rgb(100u8, 100u8, 105u8);
+            let border_color = ColorPalette::default().window_border();
             ctx.fill_rect(
                 Rect::from_xywh(origin.x, origin.y, width, 1.0),
                 border_color,

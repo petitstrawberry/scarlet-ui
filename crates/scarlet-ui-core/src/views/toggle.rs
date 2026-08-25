@@ -51,12 +51,7 @@ impl View for Toggle {
 
 /// Toggle RenderObject
 ///
-/// Design matching iOS/Android switch:
-/// - Width: 51px, Height: 31px
-/// - On: Green background (#34C759)
-/// - Off: Gray background (#767680)
-/// - Thumb: White circle, 27px diameter
-/// - Corner radius: 15.5px (half height)
+/// A platform-neutral switch using capsule geometry and the semantic palette.
 pub struct ToggleRenderObject {
     is_on: bool,
     size: Size,
@@ -193,7 +188,6 @@ impl ToggleRenderObject {
 
     /// Create a new ToggleRenderObject
     pub fn new(is_on: bool) -> Self {
-        // iOS-style toggle dimensions
         const TOGGLE_WIDTH: f32 = 51.0;
         const TOGGLE_HEIGHT: f32 = 31.0;
 
@@ -214,7 +208,7 @@ impl ToggleRenderObject {
         self.is_on = is_on;
     }
 
-    /// Draw toggle using Canvas API (iOS-style design)
+    /// Draw toggle using Canvas API.
     fn draw_toggle(&mut self) {
         let width = libm::ceilf(self.size.width) as usize;
         let height = libm::ceilf(self.size.height) as usize;
@@ -300,9 +294,10 @@ impl ToggleRenderObject {
 
 impl ElementRenderObject for ToggleRenderObject {
     fn layout(&mut self, _constraints: crate::element::LayoutConstraints) -> Size {
-        // Toggle has fixed size (51x31), ignore constraints
-        let width = self.size.width; // 51.0
-        let height = self.size.height; // 31.0
+        // The visible switch geometry is independent from any future expanded
+        // touch hit target.
+        let width = self.size.width;
+        let height = self.size.height;
 
         self.size = Size { width, height };
 

@@ -24,6 +24,7 @@ mod select;
 mod slider;
 mod spacer;
 mod split;
+pub(crate) mod style;
 mod tab;
 mod text;
 pub(crate) mod text_field;

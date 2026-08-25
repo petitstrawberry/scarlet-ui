@@ -256,11 +256,11 @@ const STD_FALLBACK_FONT_PATHS: &[&str] = FALLBACK_FONT_PATHS;
 
 #[cfg(all(feature = "std", target_os = "macos"))]
 const STD_DEFAULT_FONT_PATHS: &[&str] = &[
+    "/System/Library/Fonts/SFNS.ttf",
     concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../../bundles/desktop/fs/system/scarlet/fonts/Mplus1-Regular.ttf"
     ),
-    "/System/Library/Fonts/SFNS.ttf",
     "/Library/Fonts/OpenSans-Regular.ttf",
 ];
 

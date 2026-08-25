@@ -3,12 +3,13 @@
 //! Menu displays dropdown menu items vertically.
 
 use crate::buffer::Buffer;
-use crate::color::{Color, ColorPalette};
+use crate::color::ColorPalette;
 use crate::element::{Element, RenderElement};
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::view::View;
+use crate::views::style;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -111,8 +112,8 @@ impl Menu {
     pub fn new(items: Vec<MenuItemContent>) -> Self {
         Self {
             items,
-            item_height: 24.0, // Standard menu item height
-            width: 200.0,      // Default menu width
+            item_height: style::metrics().minimum_control_height,
+            width: 200.0, // Default menu width
         }
     }
 
@@ -249,7 +250,7 @@ impl MenuRenderObject {
 }
 
 impl crate::element::ElementRenderObject for MenuRenderObject {
-    fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
+    fn layout(&mut self, _constraints: crate::element::LayoutConstraints) -> Size {
         let height = self.calculate_height();
         let width = self.width;
 
@@ -292,11 +293,11 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
         }
 
         let palette = ColorPalette::default();
-        let bg_color = Color::rgb(1.0, 1.0, 1.0); // White background
+        let bg_color = palette.surface();
         let border_color = palette.border();
         let text_color = palette.text_primary();
         let hover_color = palette.menu_hover();
-        let separator_color = Color::rgb(0.784, 0.784, 0.784);
+        let separator_color = palette.divider();
 
         if let Some(ref mut buffer) = self.buffer {
             let mut canvas = graphics::Canvas::for_buffer(buffer);
@@ -338,7 +339,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
                     let text_color = if item.enabled {
                         text_color
                     } else {
-                        Color::rgb(0.471, 0.471, 0.471) // Disabled text color
+                        palette.text_tertiary()
                     };
 
                     canvas.draw_text_sized(text_x, text_y, &item.label, text_color, font_size);
@@ -366,15 +367,14 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let palette = ColorPalette::default();
-        let bg_color = Color::rgb(1.0, 1.0, 1.0);
+        let bg_color = palette.surface();
         let border_color = palette.border();
         let text_color = palette.text_primary();
         let hover_color = palette.menu_hover();
-        let separator_color = Color::rgb(0.784, 0.784, 0.784);
+        let separator_color = palette.divider();
 
         let rect = Rect::new(origin, self.size);
-        ctx.fill_rect(rect, bg_color);
-        ctx.stroke_rect(rect, 1.0, border_color);
+        style::popover_surface(ctx, rect, bg_color, border_color);
 
         let mut current_y = 2.0;
         let font_size = 13.0;
@@ -396,7 +396,8 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
             }
 
             if self.hovered_index == Some(i) {
-                ctx.fill_rect(
+                style::item_highlight(
+                    ctx,
                     Rect::from_xywh(
                         origin.x + 2.0,
                         origin.y + current_y,
@@ -410,7 +411,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
             let item_text_color = if item.enabled {
                 text_color
             } else {
-                Color::rgb(0.471, 0.471, 0.471)
+                palette.text_tertiary()
             };
             let text_y = origin.y + current_y + ((self.item_height - 16.0) / 2.0).max(0.0);
             ctx.draw_text(

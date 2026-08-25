@@ -11,6 +11,7 @@ use crate::os::Mutex;
 use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::view::View;
+use crate::views::style;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -169,7 +170,7 @@ pub struct SliderRenderObject {
 
 impl SliderRenderObject {
     fn thumb_diameter(&self) -> f32 {
-        self.size.height
+        style::metrics().slider_thumb_diameter
     }
 
     fn track_metrics(&self) -> (f32, f32) {
@@ -201,11 +202,12 @@ impl SliderRenderObject {
 
     /// Create a new SliderRenderObject
     pub fn new(value: f32, min: f32, max: f32, dragging: bool) -> Self {
+        let metrics = style::metrics();
         Self {
             value: value.clamp(min, max),
             min,
             max,
-            size: Size::new(200.0, 20.0),
+            size: Size::new(200.0, metrics.slider_height),
             buffer: None,
             dragging,
         }
@@ -272,7 +274,7 @@ impl SliderRenderObject {
             let center_y = (height as f32 / 2.0) as i32;
 
             // Track dimensions
-            let track_thickness = 4u32;
+            let track_thickness = style::metrics().slider_track_thickness as u32;
             let track_y = center_y - (track_thickness as i32 / 2);
 
             // Calculate fill width based on value
@@ -332,7 +334,7 @@ impl ElementRenderObject for SliderRenderObject {
             constraints.min_width.max(200.0)
         };
 
-        let height = self.size.height; // Fixed height: 20px
+        let height = style::metrics().slider_height;
 
         self.size = Size { width, height };
 
@@ -378,7 +380,7 @@ impl ElementRenderObject for SliderRenderObject {
         let height = libm::ceilf(self.size.height) as u32;
         let (track_start, track_width) = self.track_metrics();
         let center_y = height as f32 / 2.0;
-        let track_thickness = 4.0;
+        let track_thickness = style::metrics().slider_track_thickness;
         let track_y = center_y - track_thickness / 2.0;
         let range = self.max - self.min;
         let normalized_value = if range > 0.0 {
@@ -395,7 +397,8 @@ impl ElementRenderObject for SliderRenderObject {
         let thumb_radius = self.thumb_diameter().max(1.0) / 2.0;
         let thumb_center = Point::new(origin.x + track_start + fill_width, origin.y + center_y);
 
-        ctx.fill_rect(
+        style::track(
+            ctx,
             Rect::from_xywh(
                 origin.x + track_start,
                 origin.y + track_y,
@@ -405,7 +408,8 @@ impl ElementRenderObject for SliderRenderObject {
             track_color,
         );
         if fill_width > 0.0 {
-            ctx.fill_rect(
+            style::track(
+                ctx,
                 Rect::from_xywh(
                     origin.x + track_start,
                     origin.y + track_y,

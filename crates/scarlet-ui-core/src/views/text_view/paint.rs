@@ -8,6 +8,7 @@ use crate::color::Color;
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 use crate::renderer::PaintContext;
+use crate::views::style;
 
 const PREEDIT_STYLE_HIGHLIGHT: u32 = 1 << 2;
 const PREEDIT_STYLE_SELECTED: u32 = 1 << 3;
@@ -64,7 +65,8 @@ pub fn paint_text_view(
     highlight_current_line: bool,
 ) {
     let bounds = Rect::new(origin, size);
-    ctx.fill_rect(bounds, background_color);
+    let metrics = style::metrics();
+    style::fill_control(ctx, bounds, background_color);
 
     let clip_rect = Rect::from_xywh(
         origin.x + BORDER_WIDTH,
@@ -72,7 +74,10 @@ pub fn paint_text_view(
         (size.width - BORDER_WIDTH * 2.0).max(0.0),
         (size.height - BORDER_WIDTH * 2.0).max(0.0),
     );
-    ctx.push_clip(clip_rect);
+    ctx.push_rounded_clip(
+        clip_rect,
+        style::radius_for(clip_rect, (metrics.control_radius - BORDER_WIDTH).max(0.0)),
+    );
 
     if highlight_current_line && focused {
         paint_current_line(ctx, origin, size, layout, selection, current_line_color);
@@ -146,7 +151,16 @@ pub fn paint_text_view(
     } else {
         border_color
     };
-    ctx.stroke_rect(bounds, BORDER_WIDTH, border);
+    style::stroke_control(
+        ctx,
+        bounds,
+        if focused {
+            metrics.focus_stroke_width
+        } else {
+            BORDER_WIDTH
+        },
+        border,
+    );
 }
 
 fn paint_current_line(
