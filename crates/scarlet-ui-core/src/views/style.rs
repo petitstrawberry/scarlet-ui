@@ -4,9 +4,28 @@
 //! compact radius, floating surfaces use a slightly larger radius, and tracks
 //! use a capsule. Palette values and widget layout remain owned by the widget.
 
-use crate::color::Color;
-use crate::geometry::Rect;
+use crate::color::{Color, ColorPalette};
+use crate::geometry::{EdgeInsets, Offset, Rect};
 use crate::renderer::PaintContext;
+
+const RAISED_TOP_LIGHTEN: f32 = 0.018;
+const RAISED_BOTTOM_DARKEN: f32 = 0.010;
+const PRESSED_TOP_DARKEN: f32 = 0.010;
+const PRESSED_BOTTOM_LIGHTEN: f32 = 0.004;
+const CHROME_TOP_LIGHTEN: f32 = 0.012;
+const CHROME_BOTTOM_DARKEN: f32 = 0.008;
+const TEXT_SELECTION_MIX: f32 = 0.24;
+const TEXT_SELECTION_TINT_LIFT: f32 = 0.12;
+const SELECTED_ITEM_MIX: f32 = 0.14;
+const SELECTED_ITEM_TINT_LIFT: f32 = 0.08;
+
+const FLOATING_AMBIENT_OFFSET: Offset = Offset::new(0.0, 1.0);
+const FLOATING_AMBIENT_BLUR: f32 = 3.0;
+const FLOATING_AMBIENT_OPACITY: f32 = 0.55;
+const FLOATING_KEY_OFFSET: Offset = Offset::new(0.0, 4.0);
+const FLOATING_KEY_BLUR: f32 = 10.0;
+const FLOATING_KEY_OPACITY: f32 = 0.75;
+const FLOATING_OUTSETS: EdgeInsets = EdgeInsets::new(10.0, 6.0, 10.0, 14.0);
 
 /// Desktop visual metrics shared by built-in widgets.
 ///
@@ -30,6 +49,10 @@ pub(crate) struct VisualMetrics {
     pub(crate) slider_height: f32,
     pub(crate) slider_thumb_diameter: f32,
     pub(crate) slider_track_thickness: f32,
+    pub(crate) toggle_width: f32,
+    pub(crate) toggle_height: f32,
+    pub(crate) toggle_thumb_diameter: f32,
+    pub(crate) toggle_thumb_inset: f32,
     pub(crate) chrome_title_font_size: f32,
 }
 
@@ -48,13 +71,43 @@ const VISUAL_METRICS: VisualMetrics = VisualMetrics {
     scrollbar_inset: 3.0,
     scrollbar_min_thumb_length: 24.0,
     slider_height: 20.0,
-    slider_thumb_diameter: 20.0,
+    slider_thumb_diameter: 16.0,
     slider_track_thickness: 4.0,
+    toggle_width: 36.0,
+    toggle_height: 20.0,
+    toggle_thumb_diameter: 16.0,
+    toggle_thumb_inset: 2.0,
     chrome_title_font_size: 14.0,
 };
 
+/// Tonal surface hierarchy shared by built-in widgets.
+///
+/// The hierarchy describes containment, not interaction state or elevation.
+/// Raised and floating effects are applied separately so selected navigation
+/// rows and tabs never accidentally acquire depth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SurfaceLevel {
+    Canvas,
+    Structural,
+    Section,
+    Floating,
+}
+
 pub(crate) const fn metrics() -> VisualMetrics {
     VISUAL_METRICS
+}
+
+pub(crate) fn surface_color(palette: &ColorPalette, level: SurfaceLevel) -> Color {
+    match level {
+        SurfaceLevel::Canvas => palette.background(),
+        SurfaceLevel::Structural => palette.background_secondary(),
+        SurfaceLevel::Section => palette.background_tertiary(),
+        SurfaceLevel::Floating => palette.surface(),
+    }
+}
+
+pub(crate) fn focus_highlight(palette: &ColorPalette) -> Color {
+    palette.primary_light().lighten(0.4)
 }
 
 pub(crate) fn radius_for(rect: Rect, radius: f32) -> f32 {
@@ -77,14 +130,98 @@ pub(crate) fn stroke_control(ctx: &mut PaintContext<'_>, rect: Rect, width: f32,
     );
 }
 
-pub(crate) fn control_surface(ctx: &mut PaintContext<'_>, rect: Rect, fill: Color, border: Color) {
-    fill_control(ctx, rect, fill);
-    stroke_control(ctx, rect, metrics().border_width, border);
+pub(crate) fn raised_control_surface(
+    ctx: &mut PaintContext<'_>,
+    rect: Rect,
+    fill: Color,
+    border: Color,
+    pressed: bool,
+) {
+    let radius = radius_for(rect, metrics().control_radius);
+    fill_raised_surface(ctx, rect, radius, fill, pressed);
+    if border.a > 0.0 {
+        ctx.stroke_rounded_rect(rect, radius, metrics().border_width, border);
+    }
 }
 
-pub(crate) fn popover_surface(ctx: &mut PaintContext<'_>, rect: Rect, fill: Color, border: Color) {
+pub(crate) fn fill_raised_surface(
+    ctx: &mut PaintContext<'_>,
+    rect: Rect,
+    radius: f32,
+    fill: Color,
+    pressed: bool,
+) {
+    let (top, bottom) = if pressed {
+        (
+            fill.darken(PRESSED_TOP_DARKEN),
+            fill.lighten(PRESSED_BOTTOM_LIGHTEN),
+        )
+    } else {
+        (
+            fill.lighten(RAISED_TOP_LIGHTEN),
+            fill.darken(RAISED_BOTTOM_DARKEN),
+        )
+    };
+    ctx.fill_vertical_gradient_rounded_rect(rect, radius_for(rect, radius), top, bottom);
+}
+
+pub(crate) fn chrome_surface(ctx: &mut PaintContext<'_>, rect: Rect, fill: Color) {
+    ctx.fill_vertical_gradient_rounded_rect(
+        rect,
+        0.0,
+        fill.lighten(CHROME_TOP_LIGHTEN),
+        fill.darken(CHROME_BOTTOM_DARKEN),
+    );
+}
+
+pub(crate) fn text_selection_highlight(accent: Color, surface: Color) -> Color {
+    accent
+        .lighten(TEXT_SELECTION_TINT_LIFT)
+        .with_opacity(TEXT_SELECTION_MIX)
+        .blend_over(surface)
+}
+
+pub(crate) fn selected_item_surface(accent: Color, surface: Color) -> Color {
+    accent
+        .lighten(SELECTED_ITEM_TINT_LIFT)
+        .with_opacity(SELECTED_ITEM_MIX)
+        .blend_over(surface)
+}
+
+pub(crate) const fn floating_outsets() -> EdgeInsets {
+    FLOATING_OUTSETS
+}
+
+pub(crate) fn floating_shadow(ctx: &mut PaintContext<'_>, rect: Rect, radius: f32, shadow: Color) {
+    let radius = radius_for(rect, radius);
+    ctx.draw_rounded_rect_shadow(
+        rect,
+        radius,
+        FLOATING_AMBIENT_OFFSET,
+        FLOATING_AMBIENT_BLUR,
+        0.0,
+        shadow.with_opacity(shadow.a * FLOATING_AMBIENT_OPACITY),
+    );
+    ctx.draw_rounded_rect_shadow(
+        rect,
+        radius,
+        FLOATING_KEY_OFFSET,
+        FLOATING_KEY_BLUR,
+        0.0,
+        shadow.with_opacity(shadow.a * FLOATING_KEY_OPACITY),
+    );
+}
+
+pub(crate) fn popover_surface(
+    ctx: &mut PaintContext<'_>,
+    rect: Rect,
+    fill: Color,
+    border: Color,
+    shadow: Color,
+) {
     let metrics = metrics();
     let radius = radius_for(rect, metrics.popover_radius);
+    floating_shadow(ctx, rect, radius, shadow);
     ctx.fill_rounded_rect(rect, radius, fill);
     ctx.stroke_rounded_rect(rect, radius, metrics.border_width, border);
 }
@@ -101,6 +238,20 @@ pub(crate) fn track(ctx: &mut PaintContext<'_>, rect: Rect, color: Color) {
     );
 }
 
+pub(crate) fn control_thumb(
+    ctx: &mut PaintContext<'_>,
+    center: crate::geometry::Point,
+    radius: f32,
+    fill: Color,
+    border: Color,
+) {
+    let radius = radius.max(0.0);
+    if border.a > 0.0 {
+        ctx.fill_circle(center, radius, border);
+    }
+    ctx.fill_circle(center, (radius - metrics().border_width).max(0.0), fill);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,10 +259,11 @@ mod tests {
     use crate::renderer::PaintCommand;
 
     #[test]
-    fn control_surface_uses_shared_radius_and_hairline() {
+    fn inline_control_primitives_use_shared_radius_and_hairline() {
         let rect = Rect::from_xywh(0.0, 0.0, 80.0, 28.0);
         let mut ctx = PaintContext::new();
-        control_surface(&mut ctx, rect, Color::WHITE, Color::BLACK);
+        fill_control(&mut ctx, rect, Color::WHITE);
+        stroke_control(&mut ctx, rect, metrics().border_width, Color::BLACK);
         let expected = metrics();
 
         let [
@@ -140,5 +292,126 @@ mod tests {
             panic!("expected rounded track fill");
         };
         assert_eq!(*corner_radius, 2.0);
+    }
+
+    #[test]
+    fn raised_surface_uses_subtle_gradient_without_a_shadow() {
+        let rect = Rect::from_xywh(0.0, 0.0, 100.0, 32.0);
+        let fill = Color::gray(0.9);
+        let mut ctx = PaintContext::new();
+        raised_control_surface(&mut ctx, rect, fill, Color::BLACK, false);
+
+        let [
+            PaintCommand::FillVerticalGradientRoundedRect {
+                top_color,
+                bottom_color,
+                ..
+            },
+            PaintCommand::StrokeRoundedRect { .. },
+        ] = ctx.commands()
+        else {
+            panic!("expected gradient and hairline for raised control");
+        };
+        assert!(top_color.r > fill.r);
+        assert!(bottom_color.r < fill.r);
+    }
+
+    #[test]
+    fn floating_surface_uses_shared_shadow_stack_and_outsets() {
+        let rect = Rect::from_xywh(20.0, 20.0, 180.0, 120.0);
+        let mut ctx = PaintContext::new();
+        popover_surface(
+            &mut ctx,
+            rect,
+            Color::WHITE,
+            Color::gray(0.8),
+            Color::rgba_f32(0.0, 0.0, 0.0, 0.1),
+        );
+
+        assert!(matches!(
+            ctx.commands()[0],
+            PaintCommand::DrawRoundedRectShadow { .. }
+        ));
+        assert!(matches!(
+            ctx.commands()[1],
+            PaintCommand::DrawRoundedRectShadow { .. }
+        ));
+        assert!(matches!(
+            ctx.commands()[2],
+            PaintCommand::FillRoundedRect { .. }
+        ));
+        assert!(matches!(
+            ctx.commands()[3],
+            PaintCommand::StrokeRoundedRect { .. }
+        ));
+        assert_eq!(floating_outsets(), EdgeInsets::new(10.0, 6.0, 10.0, 14.0));
+    }
+
+    #[test]
+    fn text_selection_uses_a_light_accent_wash() {
+        let accent = Color::rgb_f32(0.82, 0.15, 0.15);
+        let selection = text_selection_highlight(accent, Color::WHITE);
+        let expected = accent
+            .lighten(0.12)
+            .with_opacity(0.24)
+            .blend_over(Color::WHITE);
+
+        assert_eq!(selection, expected);
+        assert_eq!(selection.a, 1.0);
+        assert!(selection.r - selection.g > 0.15);
+    }
+
+    #[test]
+    fn surface_levels_follow_the_semantic_tonal_hierarchy() {
+        let palette = ColorPalette::default();
+
+        assert_eq!(
+            surface_color(&palette, SurfaceLevel::Canvas),
+            palette.background()
+        );
+        assert_eq!(
+            surface_color(&palette, SurfaceLevel::Structural),
+            palette.background_secondary()
+        );
+        assert_eq!(
+            surface_color(&palette, SurfaceLevel::Section),
+            palette.background_tertiary()
+        );
+        assert_eq!(
+            surface_color(&palette, SurfaceLevel::Floating),
+            palette.surface()
+        );
+    }
+
+    #[test]
+    fn selected_item_surface_is_lighter_than_text_selection() {
+        let palette = ColorPalette::default();
+        let surface = surface_color(&palette, SurfaceLevel::Floating);
+        let item = selected_item_surface(palette.primary(), surface);
+        let text = text_selection_highlight(palette.primary(), surface);
+
+        assert_eq!(item.a, 1.0);
+        assert!(item.g > text.g);
+        assert!(item.r - item.g > 0.08);
+    }
+
+    #[test]
+    fn compact_controls_share_a_twenty_pixel_visual_height() {
+        let metrics = metrics();
+
+        assert_eq!(metrics.toggle_height, metrics.slider_height);
+        assert!(metrics.toggle_width > metrics.toggle_height);
+        assert!(metrics.toggle_thumb_diameter < metrics.toggle_height);
+        assert!(metrics.slider_thumb_diameter < metrics.slider_height);
+    }
+
+    #[test]
+    fn focus_highlight_is_a_light_opaque_primary_tint() {
+        let palette = ColorPalette::default();
+        let highlight = focus_highlight(&palette);
+
+        assert_eq!(highlight, palette.primary_light().lighten(0.4));
+        assert_eq!(highlight.a, 1.0);
+        assert!(highlight.r > highlight.g);
     }
 }

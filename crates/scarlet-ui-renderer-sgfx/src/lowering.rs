@@ -41,6 +41,11 @@ const MAX_CANVASES: usize = 32;
 const MAX_CANVAS_MESHES: usize = 256;
 const MAX_CANVAS_TEXTURES: usize = 128;
 const MAX_CANVAS_DRAWS: usize = 240;
+const GRADIENT_BAND_COUNT: usize = 8;
+const SHADOW_LAYER_COUNT: usize = 8;
+
+const SHADOW_LAYER_WEIGHTS: [f32; SHADOW_LAYER_COUNT] =
+    [0.02, 0.03, 0.05, 0.08, 0.12, 0.17, 0.23, 0.30];
 
 const CANVAS_TARGET_TEX_COORDS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
 
@@ -749,6 +754,98 @@ impl SgfxPaintEncoder {
                             ui_color(*color, opacity)?,
                             DrawSource::Solid,
                         )?;
+                    }
+                }
+                PaintCommand::FillVerticalGradientRoundedRect {
+                    rect,
+                    corner_radius,
+                    top_color,
+                    bottom_color,
+                } => {
+                    if !rect.size.height.is_finite() || rect.size.height <= 0.0 {
+                        continue;
+                    }
+                    tessellator.push_clip(*rect, *corner_radius)?;
+                    let band_height = rect.size.height / GRADIENT_BAND_COUNT as f32;
+                    for index in 0..GRADIENT_BAND_COUNT {
+                        let top = rect.origin.y + band_height * index as f32;
+                        let bottom = if index + 1 == GRADIENT_BAND_COUNT {
+                            rect.origin.y + rect.size.height
+                        } else {
+                            rect.origin.y + band_height * (index + 1) as f32
+                        };
+                        let band = scarlet_ui_core::geometry::Rect::from_xywh(
+                            rect.origin.x,
+                            top,
+                            rect.size.width,
+                            (bottom - top).max(0.0),
+                        );
+                        if let Some(geometry) = tessellator.fill_rounded_rect(band, 0.0)? {
+                            let amount = (index as f32 + 0.5) / GRADIENT_BAND_COUNT as f32;
+                            push_draw(
+                                &mut draws,
+                                geometry,
+                                ui_color(
+                                    interpolate_ui_color(*top_color, *bottom_color, amount),
+                                    opacity,
+                                )?,
+                                DrawSource::Solid,
+                            )?;
+                        }
+                    }
+                    tessellator.pop_clip();
+                }
+                PaintCommand::DrawRoundedRectShadow {
+                    rect,
+                    corner_radius,
+                    offset,
+                    blur_radius,
+                    spread_radius,
+                    color,
+                } => {
+                    if ![
+                        rect.origin.x,
+                        rect.origin.y,
+                        rect.size.width,
+                        rect.size.height,
+                        *corner_radius,
+                        offset.dx,
+                        offset.dy,
+                        *blur_radius,
+                        *spread_radius,
+                    ]
+                    .iter()
+                    .all(|value| value.is_finite())
+                    {
+                        return Err(Error::InvalidFrame);
+                    }
+                    let blur = blur_radius.max(0.0);
+                    for (index, weight) in SHADOW_LAYER_WEIGHTS.iter().enumerate() {
+                        let distance = if SHADOW_LAYER_COUNT > 1 {
+                            (SHADOW_LAYER_COUNT - index - 1) as f32
+                                / (SHADOW_LAYER_COUNT - 1) as f32
+                        } else {
+                            0.0
+                        };
+                        let expansion = *spread_radius + blur * distance;
+                        let shadow_rect = scarlet_ui_core::geometry::Rect::from_xywh(
+                            rect.origin.x + offset.dx - expansion,
+                            rect.origin.y + offset.dy - expansion,
+                            rect.size.width + expansion * 2.0,
+                            rect.size.height + expansion * 2.0,
+                        );
+                        let radius = (*corner_radius + expansion).max(0.0);
+                        if let Some(geometry) =
+                            tessellator.fill_rounded_rect(shadow_rect, radius)?
+                        {
+                            let layer_color = color.with_opacity(color.a * *weight);
+                            push_draw(
+                                &mut draws,
+                                geometry,
+                                ui_color(layer_color, opacity)?,
+                                DrawSource::Solid,
+                            )?;
+                        }
                     }
                 }
                 PaintCommand::StrokePath {
@@ -2265,6 +2362,16 @@ fn ui_color(color: UiColor, opacity: f32) -> Result<[f32; 4]> {
     ])
 }
 
+fn interpolate_ui_color(start: UiColor, end: UiColor, amount: f32) -> UiColor {
+    let amount = amount.clamp(0.0, 1.0);
+    UiColor {
+        r: start.r + (end.r - start.r) * amount,
+        g: start.g + (end.g - start.g) * amount,
+        b: start.b + (end.b - start.b) * amount,
+        a: start.a + (end.a - start.a) * amount,
+    }
+}
+
 fn ir_color(components: [f32; 4]) -> Result<Color> {
     Color::rgba(components[0], components[1], components[2], components[3])
         .map_err(|_| Error::InvalidFrame)
@@ -2320,7 +2427,7 @@ fn truncated(value: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::canvas::{SgfxCanvasDraw, SgfxCanvasVertex, SgfxMeshHandle};
-    use scarlet_ui_core::geometry::{Point, Rect, Size};
+    use scarlet_ui_core::geometry::{Offset, Point, Rect, Size};
     use scarlet_ui_core::icon::{ALL_ICONS, IconStyle};
     use sgfx::ir::{Command, CommandBuffer};
 
@@ -2562,6 +2669,67 @@ mod tests {
         assert_eq!(CANVAS_TARGET_TEX_COORDS[1], [1.0, 0.0]);
         assert_eq!(CANVAS_TARGET_TEX_COORDS[2], [1.0, 1.0]);
         assert_eq!(CANVAS_TARGET_TEX_COORDS[3], [0.0, 1.0]);
+    }
+
+    #[test]
+    fn vertical_gradient_lowers_to_banded_solid_draws() {
+        let mut paint = PaintContext::new();
+        paint.fill_vertical_gradient_rounded_rect(
+            Rect::from_xywh(8.0, 8.0, 96.0, 32.0),
+            6.0,
+            UiColor::WHITE,
+            UiColor::BLACK,
+        );
+        let mut encoder = SgfxPaintEncoder::new(128, 64, false).unwrap();
+        let frame = encoder
+            .lower_once(
+                &paint,
+                1_000,
+                PixelBounds {
+                    x: 0,
+                    y: 0,
+                    width: 128,
+                    height: 64,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(frame.draws.len(), GRADIENT_BAND_COUNT + 1);
+        assert!(
+            frame
+                .draws
+                .iter()
+                .all(|draw| draw.source == DrawSource::Solid)
+        );
+    }
+
+    #[test]
+    fn rounded_shadow_lowers_to_weighted_blur_layers() {
+        let mut paint = PaintContext::new();
+        paint.draw_rounded_rect_shadow(
+            Rect::from_xywh(24.0, 20.0, 72.0, 32.0),
+            8.0,
+            Offset::new(0.0, 3.0),
+            10.0,
+            0.0,
+            UiColor::rgba(0, 0, 0, 48),
+        );
+        let mut encoder = SgfxPaintEncoder::new(128, 80, false).unwrap();
+        let frame = encoder
+            .lower_once(
+                &paint,
+                1_000,
+                PixelBounds {
+                    x: 0,
+                    y: 0,
+                    width: 128,
+                    height: 80,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(frame.draws.len(), SHADOW_LAYER_COUNT + 1);
+        assert!(frame.draws[0].color[3] < frame.draws[SHADOW_LAYER_COUNT - 1].color[3]);
     }
 
     #[test]

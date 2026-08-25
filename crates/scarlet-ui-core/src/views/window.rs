@@ -644,7 +644,7 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
         let titlebar_rect = Rect::from_xywh(origin.x, origin.y, width, TITLEBAR_HEIGHT as f32);
         let palette = ColorPalette::default();
         let base_color = palette.window_titlebar_background();
-        ctx.fill_rect(titlebar_rect, base_color);
+        style::chrome_surface(ctx, titlebar_rect, base_color);
 
         let close_rect = WindowRenderObject::control_button_rect_static(width_px, 0);
         let maximize_rect = WindowRenderObject::control_button_rect_static(width_px, 1);

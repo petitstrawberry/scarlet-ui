@@ -112,10 +112,10 @@ impl TabView {
             tab_bar_height: style::metrics().tab_bar_height,
             tab_padding: 14.0,
             font_size: 13.0,
-            background_color: palette.background_secondary(),
-            selected_color: palette.surface(),
+            background_color: style::surface_color(&palette, style::SurfaceLevel::Structural),
+            selected_color: style::surface_color(&palette, style::SurfaceLevel::Canvas),
             hover_color: palette.menu_hover(),
-            border_color: palette.border(),
+            border_color: palette.divider(),
             text_color: palette.text_secondary(),
             selected_text_color: palette.text(),
         }

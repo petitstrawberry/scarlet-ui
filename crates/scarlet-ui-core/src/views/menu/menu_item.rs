@@ -38,8 +38,8 @@ impl MenuItem {
             label: label_str,
             on_click: None,
             on_hover: None,
-            font_size: 18.0,
-            padding: 8.0,
+            font_size: 14.0,
+            padding: 6.0,
             selected: false,
         }
     }
@@ -304,7 +304,7 @@ impl ElementRenderObject for MenuItemRenderObject {
             canvas.fill_rect(0, 0, width, height, Color::TRANSPARENT);
 
             // Fill background (only if hovered or pressed)
-            if self.hovered || self.pressed {
+            if self.hovered || self.pressed || self.selected {
                 canvas.fill_rect(0, 0, width, height, background);
             }
 

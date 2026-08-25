@@ -530,7 +530,7 @@ impl ElementRenderObject for ButtonRenderObject {
         let background = self.current_background();
         let border = self.current_border();
 
-        style::control_surface(ctx, rect, background, border);
+        style::raised_control_surface(ctx, rect, background, border, self.pressed);
 
         if let Some(icon) = self.icon {
             let icon_size = if self.label.is_empty() {

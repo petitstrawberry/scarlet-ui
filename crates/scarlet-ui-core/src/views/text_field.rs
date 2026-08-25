@@ -58,9 +58,9 @@ impl TextField {
             on_empty: None,
             blur_on_submit: false,
             autofocus: false,
-            background_color: palette.background(),
-            border_color: palette.background_tertiary(),
-            focused_border_color: palette.primary_light().lighten(0.4),
+            background_color: style::surface_color(&palette, style::SurfaceLevel::Canvas),
+            border_color: palette.divider(),
+            focused_border_color: style::focus_highlight(&palette),
             text_color: palette.text(),
             placeholder_color: palette.text_secondary(),
             font_size: 14.0,
@@ -446,7 +446,11 @@ impl TextFieldRenderObject {
     }
 
     fn selection_color(&self) -> Color {
-        ColorPalette::default().primary().with_opacity(0.3)
+        let palette = ColorPalette::default();
+        style::text_selection_highlight(
+            palette.primary(),
+            style::surface_color(&palette, style::SurfaceLevel::Canvas),
+        )
     }
 }
 

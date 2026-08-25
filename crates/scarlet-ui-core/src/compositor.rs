@@ -65,7 +65,28 @@ impl Compositor {
             width = width.max(buffer.logical_width() as f32);
             height = height.max(buffer.logical_height() as f32);
         }
-        Rect::from_xywh(absolute_origin.x, absolute_origin.y, width, height)
+        let bounds = Rect::from_xywh(absolute_origin.x, absolute_origin.y, width, height);
+        let Some(render_object) = element.render_object() else {
+            return bounds;
+        };
+        let outsets = render_object.paint_outsets();
+        let finite_positive = |value: f32| {
+            if value.is_finite() {
+                value.max(0.0)
+            } else {
+                0.0
+            }
+        };
+        let left = finite_positive(outsets.left);
+        let top = finite_positive(outsets.top);
+        let right = finite_positive(outsets.right);
+        let bottom = finite_positive(outsets.bottom);
+        Rect::from_xywh(
+            bounds.origin.x - left,
+            bounds.origin.y - top,
+            bounds.size.width + left + right,
+            bounds.size.height + top + bottom,
+        )
     }
 
     fn is_expanded_select(&self, element: &dyn Element) -> bool {

@@ -9,7 +9,7 @@ use crate::color::Color;
 use crate::compositor::{Compositor, DamageRect};
 use crate::element::{Element, ElementId};
 use crate::error::Result;
-use crate::geometry::{Point, Rect, Size};
+use crate::geometry::{Offset, Point, Rect, Size};
 use crate::icon::{Icon, IconStyle};
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
@@ -82,6 +82,16 @@ pub fn path_rounded_rect(rect: Rect, corner_radius: f32) -> Path {
     pts
 }
 
+fn interpolate_color(start: Color, end: Color, amount: f32) -> Color {
+    let amount = amount.clamp(0.0, 1.0);
+    Color {
+        r: start.r + (end.r - start.r) * amount,
+        g: start.g + (end.g - start.g) * amount,
+        b: start.b + (end.b - start.b) * amount,
+        a: start.a + (end.a - start.a) * amount,
+    }
+}
+
 /// Type-erased renderer-specific paint payload.
 ///
 /// Platform-independent views can place an extension in the normal paint
@@ -115,6 +125,22 @@ pub enum PaintCommand {
     FillRoundedRect {
         rect: Rect,
         corner_radius: f32,
+        color: Color,
+    },
+    /// Fill an axis-aligned rounded rectangle with a vertical color gradient.
+    FillVerticalGradientRoundedRect {
+        rect: Rect,
+        corner_radius: f32,
+        top_color: Color,
+        bottom_color: Color,
+    },
+    /// Draw a blurred rounded-rectangle shadow behind `rect`.
+    DrawRoundedRectShadow {
+        rect: Rect,
+        corner_radius: f32,
+        offset: Offset,
+        blur_radius: f32,
+        spread_radius: f32,
         color: Color,
     },
     StrokePath {
@@ -248,6 +274,43 @@ impl<'a> PaintContext<'a> {
         self.commands.push(PaintCommand::FillRoundedRect {
             rect,
             corner_radius,
+            color,
+        });
+    }
+
+    /// Fill a rounded rectangle with a top-to-bottom linear gradient.
+    pub fn fill_vertical_gradient_rounded_rect(
+        &mut self,
+        rect: Rect,
+        corner_radius: f32,
+        top_color: Color,
+        bottom_color: Color,
+    ) {
+        self.commands
+            .push(PaintCommand::FillVerticalGradientRoundedRect {
+                rect,
+                corner_radius,
+                top_color,
+                bottom_color,
+            });
+    }
+
+    /// Draw a soft rounded-rectangle drop shadow.
+    pub fn draw_rounded_rect_shadow(
+        &mut self,
+        rect: Rect,
+        corner_radius: f32,
+        offset: Offset,
+        blur_radius: f32,
+        spread_radius: f32,
+        color: Color,
+    ) {
+        self.commands.push(PaintCommand::DrawRoundedRectShadow {
+            rect,
+            corner_radius,
+            offset,
+            blur_radius,
+            spread_radius,
             color,
         });
     }
@@ -1152,6 +1215,39 @@ impl CpuPaintRenderer {
                         }
                     }
                 }
+                PaintCommand::FillVerticalGradientRoundedRect {
+                    rect,
+                    corner_radius,
+                    top_color,
+                    bottom_color,
+                } => {
+                    // The CPU renderer intentionally uses a flat midpoint
+                    // color. Geometry and contrast remain equivalent while
+                    // the GPU path provides the high-fidelity gradient.
+                    let color = interpolate_color(*top_color, *bottom_color, 0.5);
+                    let color = color.with_opacity(color.a * opacity);
+                    self.rebuild_scaled_rounded_rect(*rect, *corner_radius);
+                    match self.rebuild_effective_clip_rects(damage_rects) {
+                        EffectiveClipRects::Unclipped => {
+                            self.fill_scaled_path(color, None);
+                        }
+                        EffectiveClipRects::Empty => {}
+                        EffectiveClipRects::Rects => {
+                            for index in 0..self.scratch.clip_rects.len() {
+                                let rect = self.scratch.clip_rects[index];
+                                let clip = ClipRegion {
+                                    rect: self.scale_rect(rect),
+                                    corner_radius: 0.0,
+                                };
+                                self.fill_scaled_path(color, Some(clip));
+                            }
+                        }
+                    }
+                }
+                PaintCommand::DrawRoundedRectShadow { .. } => {
+                    // Shadows are a GPU enhancement. The CPU fallback keeps
+                    // the same surface geometry without spending time on blur.
+                }
                 PaintCommand::StrokeRect {
                     rect,
                     stroke_width,
@@ -1990,6 +2086,68 @@ mod tests {
         let mut r = CpuPaintRenderer::new(Size::new(100.0, 100.0), 1000, Color::rgb(0, 0, 0));
         r.execute(&ctx);
         assert!(r.buffer().get_pixel(50, 50).unwrap() > 0);
+    }
+
+    #[test]
+    fn vertical_gradient_records_semantic_endpoints() {
+        let rect = Rect::from_xywh(4.0, 6.0, 80.0, 28.0);
+        let mut ctx = PaintContext::new();
+        ctx.fill_vertical_gradient_rounded_rect(rect, 6.0, Color::WHITE, Color::BLACK);
+
+        let [
+            PaintCommand::FillVerticalGradientRoundedRect {
+                rect: recorded,
+                corner_radius,
+                top_color,
+                bottom_color,
+            },
+        ] = ctx.commands()
+        else {
+            panic!("expected one vertical gradient command");
+        };
+        assert_eq!(*recorded, rect);
+        assert_eq!(*corner_radius, 6.0);
+        assert_eq!(*top_color, Color::WHITE);
+        assert_eq!(*bottom_color, Color::BLACK);
+    }
+
+    #[test]
+    fn cpu_gradient_fallback_uses_midpoint_color() {
+        let mut ctx = PaintContext::new();
+        ctx.fill_vertical_gradient_rounded_rect(
+            Rect::from_xywh(2.0, 2.0, 20.0, 20.0),
+            4.0,
+            Color::WHITE,
+            Color::BLACK,
+        );
+        let mut renderer = CpuPaintRenderer::new(Size::new(24.0, 24.0), 1000, Color::TRANSPARENT);
+        renderer.execute(&ctx);
+
+        let pixel = Color::from_bgra(renderer.buffer().get_pixel(12, 12).unwrap());
+        assert!((pixel.r - 0.5).abs() < 0.01);
+        assert!((pixel.g - 0.5).abs() < 0.01);
+        assert!((pixel.b - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn cpu_shadow_fallback_does_not_paint() {
+        let background = Color::rgb(24, 32, 40);
+        let mut ctx = PaintContext::new();
+        ctx.draw_rounded_rect_shadow(
+            Rect::from_xywh(8.0, 8.0, 20.0, 20.0),
+            6.0,
+            Offset::new(0.0, 3.0),
+            8.0,
+            0.0,
+            Color::rgba(0, 0, 0, 64),
+        );
+        let mut renderer = CpuPaintRenderer::new(Size::new(40.0, 40.0), 1000, background);
+        renderer.execute(&ctx);
+
+        assert_eq!(
+            renderer.buffer().get_pixel(20, 32).unwrap(),
+            background.to_bgra()
+        );
     }
 
     #[test]

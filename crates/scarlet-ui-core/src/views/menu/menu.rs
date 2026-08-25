@@ -5,7 +5,7 @@
 use crate::buffer::Buffer;
 use crate::color::ColorPalette;
 use crate::element::{Element, RenderElement};
-use crate::geometry::{Point, Rect, Size};
+use crate::geometry::{EdgeInsets, Point, Rect, Size};
 use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::view::View;
@@ -275,6 +275,10 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
         self.size
     }
 
+    fn paint_outsets(&self) -> EdgeInsets {
+        style::floating_outsets()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -293,7 +297,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
         }
 
         let palette = ColorPalette::default();
-        let bg_color = palette.surface();
+        let bg_color = style::surface_color(&palette, style::SurfaceLevel::Floating);
         let border_color = palette.border();
         let text_color = palette.text_primary();
         let hover_color = palette.menu_hover();
@@ -367,14 +371,14 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let palette = ColorPalette::default();
-        let bg_color = palette.surface();
+        let bg_color = style::surface_color(&palette, style::SurfaceLevel::Floating);
         let border_color = palette.border();
         let text_color = palette.text_primary();
         let hover_color = palette.menu_hover();
         let separator_color = palette.divider();
 
         let rect = Rect::new(origin, self.size);
-        style::popover_surface(ctx, rect, bg_color, border_color);
+        style::popover_surface(ctx, rect, bg_color, border_color, palette.shadow());
 
         let mut current_y = 2.0;
         let font_size = 13.0;

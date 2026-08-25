@@ -2079,7 +2079,8 @@ impl RenderingPipeline {
         let bounds = element.bounds();
         let mut width = bounds.size.width;
         let mut height = bounds.size.height;
-        if let Some(select) = element.render_object().and_then(|render_object| {
+        let render_object = element.render_object();
+        if let Some(select) = render_object.and_then(|render_object| {
             render_object
                 .as_any()
                 .downcast_ref::<crate::views::SelectRenderObject>()
@@ -2090,7 +2091,30 @@ impl RenderingPipeline {
             width = width.max(buffer.logical_width() as f32);
             height = height.max(buffer.logical_height() as f32);
         }
-        Rect::from_xywh(absolute_origin.x, absolute_origin.y, width, height)
+        let bounds = Rect::from_xywh(absolute_origin.x, absolute_origin.y, width, height);
+        render_object.map_or(bounds, |render_object| {
+            Self::apply_paint_outsets(bounds, render_object.paint_outsets())
+        })
+    }
+
+    fn apply_paint_outsets(bounds: Rect, outsets: crate::geometry::EdgeInsets) -> Rect {
+        let finite_positive = |value: f32| {
+            if value.is_finite() {
+                value.max(0.0)
+            } else {
+                0.0
+            }
+        };
+        let left = finite_positive(outsets.left);
+        let top = finite_positive(outsets.top);
+        let right = finite_positive(outsets.right);
+        let bottom = finite_positive(outsets.bottom);
+        Rect::from_xywh(
+            bounds.origin.x - left,
+            bounds.origin.y - top,
+            bounds.size.width + left + right,
+            bounds.size.height + top + bottom,
+        )
     }
 
     fn paint_dirty_rects_into(
@@ -2572,6 +2596,17 @@ mod tests {
 
     #[derive(Clone)]
     struct PaintExtensionProbe;
+
+    #[test]
+    fn paint_outsets_expand_damage_bounds_conservatively() {
+        let bounds = Rect::from_xywh(20.0, 30.0, 80.0, 40.0);
+        let expanded = RenderingPipeline::apply_paint_outsets(
+            bounds,
+            crate::geometry::EdgeInsets::new(6.0, 4.0, 8.0, 10.0),
+        );
+
+        assert_eq!(expanded, Rect::from_xywh(14.0, 26.0, 94.0, 54.0));
+    }
 
     impl View for PaintExtensionProbe {
         fn create_element(&self) -> Box<dyn Element> {

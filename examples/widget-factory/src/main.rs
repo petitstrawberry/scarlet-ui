@@ -70,7 +70,7 @@ impl WidgetFactory {
     }
 
     fn button(&self) -> impl View + Clone + use<> {
-        Button::new("Factory Button").padding(12.0)
+        Button::new("Factory Button")
     }
 
     fn text_field(&self) -> impl View + Clone + use<> {
@@ -196,7 +196,6 @@ impl WidgetFactory {
         .fraction(0.34)
         .min_first(72.0)
         .min_second(120.0)
-        .divider_thickness(4.0)
         .frame(320.0, 96.0)
     }
 

@@ -32,6 +32,7 @@ use crate::geometry::{Point, Rect, Size};
 use crate::renderer::PaintContext;
 use crate::state::{Listenable, State};
 use crate::view::View;
+use crate::views::style;
 
 const BORDER_WIDTH: f32 = 1.0;
 
@@ -110,13 +111,16 @@ impl TextView {
             tab_mode: TabMode::Tab,
             line_numbers: false,
             current_line_highlight: false,
-            background_color: palette.background(),
+            background_color: style::surface_color(&palette, style::SurfaceLevel::Canvas),
             text_color: palette.text(),
             placeholder_color: palette.text_secondary(),
-            selection_color: palette.primary().with_opacity(0.3),
+            selection_color: style::text_selection_highlight(
+                palette.primary(),
+                style::surface_color(&palette, style::SurfaceLevel::Canvas),
+            ),
             current_line_color: palette.background_secondary(),
-            border_color: palette.background_tertiary(),
-            focused_border_color: palette.primary_light().lighten(0.4),
+            border_color: palette.divider(),
+            focused_border_color: style::focus_highlight(&palette),
             on_copy: None,
             on_paste: None,
             on_text_change: None,

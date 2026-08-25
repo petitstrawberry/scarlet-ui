@@ -258,7 +258,13 @@ fn text_view_default_selection_color_uses_palette_primary() {
 
     assert_eq!(
         view.selection_color,
-        ColorPalette::default().primary().with_opacity(0.3)
+        crate::views::style::text_selection_highlight(
+            ColorPalette::default().primary(),
+            crate::views::style::surface_color(
+                &ColorPalette::default(),
+                crate::views::style::SurfaceLevel::Canvas,
+            ),
+        )
     );
 }
 

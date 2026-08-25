@@ -14,7 +14,7 @@ use core::any::Any;
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::{Point, Rect, Size};
+use crate::geometry::{EdgeInsets, Point, Rect, Size};
 use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::state::State;
@@ -422,7 +422,7 @@ impl SelectRenderObject {
         let mut canvas = graphics::Canvas::for_buffer(buffer);
         let palette = ColorPalette::default();
         let background = palette.button_background();
-        let popup_background = palette.surface();
+        let popup_background = style::surface_color(&palette, style::SurfaceLevel::Floating);
         let border = palette.border();
         let text = palette.text_primary();
         let subtle = palette.text_secondary();
@@ -444,10 +444,8 @@ impl SelectRenderObject {
 
         if self.expanded {
             let active = hovered_index.or(Some(selected_index));
-            let active_background = palette
-                .primary()
-                .with_opacity(0.2)
-                .blend_over(popup_background);
+            let active_background =
+                style::selected_item_surface(palette.primary(), popup_background);
             let mut y = row_h as i32;
             for index in scroll_start..scroll_end {
                 let label = &options[index];
@@ -495,6 +493,14 @@ impl ElementRenderObject for SelectRenderObject {
         self.size
     }
 
+    fn paint_outsets(&self) -> EdgeInsets {
+        if self.expanded {
+            style::floating_outsets()
+        } else {
+            EdgeInsets::ZERO
+        }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -539,7 +545,7 @@ impl ElementRenderObject for SelectRenderObject {
         let scroll_end = (scroll_start + visible).min(self.options.len());
         let palette = ColorPalette::default();
         let background = palette.button_background();
-        let popup_background = palette.surface();
+        let popup_background = style::surface_color(&palette, style::SurfaceLevel::Floating);
         let border = palette.border();
         let text = palette.text_primary();
         let subtle = palette.text_secondary();
@@ -549,11 +555,12 @@ impl ElementRenderObject for SelectRenderObject {
         let row_rect = Rect::from_xywh(origin.x, origin.y, w, row_h);
         ctx.fill_rect(outer_rect, Color::TRANSPARENT);
         if self.expanded {
-            ctx.push_rounded_clip(outer_rect, metrics.popover_radius);
+            style::floating_shadow(ctx, outer_rect, metrics.control_radius, palette.shadow());
+            ctx.push_rounded_clip(outer_rect, metrics.control_radius);
             ctx.fill_rect(outer_rect, popup_background);
-            ctx.fill_rect(row_rect, background);
+            style::fill_raised_surface(ctx, row_rect, 0.0, background, false);
         } else {
-            style::control_surface(ctx, row_rect, background, border);
+            style::raised_control_surface(ctx, row_rect, background, border, false);
         }
 
         let label = selected_label.map_or(self.placeholder.as_str(), String::as_str);
@@ -593,10 +600,8 @@ impl ElementRenderObject for SelectRenderObject {
 
         if self.expanded {
             let active = self.hovered_index.or(Some(selected_index));
-            let active_background = palette
-                .primary()
-                .with_opacity(0.2)
-                .blend_over(popup_background);
+            let active_background =
+                style::selected_item_surface(palette.primary(), popup_background);
             let mut y = origin.y + row_h;
             for index in scroll_start..scroll_end {
                 let row_background = if active == Some(index) {
@@ -638,7 +643,7 @@ impl ElementRenderObject for SelectRenderObject {
             ctx.pop_clip();
             ctx.stroke_rounded_rect(
                 outer_rect,
-                metrics.popover_radius,
+                metrics.control_radius,
                 metrics.border_width,
                 border,
             );
@@ -685,5 +690,52 @@ impl ElementRenderObject for SelectRenderObject {
         } else {
             crate::element::UpdateResult::Replaced
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::element::LayoutConstraints;
+    use crate::renderer::PaintCommand;
+
+    #[test]
+    fn expanding_select_preserves_control_corner_radius() {
+        let mut select = SelectRenderObject::new(
+            alloc::vec![String::from("Compact"), String::from("Regular")],
+            1,
+            false,
+            200.0,
+            32.0,
+            String::new(),
+            6,
+        );
+        select.layout(LayoutConstraints::tight(200.0, 32.0));
+
+        let mut collapsed = PaintContext::new();
+        select.paint(&mut collapsed, Point::ZERO);
+        let collapsed_radius = collapsed
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::FillVerticalGradientRoundedRect { corner_radius, .. } => {
+                    Some(*corner_radius)
+                }
+                _ => None,
+            });
+
+        select.set_expanded(true);
+        let mut expanded = PaintContext::new();
+        select.paint(&mut expanded, Point::ZERO);
+        let expanded_radius = expanded
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::PushClip { corner_radius, .. } => Some(*corner_radius),
+                _ => None,
+            });
+
+        assert_eq!(collapsed_radius, Some(style::metrics().control_radius));
+        assert_eq!(expanded_radius, collapsed_radius);
     }
 }

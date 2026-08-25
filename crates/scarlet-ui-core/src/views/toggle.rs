@@ -10,6 +10,7 @@ use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::view::View;
+use crate::views::style::{self, SurfaceLevel};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -54,11 +55,36 @@ impl View for Toggle {
 /// A platform-neutral switch using capsule geometry and the semantic palette.
 pub struct ToggleRenderObject {
     is_on: bool,
+    hovered: bool,
+    pressed: bool,
     size: Size,
     buffer: Option<Buffer>,
 }
 
 impl ToggleRenderObject {
+    fn colors(&self, palette: &ColorPalette) -> (Color, Color, Color, Color) {
+        let base_track = if self.is_on {
+            palette.primary()
+        } else {
+            style::surface_color(palette, SurfaceLevel::Section)
+        };
+        let track = if self.pressed {
+            base_track.darken(0.035)
+        } else if self.hovered {
+            base_track.lighten(0.018)
+        } else {
+            base_track
+        };
+        let track_border = if self.is_on {
+            palette.primary().darken(0.06)
+        } else {
+            palette.divider()
+        };
+        let thumb = style::surface_color(palette, SurfaceLevel::Floating);
+        let thumb_border = palette.divider();
+        (track, track_border, thumb, thumb_border)
+    }
+
     fn fill_rounded_rect(
         canvas: &mut graphics::Canvas<'_>,
         x: i32,
@@ -188,12 +214,13 @@ impl ToggleRenderObject {
 
     /// Create a new ToggleRenderObject
     pub fn new(is_on: bool) -> Self {
-        const TOGGLE_WIDTH: f32 = 51.0;
-        const TOGGLE_HEIGHT: f32 = 31.0;
+        let metrics = style::metrics();
 
         Self {
             is_on,
-            size: Size::new(TOGGLE_WIDTH, TOGGLE_HEIGHT),
+            hovered: false,
+            pressed: false,
+            size: Size::new(metrics.toggle_width, metrics.toggle_height),
             buffer: None,
         }
     }
@@ -206,6 +233,14 @@ impl ToggleRenderObject {
     /// Set is_on state
     pub fn set_is_on(&mut self, is_on: bool) {
         self.is_on = is_on;
+    }
+
+    pub fn set_hovered(&mut self, hovered: bool) {
+        self.hovered = hovered;
+    }
+
+    pub fn set_pressed(&mut self, pressed: bool) {
+        self.pressed = pressed;
     }
 
     /// Draw toggle using Canvas API.
@@ -224,18 +259,13 @@ impl ToggleRenderObject {
             self.buffer = Some(Buffer::from_logical_dimensions(w, h));
         }
 
+        let palette = ColorPalette::default();
+        let (bg_color, border_color, thumb_color, thumb_border) = self.colors(&palette);
         if let Some(ref mut buffer) = self.buffer {
             let physical_w = buffer.width();
             let physical_h = buffer.height();
             let ui_scale = (buffer.scale_milli() as f32) / 1000.0;
-            let palette = ColorPalette::default();
-            let bg_color = if self.is_on {
-                palette.green().base
-            } else {
-                palette.surface_variant().darken(0.06)
-            };
-            let border_color = palette.border().with_opacity(0.7);
-            let thumb_color = palette.surface();
+            let metrics = style::metrics();
 
             let data = buffer.data_mut();
             data.fill(0);
@@ -269,21 +299,28 @@ impl ToggleRenderObject {
             data.copy_from_slice(&track);
 
             // Thumb position: on = right side, off = left side
-            let thumb_diameter = self.size.height - 4.0;
-            let thumb_offset = if self.is_on {
-                self.size.width - self.size.height
+            let thumb_diameter = metrics.toggle_thumb_diameter;
+            let thumb_x = if self.is_on {
+                self.size.width - metrics.toggle_thumb_inset - thumb_diameter
             } else {
-                0.0
+                metrics.toggle_thumb_inset
             };
-            let thumb_x = ((thumb_offset + 2.0) * ui_scale * aa_scale as f32) as i32;
-            let thumb_y = (2.0 * ui_scale * aa_scale as f32) as i32;
+            let thumb_x = (thumb_x * ui_scale * aa_scale as f32) as i32;
+            let thumb_y = (metrics.toggle_thumb_inset * ui_scale * aa_scale as f32) as i32;
             let thumb_size = libm::ceilf(thumb_diameter * ui_scale * aa_scale as f32) as i32;
             let radius = (thumb_size / 2).max(1);
             let center_x = thumb_x + radius;
             let center_y = thumb_y + radius;
             let mut thumb_hi = alloc::vec![0u8; (w_hi * h_hi * 4) as usize];
             let mut thumb_canvas = graphics::Canvas::new(&mut thumb_hi, w_hi, h_hi);
-            Self::fill_circle(&mut thumb_canvas, center_x, center_y, radius, thumb_color);
+            Self::fill_circle(&mut thumb_canvas, center_x, center_y, radius, thumb_border);
+            Self::fill_circle(
+                &mut thumb_canvas,
+                center_x,
+                center_y,
+                (radius - aa_scale as i32).max(0),
+                thumb_color,
+            );
 
             let mut thumb = alloc::vec![0u8; (physical_w * physical_h * 4) as usize];
             Self::downsample_2x(&thumb_hi, w_hi, h_hi, &mut thumb, physical_w, physical_h);
@@ -341,42 +378,38 @@ impl ElementRenderObject for ToggleRenderObject {
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let palette = ColorPalette::default();
-        let bg_color = if self.is_on {
-            palette.green().base
-        } else {
-            palette.surface_variant().darken(0.06)
-        };
-        let border_color = palette.border().with_opacity(0.7);
-        let thumb_color = palette.surface();
+        let (bg_color, border_color, thumb_color, thumb_border) = self.colors(&palette);
+        let metrics = style::metrics();
         let rect = Rect::new(origin, self.size);
-        let radius = self.size.height / 2.0;
-        let inset = 1.0;
-        ctx.fill_rounded_rect(rect, radius, border_color);
-        ctx.fill_rounded_rect(
+        let border_width = metrics.border_width;
+        style::track(ctx, rect, border_color);
+        style::track(
+            ctx,
             Rect::from_xywh(
-                origin.x + inset,
-                origin.y + inset,
-                (self.size.width - inset * 2.0).max(0.0),
-                (self.size.height - inset * 2.0).max(0.0),
+                origin.x + border_width,
+                origin.y + border_width,
+                (self.size.width - border_width * 2.0).max(0.0),
+                (self.size.height - border_width * 2.0).max(0.0),
             ),
-            (radius - inset).max(0.0),
             bg_color,
         );
 
-        let thumb_diameter = self.size.height - 4.0;
-        let thumb_offset = if self.is_on {
-            self.size.width - self.size.height
+        let thumb_diameter = metrics.toggle_thumb_diameter;
+        let thumb_x = if self.is_on {
+            self.size.width - metrics.toggle_thumb_inset - thumb_diameter
         } else {
-            0.0
+            metrics.toggle_thumb_inset
         };
         let thumb_radius = thumb_diameter / 2.0;
-        ctx.fill_circle(
+        style::control_thumb(
+            ctx,
             Point::new(
-                origin.x + thumb_offset + 2.0 + thumb_radius,
-                origin.y + 2.0 + thumb_radius,
+                origin.x + thumb_x + thumb_radius,
+                origin.y + metrics.toggle_thumb_inset + thumb_radius,
             ),
             thumb_radius,
             thumb_color,
+            thumb_border,
         );
         true
     }
@@ -393,5 +426,72 @@ impl ElementRenderObject for ToggleRenderObject {
         } else {
             crate::element::UpdateResult::Replaced
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::PaintCommand;
+
+    #[test]
+    fn toggle_uses_compact_desktop_metrics() {
+        let toggle = ToggleRenderObject::new(false);
+        let metrics = style::metrics();
+
+        assert_eq!(
+            toggle.size(),
+            Size::new(metrics.toggle_width, metrics.toggle_height)
+        );
+        assert_eq!(toggle.size(), Size::new(36.0, 20.0));
+    }
+
+    #[test]
+    fn enabled_toggle_uses_the_primary_role_instead_of_an_independent_green() {
+        let toggle = ToggleRenderObject::new(true);
+        let mut ctx = PaintContext::new();
+        toggle.paint(&mut ctx, Point::ZERO);
+
+        let PaintCommand::FillRoundedRect { color, .. } = &ctx.commands()[1] else {
+            panic!("expected inner toggle track");
+        };
+        assert_eq!(*color, ColorPalette::default().primary());
+    }
+
+    #[test]
+    fn inactive_toggle_uses_the_section_surface_role() {
+        let toggle = ToggleRenderObject::new(false);
+        let mut ctx = PaintContext::new();
+        toggle.paint(&mut ctx, Point::ZERO);
+
+        let PaintCommand::FillRoundedRect { color, .. } = &ctx.commands()[1] else {
+            panic!("expected inner toggle track");
+        };
+        let palette = ColorPalette::default();
+        assert_eq!(
+            *color,
+            style::surface_color(&palette, SurfaceLevel::Section)
+        );
+    }
+
+    #[test]
+    fn pressed_toggle_changes_tone_without_changing_geometry() {
+        let mut toggle = ToggleRenderObject::new(true);
+        let normal_size = toggle.size();
+        let normal = toggle.colors(&ColorPalette::default()).0;
+        toggle.set_pressed(true);
+        let pressed = toggle.colors(&ColorPalette::default()).0;
+
+        assert_eq!(toggle.size(), normal_size);
+        assert!(pressed.r < normal.r);
+    }
+
+    #[test]
+    fn toggle_hairlines_are_opaque() {
+        let toggle = ToggleRenderObject::new(false);
+        let (_, track_border, _, thumb_border) = toggle.colors(&ColorPalette::default());
+
+        assert_eq!(track_border.a, 1.0);
+        assert_eq!(thumb_border.a, 1.0);
     }
 }

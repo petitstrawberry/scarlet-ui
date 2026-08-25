@@ -153,12 +153,12 @@ impl View for Slider {
 
 /// Slider RenderObject
 ///
-/// Design matching macOS/iOS slider:
+/// Compact desktop slider using the shared control and track metrics:
 /// - Height: 20px (track is 4px thick)
 /// - Width: flexible (at least 100px)
-/// - Track: Light gray (#C5C5C7)
-/// - Fill: Blue (#007AFF) for filled portion
-/// - Thumb: White circle, 20px diameter with shadow
+/// - Track: semantic section surface
+/// - Fill: semantic primary color
+/// - Thumb: 16px surface circle with a hairline
 pub struct SliderRenderObject {
     value: f32,
     min: f32,
@@ -287,10 +287,14 @@ impl SliderRenderObject {
             let fill_width = (normalized_value * track_width) as u32;
 
             let palette = ColorPalette::default();
-            let track_color = palette.surface_variant();
+            let track_color = style::surface_color(&palette, style::SurfaceLevel::Section);
             let fill_color = palette.primary();
-            let thumb_color = palette.surface();
-            let thumb_border = palette.border();
+            let thumb_color = style::surface_color(&palette, style::SurfaceLevel::Floating);
+            let thumb_border = if self.dragging {
+                style::focus_highlight(&palette)
+            } else {
+                palette.divider()
+            };
 
             // Draw track (background)
             canvas.fill_rect(
@@ -390,10 +394,14 @@ impl ElementRenderObject for SliderRenderObject {
         };
         let fill_width = normalized_value * track_width;
         let palette = ColorPalette::default();
-        let track_color = palette.surface_variant();
+        let track_color = style::surface_color(&palette, style::SurfaceLevel::Section);
         let fill_color = palette.primary();
-        let thumb_color = palette.surface();
-        let thumb_border = palette.border();
+        let thumb_color = style::surface_color(&palette, style::SurfaceLevel::Floating);
+        let thumb_border = if self.dragging {
+            style::focus_highlight(&palette)
+        } else {
+            palette.divider()
+        };
         let thumb_radius = self.thumb_diameter().max(1.0) / 2.0;
         let thumb_center = Point::new(origin.x + track_start + fill_width, origin.y + center_y);
 
@@ -419,8 +427,7 @@ impl ElementRenderObject for SliderRenderObject {
                 fill_color,
             );
         }
-        ctx.fill_circle(thumb_center, thumb_radius, thumb_border);
-        ctx.fill_circle(thumb_center, (thumb_radius - 1.0).max(0.0), thumb_color);
+        style::control_thumb(ctx, thumb_center, thumb_radius, thumb_color, thumb_border);
         true
     }
 
@@ -452,5 +459,32 @@ impl ElementRenderObject for SliderRenderObject {
         } else {
             crate::element::UpdateResult::Replaced
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::element::LayoutConstraints;
+    use crate::renderer::PaintCommand;
+
+    #[test]
+    fn thumb_hairline_is_opaque_on_arbitrary_parent_surfaces() {
+        let mut slider = SliderRenderObject::new(0.5, 0.0, 1.0, false);
+        slider.layout(LayoutConstraints::tight(
+            200.0,
+            style::metrics().slider_height,
+        ));
+        let mut ctx = PaintContext::new();
+        slider.paint(&mut ctx, Point::ZERO);
+
+        let thumb_colors = ctx.commands().iter().filter_map(|command| match command {
+            PaintCommand::FillPath { color, .. } => Some(*color),
+            _ => None,
+        });
+        let colors = thumb_colors.collect::<alloc::vec::Vec<_>>();
+        assert_eq!(colors.len(), 2);
+        assert!(colors.iter().all(|color| color.a == 1.0));
+        assert_eq!(colors[0], ColorPalette::default().divider());
     }
 }

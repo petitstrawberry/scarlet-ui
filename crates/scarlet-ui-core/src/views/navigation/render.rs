@@ -250,7 +250,7 @@ impl NavigationSidebarRenderObject {
         let height = self.size.height.max(0.0);
         ctx.fill_rect(
             Rect::from_xywh(origin.x, origin.y, width, height),
-            palette.background_secondary(),
+            style::surface_color(&palette, style::SurfaceLevel::Structural),
         );
 
         let selected = self.selected_index.get();
@@ -313,7 +313,7 @@ impl NavigationSidebarRenderObject {
         if width > 0.0 {
             ctx.fill_rect(
                 Rect::from_xywh(origin.x + width - 1.0, origin.y, 1.0, height),
-                palette.border(),
+                palette.divider(),
             );
         }
     }
@@ -378,7 +378,13 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
             let metrics = style::metrics();
             let width = canvas.width();
             let height = canvas.height();
-            canvas.fill_rect(0, 0, width, height, palette.background_secondary());
+            canvas.fill_rect(
+                0,
+                0,
+                width,
+                height,
+                style::surface_color(&palette, style::SurfaceLevel::Structural),
+            );
             let selected = self.selected_index.get();
             for index in 0..self.labels.len() {
                 let y = (index as f32 * self.item_height) as i32;
@@ -413,7 +419,7 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
                     0,
                     width as i32 - 1,
                     height as i32,
-                    palette.border(),
+                    palette.divider(),
                 );
             }
         }

@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
-use crate::geometry::{Point, Rect, Size};
+use crate::geometry::{EdgeInsets, Point, Rect, Size};
 use crate::pipeline::layers::{LayerClip, LayerPrimitive};
 use crate::pipeline::{MountContext, PipelineId};
 use crate::renderer::PaintContext;
@@ -211,6 +211,14 @@ pub trait RenderObject: Any {
     /// The absolute self-paint bounds, or `None` to use the full element bounds.
     fn self_paint_bounds(&self, _origin: Point) -> Option<Rect> {
         None
+    }
+
+    /// Return visual overflow painted outside this render object's layout box.
+    ///
+    /// Shadows and similar effects must report conservative positive outsets so
+    /// retained damage and partial repainting include every affected pixel.
+    fn paint_outsets(&self) -> EdgeInsets {
+        EdgeInsets::ZERO
     }
 
     /// Return an element-local clip region for this render object.
@@ -1346,30 +1354,53 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         }
 
         if let Some(toggle) = self.view.as_any().downcast_ref::<crate::views::Toggle>() {
-            if let MouseEvent::ButtonReleased {
-                button: MouseButton::Left,
-                ..
-            } = mouse_event
+            if let Some(render_object) = self
+                .render_object
+                .as_any_mut()
+                .downcast_mut::<crate::views::ToggleRenderObject>()
             {
-                if crate::debug::is_enabled() {
-                    crate::logln!("[RenderElement] Toggle click id={:?}", self.id);
+                match mouse_event {
+                    MouseEvent::Entered { .. } | MouseEvent::Moved { .. } => {
+                        render_object.set_hovered(true);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
+                    MouseEvent::Exited { .. } => {
+                        render_object.set_hovered(false);
+                        render_object.set_pressed(false);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
+                    MouseEvent::ButtonPressed {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        render_object.set_pressed(true);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
+                    MouseEvent::ButtonReleased {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        if crate::debug::is_enabled() {
+                            crate::logln!("[RenderElement] Toggle click id={:?}", self.id);
+                        }
+                        let state = toggle.get_is_on().clone();
+                        let next = !state.get();
+                        render_object.set_pressed(false);
+
+                        // Keep interaction feedback synchronous. The State
+                        // notification still rebuilds declarative dependants, but
+                        // this control must not need an unrelated event before its
+                        // own RenderObject reflects the click.
+                        render_object.set_is_on(next);
+                        state.set(next);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
+                    _ => {}
                 }
-                let state = toggle.get_is_on().clone();
-                let next = !state.get();
-                if let Some(render_object) = self
-                    .render_object
-                    .as_any_mut()
-                    .downcast_mut::<crate::views::ToggleRenderObject>()
-                {
-                    // Keep interaction feedback synchronous. The State
-                    // notification still rebuilds declarative dependants, but
-                    // this control must not need an unrelated event before its
-                    // own RenderObject reflects the click.
-                    render_object.set_is_on(next);
-                }
-                state.set(next);
-                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
-                return true;
             }
         }
 
@@ -1480,6 +1511,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         ..
                     } => {
                         render_object.set_dragging(true);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         if !dragging_state.get() {
                             dragging_state.set(true);
                         }
@@ -1521,6 +1553,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                                 true,
                             );
                             render_object.set_dragging(false);
+                            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                             if dragging_state.get() {
                                 dragging_state.set(false);
                             }

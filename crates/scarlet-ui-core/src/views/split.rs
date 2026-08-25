@@ -63,8 +63,8 @@ impl<A: View, B: View> SplitView<A, B> {
             min_second: 0.0,
             divider_thickness: 1.0,
             divider_hit_slop: DEFAULT_DIVIDER_HIT_SLOP,
-            divider_color: palette.border(),
-            active_divider_color: palette.accent(),
+            divider_color: palette.divider(),
+            active_divider_color: crate::views::style::focus_highlight(&palette),
         }
     }
 

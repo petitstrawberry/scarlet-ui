@@ -12,6 +12,7 @@ use crate::element::{
 use crate::geometry::{Point, Size};
 use crate::renderer::PaintContext;
 use crate::view::View;
+use crate::views::style::{self, SurfaceLevel};
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -45,8 +46,8 @@ impl<C: View + Clone> HeaderBar<C> {
         Self {
             content,
             height: 48.0,
-            background: palette.background_secondary(),
-            border: palette.border(),
+            background: style::surface_color(&palette, SurfaceLevel::Structural),
+            border: palette.divider(),
         }
     }
 
@@ -170,7 +171,8 @@ impl ElementRenderObject for HeaderBarRenderObject {
     fn render(&mut self) {}
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
-        ctx.fill_rect(
+        style::chrome_surface(
+            ctx,
             crate::geometry::Rect::from_xywh(origin.x, origin.y, self.size.width, self.size.height),
             self.background,
         );
