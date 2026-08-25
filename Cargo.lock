@@ -25,17 +25,17 @@ dependencies = [
 [[package]]
 name = "adreno-a6xx-pm4"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#a144ff7685d62596dd7ab3055492b1ac49587552"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#b76f4a9d7181d54956c408878343fa10d753d401"
 
 [[package]]
 name = "adreno-a6xx-shader-pack"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#a144ff7685d62596dd7ab3055492b1ac49587552"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#b76f4a9d7181d54956c408878343fa10d753d401"
 
 [[package]]
 name = "adreno-a6xx-submit-wire"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#a144ff7685d62596dd7ab3055492b1ac49587552"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#b76f4a9d7181d54956c408878343fa10d753d401"
 dependencies = [
  "adreno-a6xx-shader-pack",
 ]
@@ -1982,7 +1982,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-scarlet-adreno"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#a144ff7685d62596dd7ab3055492b1ac49587552"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#b76f4a9d7181d54956c408878343fa10d753d401"
 dependencies = [
  "adreno-a6xx-submit-wire",
  "gpu-raw",
@@ -2019,7 +2019,7 @@ dependencies = [
 [[package]]
 name = "sgfx-codegen-adreno-a6xx"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#a144ff7685d62596dd7ab3055492b1ac49587552"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#b76f4a9d7181d54956c408878343fa10d753d401"
 dependencies = [
  "adreno-a6xx-pm4",
  "adreno-a6xx-shader-pack",
