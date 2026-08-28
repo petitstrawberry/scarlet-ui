@@ -1,5 +1,7 @@
 //! Winit-owned presentation policy for the selected SGFX backend.
 
+use std::rc::Rc;
+
 use scarlet_ui_core::color::Color;
 use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::geometry::{Rect, Size};
@@ -7,14 +9,19 @@ use scarlet_ui_core::renderer::{BackendFrame, PaintBackend, PaintContext};
 use scarlet_ui_core::{Error, Result};
 use scarlet_ui_renderer_sgfx::SgfxPaintEncoder;
 use sgfx::{MappedTargetSession, WindowContext};
+use winit::window::Window as WinitWindow;
+
+use super::configure_sgfx_surface_alpha;
 
 /// Platform composition of backend-owned SGFX targets and a Winit window.
 pub(crate) struct SgfxWindowPaintBackend {
     // Drop the mapped session before the selected backend's window context.
     session: MappedTargetSession,
     window: WindowContext,
+    native_window: Rc<WinitWindow>,
     encoder: SgfxPaintEncoder,
     supports_depth: bool,
+    transparent: bool,
     scale_milli: u32,
     next_slot: usize,
     last_slot: Option<usize>,
@@ -31,7 +38,13 @@ impl SgfxWindowPaintBackend {
     /// # Returns
     ///
     /// A configured platform renderer, or a rendering error.
-    pub(crate) fn new(window: WindowContext, width: u32, height: u32) -> Result<Self> {
+    pub(crate) fn new(
+        window: WindowContext,
+        native_window: Rc<WinitWindow>,
+        width: u32,
+        height: u32,
+        transparent: bool,
+    ) -> Result<Self> {
         let width = width.max(1);
         let height = height.max(1);
         let supports_depth = window.supports_depth();
@@ -44,11 +57,14 @@ impl SgfxWindowPaintBackend {
         let session = window
             .create_mapped_target_session(encoder.resource_table(), &targets)
             .map_err(|_| Error::RenderError)?;
+        configure_sgfx_surface_alpha(&native_window, transparent);
         Ok(Self {
             session,
             window,
+            native_window,
             encoder,
             supports_depth,
+            transparent,
             scale_milli: 1_000,
             next_slot: 0,
             last_slot: None,
@@ -77,6 +93,7 @@ impl SgfxWindowPaintBackend {
             return;
         };
         self.window.resize(width, height);
+        configure_sgfx_surface_alpha(&self.native_window, self.transparent);
         self.encoder = encoder;
         self.session = session;
         self.next_slot = 0;

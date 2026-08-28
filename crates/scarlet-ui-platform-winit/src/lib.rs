@@ -120,9 +120,10 @@ fn sgfx_backend_override_requested() -> bool {
 
 #[cfg(feature = "sgfx")]
 fn create_sgfx_backend(
-    window: &WinitWindow,
+    window: Rc<WinitWindow>,
     width: u32,
     height: u32,
+    transparent: bool,
 ) -> Result<SgfxWindowPaintBackend> {
     use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
@@ -143,8 +144,44 @@ fn create_sgfx_backend(
     }
     .map_err(|_| Error::SurfaceCreationFailed)?;
     println!("[ScarletUI] platform-winit renderer=sgfx backend={backend}");
-    SgfxWindowPaintBackend::new(window_context, width, height)
+    SgfxWindowPaintBackend::new(window_context, window, width, height, transparent)
 }
+
+#[cfg(all(feature = "sgfx", target_os = "macos"))]
+fn configure_sgfx_surface_alpha(window: &WinitWindow, transparent: bool) {
+    use objc2_app_kit::NSView;
+    use objc2_quartz_core::CALayer;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    fn set_layer_tree_opaque(layer: &CALayer, opaque: bool) {
+        layer.setOpaque(opaque);
+        let Some(sublayers) = (unsafe { layer.sublayers() }) else {
+            return;
+        };
+        for index in 0..sublayers.count() {
+            // SAFETY: `index` is bounded by the retained NSArray's count.
+            let child = unsafe { sublayers.objectAtIndex(index) };
+            set_layer_tree_opaque(&child, opaque);
+        }
+    }
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let view_ptr = handle.ns_view.as_ptr().cast::<NSView>();
+    // SAFETY: Winit owns this NSView for at least as long as `window`, and the
+    // caller invokes this only while the window is alive on the UI thread.
+    let view = unsafe { &*view_ptr };
+    if let Some(root_layer) = unsafe { view.layer() } {
+        set_layer_tree_opaque(&root_layer, !transparent);
+    }
+}
+
+#[cfg(all(feature = "sgfx", not(target_os = "macos")))]
+fn configure_sgfx_surface_alpha(_window: &WinitWindow, _transparent: bool) {}
 
 impl PlatformBackend for WinitBackend {
     fn output_scale_milli(&mut self) -> u32 {
@@ -945,6 +982,7 @@ impl WinitPlatformWindow {
         let attributes = WindowAttributes::default()
             .with_title(request.title)
             .with_decorations(system_window_decorations_enabled(request.decoration))
+            .with_transparent(!request.opaque)
             .with_inner_size(LogicalSize::new(request.size.width, request.size.height));
         let mut attributes = apply_platform_window_decoration(attributes, request.decoration);
         if let Some(position) = requested_position {
@@ -987,7 +1025,12 @@ impl WinitPlatformWindow {
         let sgfx_backend = match winit_renderer_preference() {
             WinitRendererPreference::Cpu => None,
             preference @ (WinitRendererPreference::Auto | WinitRendererPreference::Sgfx) => {
-                match create_sgfx_backend(&window, inner_size.width, inner_size.height) {
+                match create_sgfx_backend(
+                    window.clone(),
+                    inner_size.width,
+                    inner_size.height,
+                    !request.opaque,
+                ) {
                     Ok(backend) => Some(backend),
                     Err(error)
                         if preference == WinitRendererPreference::Auto

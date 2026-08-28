@@ -269,7 +269,7 @@ impl ApplicationRunner {
             menu_titles: menu_json.clone(),
             focus_on_create: window_info.focus_on_create,
             active_on_focus: window_info.active_on_focus,
-            opaque: window_info.opaque,
+            opaque: window_info.platform_surface_is_opaque(),
             decoration: window_info.decoration,
             placement: window_info.placement,
         };

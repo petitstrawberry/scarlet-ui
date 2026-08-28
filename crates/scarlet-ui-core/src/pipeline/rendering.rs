@@ -323,7 +323,7 @@ impl RenderingPipeline {
         if let Some(root) = self.element_tree.root()
             && let Some(window_info) = self.find_window_view(root)
         {
-            return window_info.background_color;
+            return window_info.surface_clear_color();
         }
         crate::color::ColorPalette::light().window_background()
     }
@@ -350,7 +350,7 @@ impl RenderingPipeline {
         self.renderer = Some(Box::new(CpuRenderer::new(
             window_size,
             self.scale_milli,
-            window_info.background_color,
+            window_info.surface_clear_color(),
         )));
         self.window_size = window_size;
         self.paint_backend.resize(window_size, self.scale_milli);
@@ -451,6 +451,9 @@ impl RenderingPipeline {
         let repaint_composite_damage = has_paint_extensions
             && self.pipeline_owner.last_paint_ids().is_empty()
             && !self.pipeline_owner.last_composite_ids().is_empty();
+        let transparent_surface_changed = background_color.a < 1.0
+            && (!self.pipeline_owner.last_paint_ids().is_empty()
+                || !self.pipeline_owner.last_composite_ids().is_empty());
 
         if self.paint_renderer.is_none() {
             self.paint_renderer = Some(CpuPaintRenderer::new(size, scale, background_color));
@@ -459,6 +462,12 @@ impl RenderingPipeline {
         let mut force_full = self.paint_needs_full
             || creating_renderer
             || self.paint_background_color != Some(background_color)
+            // A transparent top-level surface cannot clear and rebuild only a
+            // retained descendant: transparent pixels in that descendant need
+            // the window background beneath them, while the rounded exterior
+            // must stay transparent. Recompose from the root until transparent
+            // damage has its own ancestor-aware clear path.
+            || transparent_surface_changed
             || self.last_paint_ids_require_full_refresh();
 
         if !has_paint_extensions
@@ -3036,6 +3045,46 @@ mod tests {
         pipeline
             .render_with_damage()
             .expect("warm scroll frame should render");
+    }
+
+    #[test]
+    fn transparent_window_scroll_recomposes_the_window_background() {
+        let scroll = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::rgb(220, 40, 40))
+                .frame(100.0, 2_000.0),
+        )
+        .content_size(100.0, 2_000.0)
+        .wheel_sensitivity(1.0)
+        .scrollbar_visibility(ScrollbarVisibility::Never)
+        .frame(100.0, 100.0);
+        let window = Window::new("Transparent scroll", scroll).size(Size::new(120.0, 160.0));
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(window.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: 40,
+            x: 10,
+            y: 40,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Wheel,
+        })));
+        let (buffer, damage) = pipeline
+            .render_with_damage()
+            .expect("transparent scroll frame should render");
+
+        assert!(damage.is_none(), "transparent damage must include the root");
+        assert_eq!(
+            buffer.get_pixel(10, 40),
+            Some(crate::color::Color::rgb(220, 40, 40).to_bgra())
+        );
+        assert_eq!(
+            buffer.get_pixel(0, 0),
+            Some(crate::color::Color::TRANSPARENT.to_bgra())
+        );
     }
 
     fn first_any_scrollbar_primitive_rect(pipeline: &RenderingPipeline) -> Option<Rect> {

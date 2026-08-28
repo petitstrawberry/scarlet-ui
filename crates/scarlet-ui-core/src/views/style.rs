@@ -46,6 +46,7 @@ const OVERLAY_OUTSETS: EdgeInsets = EdgeInsets::new(24.0, 12.0, 24.0, 36.0);
 /// through the live view environment instead of a process-wide global mode.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct VisualMetrics {
+    pub(crate) window_radius: f32,
     pub(crate) control_radius: f32,
     pub(crate) item_radius: f32,
     pub(crate) popover_radius: f32,
@@ -70,6 +71,7 @@ pub(crate) struct VisualMetrics {
 }
 
 const VISUAL_METRICS: VisualMetrics = VisualMetrics {
+    window_radius: 10.0,
     control_radius: 6.0,
     item_radius: 4.0,
     popover_radius: 8.0,
