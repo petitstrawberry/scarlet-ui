@@ -15,6 +15,12 @@ use crate::{SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, S
 /// Default Scarlet graphics device used by the UI platform integration.
 pub const DEFAULT_GPU_DEVICE: &str = "/dev/gpu0";
 
+// SWS retains the last presented client image until a replacement reaches the
+// compositor. Two targets therefore serialize rendering behind that release
+// and can turn a narrowly missed 60 Hz deadline into a stable 30 Hz cadence.
+// A third target keeps one image presented, one pending, and one renderable.
+const PRESENTATION_SLOT_COUNT: usize = 3;
+
 /// SGFX/SWS integration operation that failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
@@ -89,8 +95,8 @@ struct RetiredGeneration {
     // The SGFX-owned session retains its physical images and cache together.
     // It must outlive every SWS registration and retained use below.
     session: MappedTargetSession,
-    identities: [Option<SgfxBufferIdentity>; 2],
-    retained: [Option<SgfxCommitToken>; 2],
+    identities: [Option<SgfxBufferIdentity>; PRESENTATION_SLOT_COUNT],
+    retained: [Option<SgfxCommitToken>; PRESENTATION_SLOT_COUNT],
 }
 
 /// Native SGFX implementation of ScarletUI's backend-neutral paint contract.
@@ -107,7 +113,7 @@ pub struct SgfxPaintBackend<S> {
     session: Option<MappedTargetSession>,
     retired: Vec<RetiredGeneration>,
     context: Context,
-    slots: [SlotState; 2],
+    slots: [SlotState; PRESENTATION_SLOT_COUNT],
     scale_milli: u32,
     physical_width: u32,
     physical_height: u32,
@@ -169,7 +175,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             session: None,
             retired: Vec::new(),
             context,
-            slots: [SlotState::new(), SlotState::new()],
+            slots: [SlotState::new(); PRESENTATION_SLOT_COUNT],
             scale_milli: scale_milli.max(1),
             physical_width,
             physical_height,
@@ -227,7 +233,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
     fn initialize_shared_images(&mut self) -> Result<()> {
         self.refresh_compositor_epoch()?;
         self.ensure_session()?;
-        for slot in 0..2 {
+        for slot in 0..PRESENTATION_SLOT_COUNT {
             let identity = self.identity(slot)?;
             let target = self
                 .encoder
@@ -351,7 +357,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         self.slots[slot].retained = Some(retained);
         self.slots[slot].needs_full_commit = false;
         self.front_slot = Some(slot);
-        self.next_slot = (slot + 1) % 2;
+        self.next_slot = (slot + 1) % PRESENTATION_SLOT_COUNT;
         self.cleanup_retired()?;
         Ok(())
     }
@@ -380,7 +386,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             return Ok(());
         }
         self.compositor_epoch = Some(epoch);
-        self.slots = [SlotState::new(), SlotState::new()];
+        self.slots = [SlotState::new(); PRESENTATION_SLOT_COUNT];
         self.front_slot = None;
         // Backend loss invalidates every old registration and retained use.
         self.retired.clear();
@@ -401,16 +407,20 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         } else {
             self.generation
         };
-        let encoder = SgfxPaintEncoder::new(
+        let encoder = SgfxPaintEncoder::with_target_count(
             self.physical_width,
             self.physical_height,
             self.supports_depth,
+            PRESENTATION_SLOT_COUNT,
         )
         .map_err(|_| Error::Render)?;
-        let targets = [
-            encoder.target_texture(0).ok_or(Error::InvalidFrame)?,
-            encoder.target_texture(1).ok_or(Error::InvalidFrame)?,
-        ];
+        let mut targets = Vec::new();
+        targets
+            .try_reserve_exact(PRESENTATION_SLOT_COUNT)
+            .map_err(|_| Error::InvalidFrame)?;
+        for slot in 0..PRESENTATION_SLOT_COUNT {
+            targets.push(encoder.target_texture(slot).ok_or(Error::InvalidFrame)?);
+        }
         let session = self
             .context
             .create_mapped_target_session(encoder.resource_table(), &targets)
@@ -419,13 +429,13 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         if let Some(previous) = self.session.replace(session) {
             self.retired.push(RetiredGeneration {
                 session: previous,
-                identities: [self.slots[0].registered, self.slots[1].registered],
-                retained: [self.slots[0].retained, self.slots[1].retained],
+                identities: self.slots.map(|slot| slot.registered),
+                retained: self.slots.map(|slot| slot.retained),
             });
         }
         self.encoder = Some(encoder);
         self.generation = next_generation;
-        self.slots = [SlotState::new(), SlotState::new()];
+        self.slots = [SlotState::new(); PRESENTATION_SLOT_COUNT];
         self.next_slot = 0;
         self.front_slot = None;
         Ok(())
@@ -446,7 +456,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
 
     fn cleanup_retired(&mut self) -> Result<()> {
         while let Some(mut retired) = self.retired.pop() {
-            for slot in 0..2 {
+            for slot in 0..PRESENTATION_SLOT_COUNT {
                 if let Some(identity) = retired.identities[slot] {
                     if let Some(retained) = retired.retained[slot] {
                         match self.sink.wait_until_released(retained) {

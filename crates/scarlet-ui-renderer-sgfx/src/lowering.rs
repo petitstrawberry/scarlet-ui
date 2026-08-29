@@ -409,7 +409,33 @@ impl SgfxPaintEncoder {
     /// A logical encoder, or a lowering error for invalid dimensions or SGFX
     /// resource-definition failure.
     pub fn new(width: u32, height: u32, supports_depth: bool) -> Result<Self> {
-        if width == 0 || height == 0 {
+        Self::with_target_count(width, height, supports_depth, 2)
+    }
+
+    /// Define persistent logical resources with an explicit target count.
+    ///
+    /// Presentation integrations that retain the currently displayed image
+    /// may need three targets so rendering can continue while one image is
+    /// displayed and another is pending at the compositor.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Physical target width in pixels.
+    /// * `height` - Physical target height in pixels.
+    /// * `supports_depth` - Whether retained canvases may request depth testing.
+    /// * `target_count` - Number of logical presentation targets to allocate.
+    ///
+    /// # Returns
+    ///
+    /// A logical encoder, or a lowering error for invalid dimensions, an empty
+    /// target set, or SGFX resource-definition failure.
+    pub fn with_target_count(
+        width: u32,
+        height: u32,
+        supports_depth: bool,
+        target_count: usize,
+    ) -> Result<Self> {
+        if width == 0 || height == 0 || target_count == 0 {
             return Err(Error::InvalidFrame);
         }
         let table = Rc::new(ResourceTable::new());
@@ -422,9 +448,9 @@ impl SgfxPaintEncoder {
 
         let mut targets = Vec::new();
         targets
-            .try_reserve_exact(2)
+            .try_reserve_exact(target_count)
             .map_err(|_| Error::FrameTooComplex)?;
-        for _ in 0..2 {
+        for _ in 0..target_count {
             let target = table
                 .define_texture(
                     TextureDesc::new(TextureFormat::Bgra8Unorm, extent, target_usage)
@@ -532,7 +558,7 @@ impl SgfxPaintEncoder {
     ///
     /// # Arguments
     ///
-    /// * `slot` - Logical target slot, in the range `0..2`.
+    /// * `slot` - Logical target slot, in the range selected at construction.
     ///
     /// # Returns
     ///
@@ -2713,6 +2739,16 @@ mod tests {
         assert_eq!(CANVAS_TARGET_TEX_COORDS[1], [1.0, 0.0]);
         assert_eq!(CANVAS_TARGET_TEX_COORDS[2], [1.0, 1.0]);
         assert_eq!(CANVAS_TARGET_TEX_COORDS[3], [0.0, 1.0]);
+    }
+
+    #[test]
+    fn presentation_target_count_is_configurable() {
+        let encoder = SgfxPaintEncoder::with_target_count(64, 32, false, 3).unwrap();
+        assert!(encoder.target_texture(0).is_some());
+        assert!(encoder.target_texture(1).is_some());
+        assert!(encoder.target_texture(2).is_some());
+        assert!(encoder.target_texture(3).is_none());
+        assert!(SgfxPaintEncoder::with_target_count(64, 32, false, 0).is_err());
     }
 
     #[test]
