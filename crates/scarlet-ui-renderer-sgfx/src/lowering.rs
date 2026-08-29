@@ -26,7 +26,7 @@ use crate::geometry::{
     FloatRect, GeometryRange, MAX_FRAME_VERTICES, PixelBounds, Tessellator, Vertex,
 };
 
-const VERTEX_STRIDE: u32 = 16;
+const PAINT_VERTEX_STRIDE: u32 = 40;
 const PASS_COMMANDS: usize = 2;
 const MAX_PAINT_DRAW_COMMANDS: usize = 7;
 const MAX_CANVAS_DRAW_COMMANDS: usize = 6;
@@ -59,7 +59,6 @@ enum DrawSource {
 #[derive(Clone, Copy)]
 struct Draw {
     geometry: GeometryRange,
-    color: [f32; 4],
     source: DrawSource,
 }
 
@@ -438,7 +437,7 @@ impl SgfxPaintEncoder {
 
         let vertex_bytes = u64::try_from(MAX_FRAME_VERTICES)
             .ok()
-            .and_then(|count| count.checked_mul(u64::from(VERTEX_STRIDE)))
+            .and_then(|count| count.checked_mul(u64::from(PAINT_VERTEX_STRIDE)))
             .ok_or(Error::FrameTooComplex)?;
         let vertex_buffer = table
             .define_buffer(
@@ -448,12 +447,15 @@ impl SgfxPaintEncoder {
             .map_err(|_| Error::sgfx(Stage::DefineResources))?
             .id();
 
-        let solid_pipeline = define_pipeline(&table, FragmentProgram::Solid)?.id();
-        let texture_pipeline =
-            define_pipeline(&table, FragmentProgram::Texture(TextureSampleMode::Rgba))?.id();
-        let glyph_pipeline = define_pipeline(
+        let solid_pipeline = define_colored_pipeline(&table, FragmentProgram::VertexColor)?.id();
+        let texture_pipeline = define_colored_pipeline(
             &table,
-            FragmentProgram::Texture(TextureSampleMode::AlphaMask),
+            FragmentProgram::TextureVertexColor(TextureSampleMode::Rgba),
+        )?
+        .id();
+        let glyph_pipeline = define_colored_pipeline(
+            &table,
+            FragmentProgram::TextureVertexColor(TextureSampleMode::AlphaMask),
         )?
         .id();
         let sampler = table
@@ -736,6 +738,7 @@ impl SgfxPaintEncoder {
                     if let Some(geometry) = tessellator.fill_path(path)? {
                         push_draw(
                             &mut draws,
+                            &mut tessellator,
                             geometry,
                             ui_color(*color, opacity)?,
                             DrawSource::Solid,
@@ -750,6 +753,7 @@ impl SgfxPaintEncoder {
                     if let Some(geometry) = tessellator.fill_rounded_rect(*rect, *corner_radius)? {
                         push_draw(
                             &mut draws,
+                            &mut tessellator,
                             geometry,
                             ui_color(*color, opacity)?,
                             DrawSource::Solid,
@@ -784,6 +788,7 @@ impl SgfxPaintEncoder {
                             let amount = (index as f32 + 0.5) / GRADIENT_BAND_COUNT as f32;
                             push_draw(
                                 &mut draws,
+                                &mut tessellator,
                                 geometry,
                                 ui_color(
                                     interpolate_ui_color(*top_color, *bottom_color, amount),
@@ -841,6 +846,7 @@ impl SgfxPaintEncoder {
                             let layer_color = color.with_opacity(color.a * *weight);
                             push_draw(
                                 &mut draws,
+                                &mut tessellator,
                                 geometry,
                                 ui_color(layer_color, opacity)?,
                                 DrawSource::Solid,
@@ -856,6 +862,7 @@ impl SgfxPaintEncoder {
                     if let Some(geometry) = tessellator.stroke_path(path, *stroke_width)? {
                         push_draw(
                             &mut draws,
+                            &mut tessellator,
                             geometry,
                             ui_color(*color, opacity)?,
                             DrawSource::Solid,
@@ -870,6 +877,7 @@ impl SgfxPaintEncoder {
                     if let Some(geometry) = tessellator.stroke_rect(*rect, 0.0, *stroke_width)? {
                         push_draw(
                             &mut draws,
+                            &mut tessellator,
                             geometry,
                             ui_color(*color, opacity)?,
                             DrawSource::Solid,
@@ -887,6 +895,7 @@ impl SgfxPaintEncoder {
                     {
                         push_draw(
                             &mut draws,
+                            &mut tessellator,
                             geometry,
                             ui_color(*color, opacity)?,
                             DrawSource::Solid,
@@ -938,7 +947,13 @@ impl SgfxPaintEncoder {
                         if let Some(geometry) = tessellator
                             .textured_rect(destination, atlas_tex_coords(atlas_bounds))?
                         {
-                            push_draw(&mut draws, geometry, color, DrawSource::Glyph(texture))?;
+                            push_draw(
+                                &mut draws,
+                                &mut tessellator,
+                                geometry,
+                                color,
+                                DrawSource::Glyph(texture),
+                            )?;
                         }
                     }
                 }
@@ -985,6 +1000,7 @@ impl SgfxPaintEncoder {
                     {
                         push_draw(
                             &mut draws,
+                            &mut tessellator,
                             geometry,
                             ui_color(*color, opacity)?,
                             DrawSource::Glyph(texture),
@@ -1012,6 +1028,7 @@ impl SgfxPaintEncoder {
                         }
                         push_draw(
                             &mut draws,
+                            &mut tessellator,
                             geometry,
                             [1.0, 1.0, 1.0, opacity],
                             DrawSource::Texture(texture),
@@ -1053,6 +1070,7 @@ impl SgfxPaintEncoder {
                         let combined_opacity = finite_unit(*command_opacity)? * opacity;
                         push_draw(
                             &mut draws,
+                            &mut tessellator,
                             geometry,
                             [1.0, 1.0, 1.0, combined_opacity],
                             DrawSource::Texture(texture),
@@ -1096,6 +1114,7 @@ impl SgfxPaintEncoder {
                     {
                         push_draw(
                             &mut draws,
+                            &mut tessellator,
                             geometry,
                             [1.0, 1.0, 1.0, opacity],
                             DrawSource::Texture(texture.texture),
@@ -1109,13 +1128,14 @@ impl SgfxPaintEncoder {
         // transparent degenerate draw so a damage rectangle that only clears
         // removed content still has a valid pass.
         let geometry = tessellator.dummy_draw()?;
-        draws.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
-        draws.push(Draw {
+        push_draw(
+            &mut draws,
+            &mut tessellator,
             geometry,
-            color: [0.0, 0.0, 0.0, 0.0],
-            source: DrawSource::Solid,
-        });
-        let vertex_bytes = encode_vertices(tessellator.vertices())?;
+            [0.0, 0.0, 0.0, 0.0],
+            DrawSource::Solid,
+        )?;
+        let vertex_bytes = encode_paint_vertices(tessellator.vertices())?;
         Ok(LoweredFrame {
             vertex_bytes,
             draws,
@@ -1895,6 +1915,7 @@ impl SgfxPaintEncoder {
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
         let clear_color = ir_color(ui_color(background, 1.0)?)?;
         let transform = pixel_transform(self.width, self.height)?;
+        let white = ir_color([1.0, 1.0, 1.0, 1.0])?;
 
         let mut first_submission = true;
         for render_area in render_areas {
@@ -1926,7 +1947,8 @@ impl SgfxPaintEncoder {
                 let mut pass = encoder
                     .begin_render_pass(descriptor)
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                let mut command_count = PASS_COMMANDS + usize::from(first_submission);
+                let initial_command_count = PASS_COMMANDS + usize::from(first_submission);
+                let mut command_count = initial_command_count;
 
                 while draw_index < frame.draws.len() {
                     let draw = frame.draws[draw_index];
@@ -1956,7 +1978,7 @@ impl SgfxPaintEncoder {
                         pass.set_sampler(sampler)
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                     }
-                    pass.set_uniforms(DrawUniforms::new(transform, ir_color(draw.color)?))
+                    pass.set_uniforms(DrawUniforms::new(transform, white))
                         .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                     let scissor =
                         PixelRect::new(scissor.x, scissor.y, scissor.width, scissor.height)
@@ -1968,7 +1990,7 @@ impl SgfxPaintEncoder {
                     command_count = command_count.saturating_add(MAX_PAINT_DRAW_COMMANDS);
                     draw_index += 1;
                 }
-                if command_count == PASS_COMMANDS + usize::from(first_submission) {
+                if command_count == initial_command_count {
                     return Err(Error::FrameTooComplex.into());
                 }
                 pass.end().map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -2102,18 +2124,26 @@ fn intersect_bounds(left: PixelBounds, right: PixelBounds) -> Option<PixelBounds
     }
 }
 
-fn define_pipeline(
+fn define_colored_pipeline(
     table: &ResourceTable,
     fragment: FragmentProgram,
 ) -> Result<sgfx::ir::RenderPipelineRef<'_>> {
-    let layout = VertexBufferLayout::new(
-        VERTEX_STRIDE,
-        alloc::vec![
-            VertexAttribute::new(0, VertexFormat::Float32x2, 0),
-            VertexAttribute::new(1, VertexFormat::Float32x2, 8),
+    let attributes = match fragment {
+        FragmentProgram::VertexColor => alloc::vec![
+            VertexAttribute::new(0, VertexFormat::Float32x4, 0),
+            VertexAttribute::new(1, VertexFormat::Float32x4, 16),
         ],
-    )
-    .map_err(|_| Error::sgfx(Stage::DefineResources))?;
+        FragmentProgram::TextureVertexColor(
+            TextureSampleMode::Rgba | TextureSampleMode::AlphaMask,
+        ) => alloc::vec![
+            VertexAttribute::new(0, VertexFormat::Float32x4, 0),
+            VertexAttribute::new(1, VertexFormat::Float32x4, 16),
+            VertexAttribute::new(2, VertexFormat::Float32x2, 32),
+        ],
+        _ => return Err(Error::InvalidFrame),
+    };
+    let layout = VertexBufferLayout::new(PAINT_VERTEX_STRIDE, attributes)
+        .map_err(|_| Error::sgfx(Stage::DefineResources))?;
     let descriptor = RenderPipelineDesc::new(
         TextureFormat::Bgra8Unorm,
         PrimitiveTopology::TriangleList,
@@ -2224,17 +2254,18 @@ fn define_sampled_texture(
 
 fn push_draw(
     draws: &mut Vec<Draw>,
+    tessellator: &mut Tessellator,
     geometry: GeometryRange,
     color: [f32; 4],
     source: DrawSource,
 ) -> Result<()> {
+    tessellator.color_geometry(geometry, color)?;
     if let Some(previous) = draws.last_mut() {
         let previous_end = previous
             .geometry
             .first_vertex
             .checked_add(previous.geometry.vertex_count);
         if previous.source == source
-            && previous.color == color
             && previous.geometry.scissor == geometry.scissor
             && previous_end == Some(geometry.first_vertex)
         {
@@ -2247,11 +2278,7 @@ fn push_draw(
         }
     }
     draws.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
-    draws.push(Draw {
-        geometry,
-        color,
-        source,
-    });
+    draws.push(Draw { geometry, source });
     Ok(())
 }
 
@@ -2264,10 +2291,10 @@ fn atlas_tex_coords(bounds: PixelBounds) -> [[f32; 2]; 4] {
     [[left, top], [right, top], [right, bottom], [left, bottom]]
 }
 
-fn encode_vertices(vertices: &[Vertex]) -> Result<Vec<u8>> {
+fn encode_paint_vertices(vertices: &[Vertex]) -> Result<Vec<u8>> {
     let capacity = vertices
         .len()
-        .checked_mul(VERTEX_STRIDE as usize)
+        .checked_mul(PAINT_VERTEX_STRIDE as usize)
         .ok_or(Error::FrameTooComplex)?;
     let mut bytes = Vec::new();
     bytes
@@ -2276,9 +2303,15 @@ fn encode_vertices(vertices: &[Vertex]) -> Result<Vec<u8>> {
     for vertex in vertices {
         bytes.extend_from_slice(&vertex.position[0].to_le_bytes());
         bytes.extend_from_slice(&vertex.position[1].to_le_bytes());
+        bytes.extend_from_slice(&0.0f32.to_le_bytes());
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        for component in vertex.color {
+            bytes.extend_from_slice(&component.clamp(0.0, 1.0).to_le_bytes());
+        }
         bytes.extend_from_slice(&vertex.tex_coord[0].to_le_bytes());
         bytes.extend_from_slice(&vertex.tex_coord[1].to_le_bytes());
     }
+    debug_assert_eq!(bytes.len(), capacity);
     Ok(bytes)
 }
 
@@ -2528,6 +2561,17 @@ mod tests {
         ]
     }
 
+    fn encoded_paint_colors(bytes: &[u8]) -> Vec<[f32; 4]> {
+        bytes
+            .chunks_exact(PAINT_VERTEX_STRIDE as usize)
+            .map(|vertex| {
+                let component =
+                    |offset| f32::from_le_bytes(vertex[offset..offset + 4].try_into().unwrap());
+                [component(16), component(20), component(24), component(28)]
+            })
+            .collect()
+    }
+
     #[test]
     fn empty_canvas_dummy_buffer_contains_three_valid_vertices() {
         let vertices = canvas_dummy_vertices();
@@ -2694,13 +2738,20 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(frame.draws.len(), GRADIENT_BAND_COUNT + 1);
+        assert_eq!(frame.draws.len(), 2);
         assert!(
             frame
                 .draws
                 .iter()
                 .all(|draw| draw.source == DrawSource::Solid)
         );
+        let colors = encoded_paint_colors(&frame.vertex_bytes);
+        let opaque_red = colors
+            .iter()
+            .filter(|color| color[3] > 0.99)
+            .map(|color| color[0])
+            .collect::<Vec<_>>();
+        assert!(opaque_red.first().unwrap() > opaque_red.last().unwrap());
     }
 
     #[test]
@@ -2728,8 +2779,105 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(frame.draws.len(), SHADOW_LAYER_COUNT + 1);
-        assert!(frame.draws[0].color[3] < frame.draws[SHADOW_LAYER_COUNT - 1].color[3]);
+        assert_eq!(frame.draws.len(), 1);
+        let alphas = encoded_paint_colors(&frame.vertex_bytes)
+            .into_iter()
+            .map(|color| color[3])
+            .filter(|alpha| *alpha > 0.0)
+            .collect::<Vec<_>>();
+        let minimum = alphas.iter().copied().fold(f32::INFINITY, f32::min);
+        let maximum = alphas.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(minimum < maximum);
+    }
+
+    #[test]
+    fn differently_colored_masks_share_one_vertex_colored_draw() {
+        let mut paint = PaintContext::new();
+        paint.draw_icon(
+            Rect::from_xywh(4.0, 4.0, 16.0, 16.0),
+            ALL_ICONS[0],
+            IconStyle::default(),
+            UiColor::WHITE,
+        );
+        paint.draw_icon(
+            Rect::from_xywh(24.0, 4.0, 16.0, 16.0),
+            ALL_ICONS[0],
+            IconStyle::default(),
+            UiColor::BLACK,
+        );
+        let mut encoder = SgfxPaintEncoder::new(64, 32, false).unwrap();
+        let frame = encoder
+            .lower_once(
+                &paint,
+                1_000,
+                PixelBounds {
+                    x: 0,
+                    y: 0,
+                    width: 64,
+                    height: 32,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            frame
+                .draws
+                .iter()
+                .filter(|draw| matches!(draw.source, DrawSource::Glyph(_)))
+                .count(),
+            1
+        );
+        let colors = encoded_paint_colors(&frame.vertex_bytes);
+        assert!(colors.iter().any(|color| color == &[1.0, 1.0, 1.0, 1.0]));
+        assert!(colors.iter().any(|color| color == &[0.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn mixed_paint_items_collapse_to_source_batches() {
+        let image = Buffer::from_dimensions(2, 2);
+        let mut paint = PaintContext::new();
+        for index in 0..32 {
+            let rect = Rect::from_xywh((index % 8) as f32 * 8.0, 0.0, 6.0, 6.0);
+            let color = if index % 2 == 0 {
+                UiColor::WHITE
+            } else {
+                UiColor::BLACK
+            };
+            paint.fill_rect(rect, color);
+        }
+        for index in 0..32 {
+            let rect = Rect::from_xywh((index % 8) as f32 * 8.0, 8.0, 6.0, 6.0);
+            let color = if index % 2 == 0 {
+                UiColor::WHITE
+            } else {
+                UiColor::BLACK
+            };
+            paint.draw_icon(rect, ALL_ICONS[0], IconStyle::default(), color);
+        }
+        for index in 0..32 {
+            let rect = Rect::from_xywh((index % 8) as f32 * 8.0, 16.0, 6.0, 6.0);
+            paint.draw_buffer_ref(rect, &image);
+        }
+
+        let mut encoder = SgfxPaintEncoder::new(64, 32, false).unwrap();
+        let frame = encoder
+            .lower_once(
+                &paint,
+                1_000,
+                PixelBounds {
+                    x: 0,
+                    y: 0,
+                    width: 64,
+                    height: 32,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(frame.draws.len(), 4);
+        assert!(frame.draws[0].source == DrawSource::Solid);
+        assert!(matches!(frame.draws[1].source, DrawSource::Glyph(_)));
+        assert!(matches!(frame.draws[2].source, DrawSource::Texture(_)));
+        assert!(frame.draws[3].source == DrawSource::Solid);
     }
 
     #[test]
