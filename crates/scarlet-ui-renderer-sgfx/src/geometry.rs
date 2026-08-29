@@ -11,6 +11,7 @@ pub(crate) const MAX_FRAME_VERTICES: usize = 196_608;
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Vertex {
     pub(crate) position: [f32; 2],
+    pub(crate) color: [f32; 4],
     pub(crate) tex_coord: [f32; 2],
 }
 
@@ -18,6 +19,7 @@ impl Vertex {
     const fn solid(point: Point2) -> Self {
         Self {
             position: [point.x, point.y],
+            color: [1.0; 4],
             tex_coord: [0.0, 0.0],
         }
     }
@@ -25,6 +27,7 @@ impl Vertex {
     const fn textured(point: Point2, tex_coord: [f32; 2]) -> Self {
         Self {
             position: [point.x, point.y],
+            color: [1.0; 4],
             tex_coord,
         }
     }
@@ -34,6 +37,12 @@ impl Vertex {
             position: [
                 self.position[0] + (other.position[0] - self.position[0]) * amount,
                 self.position[1] + (other.position[1] - self.position[1]) * amount,
+            ],
+            color: [
+                self.color[0] + (other.color[0] - self.color[0]) * amount,
+                self.color[1] + (other.color[1] - self.color[1]) * amount,
+                self.color[2] + (other.color[2] - self.color[2]) * amount,
+                self.color[3] + (other.color[3] - self.color[3]) * amount,
             ],
             tex_coord: [
                 self.tex_coord[0] + (other.tex_coord[0] - self.tex_coord[0]) * amount,
@@ -231,6 +240,24 @@ impl Tessellator {
 
     pub(crate) fn vertices(&self) -> &[Vertex] {
         &self.vertices
+    }
+
+    pub(crate) fn color_geometry(
+        &mut self,
+        geometry: GeometryRange,
+        color: [f32; 4],
+    ) -> Result<()> {
+        let start = usize::try_from(geometry.first_vertex).map_err(|_| Error::FrameTooComplex)?;
+        let count = usize::try_from(geometry.vertex_count).map_err(|_| Error::FrameTooComplex)?;
+        let end = start.checked_add(count).ok_or(Error::FrameTooComplex)?;
+        let vertices = self
+            .vertices
+            .get_mut(start..end)
+            .ok_or(Error::InvalidFrame)?;
+        for vertex in vertices {
+            vertex.color = color;
+        }
+        Ok(())
     }
 
     pub(crate) fn push_clip(&mut self, rect: Rect, corner_radius: f32) -> Result<()> {
