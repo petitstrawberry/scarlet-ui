@@ -326,6 +326,7 @@ impl ApplicationRunner {
             let cycle_started = Instant::now();
             let mut any_event = false;
             let mut any_presented = false;
+            let mut application_paced_present = false;
             let mut close_ids = Vec::new();
 
             for slot in slots.iter_mut() {
@@ -381,20 +382,28 @@ impl ApplicationRunner {
             for slot in slots.iter_mut() {
                 app.on_window_sync(&slot.context, slot.window.as_mut());
                 sync_text_input(slot.window.as_mut(), &slot.pipeline);
-                if slot.pipeline.has_dirty()
-                    && !slot.presented_this_cycle
-                    && present_pipeline(&mut slot.pipeline, slot.window.as_mut())?
-                {
-                    slot.presented_this_cycle = true;
-                    any_presented = true;
-                    app.on_frame_presented(&slot.context);
+                if slot.pipeline.has_dirty() && !slot.presented_this_cycle {
+                    match present_pipeline(&mut slot.pipeline, slot.window.as_mut())? {
+                        Presentation::Cpu => {
+                            slot.presented_this_cycle = true;
+                            any_presented = true;
+                            application_paced_present = true;
+                            app.on_frame_presented(&slot.context);
+                        }
+                        Presentation::External => {
+                            slot.presented_this_cycle = true;
+                            any_presented = true;
+                            app.on_frame_presented(&slot.context);
+                        }
+                        Presentation::Idle => {}
+                    }
                 }
             }
 
             if !any_event && !any_presented {
                 spin_without_present = 0;
                 wait_for_next_event(slots, Duration::from_millis(16));
-            } else if any_presented {
+            } else if application_paced_present {
                 // A frame was presented. Cap the presentation rate at ~60 fps
                 // so a pipeline that keeps marking itself dirty (e.g. during
                 // window close when SWS echoes frame acknowledgements) cannot
@@ -406,6 +415,13 @@ impl ApplicationRunner {
                 if !remaining.is_zero() {
                     wait_for_next_event(slots, remaining);
                 }
+            } else if any_presented {
+                // External backends own a bounded presentation queue. Their
+                // buffer-release protocol supplies the backpressure and is
+                // synchronized to the compositor/display, so an additional
+                // application-side frame sleep can make every frame miss the
+                // next vblank. Start preparing the next frame immediately.
+                spin_without_present = 0;
             } else {
                 // Events arrived (or the pipeline stayed dirty) but nothing
                 // was presented. Give a brief grace window for the next frame
@@ -517,17 +533,24 @@ fn sync_text_input(window: &mut dyn PlatformWindow, pipeline: &RenderingPipeline
     window.sync_text_input(state.as_ref());
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Presentation {
+    Cpu,
+    External,
+    Idle,
+}
+
 fn present_pipeline(
     pipeline: &mut RenderingPipeline,
     window: &mut dyn PlatformWindow,
-) -> Result<bool> {
+) -> Result<Presentation> {
     match pipeline.render_for_present()? {
         PresentedFrame::Cpu { buffer, damage } => {
             window.present_with_damage(buffer, damage);
-            Ok(true)
+            Ok(Presentation::Cpu)
         }
-        PresentedFrame::External => Ok(true),
-        PresentedFrame::Idle => Ok(false),
+        PresentedFrame::External => Ok(Presentation::External),
+        PresentedFrame::Idle => Ok(Presentation::Idle),
     }
 }
 
