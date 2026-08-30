@@ -1,4 +1,4 @@
-//! Two-slot shared-image lifecycle and ScarletUI paint-backend integration.
+//! Shared-image lifecycle and ScarletUI paint-backend integration.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -126,7 +126,7 @@ pub struct SgfxPaintBackend<S> {
 }
 
 impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
-    /// Open the default GPU and initialize both shared presentation images.
+    /// Open the default GPU and initialize the shared presentation images.
     ///
     /// # Arguments
     ///
@@ -141,7 +141,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         Self::with_device_path(sink, size, scale_milli, DEFAULT_GPU_DEVICE)
     }
 
-    /// Open an explicit GPU device and initialize both shared images.
+    /// Open an explicit GPU device and initialize the shared images.
     ///
     /// # Arguments
     ///
@@ -400,13 +400,41 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         if matches && self.session.is_some() {
             return Ok(());
         }
-        let next_generation = if self.session.is_some() {
+
+        let replacing_session = self.session.is_some();
+        let next_generation = if replacing_session {
             self.generation
                 .checked_add(1)
                 .ok_or(Error::GenerationExhausted)?
         } else {
             self.generation
         };
+
+        // A successful SWS window resize is an explicit presentation
+        // discontinuity: SWS switches the window back to its resized SHM
+        // backing and releases every retained image from the old extent. Wait
+        // for those releases, deregister the images, and drop the complete old
+        // session before allocating replacements. Keeping the old three-image
+        // session alive while materializing another three images creates a
+        // roughly 50 MiB transient color-buffer peak at 1080p and can fail on
+        // otherwise healthy low-memory systems.
+        if let Some(previous) = self.session.take() {
+            self.retired.push(RetiredGeneration {
+                session: previous,
+                identities: self.slots.map(|slot| slot.registered),
+                retained: self.slots.map(|slot| slot.retained),
+            });
+            self.encoder = None;
+            self.slots = [SlotState::new(); PRESENTATION_SLOT_COUNT];
+            self.next_slot = 0;
+            self.front_slot = None;
+        }
+        self.cleanup_retired()?;
+        // Preserve the new identity generation even if materializing its
+        // physical images fails. Retrying an allocation must not reuse an
+        // identity that SWS has already observed for the retired extent.
+        self.generation = next_generation;
+
         let encoder = SgfxPaintEncoder::with_target_count(
             self.physical_width,
             self.physical_height,
@@ -426,13 +454,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             .create_mapped_target_session(encoder.resource_table(), &targets)
             .map_err(|_| Error::Sgfx(Stage::CreateSession))?;
 
-        if let Some(previous) = self.session.replace(session) {
-            self.retired.push(RetiredGeneration {
-                session: previous,
-                identities: self.slots.map(|slot| slot.registered),
-                retained: self.slots.map(|slot| slot.retained),
-            });
-        }
+        self.session = Some(session);
         self.encoder = Some(encoder);
         self.generation = next_generation;
         self.slots = [SlotState::new(); PRESENTATION_SLOT_COUNT];
