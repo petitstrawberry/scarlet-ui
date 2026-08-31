@@ -65,6 +65,7 @@ where
         content.nav.get_sidebar_width(),
         content.nav.get_header_height(),
         content.nav.get_presentation(),
+        content.nav.get_minimum_content_size(),
     );
     crate::element::UpdateResult::Updated
 }
@@ -73,10 +74,11 @@ fn navigation_render_object<T>(content: &NavigationContent<T>) -> NavigationView
 where
     T: NavigationLinkTuple + Clone + 'static,
 {
-    NavigationViewRenderObject::new_with_presentation(
+    NavigationViewRenderObject::new_with_presentation_and_content_size(
         content.nav.get_sidebar_width(),
         content.nav.get_header_height(),
         content.nav.get_presentation(),
+        content.nav.get_minimum_content_size(),
     )
 }
 

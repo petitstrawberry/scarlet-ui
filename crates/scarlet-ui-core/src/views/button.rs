@@ -809,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn button_geometry_returns_to_laptop_metrics_when_tablet_mode_turns_off() {
+    fn button_visual_geometry_stays_stable_across_posture_changes() {
         let _environment = crate::input_environment::install_test_input_environment(
             crate::InputEnvironment::new(1, Some(true), None, true, true, true, false),
         );
@@ -827,8 +827,8 @@ mod tests {
         ));
         let laptop_size = render_object.layout(LayoutConstraints::unconstrained());
 
-        assert_eq!(tablet_size.height, 44.0);
-        assert!(laptop_size.height < tablet_size.height);
+        assert_eq!(tablet_size.height, 26.0);
+        assert_eq!(laptop_size.height, tablet_size.height);
         assert_eq!(
             crate::current_input_environment().interaction_mode(),
             crate::InteractionMode::Pointer

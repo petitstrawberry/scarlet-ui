@@ -30,10 +30,10 @@ use scarlet_ui_core::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
 };
 use scarlet_ui_core::geometry::{EdgeInsets, Point, Rect, Size};
-use scarlet_ui_core::input_environment::InputEnvironment;
+use scarlet_ui_core::input_environment::{InputEnvironment, WindowingMode};
 use scarlet_ui_core::platform::{
-    PlatformBackend, PlatformWindow, PlatformWindowDefaults, WindowCreateRequest,
-    WindowDecoration, WindowPlacement,
+    PlatformBackend, PlatformWindow, PlatformWindowDefaults, WindowCreateRequest, WindowDecoration,
+    WindowPlacement,
 };
 use scarlet_ui_core::renderer::{
     BackendFrame, CompositorBackendKind, PaintBackend, PaintContext, RendererBackendKind,
@@ -875,6 +875,14 @@ fn map_sws_input_environment(environment: sws::InputEnvironment) -> InputEnviron
         environment.has_keyboard(),
         environment.has_pen(),
     )
+    .with_system_mode(
+        environment.windowing_mode().map(|mode| match mode {
+            sws::WindowingMode::Freeform => WindowingMode::Freeform,
+            sws::WindowingMode::Focused => WindowingMode::Focused,
+        }),
+        environment.tablet_mode_override_active(),
+        environment.windowing_mode_override_active(),
+    )
 }
 
 fn validate_window_decoration(decoration: WindowDecoration) -> Result<()> {
@@ -966,11 +974,7 @@ impl SWSPlatformWindow {
         )
     }
 
-    fn logical_surface_size_for_managed(
-        width: u32,
-        height: u32,
-        insets: EdgeInsets,
-    ) -> (u32, u32) {
+    fn logical_surface_size_for_managed(width: u32, height: u32, insets: EdgeInsets) -> (u32, u32) {
         fn ceil_surface_length(value: f32) -> u32 {
             let truncated = value as u32;
             if truncated == 0 {
@@ -1129,9 +1133,7 @@ impl SWSPlatformWindow {
             WindowPlacement::At { x, y } => {
                 let mut x = Self::logical_to_physical_pos_with_scale(x, scale_milli);
                 let mut y = Self::logical_to_physical_pos_with_scale(y, scale_milli);
-                if !window_geometry_supported
-                    && let Some(geometry) = physical_geometry
-                {
+                if !window_geometry_supported && let Some(geometry) = physical_geometry {
                     x = x.saturating_sub(geometry.x);
                     y = y.saturating_sub(geometry.y);
                 }
@@ -1940,11 +1942,8 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn resize_managed(&mut self, width: u32, height: u32) -> Result<()> {
-        let (surface_width, surface_height) = Self::logical_surface_size_for_managed(
-            width,
-            height,
-            self.window_geometry_insets,
-        );
+        let (surface_width, surface_height) =
+            Self::logical_surface_size_for_managed(width, height, self.window_geometry_insets);
         self.resize(surface_width, surface_height)
     }
 
@@ -2627,10 +2626,7 @@ mod tests {
     #[test]
     fn sws_enables_the_standard_normal_window_shadow_by_default() {
         let mut backend = SwsBackend::new();
-        assert_eq!(
-            backend.window_defaults(),
-            PlatformWindowDefaults::new(true)
-        );
+        assert_eq!(backend.window_defaults(), PlatformWindowDefaults::new(true));
     }
 
     #[test]

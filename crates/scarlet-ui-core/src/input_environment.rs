@@ -11,6 +11,12 @@ const DIRECT_TOUCH: u64 = 1 << 4;
 const FINE_POINTER: u64 = 1 << 5;
 const KEYBOARD: u64 = 1 << 6;
 const PEN: u64 = 1 << 7;
+const WINDOWING_KNOWN: u64 = 1 << 8;
+const WINDOWING_FOCUSED: u64 = 1 << 9;
+const TABLET_OVERRIDE_KNOWN: u64 = 1 << 10;
+const TABLET_OVERRIDE_ACTIVE: u64 = 1 << 11;
+const WINDOWING_OVERRIDE_KNOWN: u64 = 1 << 12;
+const WINDOWING_OVERRIDE_ACTIVE: u64 = 1 << 13;
 
 static CURRENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static CURRENT_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -30,6 +36,15 @@ pub enum InteractionMode {
     Pointer,
     /// Tablet controls used while tablet mode is explicitly enabled.
     Touch,
+}
+
+/// System-wide window-management presentation selected by SWS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowingMode {
+    /// Conventional independently positioned and sized windows.
+    Freeform,
+    /// Focused tablet-style windows with explicit multitasking affordances.
+    Focused,
 }
 
 /// A snapshot of the platform's runtime input-device environment.
@@ -53,6 +68,12 @@ pub struct InputEnvironment {
     pub keyboard: bool,
     /// Whether pen input is available.
     pub pen: bool,
+    /// Effective system-wide windowing policy, when the platform reports it.
+    pub windowing_mode: Option<WindowingMode>,
+    /// Whether posture is forced instead of hardware-driven, when known.
+    pub tablet_mode_override_active: Option<bool>,
+    /// Whether windowing policy is forced instead of posture-derived, when known.
+    pub windowing_mode_override_active: Option<bool>,
 }
 
 impl InputEnvironment {
@@ -88,7 +109,33 @@ impl InputEnvironment {
             fine_pointer,
             keyboard,
             pen,
+            windowing_mode: None,
+            tablet_mode_override_active: None,
+            windowing_mode_override_active: None,
         }
+    }
+
+    /// Attach system-wide presentation policy to this input snapshot.
+    ///
+    /// # Arguments
+    ///
+    /// * `windowing_mode` - Effective focused/freeform policy, when known.
+    /// * `tablet_mode_override_active` - Whether posture is currently forced.
+    /// * `windowing_mode_override_active` - Whether windowing policy is forced.
+    ///
+    /// # Returns
+    ///
+    /// The enriched immutable snapshot.
+    pub const fn with_system_mode(
+        mut self,
+        windowing_mode: Option<WindowingMode>,
+        tablet_mode_override_active: Option<bool>,
+        windowing_mode_override_active: Option<bool>,
+    ) -> Self {
+        self.windowing_mode = windowing_mode;
+        self.tablet_mode_override_active = tablet_mode_override_active;
+        self.windowing_mode_override_active = windowing_mode_override_active;
+        self
     }
 
     /// Return the compact desktop environment used by backends without input discovery.
@@ -97,7 +144,11 @@ impl InputEnvironment {
     ///
     /// An environment with a fine pointer and keyboard, and unknown posture states.
     pub const fn desktop() -> Self {
-        Self::new(0, None, None, false, true, true, false)
+        Self::new(0, None, None, false, true, true, false).with_system_mode(
+            Some(WindowingMode::Freeform),
+            Some(false),
+            Some(false),
+        )
     }
 
     /// Resolve the effective interaction mode for this snapshot.
@@ -169,6 +220,33 @@ impl InputEnvironment {
     pub const fn has_pen(self) -> bool {
         self.pen
     }
+
+    /// Return the effective system-wide windowing policy.
+    ///
+    /// # Returns
+    ///
+    /// The platform policy, or `None` when it is not reported.
+    pub const fn windowing_mode(self) -> Option<WindowingMode> {
+        self.windowing_mode
+    }
+
+    /// Return whether tablet posture is currently overridden.
+    ///
+    /// # Returns
+    ///
+    /// The override state, or `None` when it is not reported.
+    pub const fn tablet_mode_override_active(self) -> Option<bool> {
+        self.tablet_mode_override_active
+    }
+
+    /// Return whether windowing policy is currently overridden.
+    ///
+    /// # Returns
+    ///
+    /// The override state, or `None` when it is not reported.
+    pub const fn windowing_mode_override_active(self) -> Option<bool> {
+        self.windowing_mode_override_active
+    }
 }
 
 impl Default for InputEnvironment {
@@ -219,6 +297,17 @@ fn unpack_environment(generation: u64, flags: u64) -> InputEnvironment {
         flags & FINE_POINTER != 0,
         flags & KEYBOARD != 0,
         flags & PEN != 0,
+    )
+    .with_system_mode(
+        if flags & WINDOWING_KNOWN == 0 {
+            None
+        } else if flags & WINDOWING_FOCUSED != 0 {
+            Some(WindowingMode::Focused)
+        } else {
+            Some(WindowingMode::Freeform)
+        },
+        option_flag(flags, TABLET_OVERRIDE_KNOWN, TABLET_OVERRIDE_ACTIVE),
+        option_flag(flags, WINDOWING_OVERRIDE_KNOWN, WINDOWING_OVERRIDE_ACTIVE),
     )
 }
 
@@ -329,6 +418,24 @@ const fn pack_flags(environment: InputEnvironment) -> u64 {
     if environment.pen {
         flags |= PEN;
     }
+    if let Some(windowing_mode) = environment.windowing_mode {
+        flags |= WINDOWING_KNOWN;
+        if matches!(windowing_mode, WindowingMode::Focused) {
+            flags |= WINDOWING_FOCUSED;
+        }
+    }
+    if let Some(active) = environment.tablet_mode_override_active {
+        flags |= TABLET_OVERRIDE_KNOWN;
+        if active {
+            flags |= TABLET_OVERRIDE_ACTIVE;
+        }
+    }
+    if let Some(active) = environment.windowing_mode_override_active {
+        flags |= WINDOWING_OVERRIDE_KNOWN;
+        if active {
+            flags |= WINDOWING_OVERRIDE_ACTIVE;
+        }
+    }
     flags
 }
 
@@ -357,5 +464,17 @@ mod tests {
             environment(None, false, false).interaction_mode(),
             InteractionMode::Pointer
         );
+    }
+
+    #[test]
+    fn system_windowing_and_override_metadata_survive_atomic_encoding() {
+        let environment =
+            InputEnvironment::new(17, Some(true), Some(false), true, true, false, true)
+                .with_system_mode(Some(WindowingMode::Focused), Some(true), Some(false));
+
+        assert_eq!(unpack_environment(17, pack_flags(environment)), environment);
+        assert_eq!(environment.windowing_mode(), Some(WindowingMode::Focused));
+        assert_eq!(environment.tablet_mode_override_active(), Some(true));
+        assert_eq!(environment.windowing_mode_override_active(), Some(false));
     }
 }

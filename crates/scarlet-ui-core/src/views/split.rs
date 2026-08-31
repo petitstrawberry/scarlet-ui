@@ -7,7 +7,7 @@ use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, LayoutConstraints, RenderElement};
 use crate::event::{Event, MouseButton, MouseEvent, Phase};
 use crate::geometry::{Point, Rect, Size};
-use crate::input_environment::{InteractionMode, current_input_environment};
+use crate::input_environment::InteractionMode;
 use crate::renderer::PaintContext;
 use crate::view::View;
 use alloc::boxed::Box;
@@ -32,14 +32,14 @@ pub enum SplitAxis {
 ///
 /// The default is [`SplitAxisPolicy::Fixed`] for backward compatibility:
 /// [`SplitView::axis`] is used exactly as configured. Applications opt into
-/// [`SplitAxisPolicy::AdaptiveStack`] when a horizontal desktop split should
-/// become a vertical stack for touch input or a narrow available width.
+/// [`SplitAxisPolicy::AdaptiveStack`] when a horizontal split should become a
+/// vertical stack for a narrow available width.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SplitAxisPolicy {
     /// Always use the configured [`SplitAxis`].
     #[default]
     Fixed,
-    /// Stack a configured horizontal split vertically for touch or narrow layouts.
+    /// Stack a configured horizontal split vertically for narrow layouts.
     AdaptiveStack,
 }
 
@@ -52,7 +52,7 @@ impl SplitAxisPolicy {
     /// # Arguments
     ///
     /// * `configured_axis` - Axis requested by the caller.
-    /// * `interaction_mode` - Current input density and capabilities.
+    /// * `interaction_mode` - Retained for source compatibility and ignored.
     /// * `available_width` - Width available to the split in logical pixels.
     /// * `narrow_width` - Width at or below which horizontal panes stack.
     ///
@@ -62,17 +62,34 @@ impl SplitAxisPolicy {
     pub const fn resolve(
         self,
         configured_axis: SplitAxis,
-        interaction_mode: InteractionMode,
+        _interaction_mode: InteractionMode,
+        available_width: f32,
+        narrow_width: f32,
+    ) -> SplitAxis {
+        self.resolve_for_width(configured_axis, available_width, narrow_width)
+    }
+
+    /// Resolve the effective split axis from actual container width.
+    ///
+    /// # Arguments
+    ///
+    /// * `configured_axis` - Axis requested by the caller.
+    /// * `available_width` - Width available to the split in logical pixels.
+    /// * `narrow_width` - Width at or below which horizontal panes stack.
+    ///
+    /// # Returns
+    ///
+    /// The effective split axis without consulting posture or input devices.
+    pub const fn resolve_for_width(
+        self,
+        configured_axis: SplitAxis,
         available_width: f32,
         narrow_width: f32,
     ) -> SplitAxis {
         match (self, configured_axis) {
             (_, SplitAxis::Vertical) => SplitAxis::Vertical,
             (Self::Fixed, SplitAxis::Horizontal) => SplitAxis::Horizontal,
-            (Self::AdaptiveStack, SplitAxis::Horizontal)
-                if matches!(interaction_mode, InteractionMode::Touch)
-                    || available_width <= narrow_width =>
-            {
+            (Self::AdaptiveStack, SplitAxis::Horizontal) if available_width <= narrow_width => {
                 SplitAxis::Vertical
             }
             (Self::AdaptiveStack, SplitAxis::Horizontal) => SplitAxis::Horizontal,
@@ -461,9 +478,8 @@ impl<A: View, B: View> SplitViewRenderObject<A, B> {
     }
 
     fn resolve_axis(&mut self) {
-        self.axis = self.axis_policy.resolve(
+        self.axis = self.axis_policy.resolve_for_width(
             self.configured_axis,
-            current_input_environment().interaction_mode(),
             self.size.width,
             self.adaptive_stack_narrow_width,
         );
@@ -797,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_stack_policy_resolves_touch_and_narrow_horizontal_splits() {
+    fn adaptive_stack_policy_resolves_only_from_available_width() {
         assert_eq!(
             SplitAxisPolicy::AdaptiveStack.resolve(
                 SplitAxis::Horizontal,
@@ -805,7 +821,7 @@ mod tests {
                 1200.0,
                 640.0,
             ),
-            SplitAxis::Vertical
+            SplitAxis::Horizontal
         );
         assert_eq!(
             SplitAxisPolicy::AdaptiveStack.resolve(
@@ -850,10 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_touch_layout_stacks_panes_and_uses_a_horizontal_divider_hit_area() {
-        let _environment = crate::input_environment::install_test_input_environment(
-            crate::InputEnvironment::new(1, Some(true), None, true, false, false, false),
-        );
+    fn adaptive_narrow_layout_stacks_panes_and_uses_a_horizontal_divider_hit_area() {
         let mut render_object = SplitViewRenderObject::<Text, Text>::from_view(
             &SplitView::new(Text::new("A"), Text::new("B"))
                 .axis_policy(SplitAxisPolicy::AdaptiveStack)

@@ -468,10 +468,7 @@ mod tests {
             panic!("expected inner toggle track");
         };
         let palette = ColorPalette::default();
-        assert_eq!(
-            *color,
-            style::surface_color(&palette, SurfaceRole::Section)
-        );
+        assert_eq!(*color, style::surface_color(&palette, SurfaceRole::Section));
     }
 
     #[test]

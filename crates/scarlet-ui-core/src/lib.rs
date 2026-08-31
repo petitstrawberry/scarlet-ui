@@ -124,14 +124,16 @@ pub use icon::{
     ALL_ICONS, Icon, IconFill, IconMaskKey, IconSize, IconStyle, IconWeight, RasterizedIcon,
     rasterize_icon,
 };
-pub use input_environment::{InputEnvironment, InteractionMode, current_input_environment};
+pub use input_environment::{
+    InputEnvironment, InteractionMode, WindowingMode, current_input_environment,
+};
 pub use menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
 pub use pipeline::{
     DirtyPhase, MountContext, PipelineId, PipelineOwner, RenderingPipeline, StateRegistry,
 };
 pub use platform::{
-    PlatformBackend, PlatformWindow, PlatformWindowDefaults, WindowCreateRequest,
-    WindowDecoration, WindowFrame, WindowPlacement, WindowTitleBar,
+    PlatformBackend, PlatformWindow, PlatformWindowDefaults, WindowCreateRequest, WindowDecoration,
+    WindowFrame, WindowPlacement, WindowTitleBar,
 };
 pub use render::{RenderNode, RenderTree};
 pub use renderer::{
@@ -146,10 +148,10 @@ pub use views::modifiers::{
     Padding, SetSize,
 };
 pub use views::{
-    BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, IconView, Image,
-    ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView, ScrollWheelDirection,
-    ScrollbarVisibility, Select, Slider, TabBarPlacement, TabBarPosition, TabItem, TabView, Toggle,
-    VectorImageData, VectorTriangle,
+    BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, HorizontalSizeClass,
+    IconView, Image, ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView,
+    ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabBarPlacement, TabBarPosition,
+    TabItem, TabView, Toggle, VectorImageData, VectorTriangle, VerticalSizeClass, WindowSizeClass,
 };
 pub use views::{
     Button, ElevationRole, HStack, LazyVStack, Rectangle, Spacer, SplitAxis, SplitAxisPolicy,
@@ -189,7 +191,7 @@ pub mod prelude {
     };
     pub use crate::icon::{Icon, IconFill, IconSize, IconStyle, IconWeight};
     pub use crate::input_environment::{
-        InputEnvironment, InteractionMode, current_input_environment,
+        InputEnvironment, InteractionMode, WindowingMode, current_input_environment,
     };
     pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
     pub use crate::platform::{
@@ -206,10 +208,11 @@ pub mod prelude {
         OnMouseMove, Padding,
     };
     pub use crate::views::{
-        BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, IconView, Image,
-        ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView,
-        ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabBarPlacement, TabBarPosition,
-        TabItem, TabView, Toggle, VectorImageData, VectorTriangle,
+        BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar,
+        HorizontalSizeClass, IconView, Image, ImageFit, ImageSource, ListView, ProgressView,
+        ScrollAxis, ScrollView, ScrollWheelDirection, ScrollbarVisibility, Select, Slider,
+        TabBarPlacement, TabBarPosition, TabItem, TabView, Toggle, VectorImageData, VectorTriangle,
+        VerticalSizeClass, WindowSizeClass,
     };
     pub use crate::views::{
         Button, Either, Either3, Either4, Either5, Either6, ElevationRole, HStack, LazyVStack,

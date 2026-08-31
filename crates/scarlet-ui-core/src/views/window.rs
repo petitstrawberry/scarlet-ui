@@ -2206,7 +2206,10 @@ impl ElementRenderObject for WindowRenderObject {
     }
 
     fn clip_bounds(&self, origin: Point) -> Option<(Rect, f32)> {
-        Some((self.window_geometry_rect(origin), self.effective_corner_radius()))
+        Some((
+            self.window_geometry_rect(origin),
+            self.effective_corner_radius(),
+        ))
     }
 
     fn update(&mut self, _new_view: &dyn View) -> UpdateResult {
@@ -2337,7 +2340,7 @@ mod tests {
     }
 
     #[test]
-    fn touch_environment_expands_csd_content_offset_and_control_hit_target() {
+    fn csd_visual_geometry_stays_stable_across_posture_changes() {
         let desktop = InputEnvironment::desktop();
         let _environment_guard = install_test_input_environment(desktop);
         let desktop_offset = WindowContentLayout::for_decoration(WindowDecoration::CUSTOM).offset();
@@ -2357,10 +2360,9 @@ mod tests {
         let touch_title_top = title_text_top();
         let touch_control = render_object.close_button_rect(400);
 
-        assert!(touch_offset.y > desktop_offset.y);
-        assert!(touch_title_top > desktop_title_top);
-        assert!(touch_control.size.width > desktop_control.size.width);
-        assert!(touch_control.size.height > desktop_control.size.height);
+        assert_eq!(touch_offset, desktop_offset);
+        assert_eq!(touch_title_top, desktop_title_top);
+        assert_eq!(touch_control, desktop_control);
     }
 
     #[test]

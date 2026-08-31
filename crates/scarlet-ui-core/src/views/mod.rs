@@ -2,6 +2,7 @@
 //!
 //! This module provides common View implementations like Window, Text, Button, etc.
 
+mod adaptive;
 mod button;
 mod canvas;
 pub mod containers;
@@ -35,6 +36,7 @@ pub mod text_view;
 mod toggle;
 mod window;
 
+pub use adaptive::{HorizontalSizeClass, VerticalSizeClass, WindowSizeClass};
 pub use button::{Button, ButtonCallback, ButtonRenderObject};
 pub use canvas::{CanvasEventHandler, CanvasRenderCallback, CanvasRenderObject, CanvasView};
 pub use divider::{Divider, DividerOrientation, DividerRenderObject};

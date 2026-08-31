@@ -9,6 +9,7 @@ use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 
 use crate::color::Color;
+use crate::geometry::Size;
 use crate::icon::{IconFill, IconStyle, IconWeight};
 use crate::input_environment::InteractionMode;
 use crate::state::State;
@@ -29,17 +30,18 @@ fn navigation_selected_state(key: usize) -> State<usize> {
     state
 }
 
-const MINIMUM_AUTOMATIC_CONTENT_WIDTH: f32 = 320.0;
+const DEFAULT_MINIMUM_CONTENT_WIDTH: f32 = 320.0;
+const DEFAULT_MINIMUM_CONTENT_HEIGHT: f32 = 240.0;
 
 /// Policy controlling how a navigation view presents its destinations.
 ///
-/// Automatic presentation responds to tablet posture and the available width.
-/// Tablet mode uses a bottom bar. Laptop mode retains a sidebar while at least
-/// 320 logical pixels
-/// remain for content, then fall back to a bottom bar at narrower widths.
+/// Automatic presentation responds to the logical bounds of each window.
+/// A sidebar remains visible while it can preserve the application's requested
+/// content size. Narrow portrait-like windows fall back to a bottom bar, while
+/// short landscape windows prefer a sidebar to preserve vertical content.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NavigationPresentation {
-    /// Select a sidebar or bottom bar from the interaction mode and width.
+    /// Select a sidebar or bottom bar from the available layout size.
     #[default]
     Automatic,
     /// Always place navigation destinations in a leading sidebar.
@@ -53,30 +55,66 @@ impl NavigationPresentation {
     ///
     /// # Arguments
     ///
-    /// * `interaction_mode` - Current laptop or tablet interface mode.
+    /// * `interaction_mode` - Retained for source compatibility and ignored.
     /// * `available_width` - Total width available to the navigation view.
     /// * `sidebar_width` - Width reserved by the sidebar presentation.
     ///
     /// # Returns
     ///
     /// [`Self::Sidebar`] or [`Self::BottomBar`]. Forced policies are returned
-    /// unchanged; automatic presentation uses the input mode and a stable,
-    /// content-first width threshold.
+    /// unchanged; automatic presentation uses a stable, content-first width
+    /// threshold. New code should use
+    /// [`Self::resolve_for_size`] so vertical constraints also participate.
     pub fn resolve(
         self,
-        interaction_mode: InteractionMode,
+        _interaction_mode: InteractionMode,
         available_width: f32,
         sidebar_width: f32,
+    ) -> Self {
+        self.resolve_for_size(
+            Size::new(available_width, f32::INFINITY),
+            sidebar_width,
+            Size::new(DEFAULT_MINIMUM_CONTENT_WIDTH, 0.0),
+            0.0,
+        )
+    }
+
+    /// Resolve this policy from one window's actual layout bounds.
+    ///
+    /// # Arguments
+    ///
+    /// * `available_size` - Logical size available to the navigation view.
+    /// * `sidebar_width` - Width reserved by sidebar presentation.
+    /// * `minimum_content_size` - Smallest useful selected-content size.
+    /// * `bottom_bar_height` - Height consumed by bottom-bar presentation.
+    ///
+    /// # Returns
+    ///
+    /// A concrete sidebar or bottom-bar presentation derived without consulting
+    /// device posture or pointer capabilities.
+    pub fn resolve_for_size(
+        self,
+        available_size: Size,
+        sidebar_width: f32,
+        minimum_content_size: Size,
+        bottom_bar_height: f32,
     ) -> Self {
         match self {
             Self::Sidebar | Self::BottomBar => self,
             Self::Automatic => {
-                let has_usable_content =
-                    available_width >= sidebar_width.max(0.0) + MINIMUM_AUTOMATIC_CONTENT_WIDTH;
-                if interaction_mode == InteractionMode::Touch || !has_usable_content {
-                    Self::BottomBar
-                } else {
+                let sidebar_width = sidebar_width.max(0.0);
+                let minimum_width = minimum_content_size.width.max(0.0);
+                let minimum_height = minimum_content_size.height.max(0.0);
+                let sidebar_fits = available_size.width >= sidebar_width + minimum_width;
+                let bottom_fits =
+                    available_size.height >= bottom_bar_height.max(0.0) + minimum_height;
+                let short_landscape = available_size.width > available_size.height
+                    && !bottom_fits
+                    && available_size.width >= sidebar_width + minimum_width * 0.75;
+                if sidebar_fits || short_landscape {
                     Self::Sidebar
+                } else {
+                    Self::BottomBar
                 }
             }
         }
@@ -135,6 +173,8 @@ where
     sidebar_width: f32,
     /// Requested adaptive presentation policy.
     presentation: NavigationPresentation,
+    /// Smallest useful selected-content area for automatic presentation.
+    minimum_content_size: Size,
     /// Whether icons are rendered next to sidebar labels.
     shows_icons: bool,
     /// Shared rendering style for sidebar icons.
@@ -173,6 +213,10 @@ where
             selected_index: State::new(state_id, 0),
             sidebar_width: 200.0,
             presentation: NavigationPresentation::Automatic,
+            minimum_content_size: Size::new(
+                DEFAULT_MINIMUM_CONTENT_WIDTH,
+                DEFAULT_MINIMUM_CONTENT_HEIGHT,
+            ),
             shows_icons: false,
             icon_style: IconStyle::default(),
             icon_color: None,
@@ -201,6 +245,10 @@ where
             selected_index: navigation_selected_state(state_key),
             sidebar_width: 200.0,
             presentation: NavigationPresentation::Automatic,
+            minimum_content_size: Size::new(
+                DEFAULT_MINIMUM_CONTENT_WIDTH,
+                DEFAULT_MINIMUM_CONTENT_HEIGHT,
+            ),
             shows_icons: false,
             icon_style: IconStyle::default(),
             icon_color: None,
@@ -222,8 +270,8 @@ where
     /// Set the navigation presentation policy.
     ///
     /// The default is [`NavigationPresentation::Automatic`], which responds to
-    /// the live input environment and available width. Explicit sidebar and
-    /// bottom-bar policies disable automatic selection.
+    /// the actual window bounds. Explicit sidebar and bottom-bar policies
+    /// disable automatic selection.
     ///
     /// # Arguments
     ///
@@ -234,6 +282,20 @@ where
     /// Navigation view with the requested presentation policy.
     pub fn presentation(mut self, presentation: NavigationPresentation) -> Self {
         self.presentation = presentation;
+        self
+    }
+
+    /// Set the smallest useful content size for automatic navigation.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Minimum selected-content width and height in logical pixels.
+    ///
+    /// # Returns
+    ///
+    /// Navigation view with the requested content requirement.
+    pub fn minimum_content_size(mut self, size: Size) -> Self {
+        self.minimum_content_size = Size::new(size.width.max(0.0), size.height.max(0.0));
         self
     }
 
@@ -389,6 +451,15 @@ where
         self.presentation
     }
 
+    /// Return the minimum content size used by automatic presentation.
+    ///
+    /// # Returns
+    ///
+    /// Requested logical selected-content size.
+    pub fn get_minimum_content_size(&self) -> Size {
+        self.minimum_content_size
+    }
+
     /// Return whether sidebar link icons are shown.
     ///
     /// # Returns
@@ -464,6 +535,7 @@ where
             selected_index: self.selected_index.clone(),
             sidebar_width: self.sidebar_width,
             presentation: self.presentation,
+            minimum_content_size: self.minimum_content_size,
             shows_icons: self.shows_icons,
             icon_style: self.icon_style,
             icon_color: self.icon_color,
@@ -479,7 +551,7 @@ where
 mod tests {
     use super::{NavigationPresentation, NavigationView};
     use crate::views::{NavigationLink, Text};
-    use crate::{Icon, InteractionMode};
+    use crate::{Icon, InteractionMode, Size};
 
     #[test]
     fn sidebar_icons_are_hidden_by_default_and_can_be_enabled() {
@@ -493,10 +565,10 @@ mod tests {
     }
 
     #[test]
-    fn automatic_presentation_uses_input_mode_and_usable_content_width() {
+    fn automatic_presentation_uses_each_window_size_not_input_mode() {
         assert_eq!(
             NavigationPresentation::Automatic.resolve(InteractionMode::Touch, 1200.0, 200.0),
-            NavigationPresentation::BottomBar
+            NavigationPresentation::Sidebar
         );
         assert_eq!(
             NavigationPresentation::Automatic.resolve(InteractionMode::Pointer, 520.0, 200.0),
@@ -505,6 +577,24 @@ mod tests {
         assert_eq!(
             NavigationPresentation::Automatic.resolve(InteractionMode::Pointer, 519.0, 200.0),
             NavigationPresentation::BottomBar
+        );
+        assert_eq!(
+            NavigationPresentation::Automatic.resolve_for_size(
+                Size::new(500.0, 800.0),
+                200.0,
+                Size::new(320.0, 240.0),
+                52.0,
+            ),
+            NavigationPresentation::BottomBar
+        );
+        assert_eq!(
+            NavigationPresentation::Automatic.resolve_for_size(
+                Size::new(500.0, 260.0),
+                200.0,
+                Size::new(320.0, 240.0),
+                52.0,
+            ),
+            NavigationPresentation::Sidebar
         );
     }
 

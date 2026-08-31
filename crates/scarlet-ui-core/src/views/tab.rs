@@ -10,11 +10,12 @@ use crate::element::{
 use crate::event::{Event, MouseButton, MouseEvent, Phase};
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
-use crate::input_environment::{InteractionMode, current_input_environment};
+use crate::input_environment::InteractionMode;
 use crate::renderer::PaintContext;
 use crate::state::{Listenable, State};
 use crate::view::View;
 use crate::views::style;
+use crate::views::{HorizontalSizeClass, WindowSizeClass};
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
@@ -24,12 +25,12 @@ use core::any::Any;
 
 /// Policy that determines where a [`TabView`] places its tab bar.
 ///
-/// `Automatic` follows tablet posture: laptop mode keeps the tab bar at the
-/// top, while tablet mode moves it to the bottom edge. Explicit
-/// placements always win over the input environment.
+/// `Automatic` follows the current window width: compact windows use a bottom
+/// tab bar, while regular and expanded windows keep tabs at the top. Explicit
+/// placements always win over adaptive layout.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TabBarPlacement {
-    /// Resolve the placement from the current interaction mode.
+    /// Resolve the placement from the current window size.
     #[default]
     Automatic,
     /// Place the tab bar above the selected content.
@@ -52,17 +53,40 @@ impl TabBarPlacement {
     ///
     /// # Arguments
     ///
-    /// * `interaction_mode` - Current input density and capabilities.
+    /// * `interaction_mode` - Retained for source compatibility and ignored.
     ///
     /// # Returns
     ///
     /// The concrete top or bottom tab-bar position.
-    pub const fn resolve(self, interaction_mode: InteractionMode) -> TabBarPosition {
+    pub const fn resolve(self, _interaction_mode: InteractionMode) -> TabBarPosition {
         match self {
-            Self::Automatic => match interaction_mode {
-                InteractionMode::Touch => TabBarPosition::Bottom,
-                InteractionMode::Pointer => TabBarPosition::Top,
-            },
+            Self::Automatic => TabBarPosition::Top,
+            Self::Top => TabBarPosition::Top,
+            Self::Bottom => TabBarPosition::Bottom,
+        }
+    }
+
+    /// Resolve this placement from one window's actual logical bounds.
+    ///
+    /// # Arguments
+    ///
+    /// * `available_size` - Logical size available to the tab view.
+    ///
+    /// # Returns
+    ///
+    /// Bottom placement for compact windows and top placement otherwise.
+    pub const fn resolve_for_size(self, available_size: Size) -> TabBarPosition {
+        match self {
+            Self::Automatic => {
+                if matches!(
+                    WindowSizeClass::for_size(available_size).horizontal,
+                    HorizontalSizeClass::Compact
+                ) {
+                    TabBarPosition::Bottom
+                } else {
+                    TabBarPosition::Top
+                }
+            }
             Self::Top => TabBarPosition::Top,
             Self::Bottom => TabBarPosition::Bottom,
         }
@@ -459,8 +483,7 @@ impl TabViewRenderObject {
             pressed_index: None,
             tab_bar_height,
             tab_bar_placement,
-            tab_bar_position: tab_bar_placement
-                .resolve(current_input_environment().interaction_mode()),
+            tab_bar_position: tab_bar_placement.resolve(InteractionMode::Pointer),
             tab_padding,
             font_size,
             background_color,
@@ -501,9 +524,7 @@ impl TabViewRenderObject {
     }
 
     fn resolve_tab_bar_position(&mut self) {
-        self.tab_bar_position = self
-            .tab_bar_placement
-            .resolve(current_input_environment().interaction_mode());
+        self.tab_bar_position = self.tab_bar_placement.resolve_for_size(self.size);
     }
 
     fn tab_bar_origin_y(&self) -> f32 {
@@ -863,14 +884,22 @@ mod tests {
     }
 
     #[test]
-    fn automatic_placement_resolves_to_bottom_only_for_touch() {
+    fn automatic_placement_resolves_from_window_width() {
         assert_eq!(
             TabBarPlacement::Automatic.resolve(InteractionMode::Pointer),
             TabBarPosition::Top
         );
         assert_eq!(
             TabBarPlacement::Automatic.resolve(InteractionMode::Touch),
+            TabBarPosition::Top
+        );
+        assert_eq!(
+            TabBarPlacement::Automatic.resolve_for_size(Size::new(390.0, 844.0)),
             TabBarPosition::Bottom
+        );
+        assert_eq!(
+            TabBarPlacement::Automatic.resolve_for_size(Size::new(768.0, 540.0)),
+            TabBarPosition::Top
         );
         assert_eq!(
             TabBarPlacement::Top.resolve(InteractionMode::Touch),
@@ -905,10 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn touch_environment_places_automatic_tabs_at_the_bottom_for_layout_and_hits() {
-        let _environment = crate::input_environment::install_test_input_environment(
-            crate::InputEnvironment::new(1, Some(true), None, true, false, false, false),
-        );
+    fn compact_window_places_automatic_tabs_at_the_bottom_for_layout_and_hits() {
         let selected = State::initial(crate::state::generate_state_id());
         let mut render_object = TabViewRenderObject::with_placement(
             vec![String::from("Mixer"), String::from("Editor")],

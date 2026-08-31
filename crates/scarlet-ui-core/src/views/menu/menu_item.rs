@@ -452,8 +452,7 @@ impl ElementRenderObject for MenuItemRenderObject {
         }
         if !self.label.is_empty() {
             let text_x = group_x + icon_size + spacing;
-            let text_y =
-                origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0);
+            let text_y = origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0);
             ctx.draw_text(
                 Point::new(text_x, text_y),
                 self.label.clone(),

@@ -10,7 +10,9 @@ use core::any::Any;
 use core::marker::PhantomData;
 
 use crate::color::{Color, ColorPalette};
-use crate::element::{Element, ElementRenderObject, LayoutConstraints, RenderElement, UpdateResult};
+use crate::element::{
+    Element, ElementRenderObject, LayoutConstraints, RenderElement, UpdateResult,
+};
 use crate::geometry::{EdgeInsets, Point, Rect, Size};
 use crate::renderer::PaintContext;
 use crate::view::View;
@@ -340,7 +342,10 @@ mod tests {
                 PaintCommand::FillVerticalGradientRoundedRect { .. }
             ]
         ));
-        assert_eq!(render.paint_outsets(), style::elevation_outsets(ElevationRole::Raised));
+        assert_eq!(
+            render.paint_outsets(),
+            style::elevation_outsets(ElevationRole::Raised)
+        );
     }
 
     #[test]
@@ -361,10 +366,8 @@ mod tests {
 
     #[test]
     fn surface_does_not_add_layout_padding() {
-        let mut element = Surface::section(
-            Spacer::new().frame(f32::INFINITY, 45.0),
-        )
-        .create_element();
+        let mut element =
+            Surface::section(Spacer::new().frame(f32::INFINITY, 45.0)).create_element();
 
         let size = element.layout(LayoutConstraints::new(0.0, f32::INFINITY, 0.0, 100.0));
 

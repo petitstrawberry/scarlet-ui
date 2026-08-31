@@ -8,7 +8,6 @@ use crate::element::{
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 use crate::icon::{Icon, IconStyle};
-use crate::input_environment::current_input_environment;
 use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::view::View;
@@ -31,6 +30,7 @@ pub struct NavigationViewRenderObject {
     sidebar_width: f32,
     header_height: f32,
     presentation: NavigationPresentation,
+    minimum_content_size: Size,
     size: Size,
 }
 
@@ -140,10 +140,11 @@ impl NavigationViewRenderObject {
     ///
     /// A render object ready to lay out navigation children.
     pub fn new(sidebar_width: f32, header_height: f32) -> Self {
-        Self::new_with_presentation(
+        Self::new_with_presentation_and_content_size(
             sidebar_width,
             header_height,
             NavigationPresentation::Sidebar,
+            Size::new(320.0, 240.0),
         )
     }
 
@@ -163,10 +164,37 @@ impl NavigationViewRenderObject {
         header_height: f32,
         presentation: NavigationPresentation,
     ) -> Self {
+        Self::new_with_presentation_and_content_size(
+            sidebar_width,
+            header_height,
+            presentation,
+            Size::new(320.0, 240.0),
+        )
+    }
+
+    /// Create a navigation layout with explicit adaptive content requirements.
+    ///
+    /// # Arguments
+    ///
+    /// * `sidebar_width` - Fixed width reserved by sidebar presentation.
+    /// * `header_height` - Height reserved above the content child.
+    /// * `presentation` - Adaptive or forced navigation presentation.
+    /// * `minimum_content_size` - Smallest useful selected-content area.
+    ///
+    /// # Returns
+    ///
+    /// A configured render object ready for per-window adaptive layout.
+    pub fn new_with_presentation_and_content_size(
+        sidebar_width: f32,
+        header_height: f32,
+        presentation: NavigationPresentation,
+        minimum_content_size: Size,
+    ) -> Self {
         Self {
             sidebar_width,
             header_height: header_height.max(0.0),
             presentation,
+            minimum_content_size,
             size: Size::ZERO,
         }
     }
@@ -177,10 +205,12 @@ impl NavigationViewRenderObject {
         sidebar_width: f32,
         header_height: f32,
         presentation: NavigationPresentation,
+        minimum_content_size: Size,
     ) {
         self.sidebar_width = sidebar_width;
         self.header_height = header_height.max(0.0);
         self.presentation = presentation;
+        self.minimum_content_size = minimum_content_size;
     }
 }
 
@@ -216,17 +246,19 @@ impl ElementRenderObject for NavigationViewRenderObject {
             constraints.max_width.max(0.0),
             constraints.max_height.max(0.0),
         );
-        let presentation = self.presentation.resolve(
-            current_input_environment().interaction_mode(),
-            size.width,
+        let resolved_bottom_bar_height = bottom_bar_height(style::metrics().navigation_item_height);
+        let presentation = self.presentation.resolve_for_size(
+            size,
             self.sidebar_width,
+            self.minimum_content_size,
+            resolved_bottom_bar_height,
         );
         let geometry = navigation_geometry(
             size,
             presentation,
             self.sidebar_width,
             self.header_height,
-            bottom_bar_height(style::metrics().navigation_item_height),
+            resolved_bottom_bar_height,
         );
         if let Some(navigation) = children.get_mut(0) {
             if let Some(render_object) = navigation.render_object_mut()
@@ -850,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn bottom_bar_height_tracks_the_live_navigation_item_metric() {
+    fn bottom_bar_height_stays_stable_across_posture_changes() {
         let pointer_height = {
             let _guard = crate::input_environment::install_test_input_environment(
                 crate::InputEnvironment::desktop(),
@@ -865,8 +897,7 @@ mod tests {
         };
 
         assert_eq!(pointer_height, 52.0);
-        assert_eq!(touch_height, 64.0);
-        assert!(touch_height > pointer_height);
+        assert_eq!(touch_height, pointer_height);
     }
 
     #[test]

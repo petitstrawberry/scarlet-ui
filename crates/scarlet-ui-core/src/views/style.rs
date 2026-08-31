@@ -107,34 +107,6 @@ const DESKTOP_VISUAL_METRICS: VisualMetrics = VisualMetrics {
     chrome_control_margin: 8.0,
 };
 
-const TOUCH_VISUAL_METRICS: VisualMetrics = VisualMetrics {
-    window_radius: 12.0,
-    control_radius: 8.0,
-    item_radius: 6.0,
-    popover_radius: 10.0,
-    border_width: 1.0,
-    focus_stroke_width: 2.0,
-    minimum_control_height: 44.0,
-    navigation_indicator_width: 4.0,
-    navigation_item_height: 52.0,
-    tab_indicator_height: 3.0,
-    tab_bar_height: 48.0,
-    scrollbar_thickness: 12.0,
-    scrollbar_inset: 4.0,
-    scrollbar_min_thumb_length: 44.0,
-    slider_height: 44.0,
-    slider_thumb_diameter: 28.0,
-    slider_track_thickness: 6.0,
-    toggle_width: 52.0,
-    toggle_height: 32.0,
-    toggle_thumb_diameter: 28.0,
-    toggle_thumb_inset: 2.0,
-    chrome_title_font_size: 16.0,
-    chrome_titlebar_height: 48.0,
-    chrome_control_size: 28.0,
-    chrome_control_margin: 10.0,
-};
-
 /// Tonal surface hierarchy shared by built-in widgets and containers.
 ///
 /// The hierarchy describes containment, not interaction state or elevation.
@@ -196,7 +168,10 @@ pub(crate) fn metrics() -> VisualMetrics {
 const fn metrics_for_mode(mode: InteractionMode) -> VisualMetrics {
     match mode {
         InteractionMode::Pointer => DESKTOP_VISUAL_METRICS,
-        InteractionMode::Touch => TOUCH_VISUAL_METRICS,
+        // Posture changes structure, not the visual scale of every control.
+        // Touch hit regions can be expanded by individual interactive views
+        // without changing titlebar, tab, scrollbar, or content geometry.
+        InteractionMode::Touch => DESKTOP_VISUAL_METRICS,
     }
 }
 
@@ -437,17 +412,13 @@ mod tests {
     use crate::renderer::PaintCommand;
 
     #[test]
-    fn tablet_metrics_materially_expand_interactive_targets() {
+    fn tablet_posture_does_not_blanket_scale_visual_metrics() {
         let desktop = metrics_for_mode(InteractionMode::Pointer);
         let touch = metrics_for_mode(InteractionMode::Touch);
 
-        assert_eq!(desktop.minimum_control_height, 24.0);
-        assert!(touch.minimum_control_height >= 44.0);
-        assert!(touch.navigation_item_height > desktop.navigation_item_height);
-        assert!(touch.tab_bar_height > desktop.tab_bar_height);
-        assert!(touch.scrollbar_thickness > desktop.scrollbar_thickness);
-        assert!(touch.slider_height > desktop.slider_height);
-        assert!(touch.toggle_height > desktop.toggle_height);
+        assert_eq!(touch, desktop);
+        assert_eq!(touch.chrome_titlebar_height, 32.0);
+        assert_eq!(touch.minimum_control_height, 24.0);
     }
 
     #[test]

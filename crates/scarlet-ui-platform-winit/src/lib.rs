@@ -18,7 +18,9 @@ use scarlet_ui_core::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
 };
 use scarlet_ui_core::geometry::{Point, Size};
-use scarlet_ui_core::input_environment::{InputEnvironment, current_input_environment};
+use scarlet_ui_core::input_environment::{
+    InputEnvironment, WindowingMode, current_input_environment,
+};
 use scarlet_ui_core::platform::{
     PlatformBackend, PlatformWindow, WindowCreateRequest, WindowDecoration,
 };
@@ -68,8 +70,10 @@ pub struct WinitBackend {
 
 fn startup_input_environment() -> InputEnvironment {
     match parse_tablet_mode_override(std::env::var("SCARLET_TABLET_MODE").ok().as_deref()) {
-        Some(true) => InputEnvironment::new(1, Some(true), None, true, false, false, false),
-        Some(false) => InputEnvironment::new(1, Some(false), None, false, true, true, false),
+        Some(true) => InputEnvironment::new(1, Some(true), None, true, false, false, false)
+            .with_system_mode(Some(WindowingMode::Focused), Some(true), Some(false)),
+        Some(false) => InputEnvironment::new(1, Some(false), None, false, true, true, false)
+            .with_system_mode(Some(WindowingMode::Freeform), Some(true), Some(false)),
         None => InputEnvironment::desktop(),
     }
 }
@@ -940,15 +944,22 @@ impl ApplicationHandler for WinitPumpHandler {
                     state.direct_touch_advertised = true;
                     let current = current_input_environment();
                     if !current.direct_touch {
-                        state.push(Event::InputEnvironmentChanged(InputEnvironment::new(
-                            current.generation.saturating_add(1),
-                            current.tablet_mode,
-                            current.lid_closed,
-                            true,
-                            current.fine_pointer,
-                            current.keyboard,
-                            current.pen,
-                        )));
+                        state.push(Event::InputEnvironmentChanged(
+                            InputEnvironment::new(
+                                current.generation.saturating_add(1),
+                                current.tablet_mode,
+                                current.lid_closed,
+                                true,
+                                current.fine_pointer,
+                                current.keyboard,
+                                current.pen,
+                            )
+                            .with_system_mode(
+                                current.windowing_mode,
+                                current.tablet_mode_override_active,
+                                current.windowing_mode_override_active,
+                            ),
+                        ));
                     }
                 }
 

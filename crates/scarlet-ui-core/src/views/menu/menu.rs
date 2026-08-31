@@ -145,14 +145,13 @@ impl Menu {
 
     /// Return the current adaptive menu row height.
     ///
-    /// This is a snapshot of the live input environment. Prefer
-    /// [`Menu::new`] for view-based menus or [`MenuRenderObject::new_adaptive`]
-    /// for direct legacy-popup rendering so the height continues to adapt
-    /// after the environment changes.
+    /// This is a snapshot of the shared visual metrics. Prefer [`Menu::new`]
+    /// for view-based menus or [`MenuRenderObject::new_adaptive`] for direct
+    /// legacy-popup rendering so the height follows future theme changes.
     ///
     /// # Returns
     ///
-    /// The compact laptop row height or the tablet-sized row height.
+    /// The current compact menu row height.
     pub fn adaptive_item_height() -> f32 {
         style::metrics().minimum_control_height
     }
@@ -237,11 +236,12 @@ impl MenuRenderObject {
         Self::with_requested_item_height(items, Some(item_height), width)
     }
 
-    /// Create a menu render object with fully adaptive row heights.
+    /// Create a menu render object with theme-adaptive row heights.
     ///
     /// Use this for legacy popup consumers instead of supplying a hard-coded
     /// desktop height such as `28.0`. The row height is resolved each time the
-    /// menu is laid out from the current input environment.
+    /// menu is laid out from the shared visual metrics. Tablet posture alone
+    /// does not enlarge persistent menus.
     ///
     /// # Arguments
     ///
@@ -250,8 +250,7 @@ impl MenuRenderObject {
     ///
     /// # Returns
     ///
-    /// A render object with compact laptop rows and tablet rows of at least 44
-    /// logical pixels.
+    /// A render object with compact rows derived from the current theme.
     pub fn new_adaptive(items: Vec<MenuItemContent>, width: f32) -> Self {
         Self::with_requested_item_height(items, None, width)
     }
@@ -604,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_rows_follow_the_live_input_environment() {
+    fn adaptive_rows_keep_visual_density_across_posture_changes() {
         let _environment = install_test_input_environment(pointer_environment());
         let mut menu = MenuRenderObject::new_adaptive(
             alloc::vec![MenuItemContent::new("Open"), MenuItemContent::new("Close")],
@@ -616,9 +615,9 @@ mod tests {
         assert_eq!(menu.hit_test(8.0, 26.0), Some(1));
 
         install_input_environment(touch_environment());
-        assert_eq!(menu.layout(LayoutConstraints::unconstrained()).height, 92.0);
-        assert_eq!(menu.hit_test(8.0, 45.0), Some(0));
-        assert_eq!(menu.hit_test(8.0, 46.0), Some(1));
+        assert_eq!(menu.layout(LayoutConstraints::unconstrained()).height, 52.0);
+        assert_eq!(menu.hit_test(8.0, 25.0), Some(0));
+        assert_eq!(menu.hit_test(8.0, 26.0), Some(1));
     }
 
     #[test]
