@@ -74,6 +74,7 @@ pub use text_view::{
     TextViewScroll, WrapMode,
 };
 pub use toggle::{Toggle, ToggleRenderObject};
+pub(crate) use window::WindowBackdrop;
 pub use window::window_type;
 pub use window::{
     Window, WindowContentLayout, WindowInfo, WindowRenderElement, WindowRenderObject, WindowShadow,

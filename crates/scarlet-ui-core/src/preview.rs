@@ -440,6 +440,7 @@ impl PreviewHost {
                 app_id: String::from("org.scarlet-os.scarletui.preview"),
                 title: session.title().to_string(),
                 size,
+                size_limits: crate::element::WindowSizeLimits::default(),
                 window_type: 0,
                 menu_titles: String::new(),
                 focus_on_create: true,

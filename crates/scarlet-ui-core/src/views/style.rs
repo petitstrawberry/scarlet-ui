@@ -19,6 +19,7 @@ const TEXT_SELECTION_MIX: f32 = 0.24;
 const TEXT_SELECTION_TINT_LIFT: f32 = 0.12;
 const SELECTED_ITEM_MIX: f32 = 0.14;
 const SELECTED_ITEM_TINT_LIFT: f32 = 0.08;
+const CACHED_SHADOW_LAYER_WEIGHTS: [f32; 8] = [0.02, 0.03, 0.05, 0.08, 0.12, 0.17, 0.23, 0.30];
 
 const FLOATING_AMBIENT_OFFSET: Offset = Offset::new(0.0, 1.0);
 const FLOATING_AMBIENT_BLUR: f32 = 3.0;
@@ -292,12 +293,48 @@ pub(crate) fn elevation_shadow(
     elevation: ElevationRole,
 ) {
     let radius = radius_for(rect, radius);
+    for_each_elevation_shadow(shadow, elevation, |offset, blur, spread, color| {
+        ctx.draw_rounded_rect_shadow(rect, radius, offset, blur, spread, color);
+    });
+}
+
+pub(crate) fn cached_elevation_shadow(
+    ctx: &mut PaintContext<'_>,
+    rect: Rect,
+    radius: f32,
+    shadow: Color,
+    elevation: ElevationRole,
+) {
+    let radius = radius_for(rect, radius);
+    for_each_elevation_shadow(shadow, elevation, |offset, blur, spread, color| {
+        for (index, weight) in CACHED_SHADOW_LAYER_WEIGHTS.iter().enumerate() {
+            let distance = (CACHED_SHADOW_LAYER_WEIGHTS.len() - index - 1) as f32
+                / (CACHED_SHADOW_LAYER_WEIGHTS.len() - 1) as f32;
+            let expansion = spread + blur.max(0.0) * distance;
+            let shadow_rect = Rect::from_xywh(
+                rect.origin.x + offset.dx - expansion,
+                rect.origin.y + offset.dy - expansion,
+                rect.size.width + expansion * 2.0,
+                rect.size.height + expansion * 2.0,
+            );
+            ctx.fill_rounded_rect(
+                shadow_rect,
+                (radius + expansion).max(0.0),
+                color.with_opacity(color.a * *weight),
+            );
+        }
+    });
+}
+
+fn for_each_elevation_shadow(
+    shadow: Color,
+    elevation: ElevationRole,
+    mut draw: impl FnMut(Offset, f32, f32, Color),
+) {
     match elevation {
         ElevationRole::Flat => {}
         ElevationRole::Raised => {
-            ctx.draw_rounded_rect_shadow(
-                rect,
-                radius,
+            draw(
                 RAISED_SHADOW_OFFSET,
                 RAISED_SHADOW_BLUR,
                 0.0,
@@ -305,17 +342,13 @@ pub(crate) fn elevation_shadow(
             );
         }
         ElevationRole::Window => {
-            ctx.draw_rounded_rect_shadow(
-                rect,
-                radius,
+            draw(
                 WINDOW_AMBIENT_OFFSET,
                 WINDOW_AMBIENT_BLUR,
                 0.0,
                 shadow.with_opacity(shadow.a * WINDOW_AMBIENT_OPACITY),
             );
-            ctx.draw_rounded_rect_shadow(
-                rect,
-                radius,
+            draw(
                 WINDOW_KEY_OFFSET,
                 WINDOW_KEY_BLUR,
                 0.0,
@@ -323,17 +356,13 @@ pub(crate) fn elevation_shadow(
             );
         }
         ElevationRole::Floating => {
-            ctx.draw_rounded_rect_shadow(
-                rect,
-                radius,
+            draw(
                 FLOATING_AMBIENT_OFFSET,
                 FLOATING_AMBIENT_BLUR,
                 0.0,
                 shadow.with_opacity(shadow.a * FLOATING_AMBIENT_OPACITY),
             );
-            ctx.draw_rounded_rect_shadow(
-                rect,
-                radius,
+            draw(
                 FLOATING_KEY_OFFSET,
                 FLOATING_KEY_BLUR,
                 0.0,
@@ -341,17 +370,13 @@ pub(crate) fn elevation_shadow(
             );
         }
         ElevationRole::Overlay => {
-            ctx.draw_rounded_rect_shadow(
-                rect,
-                radius,
+            draw(
                 OVERLAY_AMBIENT_OFFSET,
                 OVERLAY_AMBIENT_BLUR,
                 0.0,
                 shadow.with_opacity(shadow.a * OVERLAY_AMBIENT_OPACITY),
             );
-            ctx.draw_rounded_rect_shadow(
-                rect,
-                radius,
+            draw(
                 OVERLAY_KEY_OFFSET,
                 OVERLAY_KEY_BLUR,
                 0.0,
@@ -510,6 +535,26 @@ mod tests {
         assert_eq!(
             elevation_outsets(ElevationRole::Floating),
             EdgeInsets::new(10.0, 6.0, 10.0, 14.0)
+        );
+    }
+
+    #[test]
+    fn cached_window_shadow_flattens_the_gpu_stack_once() {
+        let rect = Rect::from_xywh(20.0, 20.0, 180.0, 120.0);
+        let mut ctx = PaintContext::new();
+        cached_elevation_shadow(
+            &mut ctx,
+            rect,
+            10.0,
+            Color::rgba_f32(0.0, 0.0, 0.0, 0.2),
+            ElevationRole::Window,
+        );
+
+        assert_eq!(ctx.commands().len(), CACHED_SHADOW_LAYER_WEIGHTS.len() * 2);
+        assert!(
+            ctx.commands()
+                .iter()
+                .all(|command| matches!(command, PaintCommand::FillRoundedRect { .. }))
         );
     }
 

@@ -24,7 +24,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::color::Color;
 use scarlet_ui_core::compositor::DamageRect;
-use scarlet_ui_core::element::TextInputElementState;
+use scarlet_ui_core::element::{TextInputElementState, WindowSizeLimits};
 use scarlet_ui_core::error::{Error, Result};
 use scarlet_ui_core::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
@@ -853,6 +853,7 @@ impl PlatformBackend for SwsBackend {
                 &request.app_id,
                 &request.title,
                 request.size,
+                request.size_limits,
                 request.window_type,
                 &request.menu_titles,
                 request.focus_on_create,
@@ -992,12 +993,16 @@ impl SWSPlatformWindow {
         )
     }
 
-    fn physical_to_logical_len(&self, value: u32) -> u32 {
+    fn physical_to_logical_len_with_scale(value: u32, scale_milli: u32) -> u32 {
         ((value as u64)
             .saturating_mul(1000)
-            .saturating_add(self.scale_milli as u64 - 1)
-            / self.scale_milli as u64)
+            .saturating_add(scale_milli.max(1) as u64 - 1)
+            / scale_milli.max(1) as u64)
             .max(1) as u32
+    }
+
+    fn physical_to_logical_len(&self, value: u32) -> u32 {
+        Self::physical_to_logical_len_with_scale(value, self.scale_milli)
     }
 
     fn logical_to_physical_pos(&self, value: i32) -> i32 {
@@ -1082,6 +1087,10 @@ impl SWSPlatformWindow {
             app_id,
             title,
             size,
+            WindowSizeLimits {
+                resizable: true,
+                ..WindowSizeLimits::default()
+            },
             window_type,
             menu_titles,
             focus_on_create,
@@ -1097,6 +1106,7 @@ impl SWSPlatformWindow {
         app_id: &str,
         title: &str,
         size: Size,
+        size_limits: WindowSizeLimits,
         window_type: u32,
         menu_titles: &str,
         focus_on_create: bool,
@@ -1107,9 +1117,11 @@ impl SWSPlatformWindow {
     ) -> Result<Self> {
         let activation_token = take_launch_activation_token(window_type);
         let requested_renderer_backend = RequestedRendererBackend::from_environment()?;
-        let window_geometry_supported = conn
-            .get_capabilities()
-            .is_ok_and(|capabilities| capabilities.supports_window_geometry());
+        let capabilities = conn.get_capabilities().ok();
+        let window_geometry_supported =
+            capabilities.is_some_and(|capabilities| capabilities.supports_window_geometry());
+        let configured_creation_supported = capabilities
+            .is_some_and(|capabilities| capabilities.supports_configured_window_creation());
         let scale_milli = conn
             .get_output_scale()
             .map(Self::sanitize_scale)
@@ -1127,6 +1139,28 @@ impl SWSPlatformWindow {
             physical_height,
             scale_milli,
         )?;
+        let physical_insets = physical_geometry.map_or(sws::WindowGeometryInsets::default(), |g| {
+            sws::WindowGeometryInsets {
+                left: g.x.max(0) as u32,
+                top: g.y.max(0) as u32,
+                right: physical_width.saturating_sub(g.x.max(0) as u32 + g.width),
+                bottom: physical_height.saturating_sub(g.y.max(0) as u32 + g.height),
+            }
+        });
+        let (min_width, min_height, max_width, max_height) = size_limits.to_u32_limits();
+        let scale_limit = |value: u32| {
+            if value == 0 {
+                0
+            } else {
+                Self::logical_to_physical_len_with_scale(value, scale_milli)
+            }
+        };
+        let physical_size_limits = sws::WindowSizeLimits {
+            min_width: scale_limit(min_width),
+            min_height: scale_limit(min_height),
+            max_width: scale_limit(max_width),
+            max_height: scale_limit(max_height),
+        };
         let placement = match placement {
             WindowPlacement::Default => sws_protocol::WindowPlacement::Default,
             WindowPlacement::Centered => sws_protocol::WindowPlacement::Centered,
@@ -1140,41 +1174,66 @@ impl SWSPlatformWindow {
                 sws_protocol::WindowPlacement::Absolute { x, y }
             }
         };
-        let surface_id = if let Some(activation_token) = activation_token {
-            conn.create_surface_with_type_and_policies_with_activation_token(
-                app_id,
-                title,
-                menu_titles,
-                physical_width,
-                physical_height,
-                window_type,
-                true,
-                focus_on_create,
-                active_on_focus,
-                placement,
-                &activation_token,
-            )
+        let (surface_id, actual_width, actual_height) = if configured_creation_supported {
+            let created = conn
+                .create_surface_configured(
+                    app_id,
+                    title,
+                    menu_titles,
+                    physical_width,
+                    physical_height,
+                    window_type,
+                    size_limits.resizable,
+                    focus_on_create,
+                    active_on_focus,
+                    placement,
+                    physical_size_limits,
+                    physical_insets,
+                    activation_token.as_deref(),
+                )
+                .map_err(|_| scarlet_ui_core::error::Error::SurfaceCreationFailed)?;
+            (created.surface_id, created.width, created.height)
         } else {
-            conn.create_surface_with_type_and_policies_with_placement(
-                app_id,
-                title,
-                menu_titles,
-                physical_width,
-                physical_height,
-                window_type,
-                true,
-                focus_on_create,
-                active_on_focus,
-                placement,
-            )
-        }
-        .map_err(|_| scarlet_ui_core::error::Error::SurfaceCreationFailed)?;
+            let surface_id = if let Some(activation_token) = activation_token.as_deref() {
+                conn.create_surface_with_type_and_policies_with_activation_token(
+                    app_id,
+                    title,
+                    menu_titles,
+                    physical_width,
+                    physical_height,
+                    window_type,
+                    size_limits.resizable,
+                    focus_on_create,
+                    active_on_focus,
+                    placement,
+                    activation_token,
+                )
+            } else {
+                conn.create_surface_with_type_and_policies_with_placement(
+                    app_id,
+                    title,
+                    menu_titles,
+                    physical_width,
+                    physical_height,
+                    window_type,
+                    size_limits.resizable,
+                    focus_on_create,
+                    active_on_focus,
+                    placement,
+                )
+            }
+            .map_err(|_| scarlet_ui_core::error::Error::SurfaceCreationFailed)?;
+            conn.set_window_size_limits(surface_id, physical_size_limits)
+                .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
+            (surface_id, physical_width, physical_height)
+        };
 
         if !opaque {
             conn.set_window_has_alpha_content(surface_id, true)
                 .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
         }
-        if window_geometry_supported
+        if !configured_creation_supported
+            && window_geometry_supported
             && let Some(geometry) = physical_geometry
             && conn.set_window_geometry(surface_id, geometry).is_err()
         {
@@ -1182,6 +1241,10 @@ impl SWSPlatformWindow {
             return Err(scarlet_ui_core::error::Error::IoError);
         }
         let event_receiver = conn.subscribe_window_events(surface_id);
+        let current_size = Size::new(
+            Self::physical_to_logical_len_with_scale(actual_width, scale_milli) as f32,
+            Self::physical_to_logical_len_with_scale(actual_height, scale_milli) as f32,
+        );
 
         Ok(Self {
             conn,
@@ -1191,7 +1254,7 @@ impl SWSPlatformWindow {
             renderer_backend: RendererBackendKind::Cpu,
             compositor_backend: CompositorBackendKind::Unknown,
             scale_milli,
-            current_size: size,
+            current_size,
             window_geometry_insets,
             window_geometry_supported,
             fullscreen: false,
@@ -2087,6 +2150,10 @@ impl PlatformWindow for SWSPlatformWindow {
             app_id,
             title,
             size,
+            WindowSizeLimits {
+                resizable: true,
+                ..WindowSizeLimits::default()
+            },
             window_type,
             "",
             true,

@@ -793,7 +793,8 @@ impl<V: View + Clone + 'static> View for Window<V> {
     fn create_element(&self) -> Box<dyn Element> {
         // Create WindowRenderObject for the background and border.
         let window_info = self.window_info();
-        let render_object = WindowRenderObject::from_window_info(&window_info);
+        let render_object =
+            WindowRenderObject::from_window_info(&window_info).with_deferred_backdrop();
 
         // Create child elements. The titlebar is a separate render element so
         // content repaints do not repaint window decorations.
@@ -1589,6 +1590,102 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct WindowBackdrop {
+    size: Size,
+    corner_radius: f32,
+    background_color: Color,
+    window_geometry_insets: EdgeInsets,
+    shadow_elevation: ElevationRole,
+    shadow_color: Color,
+}
+
+impl WindowBackdrop {
+    pub(crate) const fn size(self) -> Size {
+        self.size
+    }
+
+    pub(crate) fn window_geometry_rect(self, origin: Point) -> Rect {
+        let insets = self.window_geometry_insets;
+        Rect::from_xywh(
+            origin.x + insets.left,
+            origin.y + insets.top,
+            (self.size.width - insets.left - insets.right).max(1.0),
+            (self.size.height - insets.top - insets.bottom).max(1.0),
+        )
+    }
+
+    pub(crate) fn paint(self, ctx: &mut PaintContext<'_>, origin: Point) {
+        let rect = self.window_geometry_rect(origin);
+        style::elevation_shadow(
+            ctx,
+            rect,
+            self.effective_corner_radius(rect),
+            self.shadow_color,
+            self.shadow_elevation,
+        );
+        self.paint_body(ctx, origin);
+    }
+
+    pub(crate) fn paint_cached_shadow(self, ctx: &mut PaintContext<'_>, origin: Point) {
+        let rect = self.window_geometry_rect(origin);
+        style::cached_elevation_shadow(
+            ctx,
+            rect,
+            self.effective_corner_radius(rect),
+            self.shadow_color,
+            self.shadow_elevation,
+        );
+    }
+
+    pub(crate) fn paint_body(self, ctx: &mut PaintContext<'_>, origin: Point) {
+        let rect = self.window_geometry_rect(origin);
+        let radius = self.effective_corner_radius(rect);
+        if radius > 0.0 {
+            ctx.fill_rounded_rect(rect, radius, self.background_color);
+        } else {
+            ctx.fill_rect(rect, self.background_color);
+        }
+    }
+
+    pub(crate) fn shadow_visible_regions(self) -> [Rect; 8] {
+        let body = self.window_geometry_rect(Point::ZERO);
+        let radius = self.effective_corner_radius(body);
+        let corner = radius
+            .min(body.size.width * 0.5)
+            .min(body.size.height * 0.5);
+        let right = body.right();
+        let bottom = body.bottom();
+        [
+            Rect::from_xywh(0.0, 0.0, self.size.width, body.top().max(0.0)),
+            Rect::from_xywh(
+                0.0,
+                bottom,
+                self.size.width,
+                (self.size.height - bottom).max(0.0),
+            ),
+            Rect::from_xywh(0.0, body.top(), body.left().max(0.0), body.size.height),
+            Rect::from_xywh(
+                right,
+                body.top(),
+                (self.size.width - right).max(0.0),
+                body.size.height,
+            ),
+            Rect::from_xywh(body.left(), body.top(), corner, corner),
+            Rect::from_xywh(right - corner, body.top(), corner, corner),
+            Rect::from_xywh(body.left(), bottom - corner, corner, corner),
+            Rect::from_xywh(right - corner, bottom - corner, corner, corner),
+        ]
+    }
+
+    fn effective_corner_radius(self, rect: Rect) -> f32 {
+        self.corner_radius
+            .max(0.0)
+            .min(rect.size.width.max(0.0) * 0.5)
+            .min(rect.size.height.max(0.0) * 0.5)
+    }
+}
+
 /// WindowRenderObject - renders window with titlebar and background
 ///
 /// This RenderObject owns a single buffer that contains:
@@ -1601,6 +1698,7 @@ pub struct WindowRenderObject {
     background_color: Color,
     window_geometry_insets: EdgeInsets,
     shadow_elevation: ElevationRole,
+    deferred_backdrop: bool,
     buffer: Option<Buffer>,
 }
 
@@ -1619,6 +1717,7 @@ impl WindowRenderObject {
             background_color,
             window_geometry_insets: EdgeInsets::ZERO,
             shadow_elevation: ElevationRole::Flat,
+            deferred_backdrop: false,
             buffer: None,
         }
     }
@@ -1640,7 +1739,33 @@ impl WindowRenderObject {
             background_color: info.background_color,
             window_geometry_insets: info.window_geometry_insets,
             shadow_elevation: info.shadow_elevation,
+            deferred_backdrop: false,
             buffer: None,
+        }
+    }
+
+    fn with_deferred_backdrop(mut self) -> Self {
+        self.deferred_backdrop = true;
+        self.buffer = None;
+        self
+    }
+
+    pub(crate) fn deferred_backdrop(&self) -> Option<WindowBackdrop> {
+        self.should_defer_backdrop().then(|| self.backdrop())
+    }
+
+    fn should_defer_backdrop(&self) -> bool {
+        self.deferred_backdrop && self.shadow_elevation != ElevationRole::Flat
+    }
+
+    fn backdrop(&self) -> WindowBackdrop {
+        WindowBackdrop {
+            size: self.size,
+            corner_radius: self.effective_corner_radius(),
+            background_color: self.background_color,
+            window_geometry_insets: self.window_geometry_insets,
+            shadow_elevation: self.shadow_elevation,
+            shadow_color: ColorPalette::default().window_shadow(),
         }
     }
 
@@ -2135,6 +2260,10 @@ impl ElementRenderObject for WindowRenderObject {
     }
 
     fn render(&mut self) {
+        if self.should_defer_backdrop() {
+            self.buffer = None;
+            return;
+        }
         if crate::debug::is_enabled() {
             crate::logln!(
                 "[WindowRenderObject] render: size={}x{}, decoration={:?}",
@@ -2153,7 +2282,11 @@ impl ElementRenderObject for WindowRenderObject {
     }
 
     fn get_buffer(&self) -> Option<&Buffer> {
-        self.buffer.as_ref()
+        if self.should_defer_backdrop() {
+            None
+        } else {
+            self.buffer.as_ref()
+        }
     }
 
     fn clear_buffer(&mut self) {
@@ -2169,20 +2302,10 @@ impl ElementRenderObject for WindowRenderObject {
     }
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
-        let rect = self.window_geometry_rect(origin);
-        let radius = self.effective_corner_radius();
-        style::elevation_shadow(
-            ctx,
-            rect,
-            radius,
-            ColorPalette::default().shadow(),
-            self.shadow_elevation,
-        );
-        if radius > 0.0 {
-            ctx.fill_rounded_rect(rect, radius, self.background_color);
-        } else {
-            ctx.fill_rect(rect, self.background_color);
+        if self.should_defer_backdrop() {
+            return false;
         }
+        self.backdrop().paint(ctx, origin);
         true
     }
 

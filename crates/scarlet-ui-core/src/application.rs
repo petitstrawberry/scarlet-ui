@@ -289,6 +289,7 @@ impl ApplicationRunner {
             app_id: window_info.app_id.clone(),
             title: window_info.title.clone(),
             size: window_info.size,
+            size_limits: limits,
             window_type: window_info.window_type,
             menu_titles: menu_json.clone(),
             focus_on_create: window_info.focus_on_create,
@@ -301,6 +302,10 @@ impl ApplicationRunner {
 
         let mut window = self.backend.create_window(request)?;
         sync_output_scale(&mut pipeline, window.as_ref());
+        let negotiated_size = window.size();
+        if negotiated_size != window_info.size {
+            pipeline.resize(negotiated_size);
+        }
         if let Some(paint_backend) = window.take_paint_backend()? {
             pipeline.set_paint_backend(paint_backend);
         }
@@ -1152,6 +1157,7 @@ mod tests {
     #[derive(Default)]
     struct EnvironmentRunnerProbe {
         presents: [Vec<InputEnvironment>; 2],
+        present_sizes: [Vec<(u32, u32)>; 2],
         environment_emitted: bool,
         quit_emitted: [bool; 2],
         poll_calls: [usize; 2],
@@ -1160,6 +1166,7 @@ mod tests {
     struct EnvironmentTestBackend {
         probe: Rc<RefCell<EnvironmentRunnerProbe>>,
         next_window: usize,
+        negotiated_size: Option<Size>,
     }
 
     impl PlatformBackend for EnvironmentTestBackend {
@@ -1179,7 +1186,7 @@ mod tests {
             self.next_window += 1;
             Ok(Box::new(EnvironmentTestWindow {
                 index,
-                size: request.size,
+                size: self.negotiated_size.unwrap_or(request.size),
                 probe: self.probe.clone(),
             }))
         }
@@ -1236,8 +1243,10 @@ mod tests {
 
         fn wait_for_event(&mut self, _timeout: Duration) {}
 
-        fn present(&mut self, _buffer: &crate::Buffer) {
-            self.probe.borrow_mut().presents[self.index].push(current_input_environment());
+        fn present(&mut self, buffer: &crate::Buffer) {
+            let mut probe = self.probe.borrow_mut();
+            probe.presents[self.index].push(current_input_environment());
+            probe.present_sizes[self.index].push((buffer.logical_width(), buffer.logical_height()));
         }
 
         fn set_title(&mut self, _title: &str) {}
@@ -1381,6 +1390,7 @@ mod tests {
         let backend = EnvironmentTestBackend {
             probe: probe.clone(),
             next_window: 0,
+            negotiated_size: None,
         };
 
         ApplicationRunner::new(Box::new(backend))
@@ -1416,6 +1426,30 @@ mod tests {
                     .any(|environment| environment.interaction_mode()
                         == crate::InteractionMode::Touch)
             );
+        }
+    }
+
+    #[test]
+    fn negotiated_platform_size_is_used_for_the_first_present() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        let mut app = EnvironmentRunnerApp {
+            hook_count: Rc::new(Cell::new(0)),
+            observed: Rc::new(Cell::new(None)),
+        };
+        let backend = EnvironmentTestBackend {
+            probe: probe.clone(),
+            next_window: 0,
+            negotiated_size: Some(Size::new(320.0, 240.0)),
+        };
+
+        ApplicationRunner::new(Box::new(backend))
+            .run(&mut app)
+            .expect("runner should present negotiated windows before quitting");
+
+        let probe = probe.borrow();
+        for sizes in &probe.present_sizes {
+            assert_eq!(sizes.first().copied(), Some((320, 240)));
         }
     }
 

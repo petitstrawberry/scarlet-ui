@@ -18,7 +18,7 @@ use crate::renderer::{
     BackendFrame, CpuPaintBackend, CpuPaintRenderer, CpuRenderer, FrameSize, PaintBackend,
     PaintContext, PresentedFrame,
 };
-use crate::views::WindowInfo;
+use crate::views::{WindowBackdrop, WindowInfo, WindowRenderObject};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -33,6 +33,13 @@ struct PaintCache {
     scale_milli: u32,
     valid: bool,
     invalidated_by: Option<ElementId>,
+}
+
+struct WindowBackdropCache {
+    backdrop: WindowBackdrop,
+    origin: Point,
+    scale_milli: u32,
+    buffer: Arc<Buffer>,
 }
 
 #[derive(Default)]
@@ -64,6 +71,7 @@ pub(crate) struct PaintTestCounters {
     pub(crate) retained_sync_fallbacks: usize,
     pub(crate) retained_primitive_slot_syncs: usize,
     pub(crate) retained_primitive_scan_syncs: usize,
+    pub(crate) window_backdrop_rebuilds: usize,
 }
 
 /// RenderingPipeline integrates all components of the rendering system
@@ -82,6 +90,7 @@ pub struct RenderingPipeline {
     paint_background_color: Option<crate::color::Color>,
     paint_enabled: bool,
     paint_caches: BTreeMap<ElementId, PaintCache>,
+    window_backdrop_cache: Option<WindowBackdropCache>,
     layer_store: LayerStore,
     retained_ctx: PaintContext<'static>,
     dirty_scratch: DirtyScratch,
@@ -116,6 +125,7 @@ impl RenderingPipeline {
             paint_background_color: None,
             paint_enabled: true,
             paint_caches: BTreeMap::new(),
+            window_backdrop_cache: None,
             layer_store: LayerStore::new(),
             retained_ctx: PaintContext::new(),
             dirty_scratch: DirtyScratch::default(),
@@ -149,6 +159,7 @@ impl RenderingPipeline {
         self.paint_needs_full = true;
         self.paint_background_color = None;
         self.paint_caches.clear();
+        self.window_backdrop_cache = None;
         self.layer_store.clear();
         self.retained_ctx.clear();
     }
@@ -188,6 +199,7 @@ impl RenderingPipeline {
         self.paint_needs_full = true;
         self.paint_background_color = None;
         self.paint_caches.clear();
+        self.window_backdrop_cache = None;
         self.layer_store.clear();
         self.retained_ctx.clear();
     }
@@ -212,6 +224,7 @@ impl RenderingPipeline {
         self.paint_damage = None;
         self.paint_needs_full = true;
         self.paint_caches.clear();
+        self.window_backdrop_cache = None;
         self.layer_store.clear();
         self.retained_ctx.clear();
         if let Some(root) = self.element_tree.root_mut() {
@@ -231,6 +244,7 @@ impl RenderingPipeline {
     pub fn set_root(&mut self, root_element: Box<dyn Element>) {
         self.element_tree.set_root(root_element);
         self.paint_caches.clear();
+        self.window_backdrop_cache = None;
         self.layer_store.clear();
         if let Some(root) = self.element_tree.root() {
             self.event_dispatcher.set_root(root.id());
@@ -281,6 +295,7 @@ impl RenderingPipeline {
         self.paint_damage = None;
         self.paint_needs_full = true;
         self.paint_caches.clear();
+        self.window_backdrop_cache = None;
         self.layer_store.clear();
         self.retained_ctx.clear();
         if let Some(root) = self.element_tree.root_mut() {
@@ -339,6 +354,108 @@ impl RenderingPipeline {
         }
 
         None
+    }
+
+    fn find_deferred_window_backdrop(
+        element: &dyn Element,
+        origin: Point,
+    ) -> Option<(WindowBackdrop, Point)> {
+        let absolute_origin = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+        if let Some(backdrop) = element
+            .render_object()
+            .and_then(|render_object| render_object.as_any().downcast_ref::<WindowRenderObject>())
+            .and_then(WindowRenderObject::deferred_backdrop)
+        {
+            return Some((backdrop, absolute_origin));
+        }
+        element
+            .children()
+            .iter()
+            .find_map(|child| Self::find_deferred_window_backdrop(child.as_ref(), absolute_origin))
+    }
+
+    fn paint_deferred_window_backdrop<'a>(
+        ctx: &mut PaintContext<'a>,
+        deferred_backdrop: Option<(WindowBackdrop, Point)>,
+        damage_clip: Option<&[Rect]>,
+        cache: &mut Option<WindowBackdropCache>,
+        paint_renderer: &mut CpuPaintRenderer,
+        scale_milli: u32,
+        #[cfg(test)] paint_test_counters: &mut PaintTestCounters,
+    ) -> bool {
+        let Some((backdrop, origin)) = deferred_backdrop else {
+            *cache = None;
+            return false;
+        };
+        let size = backdrop.size();
+        let cacheable = Self::repaint_boundary_physical_size(size, scale_milli)
+            .is_some_and(|(_, _, pixels)| pixels <= MAX_REPAINT_BOUNDARY_CACHE_PIXELS);
+        if !cacheable {
+            *cache = None;
+            backdrop.paint(ctx, origin);
+            return true;
+        }
+
+        let needs_rebuild = cache.as_ref().is_none_or(|cached| {
+            cached.backdrop != backdrop
+                || cached.origin != origin
+                || cached.scale_milli != scale_milli
+        });
+        if needs_rebuild {
+            let mut buffer = Buffer::from_logical_dimensions_with_scale(
+                libm::ceilf(size.width.max(1.0)) as u32,
+                libm::ceilf(size.height.max(1.0)) as u32,
+                scale_milli,
+            );
+            let mut backdrop_ctx = PaintContext::new();
+            backdrop.paint_cached_shadow(&mut backdrop_ctx, Point::ZERO);
+            let shadow_regions = backdrop.shadow_visible_regions();
+            let mut shadow_damage = Vec::new();
+            shadow_damage.extend(
+                shadow_regions
+                    .iter()
+                    .copied()
+                    .filter(|rect| !Self::paint_bounds_is_empty(*rect)),
+            );
+            paint_renderer.execute_into_external_buffer(
+                &mut buffer,
+                crate::color::Color::TRANSPARENT,
+                &backdrop_ctx,
+                Some(&shadow_damage),
+            );
+            *cache = Some(WindowBackdropCache {
+                backdrop,
+                origin,
+                scale_milli,
+                buffer: Arc::new(buffer),
+            });
+            #[cfg(test)]
+            {
+                paint_test_counters.window_backdrop_rebuilds += 1;
+            }
+        }
+
+        let Some(cached) = cache.as_ref() else {
+            return false;
+        };
+        for source in backdrop.shadow_visible_regions() {
+            if Self::paint_bounds_is_empty(source) {
+                continue;
+            }
+            let destination = Rect::new(
+                Point::new(origin.x + source.origin.x, origin.y + source.origin.y),
+                source.size,
+            );
+            if damage_clip.is_some_and(|damage| !Self::overlaps_any(destination, damage)) {
+                continue;
+            }
+            ctx.draw_buffer_rect_shared(destination, source, cached.buffer.clone(), 1.0);
+        }
+        backdrop.paint_body(ctx, origin);
+        true
     }
 
     fn extract_background_color(&self) -> crate::color::Color {
@@ -405,6 +522,7 @@ impl RenderingPipeline {
         self.paint_damage = None;
         self.paint_needs_full = true;
         self.paint_caches.clear();
+        self.window_backdrop_cache = None;
         self.layer_store.clear();
         self.retained_ctx.clear();
 
@@ -470,6 +588,18 @@ impl RenderingPipeline {
             .element_tree
             .root()
             .is_some_and(Self::subtree_emits_paint_extension);
+        let deferred_window_backdrop = self
+            .element_tree
+            .root()
+            .and_then(|root| Self::find_deferred_window_backdrop(root, Point::ZERO));
+        let window_backdrop_retained =
+            deferred_window_backdrop.is_some_and(|(backdrop, origin)| {
+                self.window_backdrop_cache.as_ref().is_some_and(|cached| {
+                    cached.backdrop == backdrop
+                        && cached.origin == origin
+                        && cached.scale_milli == self.scale_milli
+                })
+            });
         let repaint_composite_damage = has_paint_extensions
             && self.pipeline_owner.last_paint_ids().is_empty()
             && !self.pipeline_owner.last_composite_ids().is_empty();
@@ -489,7 +619,7 @@ impl RenderingPipeline {
             // the window background beneath them, while the rounded exterior
             // must stay transparent. Recompose from the root until transparent
             // damage has its own ancestor-aware clear path.
-            || transparent_surface_changed
+            || (transparent_surface_changed && !window_backdrop_retained)
             || self.last_paint_ids_require_full_refresh();
 
         if !has_paint_extensions
@@ -547,6 +677,16 @@ impl RenderingPipeline {
                 &mut self.dirty_scratch.path,
                 &mut self.dirty_scratch.rects,
             );
+            if window_backdrop_retained && let Some((backdrop, origin)) = deferred_window_backdrop {
+                let body = backdrop.window_geometry_rect(origin);
+                self.dirty_scratch.rects.retain_mut(|rect| {
+                    let Some(intersection) = Self::intersect_paint_bounds(*rect, body) else {
+                        return false;
+                    };
+                    *rect = intersection;
+                    true
+                });
+            }
             if !self.dirty_scratch.rects.is_empty() {
                 Self::merge_overlapping_rects(&mut self.dirty_scratch.rects);
                 let partial = Self::present_damage_rects_into(
@@ -577,6 +717,16 @@ impl RenderingPipeline {
             let Some(paint_renderer) = self.paint_renderer.as_mut() else {
                 return Err(crate::error::Error::RenderError);
             };
+            let backdrop_painted = Self::paint_deferred_window_backdrop(
+                &mut ctx,
+                deferred_window_backdrop,
+                damage_clip,
+                &mut self.window_backdrop_cache,
+                paint_renderer,
+                self.scale_milli,
+                #[cfg(test)]
+                &mut self.paint_test_counters,
+            );
             let base_painted = Self::walk_and_paint(
                 &mut ctx,
                 root,
@@ -592,7 +742,7 @@ impl RenderingPipeline {
             );
             let overlay_painted =
                 Self::paint_select_overlays(&mut ctx, root, Point::ZERO, damage_clip);
-            base_painted || overlay_painted
+            backdrop_painted || base_painted || overlay_painted
         } else {
             false
         };
@@ -3254,6 +3404,88 @@ mod tests {
             buffer.get_pixel(0, 0),
             Some(crate::color::Color::TRANSPARENT.to_bgra())
         );
+    }
+
+    #[test]
+    fn shadowed_window_reuses_backdrop_for_descendant_paint() {
+        let color = State::new(
+            crate::state::generate_state_id(),
+            crate::color::Color::rgb(220, 40, 40),
+        );
+        let content = PaintOnlyComponentHarness {
+            color: color.clone(),
+        }
+        .frame(160.0, 100.0);
+        let window = Window::new("Video-like paint", content)
+            .shadow(true)
+            .size(Size::new(180.0, 140.0));
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(window.create_element());
+        pipeline.layout_initial();
+        pipeline
+            .render_with_damage()
+            .expect("initial shadowed frame should render");
+
+        assert_eq!(pipeline.paint_test_counters().window_backdrop_rebuilds, 1);
+        let initial_backdrop = pipeline
+            .window_backdrop_cache
+            .as_ref()
+            .expect("shadowed window should retain its backdrop")
+            .buffer
+            .clone();
+        let shadow_alpha_at = |x, y| {
+            crate::color::Color::from_bgra(
+                initial_backdrop
+                    .get_pixel(x, y)
+                    .expect("shadow sample should be inside the cached surface"),
+            )
+            .a
+        };
+        let top_alpha = shadow_alpha_at(101, 4);
+        let left_alpha = shadow_alpha_at(5, 76);
+        let right_alpha = shadow_alpha_at(196, 76);
+        let bottom_alpha = shadow_alpha_at(101, 156);
+        assert!(top_alpha > 0.0);
+        assert!(left_alpha > 0.0);
+        assert!(right_alpha > 0.0);
+        assert!(bottom_alpha > top_alpha);
+        assert!(bottom_alpha < 1.0);
+
+        pipeline.reset_paint_test_counters();
+        color.set(crate::color::Color::rgb(40, 80, 220));
+        let (_, damage) = pipeline
+            .render_with_damage()
+            .expect("descendant paint should render");
+        let damage = damage
+            .expect("retained window backdrop should preserve partial damage")
+            .to_vec();
+
+        assert_eq!(pipeline.paint_test_counters().window_backdrop_rebuilds, 0);
+        assert!(damage.iter().all(|&(x, y, width, height)| {
+            x >= 11 && y >= 6 && x.saturating_add(width) <= 191 && y.saturating_add(height) <= 146
+        }));
+        let retained_backdrop = &pipeline
+            .window_backdrop_cache
+            .as_ref()
+            .expect("descendant paint should preserve the backdrop")
+            .buffer;
+        assert!(Arc::ptr_eq(&initial_backdrop, retained_backdrop));
+    }
+
+    #[test]
+    fn flat_window_does_not_allocate_a_shadow_backdrop() {
+        let window = Window::new("Flat", Text::new("Content"))
+            .shadow(false)
+            .size(Size::new(180.0, 140.0));
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(window.create_element());
+        pipeline.layout_initial();
+        pipeline
+            .render_with_damage()
+            .expect("flat window should render");
+
+        assert!(pipeline.window_backdrop_cache.is_none());
+        assert_eq!(pipeline.paint_test_counters().window_backdrop_rebuilds, 0);
     }
 
     fn first_any_scrollbar_primitive_rect(pipeline: &RenderingPipeline) -> Option<Rect> {

@@ -2,7 +2,7 @@
 
 use crate::buffer::Buffer;
 use crate::compositor::DamageRect;
-use crate::element::TextInputElementState;
+use crate::element::{TextInputElementState, WindowSizeLimits};
 use crate::error::Result;
 use crate::event::Event;
 use crate::geometry::{EdgeInsets, Point, Size};
@@ -155,6 +155,8 @@ pub struct WindowCreateRequest {
     pub title: String,
     /// Initial logical window size.
     pub size: Size,
+    /// Logical min/max constraints and resize policy known before creation.
+    pub size_limits: WindowSizeLimits,
     /// Backend-specific window type.
     pub window_type: u32,
     /// Serialized top-level menu titles.
