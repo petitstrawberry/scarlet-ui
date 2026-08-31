@@ -7,6 +7,7 @@ use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, LayoutConstraints, RenderElement};
 use crate::event::{Event, MouseButton, MouseEvent, Phase};
 use crate::geometry::{Point, Rect, Size};
+use crate::input_environment::{InteractionMode, current_input_environment};
 use crate::renderer::PaintContext;
 use crate::view::View;
 use alloc::boxed::Box;
@@ -16,6 +17,7 @@ use core::any::Any;
 use core::marker::PhantomData;
 
 const DEFAULT_DIVIDER_HIT_SLOP: f32 = 6.0;
+const DEFAULT_ADAPTIVE_STACK_NARROW_WIDTH: f32 = 640.0;
 
 /// Axis used by [`SplitView`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,12 +28,66 @@ pub enum SplitAxis {
     Vertical,
 }
 
+/// Policy controlling whether a [`SplitView`] may stack its panes adaptively.
+///
+/// The default is [`SplitAxisPolicy::Fixed`] for backward compatibility:
+/// [`SplitView::axis`] is used exactly as configured. Applications opt into
+/// [`SplitAxisPolicy::AdaptiveStack`] when a horizontal desktop split should
+/// become a vertical stack for touch input or a narrow available width.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SplitAxisPolicy {
+    /// Always use the configured [`SplitAxis`].
+    #[default]
+    Fixed,
+    /// Stack a configured horizontal split vertically for touch or narrow layouts.
+    AdaptiveStack,
+}
+
+impl SplitAxisPolicy {
+    /// Resolve the effective split axis for the available context.
+    ///
+    /// `AdaptiveStack` only changes configured horizontal splits. A configured
+    /// vertical split stays vertical, and `Fixed` never changes either axis.
+    ///
+    /// # Arguments
+    ///
+    /// * `configured_axis` - Axis requested by the caller.
+    /// * `interaction_mode` - Current input density and capabilities.
+    /// * `available_width` - Width available to the split in logical pixels.
+    /// * `narrow_width` - Width at or below which horizontal panes stack.
+    ///
+    /// # Returns
+    ///
+    /// The effective axis for layout, painting, and divider hit testing.
+    pub const fn resolve(
+        self,
+        configured_axis: SplitAxis,
+        interaction_mode: InteractionMode,
+        available_width: f32,
+        narrow_width: f32,
+    ) -> SplitAxis {
+        match (self, configured_axis) {
+            (_, SplitAxis::Vertical) => SplitAxis::Vertical,
+            (Self::Fixed, SplitAxis::Horizontal) => SplitAxis::Horizontal,
+            (Self::AdaptiveStack, SplitAxis::Horizontal)
+                if matches!(interaction_mode, InteractionMode::Touch)
+                    || available_width <= narrow_width =>
+            {
+                SplitAxis::Vertical
+            }
+            (Self::AdaptiveStack, SplitAxis::Horizontal) => SplitAxis::Horizontal,
+        }
+    }
+}
+
 /// Two-pane layout with a draggable divider.
 #[derive(Clone)]
 pub struct SplitView<A: View, B: View> {
     first: A,
     second: B,
     axis: SplitAxis,
+    axis_policy: SplitAxisPolicy,
+    adaptive_stack_narrow_width: f32,
     fraction: f32,
     min_first: f32,
     min_second: f32,
@@ -58,6 +114,8 @@ impl<A: View, B: View> SplitView<A, B> {
             first,
             second,
             axis: SplitAxis::Horizontal,
+            axis_policy: SplitAxisPolicy::Fixed,
+            adaptive_stack_narrow_width: DEFAULT_ADAPTIVE_STACK_NARROW_WIDTH,
             fraction: 0.5,
             min_first: 0.0,
             min_second: 0.0,
@@ -79,6 +137,46 @@ impl<A: View, B: View> SplitView<A, B> {
     /// Updated split view.
     pub fn axis(mut self, axis: SplitAxis) -> Self {
         self.axis = axis;
+        self.axis_policy = SplitAxisPolicy::Fixed;
+        self
+    }
+
+    /// Set the policy that controls adaptive stacking.
+    ///
+    /// [`SplitAxisPolicy::Fixed`] is the default and preserves the configured
+    /// axis. Select [`SplitAxisPolicy::AdaptiveStack`] after setting a
+    /// horizontal axis to stack panes vertically in touch or narrow contexts.
+    /// Calling [`SplitView::axis`] afterwards restores the fixed policy.
+    ///
+    /// # Arguments
+    ///
+    /// * `policy` - Fixed or adaptive split-axis policy.
+    ///
+    /// # Returns
+    ///
+    /// Updated split view.
+    pub fn axis_policy(mut self, policy: SplitAxisPolicy) -> Self {
+        self.axis_policy = policy;
+        self
+    }
+
+    /// Set the width threshold used by adaptive stacking.
+    ///
+    /// This threshold applies only to [`SplitAxisPolicy::AdaptiveStack`]. At
+    /// or below it, a configured horizontal split stacks vertically even when
+    /// the interaction mode is not touch. The default threshold is 640 logical
+    /// pixels.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Non-negative narrow-layout threshold in logical pixels.
+    ///
+    /// # Returns
+    ///
+    /// Updated split view.
+    pub fn adaptive_stack_narrow_width(mut self, width: f32) -> Self {
+        self.adaptive_stack_narrow_width =
+            sanitize_non_negative(width, DEFAULT_ADAPTIVE_STACK_NARROW_WIDTH);
         self
     }
 
@@ -171,13 +269,31 @@ impl<A: View, B: View> SplitView<A, B> {
         self
     }
 
-    /// Return the split axis.
+    /// Return the configured split axis.
     ///
     /// # Returns
     ///
-    /// Current split axis.
+    /// Axis requested by the caller before adaptive resolution.
     pub fn split_axis(&self) -> SplitAxis {
         self.axis
+    }
+
+    /// Return the configured split-axis policy.
+    ///
+    /// # Returns
+    ///
+    /// The fixed or adaptive stacking policy.
+    pub fn split_axis_policy(&self) -> SplitAxisPolicy {
+        self.axis_policy
+    }
+
+    /// Return the adaptive stacking width threshold.
+    ///
+    /// # Returns
+    ///
+    /// The narrow-layout threshold in logical pixels.
+    pub fn split_adaptive_stack_narrow_width(&self) -> f32 {
+        self.adaptive_stack_narrow_width
     }
 
     /// Return the configured divider fraction.
@@ -248,7 +364,10 @@ impl<A: View + Clone + 'static, B: View + Clone + 'static> View for SplitView<A,
 
 /// Render object for [`SplitView`].
 pub struct SplitViewRenderObject<A: View, B: View> {
+    configured_axis: SplitAxis,
     axis: SplitAxis,
+    axis_policy: SplitAxisPolicy,
+    adaptive_stack_narrow_width: f32,
     fraction: f32,
     min_first: f32,
     min_second: f32,
@@ -277,7 +396,10 @@ impl<A: View, B: View> SplitViewRenderObject<A, B> {
     /// New render object.
     pub fn from_view(view: &SplitView<A, B>) -> Self {
         Self {
+            configured_axis: view.split_axis(),
             axis: view.split_axis(),
+            axis_policy: view.split_axis_policy(),
+            adaptive_stack_narrow_width: view.split_adaptive_stack_narrow_width(),
             fraction: view.split_fraction(),
             min_first: view.minimum_extents().0,
             min_second: view.minimum_extents().1,
@@ -304,6 +426,15 @@ impl<A: View, B: View> SplitViewRenderObject<A, B> {
         self.first_extent
     }
 
+    /// Return the effective split axis from the latest layout.
+    ///
+    /// # Returns
+    ///
+    /// The axis used to lay out panes and place the divider.
+    pub fn effective_axis(&self) -> SplitAxis {
+        self.axis
+    }
+
     /// Return whether the divider is being dragged.
     ///
     /// # Returns
@@ -327,6 +458,15 @@ impl<A: View, B: View> SplitViewRenderObject<A, B> {
             SplitAxis::Horizontal => self.size.width,
             SplitAxis::Vertical => self.size.height,
         }
+    }
+
+    fn resolve_axis(&mut self) {
+        self.axis = self.axis_policy.resolve(
+            self.configured_axis,
+            current_input_environment().interaction_mode(),
+            self.size.width,
+            self.adaptive_stack_narrow_width,
+        );
     }
 
     fn constrained_first_extent(&self, requested: f32) -> f32 {
@@ -410,6 +550,7 @@ impl<A: View + Clone + 'static, B: View + Clone + 'static> ElementRenderObject
             finite_split_axis(constraints.min_width, constraints.max_width),
             finite_split_axis(constraints.min_height, constraints.max_height),
         );
+        self.resolve_axis();
         let extent = (self.split_extent() - self.divider_thickness).max(0.0);
         self.first_extent = self.constrained_first_extent(extent * self.fraction);
         self.update_divider_rect();
@@ -468,7 +609,9 @@ impl<A: View + Clone + 'static, B: View + Clone + 'static> ElementRenderObject
             return crate::element::UpdateResult::Replaced;
         };
 
-        let old_axis = self.axis;
+        let old_configured_axis = self.configured_axis;
+        let old_axis_policy = self.axis_policy;
+        let old_adaptive_stack_narrow_width = self.adaptive_stack_narrow_width;
         let old_min_first = self.min_first;
         let old_min_second = self.min_second;
         let old_divider_thickness = self.divider_thickness;
@@ -476,7 +619,9 @@ impl<A: View + Clone + 'static, B: View + Clone + 'static> ElementRenderObject
         let old_divider_color = self.divider_color;
         let old_active_divider_color = self.active_divider_color;
 
-        self.axis = split_view.split_axis();
+        self.configured_axis = split_view.split_axis();
+        self.axis_policy = split_view.split_axis_policy();
+        self.adaptive_stack_narrow_width = split_view.split_adaptive_stack_narrow_width();
         if !self.dragging {
             self.fraction = split_view.split_fraction();
         }
@@ -485,7 +630,9 @@ impl<A: View + Clone + 'static, B: View + Clone + 'static> ElementRenderObject
         self.divider_hit_slop = split_view.split_divider_hit_slop();
         (self.divider_color, self.active_divider_color) = split_view.split_divider_colors();
 
-        if self.axis != old_axis
+        if self.configured_axis != old_configured_axis
+            || self.axis_policy != old_axis_policy
+            || (self.adaptive_stack_narrow_width - old_adaptive_stack_narrow_width).abs() > 0.001
             || (self.min_first - old_min_first).abs() > 0.001
             || (self.min_second - old_min_second).abs() > 0.001
             || (self.divider_thickness - old_divider_thickness).abs() > 0.001
@@ -540,6 +687,18 @@ impl<A: View + Clone + 'static, B: View + Clone + 'static> ElementRenderObject
                 false
             }
             MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                ..
+            } => {
+                if self.dragging || self.hovered {
+                    self.dragging = false;
+                    self.hovered = false;
+                    self.drag_pointer_offset = 0.0;
+                    return true;
+                }
+                false
+            }
+            MouseEvent::ButtonCancelled {
                 button: MouseButton::Left,
                 ..
             } => {
@@ -635,6 +794,82 @@ mod tests {
         render_object.layout(LayoutConstraints::tight(402.0, 100.0));
 
         assert_eq!(render_object.first_extent(), 100.0);
+    }
+
+    #[test]
+    fn adaptive_stack_policy_resolves_touch_and_narrow_horizontal_splits() {
+        assert_eq!(
+            SplitAxisPolicy::AdaptiveStack.resolve(
+                SplitAxis::Horizontal,
+                InteractionMode::Touch,
+                1200.0,
+                640.0,
+            ),
+            SplitAxis::Vertical
+        );
+        assert_eq!(
+            SplitAxisPolicy::AdaptiveStack.resolve(
+                SplitAxis::Horizontal,
+                InteractionMode::Pointer,
+                640.0,
+                640.0,
+            ),
+            SplitAxis::Vertical
+        );
+        assert_eq!(
+            SplitAxisPolicy::AdaptiveStack.resolve(
+                SplitAxis::Horizontal,
+                InteractionMode::Hybrid,
+                900.0,
+                640.0,
+            ),
+            SplitAxis::Horizontal
+        );
+    }
+
+    #[test]
+    fn fixed_policy_never_overrides_the_configured_axis() {
+        assert_eq!(
+            SplitAxisPolicy::Fixed.resolve(
+                SplitAxis::Horizontal,
+                InteractionMode::Touch,
+                320.0,
+                640.0,
+            ),
+            SplitAxis::Horizontal
+        );
+        assert_eq!(
+            SplitAxisPolicy::Fixed.resolve(
+                SplitAxis::Vertical,
+                InteractionMode::Pointer,
+                1200.0,
+                640.0,
+            ),
+            SplitAxis::Vertical
+        );
+    }
+
+    #[test]
+    fn adaptive_touch_layout_stacks_panes_and_uses_a_horizontal_divider_hit_area() {
+        let _environment = crate::input_environment::install_test_input_environment(
+            crate::InputEnvironment::new(1, None, None, true, false, false, false),
+        );
+        let mut render_object = SplitViewRenderObject::<Text, Text>::from_view(
+            &SplitView::new(Text::new("A"), Text::new("B"))
+                .axis_policy(SplitAxisPolicy::AdaptiveStack)
+                .divider_thickness(2.0),
+        );
+
+        render_object.layout(LayoutConstraints::tight(402.0, 100.0));
+
+        assert_eq!(render_object.effective_axis(), SplitAxis::Vertical);
+        assert_eq!(render_object.first_extent(), 49.0);
+        assert_eq!(
+            render_object.divider_rect,
+            Rect::from_xywh(0.0, 49.0, 402.0, 2.0)
+        );
+        assert!(render_object.point_in_divider(Point::new(20.0, 45.0)));
+        assert!(!render_object.point_in_divider(Point::new(20.0, 40.0)));
     }
 
     #[test]

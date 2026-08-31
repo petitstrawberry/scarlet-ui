@@ -86,23 +86,51 @@ The platform installs its initial snapshot before scene construction and may
 send `InputEnvironmentChanged` at any time. ScarletUI then rebuilds, relays out,
 and repaints every open pipeline in the process. Pointer mode preserves the
 compact desktop metrics. Touch and Hybrid use larger control minimums,
-navigation and tab rows, scrollbars, sliders, toggles, and client-side titlebar
-hit areas. The current implementation is process-wide so all windows and
-runners transition coherently; the public snapshot model is the seam for future
-runner- or per-window environments.
+navigation and tab rows, scrollbars, sliders, toggles, menu rows, and
+client-side titlebar hit areas. The current implementation is process-wide so
+all windows and runners transition coherently; the public snapshot model is the
+seam for future runner- or per-window environments.
+
+Input adaptation also changes composition where the component's role benefits
+from a different edge or axis:
+
+- `NavigationPresentation::Automatic` uses a leading sidebar for Pointer and
+  Hybrid while at least 320 logical pixels remain for content. Touch, or a
+  narrower window, uses a bottom destination bar with a horizontal selection
+  indicator and evenly distributed hit regions.
+- `TabBarPlacement::Automatic` keeps desktop tabs above content and moves Touch
+  tabs to the bottom edge. Layout, separators, selection indicators, and hit
+  testing all follow the resolved edge.
+- `SplitAxisPolicy::AdaptiveStack` is an explicit opt-in for content that can be
+  represented either side by side or stacked. It turns a horizontal split into
+  a vertical stack for Touch or below its configured width breakpoint. Fixed
+  split axes remain the backward-compatible default.
+- Menus use live interaction density. Pointer menus stay compact; Touch and
+  Hybrid menus reserve at least 44 logical pixels per actionable row. Retained
+  and legacy-buffer rendering share the same floating-surface, hover, divider,
+  and disabled-state structure.
+
+These are one information architecture expressed at different constraints, not
+separate desktop and tablet themes. All destinations and actions stay
+available across presentations.
 
 On Winit/macOS, `SCARLET_TABLET_MODE=tablet` (also `1`, `true`, `yes`, or `on`)
 forces the initial tablet environment. `laptop` (also `0`, `false`, `no`, or
 `off`) forces pointer/laptop behavior. Matching is case-insensitive; invalid or
 unset values leave tablet state unknown. A native Winit touch event also
-advertises direct-touch capability dynamically.
+advertises direct-touch capability dynamically. Until the core event model
+gains contact-aware multi-touch, Winit maps the first active contact to the
+logical primary-pointer press, movement, and release stream; additional
+contacts are ignored for activation and remain available for a future gesture
+layer.
 
 ## State roles
 
 - Selection remains persistent while hover or focus is shown.
-- Navigation selection uses the existing 3 px leading scarlet rail and label
-  color. Hover remains a neutral row surface.
-- Tabs use their existing selected surface plus a 2 px scarlet line indicator.
+- Navigation selection uses a 3 px scarlet rail on a sidebar and a 3 px top
+  indicator on a bottom bar. Hover remains a neutral item surface.
+- Tabs use their existing selected surface plus a 2 px scarlet line indicator
+  on the content-facing edge.
 - Fields keep the same bounds in every state. Focus changes the border color
   and stroke weight without moving content.
 - Focus and active-outline highlights share the same light primary tint across
@@ -128,8 +156,9 @@ advertises direct-touch capability dynamically.
   CPU rendering keeps the same geometry with an opaque semantic surface.
 - macOS uses the installed system UI font first; the bundled font remains the
   cross-platform fallback.
-- Window controls and widget positions are compatibility contracts and do not
-  move as part of visual refinement.
+- Window-control ordering remains a compatibility contract. Adaptive container
+  policies may move navigation, tab bars, or panes only when their public
+  presentation policy allows it.
 
 ## Rendering
 

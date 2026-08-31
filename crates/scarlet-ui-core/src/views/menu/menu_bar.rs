@@ -191,7 +191,8 @@ impl Element for MenuBarElement {
             crate::event::MouseEvent::Moved { x, y }
             | crate::event::MouseEvent::Entered { x, y }
             | crate::event::MouseEvent::ButtonPressed { x, y, .. }
-            | crate::event::MouseEvent::ButtonReleased { x, y, .. } => Point {
+            | crate::event::MouseEvent::ButtonReleased { x, y, .. }
+            | crate::event::MouseEvent::ButtonCancelled { x, y, .. } => Point {
                 x: *x as f32,
                 y: *y as f32,
             },

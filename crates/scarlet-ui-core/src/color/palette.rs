@@ -154,6 +154,24 @@ impl ColorPalette {
         self.semantic.button_background
     }
 
+    /// Subtle semantic surface shown while a header button is hovered.
+    ///
+    /// # Returns
+    ///
+    /// The current palette's header-button hover color.
+    pub fn header_button_hover(&self) -> crate::Color {
+        self.semantic.header_button_hover
+    }
+
+    /// Stronger semantic surface shown while a header button is pressed.
+    ///
+    /// # Returns
+    ///
+    /// The current palette's header-button pressed color.
+    pub fn header_button_pressed(&self) -> crate::Color {
+        self.semantic.header_button_pressed
+    }
+
     /// Overlay color
     pub fn overlay(&self) -> crate::Color {
         self.semantic.overlay

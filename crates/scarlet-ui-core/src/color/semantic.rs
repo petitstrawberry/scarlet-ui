@@ -67,6 +67,10 @@ pub struct SemanticColor {
     pub surface_variant: Color,
     /// Button background color
     pub button_background: Color,
+    /// Header button hover surface color
+    pub header_button_hover: Color,
+    /// Header button pressed surface color
+    pub header_button_pressed: Color,
 
     // Overlay
     /// Overlay/backdrop color
@@ -132,6 +136,8 @@ impl SemanticColor {
             surface: Color::rgb(1.0, 1.0, 1.0),
             surface_variant: Color::rgb(0.95, 0.95, 0.97),
             button_background: Color::rgb(229, 229, 234), // systemGray5
+            header_button_hover: Color::rgba(60, 60, 67, 0.12),
+            header_button_pressed: Color::rgba(60, 60, 67, 0.20),
 
             // Overlay
             overlay: Color::rgba(0.0, 0.0, 0.0, 0.24),
@@ -188,6 +194,8 @@ impl SemanticColor {
             surface: Color::rgb(0.18, 0.18, 0.18),
             surface_variant: Color::rgb(0.22, 0.22, 0.22),
             button_background: Color::rgb(44, 44, 46), // systemGray5 (dark)
+            header_button_hover: Color::rgba(235, 235, 245, 0.16),
+            header_button_pressed: Color::rgba(235, 235, 245, 0.24),
 
             // Overlay
             overlay: Color::rgba(0.0, 0.0, 0.0, 0.4),

@@ -1360,6 +1360,18 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                     handled = true;
                 }
             }
+            crate::event::Event::Mouse(crate::event::MouseEvent::ButtonCancelled {
+                button: crate::event::MouseButton::Left,
+                ..
+            }) => {
+                if self.pressed_button != 0 || self.last_mouse_pressed {
+                    self.pressed_button = 0;
+                    self.last_mouse_pressed = false;
+                    self.update_titlebar_button_states(self.last_mouse_x, self.last_mouse_y, false);
+                    needs_repaint = true;
+                    handled = true;
+                }
+            }
             _ => {}
         }
 

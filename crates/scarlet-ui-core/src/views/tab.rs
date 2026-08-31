@@ -10,6 +10,7 @@ use crate::element::{
 use crate::event::{Event, MouseButton, MouseEvent, Phase};
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::input_environment::{InteractionMode, current_input_environment};
 use crate::renderer::PaintContext;
 use crate::state::{Listenable, State};
 use crate::view::View;
@@ -20,6 +21,54 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
+
+/// Policy that determines where a [`TabView`] places its tab bar.
+///
+/// `Automatic` follows the current input environment: pointer and hybrid
+/// interaction keep the desktop tab bar at the top, while touch interaction
+/// moves it to the bottom edge for thumb-friendly navigation. Explicit
+/// placements always win over the input environment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TabBarPlacement {
+    /// Resolve the placement from the current interaction mode.
+    #[default]
+    Automatic,
+    /// Place the tab bar above the selected content.
+    Top,
+    /// Place the tab bar below the selected content.
+    Bottom,
+}
+
+/// Concrete tab-bar edge after resolving a [`TabBarPlacement`] policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabBarPosition {
+    /// The tab bar occupies the top edge of the view.
+    Top,
+    /// The tab bar occupies the bottom edge of the view.
+    Bottom,
+}
+
+impl TabBarPlacement {
+    /// Resolve this placement policy for an interaction mode.
+    ///
+    /// # Arguments
+    ///
+    /// * `interaction_mode` - Current input density and capabilities.
+    ///
+    /// # Returns
+    ///
+    /// The concrete top or bottom tab-bar position.
+    pub const fn resolve(self, interaction_mode: InteractionMode) -> TabBarPosition {
+        match self {
+            Self::Automatic => match interaction_mode {
+                InteractionMode::Touch => TabBarPosition::Bottom,
+                InteractionMode::Pointer | InteractionMode::Hybrid => TabBarPosition::Top,
+            },
+            Self::Top => TabBarPosition::Top,
+            Self::Bottom => TabBarPosition::Bottom,
+        }
+    }
+}
 
 /// A single tab item used by [`TabView`].
 #[derive(Clone)]
@@ -70,6 +119,7 @@ pub struct TabView {
     tabs: Vec<TabItem>,
     selected_index: State<usize>,
     tab_bar_height: f32,
+    tab_bar_placement: TabBarPlacement,
     tab_padding: f32,
     font_size: f32,
     background_color: Color,
@@ -110,6 +160,7 @@ impl TabView {
             tabs,
             selected_index,
             tab_bar_height: style::metrics().tab_bar_height,
+            tab_bar_placement: TabBarPlacement::Automatic,
             tab_padding: 14.0,
             font_size: 13.0,
             background_color: style::surface_color(&palette, style::SurfaceRole::Structural),
@@ -132,6 +183,25 @@ impl TabView {
     /// Updated tab view.
     pub fn tab_bar_height(mut self, height: f32) -> Self {
         self.tab_bar_height = height.max(1.0);
+        self
+    }
+
+    /// Set the policy used to place the tab bar.
+    ///
+    /// The default [`TabBarPlacement::Automatic`] keeps the bar at the top for
+    /// pointer and hybrid input, and moves it to the bottom for touch input.
+    /// Use an explicit placement when the surrounding layout requires a fixed
+    /// edge regardless of the available input devices.
+    ///
+    /// # Arguments
+    ///
+    /// * `placement` - Automatic or explicitly fixed tab-bar placement.
+    ///
+    /// # Returns
+    ///
+    /// Updated tab view.
+    pub fn tab_bar_placement(mut self, placement: TabBarPlacement) -> Self {
+        self.tab_bar_placement = placement;
         self
     }
 
@@ -179,6 +249,15 @@ impl TabView {
     /// Tab count.
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    /// Return the configured tab-bar placement policy.
+    ///
+    /// # Returns
+    ///
+    /// The automatic or explicit placement policy.
+    pub fn configured_tab_bar_placement(&self) -> TabBarPlacement {
+        self.tab_bar_placement
     }
 
     fn selected_tab_index(&self) -> usize {
@@ -250,10 +329,11 @@ impl View for TabViewContent {
 }
 
 fn tab_render_object(view: &TabViewContent) -> TabViewRenderObject {
-    TabViewRenderObject::new(
+    TabViewRenderObject::with_placement(
         view.tabs.labels(),
         view.tabs.selected_index_state().clone(),
         view.tabs.tab_bar_height,
+        view.tabs.tab_bar_placement,
         view.tabs.tab_padding,
         view.tabs.font_size,
         view.tabs.background_color,
@@ -272,6 +352,8 @@ pub struct TabViewRenderObject {
     hovered_index: Option<usize>,
     pressed_index: Option<usize>,
     tab_bar_height: f32,
+    tab_bar_placement: TabBarPlacement,
+    tab_bar_position: TabBarPosition,
     tab_padding: f32,
     font_size: f32,
     background_color: Color,
@@ -284,12 +366,85 @@ pub struct TabViewRenderObject {
 }
 
 impl TabViewRenderObject {
-    /// Create a tab view render object.
+    /// Create a tab view render object with fixed top placement.
+    ///
+    /// This compatibility constructor preserves the legacy top-tab behavior.
+    /// Use [`TabViewRenderObject::with_placement`] to select an automatic or
+    /// explicitly fixed policy.
+    ///
+    /// # Arguments
+    ///
+    /// * `labels` - Labels displayed in the tab bar.
+    /// * `selected_index` - State storing the selected tab index.
+    /// * `tab_bar_height` - Height of the tab bar in logical pixels.
+    /// * `tab_padding` - Horizontal padding around each label.
+    /// * `font_size` - Label font size in logical pixels.
+    /// * `background_color` - Tab-bar background color.
+    /// * `selected_color` - Selected-tab background color.
+    /// * `hover_color` - Hovered or pressed-tab background color.
+    /// * `border_color` - Divider color between content and the tab bar.
+    /// * `text_color` - Text color for unselected tabs.
+    /// * `selected_text_color` - Text color for the selected tab.
+    ///
+    /// # Returns
+    ///
+    /// A render object ready for layout.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         labels: Vec<String>,
         selected_index: State<usize>,
         tab_bar_height: f32,
+        tab_padding: f32,
+        font_size: f32,
+        background_color: Color,
+        selected_color: Color,
+        hover_color: Color,
+        border_color: Color,
+        text_color: Color,
+        selected_text_color: Color,
+    ) -> Self {
+        Self::with_placement(
+            labels,
+            selected_index,
+            tab_bar_height,
+            TabBarPlacement::Top,
+            tab_padding,
+            font_size,
+            background_color,
+            selected_color,
+            hover_color,
+            border_color,
+            text_color,
+            selected_text_color,
+        )
+    }
+
+    /// Create a tab view render object with a placement policy.
+    ///
+    /// # Arguments
+    ///
+    /// * `labels` - Labels displayed in the tab bar.
+    /// * `selected_index` - State storing the selected tab index.
+    /// * `tab_bar_height` - Height of the tab bar in logical pixels.
+    /// * `tab_bar_placement` - Policy that selects the tab-bar edge.
+    /// * `tab_padding` - Horizontal padding around each label.
+    /// * `font_size` - Label font size in logical pixels.
+    /// * `background_color` - Tab-bar background color.
+    /// * `selected_color` - Selected-tab background color.
+    /// * `hover_color` - Hovered or pressed-tab background color.
+    /// * `border_color` - Divider color between content and the tab bar.
+    /// * `text_color` - Text color for unselected tabs.
+    /// * `selected_text_color` - Text color for the selected tab.
+    ///
+    /// # Returns
+    ///
+    /// A render object ready for layout.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_placement(
+        labels: Vec<String>,
+        selected_index: State<usize>,
+        tab_bar_height: f32,
+        tab_bar_placement: TabBarPlacement,
         tab_padding: f32,
         font_size: f32,
         background_color: Color,
@@ -305,6 +460,9 @@ impl TabViewRenderObject {
             hovered_index: None,
             pressed_index: None,
             tab_bar_height,
+            tab_bar_placement,
+            tab_bar_position: tab_bar_placement
+                .resolve(current_input_environment().interaction_mode()),
             tab_padding,
             font_size,
             background_color,
@@ -335,6 +493,28 @@ impl TabViewRenderObject {
         self.pressed_index
     }
 
+    /// Return the concrete tab-bar position from the latest layout.
+    ///
+    /// # Returns
+    ///
+    /// The top or bottom edge currently occupied by the tab bar.
+    pub fn tab_bar_position(&self) -> TabBarPosition {
+        self.tab_bar_position
+    }
+
+    fn resolve_tab_bar_position(&mut self) {
+        self.tab_bar_position = self
+            .tab_bar_placement
+            .resolve(current_input_environment().interaction_mode());
+    }
+
+    fn tab_bar_origin_y(&self) -> f32 {
+        match self.tab_bar_position {
+            TabBarPosition::Top => 0.0,
+            TabBarPosition::Bottom => (self.size.height - self.tab_bar_height).max(0.0),
+        }
+    }
+
     fn tab_width(&self, label: &str) -> f32 {
         let (text_width, _) = graphics::measure_text_sized(label, self.font_size);
         text_width as f32 + self.tab_padding * 2.0
@@ -351,13 +531,10 @@ impl TabViewRenderObject {
             .labels
             .get(index)
             .map_or(0.0, |label| self.tab_width(label));
-        Rect::from_xywh(x, 0.0, width, self.tab_bar_height)
+        Rect::from_xywh(x, self.tab_bar_origin_y(), width, self.tab_bar_height)
     }
 
     fn tab_index_at(&self, point: Point) -> Option<usize> {
-        if point.y < 0.0 || point.y >= self.tab_bar_height {
-            return None;
-        }
         for index in 0..self.labels.len() {
             if self.tab_rect(index).contains(point) {
                 return Some(index);
@@ -373,6 +550,7 @@ impl ElementRenderObject for TabViewRenderObject {
             finite_tab_axis(constraints.min_width, constraints.max_width),
             finite_tab_axis(constraints.min_height, constraints.max_height),
         );
+        self.resolve_tab_bar_position();
         self.size
     }
 
@@ -385,7 +563,11 @@ impl ElementRenderObject for TabViewRenderObject {
         let content_height = (self.size.height - self.tab_bar_height).max(0.0);
         if let Some(child) = children.first_mut() {
             child.layout(LayoutConstraints::tight(self.size.width, content_height));
-            child.set_position(Point::new(0.0, self.tab_bar_height));
+            let content_y = match self.tab_bar_position {
+                TabBarPosition::Top => self.tab_bar_height,
+                TabBarPosition::Bottom => 0.0,
+            };
+            child.set_position(Point::new(0.0, content_y));
         }
         self.size
     }
@@ -431,6 +613,10 @@ impl ElementRenderObject for TabViewRenderObject {
                 self.pressed_index = pressed;
                 changed
             }
+            MouseEvent::ButtonCancelled {
+                button: MouseButton::Left,
+                ..
+            } => self.pressed_index.take().is_some(),
             MouseEvent::ButtonReleased {
                 button: MouseButton::Left,
                 x,
@@ -452,8 +638,9 @@ impl ElementRenderObject for TabViewRenderObject {
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let metrics = style::metrics();
+        let tab_bar_y = origin.y + self.tab_bar_origin_y();
         ctx.fill_rect(
-            Rect::from_xywh(origin.x, origin.y, self.size.width, self.tab_bar_height),
+            Rect::from_xywh(origin.x, tab_bar_y, self.size.width, self.tab_bar_height),
             self.background_color,
         );
 
@@ -473,8 +660,12 @@ impl ElementRenderObject for TabViewRenderObject {
             } else if self.hovered_index == Some(index) {
                 ctx.fill_rect(rect, self.hover_color);
             }
+            let border_y = match self.tab_bar_position {
+                TabBarPosition::Top => rect.bottom() - 1.0,
+                TabBarPosition::Bottom => rect.origin.y,
+            };
             ctx.fill_rect(
-                Rect::from_xywh(rect.origin.x, rect.bottom() - 1.0, rect.size.width, 1.0),
+                Rect::from_xywh(rect.origin.x, border_y, rect.size.width, 1.0),
                 self.border_color,
             );
             let text_color = if index == selected {
@@ -494,7 +685,10 @@ impl ElementRenderObject for TabViewRenderObject {
         ctx.fill_rect(
             Rect::from_xywh(
                 origin.x,
-                origin.y + self.tab_bar_height - 1.0,
+                match self.tab_bar_position {
+                    TabBarPosition::Top => tab_bar_y + self.tab_bar_height - 1.0,
+                    TabBarPosition::Bottom => tab_bar_y,
+                },
                 self.size.width,
                 1.0,
             ),
@@ -505,7 +699,12 @@ impl ElementRenderObject for TabViewRenderObject {
             ctx.fill_rect(
                 Rect::from_xywh(
                     origin.x + selected_rect.origin.x,
-                    origin.y + self.tab_bar_height - metrics.tab_indicator_height,
+                    match self.tab_bar_position {
+                        TabBarPosition::Top => {
+                            tab_bar_y + self.tab_bar_height - metrics.tab_indicator_height
+                        }
+                        TabBarPosition::Bottom => tab_bar_y,
+                    },
                     selected_rect.size.width,
                     metrics.tab_indicator_height,
                 ),
@@ -531,6 +730,7 @@ impl ElementRenderObject for TabViewRenderObject {
         self.labels = content.tabs.labels();
         self.selected_index = content.tabs.selected_index_state().clone();
         self.tab_bar_height = content.tabs.tab_bar_height;
+        self.tab_bar_placement = content.tabs.tab_bar_placement;
         self.tab_padding = content.tabs.tab_padding;
         self.font_size = content.tabs.font_size;
         self.background_color = content.tabs.background_color;
@@ -665,6 +865,92 @@ mod tests {
     }
 
     #[test]
+    fn automatic_placement_resolves_to_bottom_only_for_touch() {
+        assert_eq!(
+            TabBarPlacement::Automatic.resolve(InteractionMode::Pointer),
+            TabBarPosition::Top
+        );
+        assert_eq!(
+            TabBarPlacement::Automatic.resolve(InteractionMode::Hybrid),
+            TabBarPosition::Top
+        );
+        assert_eq!(
+            TabBarPlacement::Automatic.resolve(InteractionMode::Touch),
+            TabBarPosition::Bottom
+        );
+        assert_eq!(
+            TabBarPlacement::Top.resolve(InteractionMode::Touch),
+            TabBarPosition::Top
+        );
+    }
+
+    #[test]
+    fn legacy_render_constructor_keeps_tabs_at_the_top_in_touch_environment() {
+        let _environment = crate::input_environment::install_test_input_environment(
+            crate::InputEnvironment::new(1, None, None, true, false, false, false),
+        );
+        let selected = State::initial(crate::state::generate_state_id());
+        let mut render_object = TabViewRenderObject::new(
+            vec![String::from("Mixer")],
+            selected,
+            30.0,
+            12.0,
+            13.0,
+            ColorPalette::default().background_secondary(),
+            ColorPalette::default().surface(),
+            ColorPalette::default().menu_hover(),
+            ColorPalette::default().border(),
+            ColorPalette::default().text_secondary(),
+            ColorPalette::default().text(),
+        );
+
+        render_object.layout(LayoutConstraints::tight(300.0, 180.0));
+
+        assert_eq!(render_object.tab_bar_position(), TabBarPosition::Top);
+        assert_eq!(render_object.tab_rect(0).origin.y, 0.0);
+    }
+
+    #[test]
+    fn touch_environment_places_automatic_tabs_at_the_bottom_for_layout_and_hits() {
+        let _environment = crate::input_environment::install_test_input_environment(
+            crate::InputEnvironment::new(1, None, None, true, false, false, false),
+        );
+        let selected = State::initial(crate::state::generate_state_id());
+        let mut render_object = TabViewRenderObject::with_placement(
+            vec![String::from("Mixer"), String::from("Editor")],
+            selected.clone(),
+            30.0,
+            TabBarPlacement::Automatic,
+            12.0,
+            13.0,
+            ColorPalette::default().background_secondary(),
+            ColorPalette::default().surface(),
+            ColorPalette::default().menu_hover(),
+            ColorPalette::default().border(),
+            ColorPalette::default().text_secondary(),
+            ColorPalette::default().text(),
+        );
+        let mut children = vec![Spacer::new().create_element()];
+        render_object.layout_with_children(LayoutConstraints::tight(300.0, 180.0), &mut children);
+
+        assert_eq!(render_object.tab_bar_position(), TabBarPosition::Bottom);
+        assert_eq!(render_object.tab_rect(0).origin.y, 150.0);
+        assert_eq!(children[0].position(), Point::ZERO);
+        assert!(render_object.hit_test(Point::new(80.0, 162.0)));
+        assert!(!render_object.hit_test(Point::new(80.0, 12.0)));
+        assert!(render_object.handle_event(
+            &Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 80,
+                y: 162,
+                click_count: 1,
+            }),
+            Phase::Target,
+        ));
+        assert_eq!(selected.get(), 1);
+    }
+
+    #[test]
     fn pressing_selected_first_tab_sets_pressed_index() {
         let selected = State::initial(crate::state::generate_state_id());
         let mut render_object = TabViewRenderObject::new(
@@ -708,6 +994,47 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_press_clears_tab_feedback_without_selecting() {
+        let selected = State::initial(crate::state::generate_state_id());
+        let mut render_object = TabViewRenderObject::new(
+            vec![String::from("Mixer"), String::from("Editor")],
+            selected.clone(),
+            30.0,
+            12.0,
+            13.0,
+            ColorPalette::default().background_secondary(),
+            ColorPalette::default().surface(),
+            ColorPalette::default().menu_hover(),
+            ColorPalette::default().border(),
+            ColorPalette::default().text_secondary(),
+            ColorPalette::default().text(),
+        );
+        render_object.layout(LayoutConstraints::tight(300.0, 180.0));
+
+        assert!(render_object.handle_event(
+            &Event::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: 80,
+                y: 12,
+                click_count: 1,
+            }),
+            Phase::Target,
+        ));
+        assert_eq!(render_object.pressed_index(), Some(1));
+
+        assert!(render_object.handle_event(
+            &Event::Mouse(MouseEvent::ButtonCancelled {
+                button: MouseButton::Left,
+                x: 80,
+                y: 12,
+            }),
+            Phase::Target,
+        ));
+        assert_eq!(render_object.pressed_index(), None);
+        assert_eq!(selected.get(), 0);
+    }
+
+    #[test]
     fn selected_tab_keeps_a_line_indicator() {
         let selected = State::initial(crate::state::generate_state_id());
         let mut render_object = TabViewRenderObject::new(
@@ -737,6 +1064,38 @@ mod tests {
         assert_eq!(indicator.len(), 4);
         assert_eq!(indicator[0].y, 28.0);
         assert_eq!(indicator[2].y, 30.0);
+    }
+
+    #[test]
+    fn bottom_tabs_paint_the_selected_indicator_on_the_content_edge() {
+        let selected = State::initial(crate::state::generate_state_id());
+        let mut render_object = TabViewRenderObject::with_placement(
+            vec![String::from("Mixer"), String::from("Editor")],
+            selected,
+            30.0,
+            TabBarPlacement::Bottom,
+            12.0,
+            13.0,
+            ColorPalette::default().background_secondary(),
+            ColorPalette::default().surface(),
+            ColorPalette::default().menu_hover(),
+            ColorPalette::default().border(),
+            ColorPalette::default().text_secondary(),
+            ColorPalette::default().text(),
+        );
+        render_object.layout(LayoutConstraints::tight(300.0, 180.0));
+
+        let mut ctx = PaintContext::new();
+        render_object.paint(&mut ctx, Point::ZERO);
+        let primary = ColorPalette::default().primary();
+        let indicator = ctx.commands().iter().find_map(|command| match command {
+            PaintCommand::FillPath { path, color } if *color == primary => Some(path),
+            _ => None,
+        });
+
+        let indicator = indicator.expect("bottom tabs should paint a selected indicator");
+        assert_eq!(indicator[0].y, 150.0);
+        assert_eq!(indicator[2].y, 152.0);
     }
 
     #[test]

@@ -225,7 +225,9 @@ impl WidgetFactory {
         .min_first(72.0)
         .min_second(120.0)
         .divider_thickness(4.0)
-        .frame(320.0, 96.0)
+        .axis_policy(SplitAxisPolicy::AdaptiveStack)
+        .adaptive_stack_narrow_width(420.0)
+        .frame(320.0, 160.0)
     }
 
     fn tab_view(&self) -> impl View + Clone + use<> {
@@ -248,7 +250,8 @@ impl WidgetFactory {
                 .padding(12.0)
             }),
         ])
-        .frame(320.0, 120.0)
+        .tab_bar_placement(TabBarPlacement::Automatic)
+        .frame(320.0, 150.0)
     }
 
     fn overview_page(&self) -> impl View + Clone + use<> {
@@ -355,11 +358,32 @@ fn widget_factory_preview() -> impl View + Clone {
     let display = factory.clone();
 
     scarlet_ui::navigation! {
-        NavigationLink::new("Overview", move || overview.overview_page()),
-        NavigationLink::new("Controls", move || controls.controls_page()),
-        NavigationLink::new("Inputs", move || inputs.inputs_page()),
-        NavigationLink::new("Display", move || display.display_page()),
+        NavigationLink::new("Overview", move || overview.overview_page()).icon(Icon::Home),
+        NavigationLink::new("Controls", move || controls.controls_page()).icon(Icon::Adjustments),
+        NavigationLink::new("Inputs", move || inputs.inputs_page()).icon(Icon::FileText),
+        NavigationLink::new("Display", move || display.display_page()).icon(Icon::Photo),
     }
+    .presentation(NavigationPresentation::Automatic)
+    .shows_icons(true)
+    .sidebar_width(190.0)
+}
+
+#[scarlet_ui::preview(width = 600.0, height = 900.0)]
+fn adaptive_portrait_preview() -> impl View + Clone {
+    let factory = WidgetFactory::default();
+    let overview = factory.clone();
+    let controls = factory.clone();
+    let inputs = factory.clone();
+    let display = factory.clone();
+
+    scarlet_ui::navigation! {
+        NavigationLink::new("Overview", move || overview.overview_page()).icon(Icon::Home),
+        NavigationLink::new("Controls", move || controls.controls_page()).icon(Icon::Adjustments),
+        NavigationLink::new("Inputs", move || inputs.inputs_page()).icon(Icon::FileText),
+        NavigationLink::new("Display", move || display.display_page()).icon(Icon::Photo),
+    }
+    .presentation(NavigationPresentation::Automatic)
+    .shows_icons(true)
     .sidebar_width(190.0)
 }
 

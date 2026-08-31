@@ -16,9 +16,16 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 
+const MENU_EDGE_PADDING: f32 = 2.0;
+const MENU_SEPARATOR_HEIGHT: f32 = 1.0;
+const MENU_TEXT_INSET: f32 = 8.0;
+const MENU_SURFACE_BORDER_WIDTH: f32 = 1.0;
+
 /// Menu item action
 #[derive(Clone, Copy)]
 pub enum MenuAction {
+    /// Regular menu command.
+    Item,
     /// Separator
     Separator,
     /// Submenu
@@ -47,11 +54,19 @@ impl Clone for MenuItemContent {
 }
 
 impl MenuItemContent {
-    /// Create a new menu item
+    /// Create a regular enabled menu command.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Text displayed for the command.
+    ///
+    /// # Returns
+    ///
+    /// A command entry. Use [`MenuItemContent::separator`] for a divider.
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            action: MenuAction::Separator,
+            action: MenuAction::Item,
             enabled: true,
             shortcut: None,
             callback: Some(Arc::new(|| {})),
@@ -103,23 +118,61 @@ impl MenuItemContent {
 #[derive(Clone)]
 pub struct Menu {
     items: Vec<MenuItemContent>,
-    item_height: f32,
+    item_height: Option<f32>,
     width: f32,
 }
 
 impl Menu {
-    /// Create a new Menu with the given items
+    /// Create a new menu whose rows adapt to the current interaction density.
+    ///
+    /// The row height is resolved during layout, so an already-created menu
+    /// grows from the compact pointer target to the touch target when the
+    /// input environment changes.
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - Entries displayed by the menu.
+    ///
+    /// # Returns
+    ///
+    /// A menu with adaptive row heights and the default menu width.
     pub fn new(items: Vec<MenuItemContent>) -> Self {
         Self {
             items,
-            item_height: style::metrics().minimum_control_height,
+            item_height: None,
             width: 200.0, // Default menu width
         }
     }
 
-    /// Set the item height
+    /// Return the current adaptive menu row height.
+    ///
+    /// This is a snapshot of the live input environment. Prefer
+    /// [`Menu::new`] for view-based menus or [`MenuRenderObject::new_adaptive`]
+    /// for direct legacy-popup rendering so the height continues to adapt
+    /// after the environment changes.
+    ///
+    /// # Returns
+    ///
+    /// The compact pointer row height or the touch-sized row height. Touch and
+    /// hybrid environments always return at least 44 logical pixels.
+    pub fn adaptive_item_height() -> f32 {
+        style::metrics().minimum_control_height
+    }
+
+    /// Request a custom item height.
+    ///
+    /// The requested value is still clamped to the live adaptive minimum so
+    /// direct-touch rows remain usable.
+    ///
+    /// # Arguments
+    ///
+    /// * `height` - Preferred logical row height.
+    ///
+    /// # Returns
+    ///
+    /// The menu configured with the requested row height.
     pub fn item_height(mut self, height: f32) -> Self {
-        self.item_height = height;
+        self.item_height = Some(height);
         self
     }
 
@@ -139,7 +192,11 @@ impl View for Menu {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::new(
             self.clone(),
-            MenuRenderObject::new(self.items.clone(), self.item_height, self.width),
+            MenuRenderObject::with_requested_item_height(
+                self.items.clone(),
+                self.item_height,
+                self.width,
+            ),
         ))
     }
 
@@ -155,7 +212,7 @@ impl View for Menu {
 /// Menu RenderObject - handles vertical layout of menu items
 pub struct MenuRenderObject {
     items: Vec<MenuItemContent>,
-    item_height: f32,
+    requested_item_height: Option<f32>,
     width: f32,
     hovered_index: Option<usize>,
     size: Size,
@@ -163,23 +220,67 @@ pub struct MenuRenderObject {
 }
 
 impl MenuRenderObject {
-    /// Create a new MenuRenderObject
+    /// Create a menu render object with a requested row height.
+    ///
+    /// The requested height remains a lower bound: layout applies the current
+    /// adaptive minimum so rows are at least 44 logical pixels in touch and
+    /// hybrid environments.
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - Entries displayed by the menu.
+    /// * `item_height` - Preferred logical row height.
+    /// * `width` - Logical width of the menu surface.
+    ///
+    /// # Returns
+    ///
+    /// A render object that uses the requested height subject to live input
+    /// density constraints.
     pub fn new(items: Vec<MenuItemContent>, item_height: f32, width: f32) -> Self {
+        Self::with_requested_item_height(items, Some(item_height), width)
+    }
+
+    /// Create a menu render object with fully adaptive row heights.
+    ///
+    /// Use this for legacy popup consumers instead of supplying a hard-coded
+    /// desktop height such as `28.0`. The row height is resolved each time the
+    /// menu is laid out from the current input environment.
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - Entries displayed by the menu.
+    /// * `width` - Logical width of the menu surface.
+    ///
+    /// # Returns
+    ///
+    /// A render object with compact pointer rows and touch/hybrid rows of at
+    /// least 44 logical pixels.
+    pub fn new_adaptive(items: Vec<MenuItemContent>, width: f32) -> Self {
+        Self::with_requested_item_height(items, None, width)
+    }
+
+    fn with_requested_item_height(
+        items: Vec<MenuItemContent>,
+        requested_item_height: Option<f32>,
+        width: f32,
+    ) -> Self {
         let height = items
             .iter()
             .map(|item| {
                 if matches!(item.action, MenuAction::Separator) {
-                    1.0 // Separator height
+                    MENU_SEPARATOR_HEIGHT
                 } else {
-                    item_height
+                    requested_item_height
+                        .unwrap_or_else(Menu::adaptive_item_height)
+                        .max(Menu::adaptive_item_height())
                 }
             })
             .sum::<f32>()
-            + 4.0; // Add padding
+            + MENU_EDGE_PADDING * 2.0;
 
         Self {
             items,
-            item_height,
+            requested_item_height,
             width,
             hovered_index: None,
             size: Size { width, height },
@@ -203,13 +304,14 @@ impl MenuRenderObject {
             return None;
         }
 
-        let mut current_y = 2.0; // Top padding
+        let item_height = self.effective_item_height();
+        let mut current_y = MENU_EDGE_PADDING;
 
         for (i, item) in self.items.iter().enumerate() {
             let item_h = if matches!(item.action, MenuAction::Separator) {
-                1.0
+                MENU_SEPARATOR_HEIGHT
             } else {
-                self.item_height
+                item_height
             };
 
             if y >= current_y && y < current_y + item_h {
@@ -235,17 +337,24 @@ impl MenuRenderObject {
 
     /// Calculate total height
     fn calculate_height(&self) -> f32 {
+        let item_height = self.effective_item_height();
         self.items
             .iter()
             .map(|item| {
                 if matches!(item.action, MenuAction::Separator) {
-                    1.0
+                    MENU_SEPARATOR_HEIGHT
                 } else {
-                    self.item_height
+                    item_height
                 }
             })
             .sum::<f32>()
-            + 4.0 // Top and bottom padding
+            + MENU_EDGE_PADDING * 2.0
+    }
+
+    fn effective_item_height(&self) -> f32 {
+        self.requested_item_height
+            .unwrap_or_else(Menu::adaptive_item_height)
+            .max(Menu::adaptive_item_height())
     }
 }
 
@@ -302,43 +411,72 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
         let text_color = palette.text_primary();
         let hover_color = palette.menu_hover();
         let separator_color = palette.divider();
+        let item_height = self.effective_item_height();
 
         if let Some(ref mut buffer) = self.buffer {
             let mut canvas = graphics::Canvas::for_buffer(buffer);
             let width = canvas.width();
             let height = canvas.height();
 
-            // Fill background
-            canvas.fill_rect(0, 0, width, height, bg_color);
-
-            // Draw border
-            canvas.draw_rect(0, 0, width, height, border_color);
+            // The retained path paints a rounded floating surface. Canvas has
+            // no rounded primitive, so rasterize the equivalent geometry here.
+            canvas.fill_rect(0, 0, width, height, crate::color::Color::TRANSPARENT);
+            canvas_fill_rounded_rect(
+                &mut canvas,
+                0,
+                0,
+                width,
+                height,
+                style::surface_radius(style::SurfaceRole::Floating),
+                border_color,
+            );
+            if width > 2 && height > 2 {
+                canvas_fill_rounded_rect(
+                    &mut canvas,
+                    MENU_SURFACE_BORDER_WIDTH as i32,
+                    MENU_SURFACE_BORDER_WIDTH as i32,
+                    width - 2,
+                    height - 2,
+                    (style::surface_radius(style::SurfaceRole::Floating)
+                        - MENU_SURFACE_BORDER_WIDTH)
+                        .max(0.0),
+                    bg_color,
+                );
+            }
 
             // Draw items
-            let mut current_y: f32 = 2.0; // Top padding
+            let mut current_y = MENU_EDGE_PADDING;
             let font_size = 13.0;
 
             for (i, item) in self.items.iter().enumerate() {
                 if matches!(item.action, MenuAction::Separator) {
                     // Draw separator line
                     let sep_y = current_y as i32;
-                    canvas.draw_line(2, sep_y, (width as i32) - 2, sep_y, separator_color);
-                    current_y += 1.0;
+                    canvas.fill_rect(
+                        MENU_EDGE_PADDING as i32,
+                        sep_y,
+                        width.saturating_sub((MENU_EDGE_PADDING * 2.0) as u32),
+                        MENU_SEPARATOR_HEIGHT as u32,
+                        separator_color,
+                    );
+                    current_y += MENU_SEPARATOR_HEIGHT;
                 } else {
                     // Draw hover background
                     if self.hovered_index == Some(i) {
-                        canvas.fill_rect(
-                            2,
+                        canvas_fill_rounded_rect(
+                            &mut canvas,
+                            MENU_EDGE_PADDING as i32,
                             current_y as i32,
-                            width - 4,
-                            self.item_height as u32,
+                            width.saturating_sub((MENU_EDGE_PADDING * 2.0) as u32),
+                            libm::ceilf(item_height) as u32,
+                            style::metrics().item_radius,
                             hover_color,
                         );
                     }
 
                     // Draw text
-                    let text_x = 8;
-                    let text_y = current_y as i32 + ((self.item_height as i32 - 16) / 2).max(0);
+                    let text_x = MENU_TEXT_INSET as i32;
+                    let text_y = current_y as i32 + ((item_height as i32 - 16) / 2).max(0);
 
                     let text_color = if item.enabled {
                         text_color
@@ -351,11 +489,12 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
                     // Draw shortcut if present
                     if let Some(ref shortcut) = item.shortcut {
                         let (shortcut_w, _) = graphics::measure_text_sized(shortcut, font_size);
-                        let shortcut_x = (width as i32) - shortcut_w as i32 - 8;
+                        let shortcut_x =
+                            (width as i32) - shortcut_w as i32 - MENU_TEXT_INSET as i32;
                         canvas.draw_text_sized(shortcut_x, text_y, shortcut, text_color, font_size);
                     }
 
-                    current_y += self.item_height;
+                    current_y += item_height;
                 }
             }
         }
@@ -376,11 +515,12 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
         let text_color = palette.text_primary();
         let hover_color = palette.menu_hover();
         let separator_color = palette.divider();
+        let item_height = self.effective_item_height();
 
         let rect = Rect::new(origin, self.size);
         style::popover_surface(ctx, rect, bg_color, border_color, palette.shadow());
 
-        let mut current_y = 2.0;
+        let mut current_y = MENU_EDGE_PADDING;
         let font_size = 13.0;
         let width = self.size.width.max(0.0);
 
@@ -390,12 +530,12 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
                     Rect::from_xywh(
                         origin.x + 2.0,
                         origin.y + current_y,
-                        (width - 4.0).max(0.0),
-                        1.0,
+                        (width - MENU_EDGE_PADDING * 2.0).max(0.0),
+                        MENU_SEPARATOR_HEIGHT,
                     ),
                     separator_color,
                 );
-                current_y += 1.0;
+                current_y += MENU_SEPARATOR_HEIGHT;
                 continue;
             }
 
@@ -403,10 +543,10 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
                 style::item_highlight(
                     ctx,
                     Rect::from_xywh(
-                        origin.x + 2.0,
+                        origin.x + MENU_EDGE_PADDING,
                         origin.y + current_y,
-                        (width - 4.0).max(0.0),
-                        self.item_height,
+                        (width - MENU_EDGE_PADDING * 2.0).max(0.0),
+                        item_height,
                     ),
                     hover_color,
                 );
@@ -417,9 +557,9 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
             } else {
                 palette.text_tertiary()
             };
-            let text_y = origin.y + current_y + ((self.item_height - 16.0) / 2.0).max(0.0);
+            let text_y = origin.y + current_y + ((item_height - 16.0) / 2.0).max(0.0);
             ctx.draw_text(
-                Point::new(origin.x + 8.0, text_y),
+                Point::new(origin.x + MENU_TEXT_INSET, text_y),
                 item.label.clone(),
                 item_text_color,
                 font_size,
@@ -427,7 +567,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
 
             if let Some(ref shortcut) = item.shortcut {
                 let (shortcut_w, _) = graphics::measure_text_sized(shortcut, font_size);
-                let shortcut_x = origin.x + width - shortcut_w as f32 - 8.0;
+                let shortcut_x = origin.x + width - shortcut_w as f32 - MENU_TEXT_INSET;
                 ctx.draw_text(
                     Point::new(shortcut_x, text_y),
                     shortcut.clone(),
@@ -436,7 +576,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
                 );
             }
 
-            current_y += self.item_height;
+            current_y += item_height;
         }
 
         true
@@ -447,7 +587,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
             return crate::element::UpdateResult::Replaced;
         };
         self.items = menu.items.clone();
-        self.item_height = menu.item_height;
+        self.requested_item_height = menu.item_height;
         self.width = menu.width;
         self.hovered_index = self.hovered_index.filter(|index| *index < self.items.len());
         self.size = Size::new(
@@ -456,18 +596,154 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
                 .iter()
                 .map(|item| {
                     if matches!(item.action, MenuAction::Separator) {
-                        1.0
+                        MENU_SEPARATOR_HEIGHT
                     } else {
-                        self.item_height
+                        self.effective_item_height()
                     }
                 })
                 .sum::<f32>()
-                + 4.0,
+                + MENU_EDGE_PADDING * 2.0,
         );
         crate::element::UpdateResult::Updated
     }
 
     fn update_needs_layout(&self) -> bool {
         true
+    }
+}
+
+fn canvas_fill_rounded_rect(
+    canvas: &mut graphics::Canvas<'_>,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    radius: f32,
+    color: crate::color::Color,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let radius = radius
+        .max(0.0)
+        .min(width as f32 * 0.5)
+        .min(height as f32 * 0.5);
+    for row in 0..height {
+        for column in 0..width {
+            let point_x = column as f32 + 0.5;
+            let point_y = row as f32 + 0.5;
+            let nearest_x = point_x.clamp(radius, width as f32 - radius);
+            let nearest_y = point_y.clamp(radius, height as f32 - radius);
+            let dx = point_x - nearest_x;
+            let dy = point_y - nearest_y;
+            if dx * dx + dy * dy <= radius * radius {
+                canvas.put_pixel(x + column as i32, y + row as i32, color);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color::Color;
+    use crate::element::{ElementRenderObject, LayoutConstraints};
+    use crate::input_environment::{
+        InputEnvironment, install_input_environment, install_test_input_environment,
+    };
+    use crate::renderer::PaintCommand;
+
+    fn pointer_environment() -> InputEnvironment {
+        InputEnvironment::new(1, None, None, false, true, true, false)
+    }
+
+    fn touch_environment() -> InputEnvironment {
+        InputEnvironment::new(2, Some(true), None, true, false, true, false)
+    }
+
+    #[test]
+    fn adaptive_rows_follow_the_live_input_environment() {
+        let _environment = install_test_input_environment(pointer_environment());
+        let mut menu = MenuRenderObject::new_adaptive(
+            alloc::vec![MenuItemContent::new("Open"), MenuItemContent::new("Close")],
+            120.0,
+        );
+
+        assert_eq!(menu.layout(LayoutConstraints::unconstrained()).height, 52.0);
+        assert_eq!(menu.hit_test(8.0, 25.0), Some(0));
+        assert_eq!(menu.hit_test(8.0, 26.0), Some(1));
+
+        install_input_environment(touch_environment());
+        assert_eq!(menu.layout(LayoutConstraints::unconstrained()).height, 92.0);
+        assert_eq!(menu.hit_test(8.0, 45.0), Some(0));
+        assert_eq!(menu.hit_test(8.0, 46.0), Some(1));
+    }
+
+    #[test]
+    fn custom_rows_keep_the_touch_minimum() {
+        let _environment = install_test_input_environment(touch_environment());
+        let mut menu =
+            MenuRenderObject::new(alloc::vec![MenuItemContent::new("Open")], 28.0, 120.0);
+
+        assert_eq!(menu.layout(LayoutConstraints::unconstrained()).height, 48.0);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn legacy_buffer_matches_retained_menu_semantics() {
+        let _environment = install_test_input_environment(pointer_environment());
+        let palette = ColorPalette::default();
+        let mut menu = MenuRenderObject::new_adaptive(
+            alloc::vec![
+                MenuItemContent::new("Open").shortcut("Ctrl+O"),
+                MenuItemContent::separator(),
+                MenuItemContent::new("Unavailable").enabled(false),
+            ],
+            120.0,
+        );
+        menu.set_hovered(Some(0));
+        menu.layout(LayoutConstraints::unconstrained());
+        menu.render();
+
+        let buffer = menu
+            .get_buffer()
+            .expect("layout creates a legacy popup buffer");
+        assert_eq!(buffer.get_pixel(0, 0), Some(Color::TRANSPARENT.to_bgra()));
+        assert_eq!(buffer.get_pixel(60, 0), Some(palette.border().to_bgra()));
+        assert_eq!(
+            buffer.get_pixel(50, 10),
+            Some(palette.menu_hover().to_bgra())
+        );
+        assert_eq!(buffer.get_pixel(10, 26), Some(palette.divider().to_bgra()));
+
+        let mut paint = PaintContext::new();
+        assert!(menu.paint(&mut paint, Point::ZERO));
+        assert!(paint.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillRoundedRect { corner_radius, color, .. }
+                if *corner_radius == style::surface_radius(style::SurfaceRole::Floating)
+                    && *color == style::surface_color(&palette, style::SurfaceRole::Floating)
+        )));
+        assert!(paint.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::StrokeRoundedRect { corner_radius, color, .. }
+                if *corner_radius == style::surface_radius(style::SurfaceRole::Floating)
+                    && *color == palette.border()
+        )));
+        assert!(paint.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillRoundedRect { corner_radius, color, .. }
+                if *corner_radius == style::metrics().item_radius && *color == palette.menu_hover()
+        )));
+        assert!(paint.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillPath { color, .. } if *color == palette.divider()
+        )));
+        assert!(paint.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::DrawText { text, color, .. }
+                if text == "Unavailable" && *color == palette.text_tertiary()
+        )));
     }
 }

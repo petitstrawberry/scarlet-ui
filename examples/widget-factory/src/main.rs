@@ -196,7 +196,9 @@ impl WidgetFactory {
         .fraction(0.34)
         .min_first(72.0)
         .min_second(120.0)
-        .frame(320.0, 96.0)
+        .axis_policy(SplitAxisPolicy::AdaptiveStack)
+        .adaptive_stack_narrow_width(420.0)
+        .frame(320.0, 160.0)
     }
 
     fn tab_view(&self) -> impl View + Clone + use<> {
@@ -219,7 +221,8 @@ impl WidgetFactory {
                 .padding(12.0)
             }),
         ])
-        .frame(320.0, 120.0)
+        .tab_bar_placement(TabBarPlacement::Automatic)
+        .frame(320.0, 150.0)
     }
 
     fn overview_page(&self) -> impl View + Clone + use<> {
@@ -354,12 +357,19 @@ impl Application for WidgetFactory {
             Window::new(
                 "Widget Factory",
                 scarlet_ui::navigation! {
-                    NavigationLink::new("Overview", move || overview.overview_page()),
-                    NavigationLink::new("Controls", move || controls.controls_page()),
-                    NavigationLink::new("Inputs", move || inputs.inputs_page()),
-                    NavigationLink::new("Display", move || display.display_page()),
-                    NavigationLink::new("SGFX", move || sgfx.sgfx_page()),
+                    NavigationLink::new("Overview", move || overview.overview_page())
+                        .icon(Icon::Home),
+                    NavigationLink::new("Controls", move || controls.controls_page())
+                        .icon(Icon::Adjustments),
+                    NavigationLink::new("Inputs", move || inputs.inputs_page())
+                        .icon(Icon::FileText),
+                    NavigationLink::new("Display", move || display.display_page())
+                        .icon(Icon::Photo),
+                    NavigationLink::new("SGFX", move || sgfx.sgfx_page())
+                        .icon(Icon::Package),
                 }
+                .presentation(NavigationPresentation::Automatic)
+                .shows_icons(true)
                 .sidebar_width(190.0),
             )
             .size(Size::new(860.0, 560.0)),

@@ -126,6 +126,15 @@ Pointer hover and button capture are separate runtime concepts:
 - Button-like controls clear their armed/pressed state on `Exited`. A release
   invokes the click action only while that state is still armed, so pressing
   inside and releasing outside cancels the click.
+- `MouseEvent::ButtonCancelled` is a terminal, non-activating event. It clears
+  capture and pressed or dragging state but must never invoke a click,
+  selection, or release action. Platform adapters use it for interrupted touch
+  contacts and equivalent native cancellation paths.
+
+Compatibility note: `ButtonCancelled` extends the public `MouseEvent` enum.
+Downstream exhaustive matches must add a cancellation arm; treating it like a
+normal `ButtonReleased` is incorrect because release handlers can commit an
+action.
 
 The platform adapter must make surface crossings observable to each pipeline.
 It may deliver an explicit leave event or a final out-of-bounds pointer motion

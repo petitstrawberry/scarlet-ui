@@ -642,12 +642,20 @@ pub(crate) fn handle_text_field_mouse(
             render_object.dragging = false;
             true
         }
+        MouseEvent::ButtonCancelled {
+            button: MouseButton::Left,
+            ..
+        } => {
+            render_object.dragging = false;
+            true
+        }
         MouseEvent::Entered { .. }
         | MouseEvent::Exited { .. }
         | MouseEvent::RelativeMotion { .. }
         | MouseEvent::Wheel { .. }
         | MouseEvent::ButtonPressed { .. }
-        | MouseEvent::ButtonReleased { .. } => false,
+        | MouseEvent::ButtonReleased { .. }
+        | MouseEvent::ButtonCancelled { .. } => false,
     }
 }
 

@@ -1,7 +1,7 @@
-//! NavigationView - SwiftUI-style sidebar navigation with dynamic content switching
+//! NavigationView - adaptive navigation with dynamic content switching
 //!
-//! NavigationView provides a sidebar navigation interface where users can select
-//! different items to display different content views.
+//! NavigationView provides sidebar and bottom-bar presentations where users can
+//! select different items to display different content views.
 
 use crate::os::Mutex;
 use alloc::boxed::Box;
@@ -10,6 +10,7 @@ use alloc::rc::Rc;
 
 use crate::color::Color;
 use crate::icon::{IconFill, IconStyle, IconWeight};
+use crate::input_environment::InteractionMode;
 use crate::state::State;
 use crate::view::View;
 use crate::views::navigation::tuple::NavigationLinkTuple;
@@ -28,10 +29,64 @@ fn navigation_selected_state(key: usize) -> State<usize> {
     state
 }
 
-/// NavigationView - Sidebar navigation with dynamic content switching
+const MINIMUM_AUTOMATIC_CONTENT_WIDTH: f32 = 320.0;
+
+/// Policy controlling how a navigation view presents its destinations.
+///
+/// Automatic presentation responds to both the live interaction mode and the
+/// available width. Direct-touch environments use a bottom bar. Pointer and
+/// hybrid environments retain a sidebar while at least 320 logical pixels
+/// remain for content, then fall back to a bottom bar at narrower widths.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NavigationPresentation {
+    /// Select a sidebar or bottom bar from the interaction mode and width.
+    #[default]
+    Automatic,
+    /// Always place navigation destinations in a leading sidebar.
+    Sidebar,
+    /// Always place navigation destinations in a bottom bar.
+    BottomBar,
+}
+
+impl NavigationPresentation {
+    /// Resolve this policy to a concrete presentation.
+    ///
+    /// # Arguments
+    ///
+    /// * `interaction_mode` - Current pointer, touch, or hybrid input mode.
+    /// * `available_width` - Total width available to the navigation view.
+    /// * `sidebar_width` - Width reserved by the sidebar presentation.
+    ///
+    /// # Returns
+    ///
+    /// [`Self::Sidebar`] or [`Self::BottomBar`]. Forced policies are returned
+    /// unchanged; automatic presentation uses the input mode and a stable,
+    /// content-first width threshold.
+    pub fn resolve(
+        self,
+        interaction_mode: InteractionMode,
+        available_width: f32,
+        sidebar_width: f32,
+    ) -> Self {
+        match self {
+            Self::Sidebar | Self::BottomBar => self,
+            Self::Automatic => {
+                let has_usable_content =
+                    available_width >= sidebar_width.max(0.0) + MINIMUM_AUTOMATIC_CONTENT_WIDTH;
+                if interaction_mode == InteractionMode::Touch || !has_usable_content {
+                    Self::BottomBar
+                } else {
+                    Self::Sidebar
+                }
+            }
+        }
+    }
+}
+
+/// NavigationView - Adaptive navigation with dynamic content switching
 ///
 /// NavigationView provides a SwiftUI-style navigation interface with:
-/// - A fixed-width sidebar containing navigation items
+/// - An adaptive sidebar or bottom bar containing navigation items
 /// - A content area that displays the selected item's view
 /// - Visual feedback for selection and hover states
 ///
@@ -44,7 +99,7 @@ fn navigation_selected_state(key: usize) -> State<usize> {
 /// - NavigationView does NOT implement Clone (closures don't support Clone)
 /// - When selected_index changes, the entire view tree is rebuilt
 /// - The `navigation!` macro preserves selected item state across rebuilds
-/// - For page state preservation, use State<T> passed to link closures
+/// - For page state preservation, use `State<T>` passed to link closures
 ///
 /// # Examples
 ///
@@ -76,8 +131,10 @@ where
     links: T,
     /// Currently selected link index (tracked via State for reactivity)
     selected_index: State<usize>,
-    /// Width of the sidebar (fixed)
+    /// Width reserved when using sidebar presentation.
     sidebar_width: f32,
+    /// Requested adaptive presentation policy.
+    presentation: NavigationPresentation,
     /// Whether icons are rendered next to sidebar labels.
     shows_icons: bool,
     /// Shared rendering style for sidebar icons.
@@ -115,6 +172,7 @@ where
             links,
             selected_index: State::new(state_id, 0),
             sidebar_width: 200.0,
+            presentation: NavigationPresentation::Automatic,
             shows_icons: false,
             icon_style: IconStyle::default(),
             icon_color: None,
@@ -142,6 +200,7 @@ where
             links,
             selected_index: navigation_selected_state(state_key),
             sidebar_width: 200.0,
+            presentation: NavigationPresentation::Automatic,
             shows_icons: false,
             icon_style: IconStyle::default(),
             icon_color: None,
@@ -150,13 +209,31 @@ where
         }
     }
 
-    /// Set the sidebar width
+    /// Set the width reserved by sidebar presentation.
     ///
     /// # Parameters
     ///
     /// * `width` - Width of the sidebar in points
     pub fn sidebar_width(mut self, width: f32) -> Self {
         self.sidebar_width = width;
+        self
+    }
+
+    /// Set the navigation presentation policy.
+    ///
+    /// The default is [`NavigationPresentation::Automatic`], which responds to
+    /// the live input environment and available width. Explicit sidebar and
+    /// bottom-bar policies disable automatic selection.
+    ///
+    /// # Arguments
+    ///
+    /// * `presentation` - Adaptive or forced presentation policy.
+    ///
+    /// # Returns
+    ///
+    /// Navigation view with the requested presentation policy.
+    pub fn presentation(mut self, presentation: NavigationPresentation) -> Self {
+        self.presentation = presentation;
         self
     }
 
@@ -303,6 +380,15 @@ where
         self.sidebar_width
     }
 
+    /// Return the configured navigation presentation policy.
+    ///
+    /// # Returns
+    ///
+    /// The adaptive or forced presentation selected for this navigation view.
+    pub fn get_presentation(&self) -> NavigationPresentation {
+        self.presentation
+    }
+
     /// Return whether sidebar link icons are shown.
     ///
     /// # Returns
@@ -377,6 +463,7 @@ where
             links: self.links.clone(),
             selected_index: self.selected_index.clone(),
             sidebar_width: self.sidebar_width,
+            presentation: self.presentation,
             shows_icons: self.shows_icons,
             icon_style: self.icon_style,
             icon_color: self.icon_color,
@@ -390,9 +477,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::NavigationView;
-    use crate::Icon;
+    use super::{NavigationPresentation, NavigationView};
     use crate::views::{NavigationLink, Text};
+    use crate::{Icon, InteractionMode};
 
     #[test]
     fn sidebar_icons_are_hidden_by_default_and_can_be_enabled() {
@@ -403,5 +490,33 @@ mod tests {
 
         assert!(!navigation.get_shows_icons());
         assert!(navigation.shows_icons(true).get_shows_icons());
+    }
+
+    #[test]
+    fn automatic_presentation_uses_input_mode_and_usable_content_width() {
+        assert_eq!(
+            NavigationPresentation::Automatic.resolve(InteractionMode::Touch, 1200.0, 200.0),
+            NavigationPresentation::BottomBar
+        );
+        assert_eq!(
+            NavigationPresentation::Automatic.resolve(InteractionMode::Pointer, 520.0, 200.0),
+            NavigationPresentation::Sidebar
+        );
+        assert_eq!(
+            NavigationPresentation::Automatic.resolve(InteractionMode::Hybrid, 519.0, 200.0),
+            NavigationPresentation::BottomBar
+        );
+    }
+
+    #[test]
+    fn explicit_presentation_is_not_changed_by_environment_or_width() {
+        assert_eq!(
+            NavigationPresentation::Sidebar.resolve(InteractionMode::Touch, 100.0, 200.0),
+            NavigationPresentation::Sidebar
+        );
+        assert_eq!(
+            NavigationPresentation::BottomBar.resolve(InteractionMode::Pointer, 1200.0, 200.0),
+            NavigationPresentation::BottomBar
+        );
     }
 }

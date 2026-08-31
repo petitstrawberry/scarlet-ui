@@ -90,7 +90,13 @@ pub enum Event {
     TextInputDone { context_id: u32, serial: u32 },
 }
 
-/// Mouse events
+/// Mouse events.
+///
+/// Platform adapters that map a direct-touch contact into this compatibility
+/// stream must end the contact with `ButtonReleased` or `ButtonCancelled`,
+/// followed immediately by `Exited` at the terminal location. This guarantees
+/// that the dispatcher clears hover after both activated and cancelled touch
+/// contacts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MouseEvent {
     /// Mouse moved
@@ -118,6 +124,12 @@ pub enum MouseEvent {
         y: i32,
         click_count: u8,
     },
+
+    /// Mouse button interaction cancelled by the platform without activation.
+    ///
+    /// Direct-touch adapters emit this before the terminal [`Self::Exited`]
+    /// event, so controls clear pressed state without committing an action.
+    ButtonCancelled { button: MouseButton, x: i32, y: i32 },
 
     /// Mouse wheel scrolled.
     ///

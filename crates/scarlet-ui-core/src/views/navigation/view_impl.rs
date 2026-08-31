@@ -64,6 +64,7 @@ where
     render_object.update_configuration(
         content.nav.get_sidebar_width(),
         content.nav.get_header_height(),
+        content.nav.get_presentation(),
     );
     crate::element::UpdateResult::Updated
 }
@@ -72,9 +73,10 @@ fn navigation_render_object<T>(content: &NavigationContent<T>) -> NavigationView
 where
     T: NavigationLinkTuple + Clone + 'static,
 {
-    NavigationViewRenderObject::new(
+    NavigationViewRenderObject::new_with_presentation(
         content.nav.get_sidebar_width(),
         content.nav.get_header_height(),
+        content.nav.get_presentation(),
     )
 }
 
@@ -99,6 +101,7 @@ where
         content.nav.get_shows_icons(),
         content.nav.get_icon_style(),
         content.nav.get_icon_color(),
+        content.nav.get_presentation(),
     )
 }
 

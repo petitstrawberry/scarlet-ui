@@ -148,17 +148,18 @@ pub use views::modifiers::{
 pub use views::{
     BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, IconView, Image,
     ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView, ScrollWheelDirection,
-    ScrollbarVisibility, Select, Slider, TabItem, TabView, Toggle, VectorImageData, VectorTriangle,
+    ScrollbarVisibility, Select, Slider, TabBarPlacement, TabBarPosition, TabItem, TabView, Toggle,
+    VectorImageData, VectorTriangle,
 };
 pub use views::{
-    Button, ElevationRole, HStack, LazyVStack, Rectangle, Spacer, SplitAxis, SplitView, Surface,
-    SurfaceRole, Text, TextField, VStack, Window, WindowContentLayout, ZStack,
+    Button, ElevationRole, HStack, LazyVStack, Rectangle, Spacer, SplitAxis, SplitAxisPolicy,
+    SplitView, Surface, SurfaceRole, Text, TextField, VStack, Window, WindowContentLayout, ZStack,
 };
 pub use views::{
     EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView, TextViewRenderObject,
     TextViewScroll, WrapMode,
 };
-pub use views::{NavigationLink, NavigationView};
+pub use views::{NavigationLink, NavigationPresentation, NavigationView};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
 
 pub use scarlet_ui_macros::preview;
@@ -204,13 +205,13 @@ pub mod prelude {
     pub use crate::views::{
         BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, IconView, Image,
         ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView,
-        ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabItem, TabView, Toggle,
-        VectorImageData, VectorTriangle,
+        ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabBarPlacement, TabBarPosition,
+        TabItem, TabView, Toggle, VectorImageData, VectorTriangle,
     };
     pub use crate::views::{
         Button, Either, Either3, Either4, Either5, Either6, ElevationRole, HStack, LazyVStack,
-        Rectangle, Spacer, SplitAxis, SplitView, Surface, SurfaceRole, Text, TextField, VStack,
-        Window, WindowContentLayout, ZStack,
+        NavigationPresentation, Rectangle, Spacer, SplitAxis, SplitAxisPolicy, SplitView, Surface,
+        SurfaceRole, Text, TextField, VStack, Window, WindowContentLayout, ZStack,
     };
     pub use crate::views::{
         EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView,

@@ -1252,6 +1252,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
+                    MouseEvent::ButtonCancelled {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        render_object.set_pressed(false);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
                     MouseEvent::ButtonReleased {
                         button: MouseButton::Left,
                         ..
@@ -1292,6 +1300,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         ..
                     } => {
                         render_object.set_pressed(true);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
+                    MouseEvent::ButtonCancelled {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        render_object.set_pressed(false);
                         crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
@@ -1376,6 +1392,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         ..
                     } => {
                         render_object.set_pressed(true);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
+                    MouseEvent::ButtonCancelled {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        render_object.set_pressed(false);
                         crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
@@ -1535,6 +1559,19 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                                 *x,
                                 true,
                             );
+                            return true;
+                        }
+                    }
+                    MouseEvent::ButtonCancelled {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        if render_object.is_dragging() {
+                            render_object.set_dragging(false);
+                            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                            if dragging_state.get() {
+                                dragging_state.set(false);
+                            }
                             return true;
                         }
                     }

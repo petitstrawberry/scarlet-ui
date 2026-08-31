@@ -28,10 +28,19 @@ pub struct Button {
     icon_color: Option<Color>,
     on_click: Option<Arc<dyn Fn() + 'static>>,
     background_color: Color,
+    hover_background_color: Option<Color>,
+    pressed_background_color: Option<Color>,
     border_color: Color,
     text_color: Color,
     font_size: f32,
     padding: f32,
+    appearance: ButtonAppearance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ButtonAppearance {
+    Raised,
+    Header,
 }
 
 impl Button {
@@ -46,10 +55,13 @@ impl Button {
             icon_color: None,
             on_click: None,
             background_color: palette.button_background(),
+            hover_background_color: None,
+            pressed_background_color: None,
             border_color: Color::CLEAR,
             text_color: palette.text_primary(),
             font_size: 15.0,
             padding: 4.0,
+            appearance: ButtonAppearance::Raised,
         }
     }
 
@@ -71,10 +83,13 @@ impl Button {
             icon_color: None,
             on_click: None,
             background_color: palette.button_background(),
+            hover_background_color: None,
+            pressed_background_color: None,
             border_color: Color::CLEAR,
             text_color: palette.text_primary(),
             font_size: 15.0,
             padding: 7.0,
+            appearance: ButtonAppearance::Raised,
         }
     }
 
@@ -175,13 +190,17 @@ impl Button {
     ///
     /// # Returns
     ///
-    /// The updated button with transparent surface chrome and compact padding.
+    /// The updated button with transparent rest-state chrome, semantic rounded
+    /// hover and pressed fills, and compact padding.
     pub fn header_style(mut self) -> Self {
         let palette = ColorPalette::default();
         self.background_color = Color::CLEAR;
+        self.hover_background_color = Some(palette.header_button_hover());
+        self.pressed_background_color = Some(palette.header_button_pressed());
         self.border_color = Color::CLEAR;
         self.text_color = palette.text();
         self.padding = 6.0;
+        self.appearance = ButtonAppearance::Header;
         self
     }
 
@@ -257,24 +276,29 @@ impl Button {
             callback();
         }
     }
+
+    fn build_render_object(&self) -> ButtonRenderObject {
+        let mut render_object = ButtonRenderObject::new(
+            self.label.clone(),
+            self.icon,
+            self.icon_style,
+            self.icon_color,
+            self.background_color,
+            self.border_color,
+            self.text_color,
+            self.font_size,
+            self.padding,
+        );
+        render_object.hover_background_color = self.hover_background_color;
+        render_object.pressed_background_color = self.pressed_background_color;
+        render_object.appearance = self.appearance;
+        render_object
+    }
 }
 
 impl View for Button {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
-            self.clone(),
-            ButtonRenderObject::new(
-                self.label.clone(),
-                self.icon,
-                self.icon_style,
-                self.icon_color,
-                self.background_color,
-                self.border_color,
-                self.text_color,
-                self.font_size,
-                self.padding,
-            ),
-        ))
+        Box::new(RenderElement::new(self.clone(), self.build_render_object()))
     }
 
     fn listenables(&self) -> alloc::vec::Vec<&dyn crate::state::Listenable> {
@@ -293,10 +317,13 @@ pub struct ButtonRenderObject {
     icon_style: IconStyle,
     icon_color: Option<Color>,
     background_color: Color,
+    hover_background_color: Option<Color>,
+    pressed_background_color: Option<Color>,
     border_color: Color,
     text_color: Color,
     font_size: f32,
     padding: f32,
+    appearance: ButtonAppearance,
     hovered: bool,
     pressed: bool,
     size: Size,
@@ -338,10 +365,13 @@ impl ButtonRenderObject {
             icon_style,
             icon_color,
             background_color,
+            hover_background_color: None,
+            pressed_background_color: None,
             border_color,
             text_color,
             font_size,
             padding,
+            appearance: ButtonAppearance::Raised,
             hovered: false,
             pressed: false,
             size: Size::ZERO,
@@ -393,9 +423,11 @@ impl ButtonRenderObject {
 
     fn current_background(&self) -> Color {
         if self.pressed {
-            Self::shade_color(self.background_color, 0.92)
+            self.pressed_background_color
+                .unwrap_or_else(|| Self::shade_color(self.background_color, 0.92))
         } else if self.hovered {
-            Self::shade_color(self.background_color, 0.97)
+            self.hover_background_color
+                .unwrap_or_else(|| Self::shade_color(self.background_color, 0.97))
         } else {
             self.background_color
         }
@@ -496,11 +528,28 @@ impl ElementRenderObject for ButtonRenderObject {
             let width = canvas.width();
             let height = canvas.height();
 
-            // Fill background
-            canvas.fill_rect(0, 0, width, height, background);
+            match self.appearance {
+                ButtonAppearance::Raised => {
+                    // Fill background
+                    canvas.fill_rect(0, 0, width, height, background);
 
-            // Border
-            canvas.draw_rect(0, 0, width, height, border);
+                    // Border
+                    canvas.draw_rect(0, 0, width, height, border);
+                }
+                ButtonAppearance::Header => {
+                    canvas.fill_rect(0, 0, width, height, Color::CLEAR);
+                    canvas_fill_rounded_rect(
+                        &mut canvas,
+                        width,
+                        height,
+                        style::radius_for(
+                            Rect::from_xywh(0.0, 0.0, width as f32, height as f32),
+                            style::metrics().control_radius,
+                        ),
+                        background,
+                    );
+                }
+            }
 
             // Draw text centered
             let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
@@ -530,7 +579,12 @@ impl ElementRenderObject for ButtonRenderObject {
         let background = self.current_background();
         let border = self.current_border();
 
-        style::raised_control_surface(ctx, rect, background, border, self.pressed);
+        match self.appearance {
+            ButtonAppearance::Raised => {
+                style::raised_control_surface(ctx, rect, background, border, self.pressed);
+            }
+            ButtonAppearance::Header => style::fill_control(ctx, rect, background),
+        }
 
         if let Some(icon) = self.icon {
             let icon_size = if self.label.is_empty() {
@@ -587,14 +641,172 @@ impl ElementRenderObject for ButtonRenderObject {
         self.icon_style = button.icon_style;
         self.icon_color = button.icon_color;
         self.background_color = button.background_color;
+        self.hover_background_color = button.hover_background_color;
+        self.pressed_background_color = button.pressed_background_color;
         self.border_color = button.border_color;
         self.text_color = button.text_color;
         self.font_size = button.font_size;
         self.padding = button.padding;
+        self.appearance = button.appearance;
         crate::element::UpdateResult::Updated
     }
 
     fn update_needs_layout(&self) -> bool {
         true
+    }
+}
+
+fn canvas_fill_rounded_rect(
+    canvas: &mut graphics::Canvas<'_>,
+    width: u32,
+    height: u32,
+    radius: f32,
+    color: Color,
+) {
+    if width == 0 || height == 0 || color.a <= 0.0 {
+        return;
+    }
+
+    let radius = radius
+        .max(0.0)
+        .min(width as f32 * 0.5)
+        .min(height as f32 * 0.5);
+    for row in 0..height {
+        for column in 0..width {
+            let point_x = column as f32 + 0.5;
+            let point_y = row as f32 + 0.5;
+            let nearest_x = point_x.clamp(radius, width as f32 - radius);
+            let nearest_y = point_y.clamp(radius, height as f32 - radius);
+            let dx = point_x - nearest_x;
+            let dy = point_y - nearest_y;
+            if dx * dx + dy * dy <= radius * radius {
+                canvas.put_pixel(column as i32, row as i32, color);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(deprecated)]
+mod tests {
+    use super::*;
+    use crate::element::{ElementRenderObject, LayoutConstraints, UpdateResult};
+    use crate::renderer::PaintCommand;
+
+    fn laid_out(button: Button) -> ButtonRenderObject {
+        let mut render_object = button.build_render_object();
+        render_object.layout(LayoutConstraints::unconstrained());
+        render_object
+    }
+
+    fn center_pixel(render_object: &ButtonRenderObject) -> u32 {
+        let buffer = render_object
+            .get_buffer()
+            .expect("button buffer should exist");
+        let x = buffer.width() / 2;
+        let y = buffer.height() / 2;
+        buffer.as_slice()[(y * buffer.width() + x) as usize]
+    }
+
+    #[test]
+    fn header_style_uses_transparent_rest_and_distinct_semantic_state_fills() {
+        let mut render_object = laid_out(Button::new("").header_style());
+        let palette = ColorPalette::default();
+
+        assert_eq!(render_object.current_background(), Color::CLEAR);
+        render_object.render();
+        assert_eq!(center_pixel(&render_object), Color::CLEAR.to_bgra());
+
+        render_object.set_hovered(true);
+        assert_eq!(
+            render_object.current_background(),
+            palette.header_button_hover()
+        );
+        assert!(render_object.current_background().a > 0.0);
+        render_object.render();
+        assert_eq!(
+            center_pixel(&render_object),
+            palette.header_button_hover().to_bgra()
+        );
+
+        render_object.set_pressed(true);
+        assert_eq!(
+            render_object.current_background(),
+            palette.header_button_pressed()
+        );
+        assert_ne!(
+            palette.header_button_hover(),
+            palette.header_button_pressed()
+        );
+        assert!(palette.header_button_pressed().a > palette.header_button_hover().a);
+        render_object.render();
+        assert_eq!(
+            center_pixel(&render_object),
+            palette.header_button_pressed().to_bgra()
+        );
+    }
+
+    #[test]
+    fn raised_button_keeps_its_legacy_shaded_interaction_colors() {
+        let mut render_object = laid_out(Button::new(""));
+        let base = ColorPalette::default().button_background();
+
+        assert_eq!(render_object.current_background(), base);
+        render_object.set_hovered(true);
+        assert_eq!(
+            render_object.current_background(),
+            ButtonRenderObject::shade_color(base, 0.97)
+        );
+        render_object.set_pressed(true);
+        assert_eq!(
+            render_object.current_background(),
+            ButtonRenderObject::shade_color(base, 0.92)
+        );
+    }
+
+    #[test]
+    fn header_buffer_and_retained_paint_share_the_current_background() {
+        let mut render_object = laid_out(Button::new("").header_style());
+        render_object.set_hovered(true);
+        let expected = render_object.current_background();
+        render_object.render();
+
+        assert_eq!(center_pixel(&render_object), expected.to_bgra());
+
+        let mut context = PaintContext::new();
+        assert!(render_object.paint(&mut context, Point::new(0.0, 0.0)));
+        let Some(PaintCommand::FillRoundedRect {
+            color,
+            corner_radius,
+            ..
+        }) = context.commands().first()
+        else {
+            panic!("header button should paint a rounded background");
+        };
+        assert_eq!(*color, expected);
+        assert!(*corner_radius > 0.0);
+    }
+
+    #[test]
+    fn update_preserves_header_appearance_and_semantic_state_colors() {
+        let mut render_object = laid_out(Button::new(""));
+        let replacement = Button::new("").header_style();
+
+        assert!(matches!(
+            render_object.update(&replacement),
+            UpdateResult::Updated
+        ));
+        assert_eq!(render_object.appearance, ButtonAppearance::Header);
+        assert_eq!(render_object.current_background(), Color::CLEAR);
+        render_object.set_hovered(true);
+        assert_eq!(
+            render_object.current_background(),
+            ColorPalette::default().header_button_hover()
+        );
+        render_object.set_pressed(true);
+        assert_eq!(
+            render_object.current_background(),
+            ColorPalette::default().header_button_pressed()
+        );
     }
 }

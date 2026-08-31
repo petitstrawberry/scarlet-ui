@@ -133,6 +133,10 @@ impl GestureRecognizer for TapGestureRecognizer {
                 }
                 None
             }
+            MouseEvent::ButtonCancelled { .. } => {
+                self.reset();
+                None
+            }
             MouseEvent::Moved { .. }
             | MouseEvent::Entered { .. }
             | MouseEvent::Exited { .. }
@@ -245,7 +249,7 @@ impl GestureRecognizer for DragGestureRecognizer {
             MouseEvent::Entered { .. }
             | MouseEvent::Exited { .. }
             | MouseEvent::RelativeMotion { .. } => None,
-            MouseEvent::ButtonReleased { .. } => {
+            MouseEvent::ButtonReleased { .. } | MouseEvent::ButtonCancelled { .. } => {
                 self.reset();
                 None
             }
@@ -354,7 +358,7 @@ impl GestureRecognizer for LongPressGestureRecognizer {
             MouseEvent::Entered { .. }
             | MouseEvent::Exited { .. }
             | MouseEvent::RelativeMotion { .. } => None,
-            MouseEvent::ButtonReleased { .. } => {
+            MouseEvent::ButtonReleased { .. } | MouseEvent::ButtonCancelled { .. } => {
                 self.reset();
                 None
             }

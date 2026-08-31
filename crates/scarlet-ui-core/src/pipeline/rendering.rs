@@ -2620,7 +2620,7 @@ mod tests {
     use crate::view::{View, ViewExt};
     use crate::views::{
         Button, Either, GridView, LazyVStack, MenuItem, NavigationLink, NavigationView, Rectangle,
-        ScrollView, ScrollbarVisibility, Text, TextField, Toggle, Window,
+        ScrollView, ScrollbarVisibility, Select, Text, TextField, Toggle, Window,
     };
     use core::cell::Cell;
     use std::rc::Rc;
@@ -2982,6 +2982,128 @@ mod tests {
         );
 
         assert!(!clicked.get());
+    }
+
+    #[test]
+    fn touch_terminal_events_clear_hover_and_only_release_activates() {
+        let click_count = Rc::new(Cell::new(0));
+        let click_count_for_button = click_count.clone();
+        let hover_enter_count = Rc::new(Cell::new(0));
+        let hover_enter_for_button = hover_enter_count.clone();
+        let hover_exit_count = Rc::new(Cell::new(0));
+        let hover_exit_for_button = hover_exit_count.clone();
+        let button = Button::new("Task")
+            .on_click(move || click_count_for_button.set(click_count_for_button.get() + 1))
+            .on_hover(move || hover_enter_for_button.set(hover_enter_for_button.get() + 1))
+            .on_exit(move || hover_exit_for_button.set(hover_exit_for_button.get() + 1));
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(button.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 10, y: 10 }));
+        assert_eq!(hover_enter_count.get(), 1);
+        pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonPressed {
+            button: MouseButton::Left,
+            x: 10,
+            y: 10,
+            click_count: 1,
+        }));
+        pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonCancelled {
+            button: MouseButton::Left,
+            x: 10,
+            y: 10,
+        }));
+        assert_eq!(click_count.get(), 0);
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Exited { x: 10, y: 10 }));
+        assert_eq!(hover_exit_count.get(), 1);
+
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 10, y: 10 }));
+        assert_eq!(hover_enter_count.get(), 2);
+        pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonPressed {
+            button: MouseButton::Left,
+            x: 10,
+            y: 10,
+            click_count: 1,
+        }));
+        pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+            button: MouseButton::Left,
+            x: 10,
+            y: 10,
+            click_count: 1,
+        }));
+        assert_eq!(click_count.get(), 1);
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Exited { x: 10, y: 10 }));
+        assert_eq!(hover_exit_count.get(), 2);
+    }
+
+    #[test]
+    fn cancelled_pointer_does_not_select_navigation_or_call_its_callback() {
+        let callback_count = Rc::new(Cell::new(0));
+        let callback_count_for_link = callback_count.clone();
+        let navigation = NavigationView::new((
+            NavigationLink::new("First", || Text::new("first page")),
+            NavigationLink::new("Second", || Text::new("second page")).on_select(move || {
+                callback_count_for_link.set(callback_count_for_link.get() + 1);
+            }),
+        ))
+        .sidebar_width(150.0);
+        let selected_index = navigation.selected_index_state().clone();
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(navigation.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonPressed {
+            button: MouseButton::Left,
+            x: 10,
+            y: 50,
+            click_count: 1,
+        }));
+        assert!(
+            !pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonCancelled {
+                button: MouseButton::Left,
+                x: 10,
+                y: 50,
+            }))
+        );
+        assert_eq!(selected_index.get(), 0);
+        assert_eq!(callback_count.get(), 0);
+    }
+
+    #[test]
+    fn cancelled_pointer_does_not_open_or_change_select() {
+        let selected_index = State::new(crate::state::generate_state_id(), 0);
+        let change_count = Rc::new(Cell::new(0));
+        let change_count_for_select = change_count.clone();
+        let select = Select::new(
+            alloc::vec![String::from("First"), String::from("Second")],
+            selected_index.clone(),
+        )
+        .on_change(move |_| change_count_for_select.set(change_count_for_select.get() + 1));
+
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(select.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+
+        pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonPressed {
+            button: MouseButton::Left,
+            x: 10,
+            y: 10,
+            click_count: 1,
+        }));
+        assert!(
+            !pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonCancelled {
+                button: MouseButton::Left,
+                x: 10,
+                y: 10,
+            }))
+        );
+        assert_eq!(selected_index.get(), 0);
+        assert_eq!(change_count.get(), 0);
     }
 
     #[test]

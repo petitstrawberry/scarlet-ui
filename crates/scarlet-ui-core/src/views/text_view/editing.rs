@@ -264,13 +264,22 @@ pub(crate) fn handle_text_view_mouse(
             render_object.dragging = false;
             true
         }
+        MouseEvent::ButtonCancelled {
+            button: MouseButton::Left,
+            ..
+        } => {
+            render_object.dragging = false;
+            true
+        }
         MouseEvent::Wheel {
             delta_x, delta_y, ..
         } => scroll_view(view, render_object, delta_x, delta_y),
         MouseEvent::Entered { .. }
         | MouseEvent::Exited { .. }
         | MouseEvent::RelativeMotion { .. } => false,
-        MouseEvent::ButtonPressed { .. } | MouseEvent::ButtonReleased { .. } => false,
+        MouseEvent::ButtonPressed { .. }
+        | MouseEvent::ButtonReleased { .. }
+        | MouseEvent::ButtonCancelled { .. } => false,
     }
 }
 

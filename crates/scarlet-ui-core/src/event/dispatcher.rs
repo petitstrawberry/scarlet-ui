@@ -564,11 +564,16 @@ impl EventDispatcher {
                     handled || wheel_target_locked
                 );
             }
-            if let crate::event::MouseEvent::ButtonReleased {
-                button: crate::event::MouseButton::Left,
-                ..
-            } = event
-            {
+            if matches!(
+                event,
+                crate::event::MouseEvent::ButtonReleased {
+                    button: crate::event::MouseButton::Left,
+                    ..
+                } | crate::event::MouseEvent::ButtonCancelled {
+                    button: crate::event::MouseButton::Left,
+                    ..
+                }
+            ) {
                 self.left_button_down = false;
                 self.captured_id = None;
                 self.captured_path.clear();
@@ -583,11 +588,16 @@ impl EventDispatcher {
             }
             result
         } else {
-            if let crate::event::MouseEvent::ButtonReleased {
-                button: crate::event::MouseButton::Left,
-                ..
-            } = event
-            {
+            if matches!(
+                event,
+                crate::event::MouseEvent::ButtonReleased {
+                    button: crate::event::MouseButton::Left,
+                    ..
+                } | crate::event::MouseEvent::ButtonCancelled {
+                    button: crate::event::MouseButton::Left,
+                    ..
+                }
+            ) {
                 self.left_button_down = false;
                 self.captured_id = None;
                 self.captured_path.clear();
@@ -1073,6 +1083,10 @@ impl EventDispatcher {
                 x: *x as f32,
                 y: *y as f32,
             },
+            crate::event::MouseEvent::ButtonCancelled { x, y, .. } => Point {
+                x: *x as f32,
+                y: *y as f32,
+            },
             crate::event::MouseEvent::Wheel { x, y, .. } => Point {
                 x: *x as f32,
                 y: *y as f32,
@@ -1328,6 +1342,13 @@ impl EventDispatcher {
                 y: y - origin.y as i32,
                 click_count,
             },
+            crate::event::MouseEvent::ButtonCancelled { button, x, y } => {
+                crate::event::MouseEvent::ButtonCancelled {
+                    button,
+                    x: x - origin.x as i32,
+                    y: y - origin.y as i32,
+                }
+            }
             crate::event::MouseEvent::Wheel {
                 delta_x,
                 delta_y,
