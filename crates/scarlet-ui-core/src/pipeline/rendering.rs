@@ -272,6 +272,28 @@ impl RenderingPipeline {
         self.pipeline_owner.has_dirty()
     }
 
+    /// Invalidate the complete pipeline after a runtime input-environment change.
+    ///
+    /// This schedules build, layout, and paint so device-dependent metrics are
+    /// reflected by both geometry and rendering on the next frame.
+    pub fn invalidate_input_environment(&mut self) {
+        self.last_paint_bounds.clear();
+        self.paint_damage = None;
+        self.paint_needs_full = true;
+        self.paint_caches.clear();
+        self.layer_store.clear();
+        self.retained_ctx.clear();
+        if let Some(root) = self.element_tree.root_mut() {
+            root.clear_buffers();
+        }
+        if let Some(root) = self.element_tree.root() {
+            let id = root.id();
+            self.pipeline_owner.mark_needs_build(id);
+            self.pipeline_owner.mark_needs_layout(id);
+            self.pipeline_owner.mark_needs_paint(id);
+        }
+    }
+
     /// Extract window information from the element tree
     ///
     /// This searches the element tree for a Window View and extracts
@@ -2615,6 +2637,31 @@ mod tests {
         );
 
         assert_eq!(expanded, Rect::from_xywh(14.0, 26.0, 94.0, 54.0));
+    }
+
+    #[test]
+    fn runtime_input_environment_transition_invalidates_layout_and_paint() {
+        let desktop = crate::InputEnvironment::desktop();
+        let _environment_guard = crate::input_environment::install_test_input_environment(desktop);
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(Rectangle::new().frame(100.0, 100.0).create_element());
+        pipeline.layout_initial();
+        let _ = pipeline.render_with_damage();
+        assert!(!pipeline.has_dirty());
+
+        crate::input_environment::install_input_environment(crate::InputEnvironment::new(
+            1,
+            Some(true),
+            None,
+            true,
+            false,
+            false,
+            false,
+        ));
+        pipeline.invalidate_input_environment();
+        assert!(pipeline.has_dirty());
+        let _ = pipeline.render_with_damage();
+        assert!(!pipeline.has_dirty());
     }
 
     impl View for PaintExtensionProbe {

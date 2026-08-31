@@ -6,6 +6,7 @@
 
 use crate::color::{Color, ColorPalette};
 use crate::geometry::{EdgeInsets, Offset, Rect};
+use crate::input_environment::{InteractionMode, current_input_environment};
 use crate::renderer::PaintContext;
 
 const RAISED_TOP_LIGHTEN: f32 = 0.018;
@@ -40,10 +41,7 @@ const OVERLAY_KEY_BLUR: f32 = 24.0;
 const OVERLAY_KEY_OPACITY: f32 = 0.85;
 const OVERLAY_OUTSETS: EdgeInsets = EdgeInsets::new(24.0, 12.0, 24.0, 36.0);
 
-/// Desktop visual metrics shared by built-in widgets.
-///
-/// These are deliberately private. Future input adaptation must be supplied
-/// through the live view environment instead of a process-wide global mode.
+/// Visual metrics shared by built-in widgets for one interaction density.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct VisualMetrics {
     pub(crate) window_radius: f32,
@@ -68,9 +66,12 @@ pub(crate) struct VisualMetrics {
     pub(crate) toggle_thumb_diameter: f32,
     pub(crate) toggle_thumb_inset: f32,
     pub(crate) chrome_title_font_size: f32,
+    pub(crate) chrome_titlebar_height: f32,
+    pub(crate) chrome_control_size: f32,
+    pub(crate) chrome_control_margin: f32,
 }
 
-const VISUAL_METRICS: VisualMetrics = VisualMetrics {
+const DESKTOP_VISUAL_METRICS: VisualMetrics = VisualMetrics {
     window_radius: 10.0,
     control_radius: 6.0,
     item_radius: 4.0,
@@ -93,6 +94,37 @@ const VISUAL_METRICS: VisualMetrics = VisualMetrics {
     toggle_thumb_diameter: 16.0,
     toggle_thumb_inset: 2.0,
     chrome_title_font_size: 14.0,
+    chrome_titlebar_height: 32.0,
+    chrome_control_size: 18.0,
+    chrome_control_margin: 8.0,
+};
+
+const TOUCH_VISUAL_METRICS: VisualMetrics = VisualMetrics {
+    window_radius: 12.0,
+    control_radius: 8.0,
+    item_radius: 6.0,
+    popover_radius: 10.0,
+    border_width: 1.0,
+    focus_stroke_width: 2.0,
+    minimum_control_height: 44.0,
+    navigation_indicator_width: 4.0,
+    navigation_item_height: 52.0,
+    tab_indicator_height: 3.0,
+    tab_bar_height: 48.0,
+    scrollbar_thickness: 12.0,
+    scrollbar_inset: 4.0,
+    scrollbar_min_thumb_length: 44.0,
+    slider_height: 44.0,
+    slider_thumb_diameter: 28.0,
+    slider_track_thickness: 6.0,
+    toggle_width: 52.0,
+    toggle_height: 32.0,
+    toggle_thumb_diameter: 28.0,
+    toggle_thumb_inset: 2.0,
+    chrome_title_font_size: 16.0,
+    chrome_titlebar_height: 48.0,
+    chrome_control_size: 28.0,
+    chrome_control_margin: 10.0,
 };
 
 /// Tonal surface hierarchy shared by built-in widgets and containers.
@@ -132,8 +164,15 @@ pub enum ElevationRole {
     Overlay,
 }
 
-pub(crate) const fn metrics() -> VisualMetrics {
-    VISUAL_METRICS
+pub(crate) fn metrics() -> VisualMetrics {
+    metrics_for_mode(current_input_environment().interaction_mode())
+}
+
+const fn metrics_for_mode(mode: InteractionMode) -> VisualMetrics {
+    match mode {
+        InteractionMode::Pointer => DESKTOP_VISUAL_METRICS,
+        InteractionMode::Touch | InteractionMode::Hybrid => TOUCH_VISUAL_METRICS,
+    }
 }
 
 pub(crate) fn surface_color(palette: &ColorPalette, role: SurfaceRole) -> Color {
@@ -352,6 +391,22 @@ mod tests {
     use super::*;
     use crate::geometry::Rect;
     use crate::renderer::PaintCommand;
+
+    #[test]
+    fn touch_and_hybrid_metrics_materially_expand_interactive_targets() {
+        let desktop = metrics_for_mode(InteractionMode::Pointer);
+        let touch = metrics_for_mode(InteractionMode::Touch);
+        let hybrid = metrics_for_mode(InteractionMode::Hybrid);
+
+        assert_eq!(desktop.minimum_control_height, 24.0);
+        assert!(touch.minimum_control_height >= 44.0);
+        assert!(touch.navigation_item_height > desktop.navigation_item_height);
+        assert!(touch.tab_bar_height > desktop.tab_bar_height);
+        assert!(touch.scrollbar_thickness > desktop.scrollbar_thickness);
+        assert!(touch.slider_height > desktop.slider_height);
+        assert!(touch.toggle_height > desktop.toggle_height);
+        assert_eq!(hybrid, touch);
+    }
 
     #[test]
     fn inline_control_primitives_use_shared_radius_and_hairline() {

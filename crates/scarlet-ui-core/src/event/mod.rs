@@ -1,5 +1,6 @@
 //! Event types and handling for ScarletUI
 
+use crate::input_environment::InputEnvironment;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -17,6 +18,9 @@ pub use gesture::{
 pub enum Event {
     /// Quit event - application should exit
     Quit,
+
+    /// The platform's runtime input-device environment changed.
+    InputEnvironmentChanged(InputEnvironment),
 
     /// Window resize event
     Resize { width: u32, height: u32 },

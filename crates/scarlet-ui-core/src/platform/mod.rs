@@ -6,6 +6,7 @@ use crate::element::TextInputElementState;
 use crate::error::Result;
 use crate::event::Event;
 use crate::geometry::{Point, Size};
+use crate::input_environment::InputEnvironment;
 use crate::renderer::{CompositorBackendKind, PaintBackend, RendererBackendKind};
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -139,6 +140,14 @@ pub struct WindowCreateRequest {
 
 /// Creates platform windows for the application runner.
 pub trait PlatformBackend {
+    /// Return the input environment to install before initial scene layout.
+    ///
+    /// Backends that do not implement device discovery retain compact desktop
+    /// behavior through this backwards-compatible default.
+    fn initial_input_environment(&mut self) -> InputEnvironment {
+        InputEnvironment::desktop()
+    }
+
     /// Return the current output scale in milli-units.
     fn output_scale_milli(&mut self) -> u32;
 

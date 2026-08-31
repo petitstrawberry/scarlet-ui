@@ -14,6 +14,9 @@ use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult, Window
 use crate::error::{Error, Result};
 use crate::event::{Event, MouseEvent, ScrollSource, WheelPhase};
 use crate::geometry::{Point, Rect, Size};
+use crate::input_environment::{
+    InputEnvironment, current_input_environment, install_input_environment,
+};
 use crate::menu_model;
 use crate::pipeline::{MountContext, PipelineId, RenderingPipeline};
 use crate::platform::{PlatformBackend, PlatformWindow, WindowCreateRequest};
@@ -59,6 +62,25 @@ fn env_flag_enabled(value: &str) -> bool {
 pub trait Application: Clone + 'static {
     /// Returns the scene graph of top-level application windows.
     fn scenes(&self) -> impl Scene;
+
+    /// Return the process-live input environment used by built-in views.
+    ///
+    /// # Returns
+    ///
+    /// The most recently installed platform snapshot.
+    fn input_environment(&self) -> InputEnvironment {
+        current_input_environment()
+    }
+
+    /// Handle a runtime input-environment transition.
+    ///
+    /// The new snapshot is installed before this hook runs and before open
+    /// pipelines are rebuilt, relaid out, and repainted.
+    ///
+    /// # Arguments
+    ///
+    /// * `_environment` - Newly installed platform snapshot
+    fn on_input_environment_changed(&mut self, _environment: InputEnvironment) {}
 
     /// Handle focus change event from window server.
     fn on_focus_changed(&mut self, _window_id: u32, _app_name: &str, _menu_titles: &str) {}
@@ -200,6 +222,7 @@ impl ApplicationRunner {
     pub fn run<A: Application + View>(&mut self, app: &mut A) -> Result<()> {
         crate::debug::set_enabled(app.debug_logging());
         crate::debug::set_wheel_log_enabled(wheel_log_env_enabled());
+        install_input_environment(self.backend.initial_input_environment());
         app.init();
 
         let declarations = collect_scene_declarations(app)?;
@@ -317,6 +340,7 @@ impl ApplicationRunner {
         slots: &mut Vec<WindowSlot<A>>,
     ) -> Result<()> {
         let app_wheel_coalesce_enabled = app_wheel_coalesce_env_enabled();
+        let mut applied_environment = current_input_environment();
         // Counts consecutive iterations that processed events (or had a dirty
         // pipeline) without actually presenting a frame. A few of these are
         // normal during an event burst; a long run means the compositor or
@@ -364,6 +388,14 @@ impl ApplicationRunner {
                 if !slot_closing && let Some(pending) = pending_mouse_motion.take() {
                     let _ = handle_window_event(app, slot, pending, &mut close_ids)?;
                 }
+            }
+
+            let current_environment = current_input_environment();
+            if current_environment != applied_environment {
+                for slot in slots.iter_mut() {
+                    slot.pipeline.invalidate_input_environment();
+                }
+                applied_environment = current_environment;
             }
 
             remove_closed_slots(slots, &close_ids);
@@ -661,6 +693,11 @@ fn handle_window_event<A: Application>(
             let _ = slot.window.close();
             close_ids.push(slot.context.window_id);
             return Ok(true);
+        }
+        Event::InputEnvironmentChanged(environment) => {
+            if install_input_environment(environment) {
+                app.on_input_environment_changed(environment);
+            }
         }
         Event::Window(crate::event::WindowEvent::CloseRequested) => {
             return Ok(handle_window_close_request(app, slot, close_ids));
@@ -1073,7 +1110,10 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
 mod tests {
     use super::*;
     use alloc::rc::Rc;
-    use core::cell::Cell;
+    use core::cell::{Cell, RefCell};
+
+    use crate::input_environment::install_test_input_environment;
+    use crate::views::{Text, Window};
 
     #[derive(Clone)]
     struct PointerLockLifecycleApp {
@@ -1105,6 +1145,276 @@ mod tests {
         notify_pointer_lock_changed(&mut app, &context, true);
 
         assert_eq!(observed.get(), Some(true));
+    }
+
+    #[derive(Default)]
+    struct EnvironmentRunnerProbe {
+        presents: [Vec<InputEnvironment>; 2],
+        environment_emitted: bool,
+        quit_emitted: [bool; 2],
+        poll_calls: [usize; 2],
+    }
+
+    struct EnvironmentTestBackend {
+        probe: Rc<RefCell<EnvironmentRunnerProbe>>,
+        next_window: usize,
+    }
+
+    impl PlatformBackend for EnvironmentTestBackend {
+        fn initial_input_environment(&mut self) -> InputEnvironment {
+            InputEnvironment::desktop()
+        }
+
+        fn output_scale_milli(&mut self) -> u32 {
+            1000
+        }
+
+        fn create_window(
+            &mut self,
+            request: WindowCreateRequest,
+        ) -> Result<Box<dyn PlatformWindow>> {
+            let index = self.next_window;
+            self.next_window += 1;
+            Ok(Box::new(EnvironmentTestWindow {
+                index,
+                size: request.size,
+                probe: self.probe.clone(),
+            }))
+        }
+    }
+
+    struct EnvironmentTestWindow {
+        index: usize,
+        size: Size,
+        probe: Rc<RefCell<EnvironmentRunnerProbe>>,
+    }
+
+    impl PlatformWindow for EnvironmentTestWindow {
+        fn new(_app_id: &str, _title: &str, size: Size) -> Result<Self> {
+            Ok(Self {
+                index: 0,
+                size,
+                probe: Rc::new(RefCell::new(EnvironmentRunnerProbe::default())),
+            })
+        }
+
+        fn poll_event(&mut self) -> Option<Event> {
+            let mut probe = self.probe.borrow_mut();
+            probe.poll_calls[self.index] += 1;
+            let both_presented_initially =
+                probe.presents.iter().all(|presents| !presents.is_empty());
+            if self.index == 0 && both_presented_initially && !probe.environment_emitted {
+                probe.environment_emitted = true;
+                return Some(Event::InputEnvironmentChanged(InputEnvironment::new(
+                    1,
+                    Some(true),
+                    None,
+                    true,
+                    false,
+                    false,
+                    false,
+                )));
+            }
+
+            let both_presented_touch = probe.presents.iter().all(|presents| {
+                presents.iter().any(|environment| {
+                    environment.interaction_mode() == crate::InteractionMode::Touch
+                })
+            });
+            if both_presented_touch && !probe.quit_emitted[self.index] {
+                probe.quit_emitted[self.index] = true;
+                return Some(Event::Quit);
+            }
+            if probe.poll_calls[self.index] > 200 && !probe.quit_emitted[self.index] {
+                probe.quit_emitted[self.index] = true;
+                return Some(Event::Quit);
+            }
+            None
+        }
+
+        fn wait_for_event(&mut self, _timeout: Duration) {}
+
+        fn present(&mut self, _buffer: &crate::Buffer) {
+            self.probe.borrow_mut().presents[self.index].push(current_input_environment());
+        }
+
+        fn set_title(&mut self, _title: &str) {}
+
+        fn size(&self) -> Size {
+            self.size
+        }
+
+        fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+            self.size = Size::new(width as f32, height as f32);
+            Ok(())
+        }
+
+        fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn minimize(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn maximize(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_fullscreen(&mut self, _fullscreen: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn restore(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn request_move(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn create_popup(&mut self, _position: Point, _size: Size) -> Result<u32> {
+            Ok(0)
+        }
+
+        fn destroy_popup(&mut self, _surface_id: u32) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_workarea(&mut self, _x: i32, _y: i32, _width: u32, _height: u32) -> Result<()> {
+            Ok(())
+        }
+
+        fn create_window_with_type(
+            &mut self,
+            _app_id: &str,
+            _title: &str,
+            size: Size,
+            _window_type: u32,
+        ) -> Result<Self> {
+            Self::new("", "", size)
+        }
+
+        fn move_window(&mut self, _x: i32, _y: i32) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_window_type(&mut self, _surface_id: u32, _window_type: u32) -> Result<()> {
+            Ok(())
+        }
+
+        fn get_screen_size(&mut self) -> Result<(u32, u32)> {
+            Ok((1024, 768))
+        }
+
+        fn surface_id(&self) -> u32 {
+            self.index as u32 + 1
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+
+        fn set_resizable(&mut self, _resizable: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_opaque(&mut self, _opaque: bool) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_menu_titles(&mut self, _menu_titles: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct EnvironmentRunnerApp {
+        hook_count: Rc<Cell<usize>>,
+        observed: Rc<Cell<Option<InputEnvironment>>>,
+    }
+
+    impl Application for EnvironmentRunnerApp {
+        fn scenes(&self) -> impl Scene {
+            (
+                Window::new("One", Text::new("One"))
+                    .scene_key("one")
+                    .size(Size::new(180.0, 120.0)),
+                Window::new("Two", Text::new("Two"))
+                    .scene_key("two")
+                    .size(Size::new(180.0, 120.0)),
+            )
+        }
+
+        fn on_input_environment_changed(&mut self, environment: InputEnvironment) {
+            self.hook_count.set(self.hook_count.get() + 1);
+            self.observed.set(Some(environment));
+        }
+
+        fn init(&mut self) {
+            crate::open_window("two");
+        }
+    }
+
+    impl View for EnvironmentRunnerApp {
+        fn create_element(&self) -> Box<dyn Element> {
+            Text::new("Runner").create_element()
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn input_environment_event_rebuilds_and_presents_both_open_windows() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        let hook_count = Rc::new(Cell::new(0));
+        let observed = Rc::new(Cell::new(None));
+        let mut app = EnvironmentRunnerApp {
+            hook_count: hook_count.clone(),
+            observed: observed.clone(),
+        };
+        let backend = EnvironmentTestBackend {
+            probe: probe.clone(),
+            next_window: 0,
+        };
+
+        ApplicationRunner::new(Box::new(backend))
+            .run(&mut app)
+            .expect("runner should exit after both deterministic quit events");
+
+        let probe_snapshot = probe.borrow();
+        assert_eq!(
+            hook_count.get(),
+            1,
+            "presents={:?} polls={:?} environment_emitted={}",
+            [
+                probe_snapshot.presents[0].len(),
+                probe_snapshot.presents[1].len(),
+            ],
+            probe_snapshot.poll_calls,
+            probe_snapshot.environment_emitted,
+        );
+        assert_eq!(
+            observed.get().map(InputEnvironment::interaction_mode),
+            Some(crate::InteractionMode::Touch)
+        );
+        for presents in &probe_snapshot.presents {
+            assert!(presents.len() >= 2);
+            assert_eq!(
+                presents[0].interaction_mode(),
+                crate::InteractionMode::Pointer
+            );
+            assert!(
+                presents
+                    .iter()
+                    .skip(1)
+                    .any(|environment| environment.interaction_mode()
+                        == crate::InteractionMode::Touch)
+            );
+        }
     }
 
     fn wheel(delta_y: i32, phase: WheelPhase, source: ScrollSource) -> Event {

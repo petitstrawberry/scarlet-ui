@@ -74,23 +74,28 @@ GPU paint renders the gradient and layered blur approximation. CPU paint uses
 the gradient midpoint as a flat fill and omits the shadow while retaining the
 same surface, border, and state semantics.
 
-## Future input adaptation
+## Runtime input adaptation
 
-Touch support is an input-capability concern, not a second visual theme. A
-convertible device may gain or lose a mouse, keyboard, pen, or touchscreen
-while the application is running, so adaptation must be a live, per-window
-view-environment value rather than a process-wide setting.
+Touch support is an input-capability concern, not a second visual theme.
+`InputEnvironment` carries a generation, optional tablet and lid states, and
+direct-touch, fine-pointer, keyboard, and pen capabilities. Explicit tablet
+mode selects Touch. Otherwise touch plus a fine pointer selects Hybrid, touch
+alone selects Touch, and remaining configurations select Pointer.
 
-Adaptation must also be selective. It must not uniformly enlarge every visible
-widget. A touch-capable configuration may expand invisible hit slop, increase
-spacing only where adjacent targets would otherwise be ambiguous, expose
-gesture affordances, or adjust transient scroll controls while retaining the
-same compact visual geometry where it remains usable. Mixed-input devices must
-continue to work well with pointer and keyboard interaction.
+The platform installs its initial snapshot before scene construction and may
+send `InputEnvironmentChanged` at any time. ScarletUI then rebuilds, relays out,
+and repaints every open pipeline in the process. Pointer mode preserves the
+compact desktop metrics. Touch and Hybrid use larger control minimums,
+navigation and tab rows, scrollbars, sliders, toggles, and client-side titlebar
+hit areas. The current implementation is process-wide so all windows and
+runners transition coherently; the public snapshot model is the seam for future
+runner- or per-window environments.
 
-The current foundation intentionally exposes no static Desktop/Touch switch.
-The dynamic environment and hit-target model should be designed with the input
-event system before a public API is added.
+On Winit/macOS, `SCARLET_TABLET_MODE=tablet` (also `1`, `true`, `yes`, or `on`)
+forces the initial tablet environment. `laptop` (also `0`, `false`, `no`, or
+`off`) forces pointer/laptop behavior. Matching is case-insensitive; invalid or
+unset values leave tablet state unknown. A native Winit touch event also
+advertises direct-touch capability dynamically.
 
 ## State roles
 
@@ -110,8 +115,7 @@ event system before a public API is added.
   dense; repeated painting cannot darken it.
 - Pressed and hover colors continue to come from the semantic palette.
 - Desktop toggles use a compact 36 x 20 px visual capsule and the primary
-  accent. Future touch adaptation expands hit targets independently instead of
-  replacing the desktop geometry with a mobile-sized switch.
+  accent. Touch and Hybrid environments use a larger 52 x 32 px target.
 
 ## Surfaces and type
 

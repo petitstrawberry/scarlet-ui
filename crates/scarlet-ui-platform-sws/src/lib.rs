@@ -30,6 +30,7 @@ use scarlet_ui_core::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
 };
 use scarlet_ui_core::geometry::{Point, Rect, Size};
+use scarlet_ui_core::input_environment::InputEnvironment;
 use scarlet_ui_core::platform::{
     PlatformBackend, PlatformWindow, WindowCreateRequest, WindowDecoration, WindowPlacement,
 };
@@ -819,6 +820,14 @@ impl SwsBackend {
 }
 
 impl PlatformBackend for SwsBackend {
+    fn initial_input_environment(&mut self) -> InputEnvironment {
+        self.connection()
+            .ok()
+            .and_then(|connection| connection.get_input_environment().ok())
+            .map(map_sws_input_environment)
+            .unwrap_or_default()
+    }
+
     fn output_scale_milli(&mut self) -> u32 {
         let Ok(conn) = self.connection() else {
             return DEFAULT_SCALE_MILLI;
@@ -846,6 +855,18 @@ impl PlatformBackend for SwsBackend {
             )?,
         ))
     }
+}
+
+fn map_sws_input_environment(environment: sws::InputEnvironment) -> InputEnvironment {
+    InputEnvironment::new(
+        environment.generation.into(),
+        environment.tablet_mode(),
+        environment.lid_closed(),
+        environment.has_direct_touch(),
+        environment.has_fine_pointer(),
+        environment.has_keyboard(),
+        environment.has_pen(),
+    )
 }
 
 fn validate_window_decoration(decoration: WindowDecoration) -> Result<()> {
@@ -2303,6 +2324,11 @@ impl SWSPlatformWindow {
                     width: self.current_size.width.max(1.0) as u32,
                     height: self.current_size.height.max(1.0) as u32,
                 });
+            }
+            SwsEvent::InputEnvironmentChanged(environment) => {
+                self.push_event(Event::InputEnvironmentChanged(map_sws_input_environment(
+                    environment,
+                )));
             }
             SwsEvent::SurfaceDestroyed { surface_id } => {
                 if surface_id == self.surface_id {

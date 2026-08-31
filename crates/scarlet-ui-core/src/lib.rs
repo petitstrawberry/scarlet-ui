@@ -53,6 +53,7 @@ pub mod event;
 pub mod geometry;
 pub mod graphics;
 pub mod icon;
+pub mod input_environment;
 pub mod macros;
 pub mod menu_model;
 mod os;
@@ -123,6 +124,7 @@ pub use icon::{
     ALL_ICONS, Icon, IconFill, IconMaskKey, IconSize, IconStyle, IconWeight, RasterizedIcon,
     rasterize_icon,
 };
+pub use input_environment::{InputEnvironment, InteractionMode, current_input_environment};
 pub use menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
 pub use pipeline::{
     DirtyPhase, MountContext, PipelineId, PipelineOwner, RenderingPipeline, StateRegistry,
@@ -184,6 +186,9 @@ pub mod prelude {
         rasterize_text, rasterize_text_with_font_stack, set_default_font_stack,
     };
     pub use crate::icon::{Icon, IconFill, IconSize, IconStyle, IconWeight};
+    pub use crate::input_environment::{
+        InputEnvironment, InteractionMode, current_input_environment,
+    };
     pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
     pub use crate::platform::{WindowDecoration, WindowFrame, WindowTitleBar};
     pub use crate::renderer::{CompositorBackendKind, RendererBackendKind};

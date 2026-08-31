@@ -18,6 +18,7 @@ use scarlet_ui_core::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
 };
 use scarlet_ui_core::geometry::{Point, Size};
+use scarlet_ui_core::input_environment::{InputEnvironment, current_input_environment};
 use scarlet_ui_core::platform::{
     PlatformBackend, PlatformWindow, WindowCreateRequest, WindowDecoration,
 };
@@ -48,6 +49,9 @@ use ::winit::window::{
 
 #[cfg(feature = "sgfx")]
 mod sgfx_renderer;
+mod tablet_mode;
+
+use tablet_mode::parse_tablet_mode_override;
 
 type SoftbufferContext = softbuffer::Context<::winit::event_loop::OwnedDisplayHandle>;
 type SoftbufferSurface =
@@ -60,6 +64,14 @@ const TRACKPAD_MOVED_MIN_INTERVAL: Duration = Duration::from_millis(16);
 
 pub struct WinitBackend {
     shared: Rc<WinitSharedState>,
+}
+
+fn startup_input_environment() -> InputEnvironment {
+    match parse_tablet_mode_override(std::env::var("SCARLET_TABLET_MODE").ok().as_deref()) {
+        Some(true) => InputEnvironment::new(1, Some(true), None, true, false, false, false),
+        Some(false) => InputEnvironment::new(1, Some(false), None, false, true, true, false),
+        None => InputEnvironment::desktop(),
+    }
 }
 
 impl WinitBackend {
@@ -184,6 +196,10 @@ fn configure_sgfx_surface_alpha(window: &WinitWindow, transparent: bool) {
 fn configure_sgfx_surface_alpha(_window: &WinitWindow, _transparent: bool) {}
 
 impl PlatformBackend for WinitBackend {
+    fn initial_input_environment(&mut self) -> InputEnvironment {
+        startup_input_environment()
+    }
+
     fn output_scale_milli(&mut self) -> u32 {
         1000
     }
@@ -226,6 +242,7 @@ struct WinitEventState {
     pending_trackpad_moved: Option<PendingTrackpadMoved>,
     last_trackpad_moved_emit_at: Option<Instant>,
     wheel_coalesce_enabled: bool,
+    direct_touch_advertised: bool,
     queue: VecDeque<Event>,
 }
 
@@ -331,6 +348,7 @@ impl WinitEventState {
             pending_trackpad_moved: None,
             last_trackpad_moved_emit_at: None,
             wheel_coalesce_enabled,
+            direct_touch_advertised: false,
             queue: VecDeque::new(),
         }
     }
@@ -792,6 +810,23 @@ impl ApplicationHandler for WinitPumpHandler {
                     phase: mapped_phase,
                     source,
                 }));
+            }
+            WindowEvent::Touch(_) => {
+                if !state.direct_touch_advertised {
+                    state.direct_touch_advertised = true;
+                    let current = current_input_environment();
+                    if !current.direct_touch {
+                        state.push(Event::InputEnvironmentChanged(InputEnvironment::new(
+                            current.generation.saturating_add(1),
+                            current.tablet_mode,
+                            current.lid_closed,
+                            true,
+                            current.fine_pointer,
+                            current.keyboard,
+                            current.pen,
+                        )));
+                    }
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let keycode = map_key(&event.logical_key);

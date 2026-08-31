@@ -151,6 +151,7 @@ impl EventDispatcher {
                 false
             }
             Event::FullscreenChanged { .. } => false,
+            Event::InputEnvironmentChanged(_) => false,
             Event::PointerLockChanged { locked } => {
                 self.update_pointer_lock_target(element_tree, *locked);
                 false

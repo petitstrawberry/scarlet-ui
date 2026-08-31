@@ -118,11 +118,26 @@ impl WindowInfo {
 }
 
 /// Constants for window decorations (matching Scarlet_old design)
-const TITLEBAR_HEIGHT: u32 = 32;
-const CLOSE_BUTTON_SIZE: u32 = 18;
-const CLOSE_BUTTON_MARGIN: u32 = 8;
 const TITLEBAR_CONTROL_COUNT: u32 = 3;
 const WINDOW_BORDER_WIDTH: u32 = 1;
+
+fn titlebar_height() -> u32 {
+    style::metrics().chrome_titlebar_height as u32
+}
+
+fn close_button_size() -> u32 {
+    style::metrics().chrome_control_size as u32
+}
+
+fn close_button_margin() -> u32 {
+    style::metrics().chrome_control_margin as u32
+}
+
+fn title_text_top() -> f32 {
+    let metrics = style::metrics();
+    let text_height = crate::graphics::measure_text_sized("Mg", metrics.chrome_title_font_size).1;
+    libm::floorf(((metrics.chrome_titlebar_height - text_height as f32) / 2.0).max(0.0))
+}
 
 /// Layout metrics for the content area inside a top-level window.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -141,7 +156,7 @@ impl WindowContentLayout {
     /// # Returns
     ///
     /// Content offset and total decoration size in ScarletUI logical pixels.
-    pub const fn new(decorated: bool) -> Self {
+    pub fn new(decorated: bool) -> Self {
         if decorated {
             Self::for_decoration(WindowDecoration::CUSTOM)
         } else {
@@ -150,14 +165,14 @@ impl WindowContentLayout {
     }
 
     /// Create layout metrics for an explicit window decoration mode.
-    pub const fn for_decoration(decoration: WindowDecoration) -> Self {
+    pub fn for_decoration(decoration: WindowDecoration) -> Self {
         let border_width = if decoration.frame.is_custom() {
             WINDOW_BORDER_WIDTH as f32
         } else {
             0.0
         };
         let titlebar_height = if decoration.title_bar.is_custom() {
-            TITLEBAR_HEIGHT as f32
+            style::metrics().chrome_titlebar_height
         } else {
             0.0
         };
@@ -667,7 +682,7 @@ impl WindowTitleBarRenderObject {
             title,
             focused,
             draw_frame_edges,
-            size: Size::new(0.0, TITLEBAR_HEIGHT as f32),
+            size: Size::new(0.0, titlebar_height() as f32),
             buffer: None,
             close_button_state: 0,
             maximize_button_state: 0,
@@ -713,7 +728,7 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
         } else {
             self.size.width.max(constraints.min_width)
         };
-        self.size = Size::new(width, TITLEBAR_HEIGHT as f32);
+        self.size = Size::new(width, titlebar_height() as f32);
 
         let w = libm::ceilf(self.size.width) as u32;
         let h = libm::ceilf(self.size.height) as u32;
@@ -772,7 +787,7 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let width_px = libm::ceilf(self.size.width.max(0.0)) as u32;
         let width = width_px as f32;
-        let titlebar_rect = Rect::from_xywh(origin.x, origin.y, width, TITLEBAR_HEIGHT as f32);
+        let titlebar_rect = Rect::from_xywh(origin.x, origin.y, width, titlebar_height() as f32);
         let palette = ColorPalette::default();
         let base_color = palette.window_titlebar_background();
         style::chrome_surface(ctx, titlebar_rect, base_color);
@@ -801,7 +816,7 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
         }
 
         let title_x = 10.0;
-        let title_y = 7.0;
+        let title_y = title_text_top();
         let title_font_size = style::metrics().chrome_title_font_size;
         let title_color = if self.focused {
             palette.window_titlebar_text_active()
@@ -889,7 +904,7 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
         ctx.fill_rect(
             Rect::from_xywh(
                 origin.x,
-                origin.y + TITLEBAR_HEIGHT as f32 - 1.0,
+                origin.y + titlebar_height() as f32 - 1.0,
                 width,
                 1.0,
             ),
@@ -1225,7 +1240,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
 
                 // Check if click is in titlebar
                 let width = self.render_object.size.width as u32;
-                let titlebar_height = TITLEBAR_HEIGHT as i32;
+                let titlebar_height = titlebar_height() as i32;
 
                 if local_y >= 0 && local_y < titlebar_height {
                     // Determine which button was pressed
@@ -1288,7 +1303,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
 
                     // Check which button we're releasing on
                     let width = self.render_object.size.width as u32;
-                    let titlebar_height = TITLEBAR_HEIGHT as i32;
+                    let titlebar_height = titlebar_height() as i32;
 
                     if local_y >= 0 && local_y < titlebar_height {
                         let close_rect = self.render_object.close_button_rect(width);
@@ -1450,7 +1465,7 @@ impl WindowRenderObject {
             return Rect::zero();
         }
 
-        let base_seg_w = CLOSE_BUTTON_SIZE + CLOSE_BUTTON_MARGIN * 2;
+        let base_seg_w = close_button_size() + close_button_margin() * 2;
         let seg_w = if width >= base_seg_w * TITLEBAR_CONTROL_COUNT {
             base_seg_w
         } else {
@@ -1459,7 +1474,7 @@ impl WindowRenderObject {
         let total_w = seg_w.saturating_mul(TITLEBAR_CONTROL_COUNT).min(width);
         let right_x0 = (width - total_w) as i32;
         let x = right_x0 + (total_w as i32) - (seg_w as i32) * (index_from_right as i32 + 1);
-        Rect::from_xywh(x as f32, 0.0, seg_w as f32, TITLEBAR_HEIGHT as f32)
+        Rect::from_xywh(x as f32, 0.0, seg_w as f32, titlebar_height() as f32)
     }
 
     /// Get button color based on state
@@ -1549,7 +1564,7 @@ impl WindowRenderObject {
         let minimize_color = Self::get_button_color(minimize_button_state);
 
         // Draw titlebar with button colors
-        for y in 0..TITLEBAR_HEIGHT {
+        for y in 0..titlebar_height() {
             // No corner rounding (WINDOW_CORNER_RADIUS = 0)
             canvas.fill_rect(0, y as i32, width, 1, base_color);
             canvas.fill_rect(
@@ -1576,7 +1591,7 @@ impl WindowRenderObject {
         }
 
         let title_x: i32 = 10;
-        let title_y: i32 = 7;
+        let title_y = title_text_top() as i32;
         let title_font_size = style::metrics().chrome_title_font_size;
         let title_color = if focused {
             palette.window_titlebar_text_active()
@@ -1675,9 +1690,9 @@ impl WindowRenderObject {
         let border_color = palette.window_titlebar_border();
         canvas.draw_line(
             0,
-            TITLEBAR_HEIGHT as i32 - 1,
+            titlebar_height() as i32 - 1,
             width as i32 - 1,
-            TITLEBAR_HEIGHT as i32 - 1,
+            titlebar_height() as i32 - 1,
             border_color,
         );
 
@@ -1686,12 +1701,12 @@ impl WindowRenderObject {
         if draw_frame_edges && width > 0 {
             let outer_border_color = palette.window_border();
             canvas.draw_line(0, 0, width as i32 - 1, 0, outer_border_color);
-            canvas.draw_line(0, 0, 0, TITLEBAR_HEIGHT as i32 - 1, outer_border_color);
+            canvas.draw_line(0, 0, 0, titlebar_height() as i32 - 1, outer_border_color);
             canvas.draw_line(
                 width as i32 - 1,
                 0,
                 width as i32 - 1,
-                TITLEBAR_HEIGHT as i32 - 1,
+                titlebar_height() as i32 - 1,
                 outer_border_color,
             );
         }
@@ -1703,7 +1718,7 @@ impl WindowRenderObject {
             return Rect::zero();
         }
 
-        let base_seg_w = CLOSE_BUTTON_SIZE + CLOSE_BUTTON_MARGIN * 2;
+        let base_seg_w = close_button_size() + close_button_margin() * 2;
         let seg_w = if width >= base_seg_w * TITLEBAR_CONTROL_COUNT {
             base_seg_w
         } else {
@@ -1712,7 +1727,7 @@ impl WindowRenderObject {
         let total_w = seg_w.saturating_mul(TITLEBAR_CONTROL_COUNT).min(width);
         let right_x0 = (width - total_w) as i32;
         let x = right_x0 + (total_w as i32) - (seg_w as i32) * (index_from_right as i32 + 1);
-        Rect::from_xywh(x as f32, 0.0, seg_w as f32, TITLEBAR_HEIGHT as f32)
+        Rect::from_xywh(x as f32, 0.0, seg_w as f32, titlebar_height() as f32)
     }
 
     /// Draw window border (exact Scarlet_old design)
@@ -1798,7 +1813,10 @@ impl ElementRenderObject for WindowRenderObject {
         if self.decoration.title_bar.is_custom()
             && let Some(titlebar) = children.get_mut(0)
         {
-            titlebar.layout(LayoutConstraints::tight(size.width, TITLEBAR_HEIGHT as f32));
+            titlebar.layout(LayoutConstraints::tight(
+                size.width,
+                titlebar_height() as f32,
+            ));
             titlebar.set_position(Point::ZERO);
         }
 
@@ -1918,6 +1936,7 @@ impl ElementRenderObject for WindowRenderObject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input_environment::{InputEnvironment, install_test_input_environment};
     use crate::views::Text;
 
     #[test]
@@ -1937,10 +1956,10 @@ mod tests {
     #[test]
     fn frame_and_titlebar_contribute_layout_independently() {
         let custom = WindowContentLayout::for_decoration(WindowDecoration::CUSTOM);
-        assert_eq!(custom.offset(), Point::new(1.0, TITLEBAR_HEIGHT as f32));
+        assert_eq!(custom.offset(), Point::new(1.0, titlebar_height() as f32));
         assert_eq!(
             custom.decoration_size(),
-            Size::new(2.0, TITLEBAR_HEIGHT as f32 + 1.0)
+            Size::new(2.0, titlebar_height() as f32 + 1.0)
         );
 
         let system_frame_custom_titlebar = WindowContentLayout::for_decoration(
@@ -1948,11 +1967,11 @@ mod tests {
         );
         assert_eq!(
             system_frame_custom_titlebar.offset(),
-            Point::new(0.0, TITLEBAR_HEIGHT as f32)
+            Point::new(0.0, titlebar_height() as f32)
         );
         assert_eq!(
             system_frame_custom_titlebar.decoration_size(),
-            Size::new(0.0, TITLEBAR_HEIGHT as f32)
+            Size::new(0.0, titlebar_height() as f32)
         );
 
         let custom_frame_no_titlebar = WindowContentLayout::for_decoration(WindowDecoration::new(
@@ -1970,6 +1989,33 @@ mod tests {
             assert_eq!(layout.offset(), Point::ZERO);
             assert_eq!(layout.decoration_size(), Size::ZERO);
         }
+    }
+
+    #[test]
+    fn touch_environment_expands_csd_content_offset_and_control_hit_target() {
+        let desktop = InputEnvironment::desktop();
+        let _environment_guard = install_test_input_environment(desktop);
+        let desktop_offset = WindowContentLayout::for_decoration(WindowDecoration::CUSTOM).offset();
+        let desktop_title_top = title_text_top();
+        let render_object = WindowRenderObject::new(
+            String::from("Test"),
+            Size::new(400.0, 300.0),
+            WindowDecoration::CUSTOM,
+            10.0,
+            Color::WHITE,
+        );
+        let desktop_control = render_object.close_button_rect(400);
+
+        let touch = InputEnvironment::new(1, Some(true), None, true, false, false, false);
+        crate::input_environment::install_input_environment(touch);
+        let touch_offset = WindowContentLayout::for_decoration(WindowDecoration::CUSTOM).offset();
+        let touch_title_top = title_text_top();
+        let touch_control = render_object.close_button_rect(400);
+
+        assert!(touch_offset.y > desktop_offset.y);
+        assert!(touch_title_top > desktop_title_top);
+        assert!(touch_control.size.width > desktop_control.size.width);
+        assert!(touch_control.size.height > desktop_control.size.height);
     }
 
     #[test]
