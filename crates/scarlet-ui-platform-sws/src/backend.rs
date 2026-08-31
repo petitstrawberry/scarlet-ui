@@ -401,14 +401,11 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             return Ok(());
         }
 
-        let replacing_session = self.session.is_some();
-        let next_generation = if replacing_session {
-            self.generation
-                .checked_add(1)
-                .ok_or(Error::GenerationExhausted)?
-        } else {
-            self.generation
-        };
+        let next_generation = next_session_generation(
+            self.generation,
+            self.session.is_some(),
+            !self.retired.is_empty(),
+        )?;
 
         // A successful SWS window resize is an explicit presentation
         // discontinuity: SWS switches the window back to its resized SHM
@@ -588,6 +585,18 @@ impl<S: SgfxFrameSink> PaintBackend for SgfxPaintBackend<S> {
     }
 }
 
+fn next_session_generation(
+    generation: u32,
+    has_current_session: bool,
+    has_retired_session: bool,
+) -> Result<u32> {
+    if has_current_session || has_retired_session {
+        generation.checked_add(1).ok_or(Error::GenerationExhausted)
+    } else {
+        Ok(generation)
+    }
+}
+
 fn physical_dimensions(size: Size, scale_milli: u32) -> Result<(u32, u32)> {
     if !size.width.is_finite()
         || !size.height.is_finite()
@@ -642,5 +651,15 @@ mod tests {
         assert!(slot.needs_full_commit);
         assert_eq!(slot.registered, None);
         assert_eq!(slot.retained, None);
+    }
+
+    #[test]
+    fn cleanup_retry_still_advances_the_session_generation() {
+        assert_eq!(next_session_generation(7, false, true), Ok(8));
+        assert_eq!(next_session_generation(7, false, false), Ok(7));
+        assert_eq!(
+            next_session_generation(u32::MAX, true, false),
+            Err(Error::GenerationExhausted)
+        );
     }
 }
