@@ -24,9 +24,8 @@ use core::any::Any;
 
 /// Policy that determines where a [`TabView`] places its tab bar.
 ///
-/// `Automatic` follows the current input environment: pointer and hybrid
-/// interaction keep the desktop tab bar at the top, while touch interaction
-/// moves it to the bottom edge for thumb-friendly navigation. Explicit
+/// `Automatic` follows tablet posture: laptop mode keeps the tab bar at the
+/// top, while tablet mode moves it to the bottom edge. Explicit
 /// placements always win over the input environment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TabBarPlacement {
@@ -62,7 +61,7 @@ impl TabBarPlacement {
         match self {
             Self::Automatic => match interaction_mode {
                 InteractionMode::Touch => TabBarPosition::Bottom,
-                InteractionMode::Pointer | InteractionMode::Hybrid => TabBarPosition::Top,
+                InteractionMode::Pointer => TabBarPosition::Top,
             },
             Self::Top => TabBarPosition::Top,
             Self::Bottom => TabBarPosition::Bottom,
@@ -188,10 +187,9 @@ impl TabView {
 
     /// Set the policy used to place the tab bar.
     ///
-    /// The default [`TabBarPlacement::Automatic`] keeps the bar at the top for
-    /// pointer and hybrid input, and moves it to the bottom for touch input.
-    /// Use an explicit placement when the surrounding layout requires a fixed
-    /// edge regardless of the available input devices.
+    /// The default [`TabBarPlacement::Automatic`] keeps the bar at the top in
+    /// laptop mode and moves it to the bottom in tablet mode. Use an explicit
+    /// placement when the surrounding layout requires a fixed edge.
     ///
     /// # Arguments
     ///
@@ -871,10 +869,6 @@ mod tests {
             TabBarPosition::Top
         );
         assert_eq!(
-            TabBarPlacement::Automatic.resolve(InteractionMode::Hybrid),
-            TabBarPosition::Top
-        );
-        assert_eq!(
             TabBarPlacement::Automatic.resolve(InteractionMode::Touch),
             TabBarPosition::Bottom
         );
@@ -887,7 +881,7 @@ mod tests {
     #[test]
     fn legacy_render_constructor_keeps_tabs_at_the_top_in_touch_environment() {
         let _environment = crate::input_environment::install_test_input_environment(
-            crate::InputEnvironment::new(1, None, None, true, false, false, false),
+            crate::InputEnvironment::new(1, Some(true), None, true, false, false, false),
         );
         let selected = State::initial(crate::state::generate_state_id());
         let mut render_object = TabViewRenderObject::new(
@@ -913,7 +907,7 @@ mod tests {
     #[test]
     fn touch_environment_places_automatic_tabs_at_the_bottom_for_layout_and_hits() {
         let _environment = crate::input_environment::install_test_input_environment(
-            crate::InputEnvironment::new(1, None, None, true, false, false, false),
+            crate::InputEnvironment::new(1, Some(true), None, true, false, false, false),
         );
         let selected = State::initial(crate::state::generate_state_id());
         let mut render_object = TabViewRenderObject::with_placement(

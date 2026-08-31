@@ -29,10 +29,11 @@ use scarlet_ui_core::error::{Error, Result};
 use scarlet_ui_core::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
 };
-use scarlet_ui_core::geometry::{Point, Rect, Size};
+use scarlet_ui_core::geometry::{EdgeInsets, Point, Rect, Size};
 use scarlet_ui_core::input_environment::InputEnvironment;
 use scarlet_ui_core::platform::{
-    PlatformBackend, PlatformWindow, WindowCreateRequest, WindowDecoration, WindowPlacement,
+    PlatformBackend, PlatformWindow, PlatformWindowDefaults, WindowCreateRequest,
+    WindowDecoration, WindowPlacement,
 };
 use scarlet_ui_core::renderer::{
     BackendFrame, CompositorBackendKind, PaintBackend, PaintContext, RendererBackendKind,
@@ -712,6 +713,8 @@ pub struct SWSPlatformWindow {
     compositor_backend: CompositorBackendKind,
     scale_milli: u32,
     current_size: Size,
+    window_geometry_insets: EdgeInsets,
+    window_geometry_supported: bool,
     fullscreen: bool,
     pointer_locked: bool,
     pointer_lock_requested: Option<bool>,
@@ -820,6 +823,10 @@ impl SwsBackend {
 }
 
 impl PlatformBackend for SwsBackend {
+    fn window_defaults(&mut self) -> PlatformWindowDefaults {
+        PlatformWindowDefaults::new(true)
+    }
+
     fn initial_input_environment(&mut self) -> InputEnvironment {
         self.connection()
             .ok()
@@ -852,6 +859,7 @@ impl PlatformBackend for SwsBackend {
                 request.active_on_focus,
                 request.opaque,
                 request.placement,
+                request.window_geometry_insets,
             )?,
         ))
     }
@@ -901,6 +909,83 @@ impl SWSPlatformWindow {
 
     fn logical_to_physical_len(&self, value: u32) -> u32 {
         Self::logical_to_physical_len_with_scale(value, self.scale_milli)
+    }
+
+    fn logical_to_physical_inset_with_scale(value: f32, scale_milli: u32) -> u32 {
+        if !value.is_finite() || value <= 0.0 {
+            return 0;
+        }
+        let scaled = value * scale_milli.max(1) as f32 / 1000.0;
+        if scaled >= i32::MAX as f32 {
+            i32::MAX as u32
+        } else {
+            (scaled + 0.5) as u32
+        }
+    }
+
+    fn physical_window_geometry(
+        insets: EdgeInsets,
+        surface_width: u32,
+        surface_height: u32,
+        scale_milli: u32,
+    ) -> Result<Option<sws::WindowGeometry>> {
+        let left = Self::logical_to_physical_inset_with_scale(insets.left, scale_milli);
+        let top = Self::logical_to_physical_inset_with_scale(insets.top, scale_milli);
+        let right = Self::logical_to_physical_inset_with_scale(insets.right, scale_milli);
+        let bottom = Self::logical_to_physical_inset_with_scale(insets.bottom, scale_milli);
+        if left == 0 && top == 0 && right == 0 && bottom == 0 {
+            return Ok(None);
+        }
+
+        let horizontal = left
+            .checked_add(right)
+            .filter(|total| *total < surface_width)
+            .ok_or(Error::InvalidSize {
+                width: surface_width,
+                height: surface_height,
+            })?;
+        let vertical = top
+            .checked_add(bottom)
+            .filter(|total| *total < surface_height)
+            .ok_or(Error::InvalidSize {
+                width: surface_width,
+                height: surface_height,
+            })?;
+        Ok(Some(sws::WindowGeometry {
+            x: left as i32,
+            y: top as i32,
+            width: surface_width - horizontal,
+            height: surface_height - vertical,
+        }))
+    }
+
+    fn logical_managed_size(surface_size: Size, insets: EdgeInsets) -> Size {
+        Size::new(
+            (surface_size.width - insets.left - insets.right).max(1.0),
+            (surface_size.height - insets.top - insets.bottom).max(1.0),
+        )
+    }
+
+    fn logical_surface_size_for_managed(
+        width: u32,
+        height: u32,
+        insets: EdgeInsets,
+    ) -> (u32, u32) {
+        fn ceil_surface_length(value: f32) -> u32 {
+            let truncated = value as u32;
+            if truncated == 0 {
+                1
+            } else if truncated < u32::MAX && (truncated as f32) < value {
+                truncated + 1
+            } else {
+                truncated
+            }
+        }
+
+        (
+            ceil_surface_length(width as f32 + insets.left + insets.right),
+            ceil_surface_length(height as f32 + insets.top + insets.bottom),
+        )
     }
 
     fn physical_to_logical_len(&self, value: u32) -> u32 {
@@ -999,6 +1084,7 @@ impl SWSPlatformWindow {
             active_on_focus,
             opaque,
             placement,
+            EdgeInsets::ZERO,
         )
     }
 
@@ -1013,9 +1099,13 @@ impl SWSPlatformWindow {
         active_on_focus: bool,
         opaque: bool,
         placement: WindowPlacement,
+        window_geometry_insets: EdgeInsets,
     ) -> Result<Self> {
         let activation_token = take_launch_activation_token(window_type);
         let requested_renderer_backend = RequestedRendererBackend::from_environment()?;
+        let window_geometry_supported = conn
+            .get_capabilities()
+            .is_ok_and(|capabilities| capabilities.supports_window_geometry());
         let scale_milli = conn
             .get_output_scale()
             .map(Self::sanitize_scale)
@@ -1027,13 +1117,26 @@ impl SWSPlatformWindow {
 
         // Create the surface with the placement hint in the same request so
         // the compositor can apply its policy before the first frame.
+        let physical_geometry = Self::physical_window_geometry(
+            window_geometry_insets,
+            physical_width,
+            physical_height,
+            scale_milli,
+        )?;
         let placement = match placement {
             WindowPlacement::Default => sws_protocol::WindowPlacement::Default,
             WindowPlacement::Centered => sws_protocol::WindowPlacement::Centered,
-            WindowPlacement::At { x, y } => sws_protocol::WindowPlacement::Absolute {
-                x: Self::logical_to_physical_pos_with_scale(x, scale_milli),
-                y: Self::logical_to_physical_pos_with_scale(y, scale_milli),
-            },
+            WindowPlacement::At { x, y } => {
+                let mut x = Self::logical_to_physical_pos_with_scale(x, scale_milli);
+                let mut y = Self::logical_to_physical_pos_with_scale(y, scale_milli);
+                if !window_geometry_supported
+                    && let Some(geometry) = physical_geometry
+                {
+                    x = x.saturating_sub(geometry.x);
+                    y = y.saturating_sub(geometry.y);
+                }
+                sws_protocol::WindowPlacement::Absolute { x, y }
+            }
         };
         let surface_id = if let Some(activation_token) = activation_token {
             conn.create_surface_with_type_and_policies_with_activation_token(
@@ -1069,6 +1172,13 @@ impl SWSPlatformWindow {
             conn.set_window_has_alpha_content(surface_id, true)
                 .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
         }
+        if window_geometry_supported
+            && let Some(geometry) = physical_geometry
+            && conn.set_window_geometry(surface_id, geometry).is_err()
+        {
+            let _ = conn.destroy_surface(surface_id);
+            return Err(scarlet_ui_core::error::Error::IoError);
+        }
         let event_receiver = conn.subscribe_window_events(surface_id);
 
         Ok(Self {
@@ -1080,6 +1190,8 @@ impl SWSPlatformWindow {
             compositor_backend: CompositorBackendKind::Unknown,
             scale_milli,
             current_size: size,
+            window_geometry_insets,
+            window_geometry_supported,
             fullscreen: false,
             pointer_locked: false,
             pointer_lock_requested: None,
@@ -1779,6 +1891,10 @@ impl PlatformWindow for SWSPlatformWindow {
         self.current_size
     }
 
+    fn managed_size(&self) -> Size {
+        Self::logical_managed_size(self.current_size, self.window_geometry_insets)
+    }
+
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         if width == 0 || height == 0 {
             return Err(scarlet_ui_core::error::Error::InvalidSize { width, height });
@@ -1791,6 +1907,12 @@ impl PlatformWindow for SWSPlatformWindow {
 
         let physical_width = self.logical_to_physical_len(width);
         let physical_height = self.logical_to_physical_len(height);
+        let physical_geometry = Self::physical_window_geometry(
+            self.window_geometry_insets,
+            physical_width,
+            physical_height,
+            self.scale_milli,
+        )?;
         let surface_is_current = self
             .conn
             .with_surface(self.surface_id, |surface| {
@@ -1804,10 +1926,26 @@ impl PlatformWindow for SWSPlatformWindow {
         self.conn
             .resize_window(self.surface_id, physical_width, physical_height)
             .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
+        if self.window_geometry_supported
+            && let Some(geometry) = physical_geometry
+        {
+            self.conn
+                .set_window_geometry(self.surface_id, geometry)
+                .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
+        }
 
         self.current_size = new_size;
         self.needs_full_present = true;
         Ok(())
+    }
+
+    fn resize_managed(&mut self, width: u32, height: u32) -> Result<()> {
+        let (surface_width, surface_height) = Self::logical_surface_size_for_managed(
+            width,
+            height,
+            self.window_geometry_insets,
+        );
+        self.resize(surface_width, surface_height)
     }
 
     fn close(&mut self) -> Result<()> {
@@ -1956,6 +2094,7 @@ impl PlatformWindow for SWSPlatformWindow {
             window_type == sws_protocol::window_types::NORMAL,
             true,
             WindowPlacement::Default,
+            EdgeInsets::ZERO,
         )
     }
 
@@ -2484,6 +2623,69 @@ impl SWSPlatformWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sws_enables_the_standard_normal_window_shadow_by_default() {
+        let mut backend = SwsBackend::new();
+        assert_eq!(
+            backend.window_defaults(),
+            PlatformWindowDefaults::new(true)
+        );
+    }
+
+    #[test]
+    fn window_geometry_scales_shadow_outsets_inside_the_surface() {
+        assert_eq!(
+            SWSPlatformWindow::physical_window_geometry(
+                EdgeInsets::new(10.0, 6.0, 10.0, 14.0),
+                648,
+                520,
+                2000,
+            ),
+            Ok(Some(sws::WindowGeometry {
+                x: 20,
+                y: 12,
+                width: 608,
+                height: 480,
+            }))
+        );
+        assert_eq!(
+            SWSPlatformWindow::physical_window_geometry(EdgeInsets::ZERO, 304, 240, 1000),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn managed_resize_preserves_shadow_outsets_in_the_complete_surface() {
+        let insets = EdgeInsets::new(10.0, 6.0, 10.0, 14.0);
+        let body = Size::new(304.0, 188.0);
+        let surface = Size::new(324.0, 208.0);
+
+        assert_eq!(
+            SWSPlatformWindow::logical_surface_size_for_managed(304, 188, insets),
+            (324, 208)
+        );
+        assert_eq!(
+            SWSPlatformWindow::logical_managed_size(surface, insets),
+            body
+        );
+    }
+
+    #[test]
+    fn window_geometry_rejects_outsets_that_consume_the_surface() {
+        assert_eq!(
+            SWSPlatformWindow::physical_window_geometry(
+                EdgeInsets::symmetric(6.0, 10.0),
+                20,
+                40,
+                1000,
+            ),
+            Err(Error::InvalidSize {
+                width: 20,
+                height: 40,
+            })
+        );
+    }
 
     #[test]
     fn system_owned_window_chrome_is_rejected_explicitly() {

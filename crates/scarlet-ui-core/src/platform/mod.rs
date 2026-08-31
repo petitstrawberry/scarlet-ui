@@ -5,13 +5,46 @@ use crate::compositor::DamageRect;
 use crate::element::TextInputElementState;
 use crate::error::Result;
 use crate::event::Event;
-use crate::geometry::{Point, Size};
+use crate::geometry::{EdgeInsets, Point, Size};
 use crate::input_environment::InputEnvironment;
 use crate::renderer::{CompositorBackendKind, PaintBackend, RendererBackendKind};
 use alloc::boxed::Box;
 use alloc::string::String;
 use core::any::Any;
+use core::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+/// Platform-specific defaults applied while building top-level windows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlatformWindowDefaults {
+    /// Whether ordinary custom-framed windows receive ScarletUI's standard shadow.
+    pub standard_shadow: bool,
+}
+
+impl PlatformWindowDefaults {
+    /// Create platform window defaults.
+    ///
+    /// # Arguments
+    ///
+    /// * `standard_shadow` - Whether normal custom-framed windows use a shadow.
+    ///
+    /// # Returns
+    ///
+    /// A platform-default snapshot.
+    pub const fn new(standard_shadow: bool) -> Self {
+        Self { standard_shadow }
+    }
+}
+
+static PLATFORM_STANDARD_WINDOW_SHADOW: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn install_platform_window_defaults(defaults: PlatformWindowDefaults) {
+    PLATFORM_STANDARD_WINDOW_SHADOW.store(defaults.standard_shadow, Ordering::Release);
+}
+
+pub(crate) fn platform_standard_window_shadow() -> bool {
+    PLATFORM_STANDARD_WINDOW_SHADOW.load(Ordering::Acquire)
+}
 
 /// Hint used by the window manager when placing a newly created window.
 ///
@@ -136,10 +169,21 @@ pub struct WindowCreateRequest {
     pub decoration: WindowDecoration,
     /// Initial placement hint passed to the window manager.
     pub placement: WindowPlacement,
+    /// Non-interactive decoration excluded from managed window geometry.
+    pub window_geometry_insets: EdgeInsets,
 }
 
 /// Creates platform windows for the application runner.
 pub trait PlatformBackend {
+    /// Return visual defaults for top-level windows created by this backend.
+    ///
+    /// # Returns
+    ///
+    /// Platform-specific defaults installed before scene construction.
+    fn window_defaults(&mut self) -> PlatformWindowDefaults {
+        PlatformWindowDefaults::default()
+    }
+
     /// Return the input environment to install before initial scene layout.
     ///
     /// Backends that do not implement device discovery retain compact desktop
@@ -225,8 +269,26 @@ pub trait PlatformWindow: Any {
     /// Set the window title
     fn set_title(&mut self, title: &str);
 
-    /// Get the window size
+    /// Get the complete platform-surface size.
+    ///
+    /// # Returns
+    ///
+    /// The logical backing-surface size, including non-interactive decoration
+    /// such as client-rendered shadow outsets.
     fn size(&self) -> Size;
+
+    /// Get the managed visible window-body size.
+    ///
+    /// Backends without separate surface and window geometry return
+    /// [`Self::size`].
+    ///
+    /// # Returns
+    ///
+    /// The logical size used for placement, hit testing, and application
+    /// content layout.
+    fn managed_size(&self) -> Size {
+        self.size()
+    }
 
     /// Get the window backing-store size in physical pixels.
     fn physical_size(&self) -> (u32, u32) {
@@ -238,8 +300,34 @@ pub trait PlatformWindow: Any {
         )
     }
 
-    /// Resize the window
+    /// Resize the complete platform surface.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - New logical backing-surface width.
+    /// * `height` - New logical backing-surface height.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the platform accepted the surface resize.
     fn resize(&mut self, width: u32, height: u32) -> Result<()>;
+
+    /// Resize the managed visible window body.
+    ///
+    /// Backends with client-side decoration add their configured outsets before
+    /// resizing the complete surface. Other backends delegate to [`Self::resize`].
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - New logical managed-body width.
+    /// * `height` - New logical managed-body height.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the platform accepted the managed resize.
+    fn resize_managed(&mut self, width: u32, height: u32) -> Result<()> {
+        self.resize(width, height)
+    }
 
     /// Close the window
     fn close(&mut self) -> Result<()>;

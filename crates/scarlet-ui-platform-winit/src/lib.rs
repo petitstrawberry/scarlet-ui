@@ -1285,6 +1285,7 @@ impl PlatformWindow for WinitPlatformWindow {
                 opaque: true,
                 decoration: WindowDecoration::CUSTOM,
                 placement: scarlet_ui_core::platform::WindowPlacement::Default,
+                window_geometry_insets: scarlet_ui_core::geometry::EdgeInsets::ZERO,
             },
         )
     }
@@ -1490,6 +1491,7 @@ impl PlatformWindow for WinitPlatformWindow {
                 opaque: true,
                 decoration: WindowDecoration::CUSTOM,
                 placement: scarlet_ui_core::platform::WindowPlacement::Default,
+                window_geometry_insets: scarlet_ui_core::geometry::EdgeInsets::ZERO,
             },
         )
     }

@@ -23,15 +23,13 @@ std::thread_local! {
     };
 }
 
-/// The interaction density selected from the currently available input devices.
+/// The interface density selected solely from the current tablet posture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InteractionMode {
-    /// Compact controls intended primarily for a mouse or trackpad.
+    /// Compact controls used while the device is not in tablet mode.
     Pointer,
-    /// Larger controls intended primarily for direct touch.
+    /// Tablet controls used while tablet mode is explicitly enabled.
     Touch,
-    /// Touch-sized controls while both direct touch and a fine pointer are available.
-    Hybrid,
 }
 
 /// A snapshot of the platform's runtime input-device environment.
@@ -104,19 +102,14 @@ impl InputEnvironment {
 
     /// Resolve the effective interaction mode for this snapshot.
     ///
-    /// Explicit tablet mode takes precedence. Otherwise direct touch combined
-    /// with a fine pointer is hybrid, direct touch alone is touch, and all
-    /// remaining environments use pointer metrics.
+    /// Presentation follows tablet posture only. Input capabilities remain
+    /// available through their dedicated accessors but never affect UI mode.
     ///
     /// # Returns
     ///
-    /// The resolved pointer, touch, or hybrid interaction mode.
+    /// Touch when tablet mode is explicitly enabled, otherwise pointer.
     pub const fn interaction_mode(self) -> InteractionMode {
         if matches!(self.tablet_mode, Some(true)) {
-            InteractionMode::Touch
-        } else if self.direct_touch && self.fine_pointer {
-            InteractionMode::Hybrid
-        } else if self.direct_touch {
             InteractionMode::Touch
         } else {
             InteractionMode::Pointer
@@ -344,7 +337,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn interaction_mode_resolution_obeys_runtime_capabilities() {
+    fn interaction_mode_resolution_obeys_only_tablet_posture() {
         let environment = |tablet, touch, pointer| {
             InputEnvironment::new(1, tablet, None, touch, pointer, true, false)
         };
@@ -354,11 +347,11 @@ mod tests {
         );
         assert_eq!(
             environment(Some(false), true, true).interaction_mode(),
-            InteractionMode::Hybrid
+            InteractionMode::Pointer
         );
         assert_eq!(
             environment(None, true, false).interaction_mode(),
-            InteractionMode::Touch
+            InteractionMode::Pointer
         );
         assert_eq!(
             environment(None, false, false).interaction_mode(),

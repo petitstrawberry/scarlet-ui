@@ -7,7 +7,7 @@ use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
-use crate::icon::{Icon, IconFill, IconStyle, IconWeight};
+use crate::icon::{Icon, IconFill, IconSize, IconStyle, IconWeight};
 use crate::renderer::PaintContext;
 use crate::view::View;
 use crate::views::style;
@@ -24,6 +24,7 @@ pub type ButtonCallback = Box<dyn Fn() + 'static>;
 pub struct Button {
     label: String,
     icon: Option<Icon>,
+    icon_size: Option<IconSize>,
     icon_style: IconStyle,
     icon_color: Option<Color>,
     on_click: Option<Arc<dyn Fn() + 'static>>,
@@ -51,6 +52,7 @@ impl Button {
         Self {
             label: label_str,
             icon: None,
+            icon_size: None,
             icon_style: IconStyle::default(),
             icon_color: None,
             on_click: None,
@@ -79,6 +81,7 @@ impl Button {
         Self {
             label: String::new(),
             icon: Some(icon),
+            icon_size: None,
             icon_style: IconStyle::default(),
             icon_color: None,
             on_click: None,
@@ -104,6 +107,21 @@ impl Button {
     /// The updated button.
     pub fn icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// Set the standard logical size used to paint this button's icon.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Standard or explicit icon size.
+    ///
+    /// # Returns
+    ///
+    /// The updated button. The icon remains constrained by the button's
+    /// available content area.
+    pub fn icon_size(mut self, size: IconSize) -> Self {
+        self.icon_size = Some(size);
         self
     }
 
@@ -270,6 +288,16 @@ impl Button {
         self.padding
     }
 
+    /// Get the optional explicit icon size.
+    ///
+    /// # Returns
+    ///
+    /// The configured size, or `None` when the button derives its legacy icon
+    /// size from the available content area.
+    pub fn get_icon_size(&self) -> Option<IconSize> {
+        self.icon_size
+    }
+
     /// Invoke the click callback if present
     pub fn invoke_on_click(&self) {
         if let Some(callback) = self.on_click.as_ref() {
@@ -289,6 +317,7 @@ impl Button {
             self.font_size,
             self.padding,
         );
+        render_object.icon_size = self.icon_size;
         render_object.hover_background_color = self.hover_background_color;
         render_object.pressed_background_color = self.pressed_background_color;
         render_object.appearance = self.appearance;
@@ -314,6 +343,7 @@ impl View for Button {
 pub struct ButtonRenderObject {
     label: String,
     icon: Option<Icon>,
+    icon_size: Option<IconSize>,
     icon_style: IconStyle,
     icon_color: Option<Color>,
     background_color: Color,
@@ -362,6 +392,7 @@ impl ButtonRenderObject {
         Self {
             label,
             icon,
+            icon_size: None,
             icon_style,
             icon_color,
             background_color,
@@ -382,14 +413,21 @@ impl ButtonRenderObject {
     /// Estimate button size based on label
     fn estimate_size(&self) -> Size {
         if self.icon.is_some() && self.label.is_empty() {
-            let side = self.font_size * 1.35 + self.padding * 2.0;
+            let icon_size = self
+                .icon_size
+                .map(|size| size.logical_pixels() as f32)
+                .unwrap_or(self.font_size * 1.35);
+            let side = icon_size + self.padding * 2.0;
             return Size::new(side, side);
         }
         let char_width = self.font_size * 0.6;
 
         let text_width = self.label.len() as f32 * char_width;
         let icon_width = if self.icon.is_some() {
-            self.font_size * 1.1 + 6.0
+            self.icon_size
+                .map(|size| size.logical_pixels() as f32)
+                .unwrap_or(self.font_size * 1.1)
+                + 6.0
         } else {
             0.0
         };
@@ -587,11 +625,16 @@ impl ElementRenderObject for ButtonRenderObject {
         }
 
         if let Some(icon) = self.icon {
-            let icon_size = if self.label.is_empty() {
+            let available_icon_size = if self.label.is_empty() {
                 (self.size.width.min(self.size.height) - self.padding).max(1.0)
             } else {
                 (self.size.height - self.padding).max(1.0)
             };
+            let icon_size = self
+                .icon_size
+                .map(|size| size.logical_pixels() as f32)
+                .unwrap_or(available_icon_size)
+                .min(available_icon_size);
             let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
             let group_width = if self.label.is_empty() {
                 icon_size
@@ -638,6 +681,7 @@ impl ElementRenderObject for ButtonRenderObject {
         };
         self.label = button.label.clone();
         self.icon = button.icon;
+        self.icon_size = button.icon_size;
         self.icon_style = button.icon_style;
         self.icon_color = button.icon_color;
         self.background_color = button.background_color;
@@ -765,6 +809,33 @@ mod tests {
     }
 
     #[test]
+    fn button_geometry_returns_to_laptop_metrics_when_tablet_mode_turns_off() {
+        let _environment = crate::input_environment::install_test_input_environment(
+            crate::InputEnvironment::new(1, Some(true), None, true, true, true, false),
+        );
+        let mut render_object = Button::new("Mode").build_render_object();
+        let tablet_size = render_object.layout(LayoutConstraints::unconstrained());
+
+        crate::input_environment::install_input_environment(crate::InputEnvironment::new(
+            2,
+            Some(false),
+            None,
+            true,
+            true,
+            true,
+            false,
+        ));
+        let laptop_size = render_object.layout(LayoutConstraints::unconstrained());
+
+        assert_eq!(tablet_size.height, 44.0);
+        assert!(laptop_size.height < tablet_size.height);
+        assert_eq!(
+            crate::current_input_environment().interaction_mode(),
+            crate::InteractionMode::Pointer
+        );
+    }
+
+    #[test]
     fn header_buffer_and_retained_paint_share_the_current_background() {
         let mut render_object = laid_out(Button::new("").header_style());
         render_object.set_hovered(true);
@@ -785,6 +856,25 @@ mod tests {
         };
         assert_eq!(*color, expected);
         assert!(*corner_radius > 0.0);
+    }
+
+    #[test]
+    fn explicit_icon_size_uses_the_shared_icon_token_in_retained_paint() {
+        let button = Button::icon_only(Icon::Settings)
+            .header_style()
+            .icon_size(IconSize::Medium);
+        assert_eq!(button.get_icon_size(), Some(IconSize::Medium));
+
+        let render_object = laid_out(button);
+        let mut context = PaintContext::new();
+        assert!(render_object.paint(&mut context, Point::ZERO));
+        let Some(rect) = context.commands().iter().find_map(|command| match command {
+            PaintCommand::DrawIcon { rect, .. } => Some(rect),
+            _ => None,
+        }) else {
+            panic!("icon button should emit a retained icon command");
+        };
+        assert_eq!(rect.size, Size::new(20.0, 20.0));
     }
 
     #[test]

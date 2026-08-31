@@ -74,7 +74,7 @@ pub use text_view::{
 pub use toggle::{Toggle, ToggleRenderObject};
 pub use window::window_type;
 pub use window::{
-    Window, WindowContentLayout, WindowInfo, WindowRenderElement, WindowRenderObject,
+    Window, WindowContentLayout, WindowInfo, WindowRenderElement, WindowRenderObject, WindowShadow,
 };
 
 // Re-export modifiers for convenience

@@ -8,6 +8,7 @@ use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::icon::{Icon, IconSize, IconStyle};
 use crate::renderer::PaintContext;
 use crate::view::View;
 use crate::views::style;
@@ -23,6 +24,8 @@ pub type MenuItemCallback = Box<dyn Fn() + 'static>;
 #[derive(Clone)]
 pub struct MenuItem {
     label: String,
+    icon: Option<Icon>,
+    icon_size: IconSize,
     on_click: Option<Arc<dyn Fn() + 'static>>,
     on_hover: Option<Arc<dyn Fn() + 'static>>,
     font_size: f32,
@@ -36,12 +39,43 @@ impl MenuItem {
         let label_str = label.into();
         Self {
             label: label_str,
+            icon: None,
+            icon_size: IconSize::Small,
             on_click: None,
             on_hover: None,
             font_size: 14.0,
             padding: 6.0,
             selected: false,
         }
+    }
+
+    /// Add a standard ScarletUI icon to this menu item.
+    ///
+    /// # Arguments
+    ///
+    /// * `icon` - Tabler icon rendered before the label, or centered when the
+    ///   label is empty.
+    ///
+    /// # Returns
+    ///
+    /// The updated menu item.
+    pub fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// Set the standard logical size of this menu item's icon.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Standard or explicit icon size.
+    ///
+    /// # Returns
+    ///
+    /// The updated menu item.
+    pub fn icon_size(mut self, size: IconSize) -> Self {
+        self.icon_size = size;
+        self
     }
 
     /// Set the click callback
@@ -77,6 +111,24 @@ impl MenuItem {
     /// Get the menu item label
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    /// Get the optional icon displayed by this menu item.
+    ///
+    /// # Returns
+    ///
+    /// The configured icon, or `None` for a text-only item.
+    pub fn get_icon(&self) -> Option<Icon> {
+        self.icon
+    }
+
+    /// Get the configured logical icon size.
+    ///
+    /// # Returns
+    ///
+    /// The standard or explicit icon size used during layout and painting.
+    pub fn get_icon_size(&self) -> IconSize {
+        self.icon_size
     }
 
     /// Get the font size
@@ -118,7 +170,8 @@ impl View for MenuItem {
                 self.font_size,
                 self.padding,
                 self.selected,
-            ),
+            )
+            .with_icon(self.icon, self.icon_size),
         ))
     }
 
@@ -134,6 +187,8 @@ impl View for MenuItem {
 /// MenuItem RenderObject - handles menu item rendering and interaction
 pub struct MenuItemRenderObject {
     label: String,
+    icon: Option<Icon>,
+    icon_size: IconSize,
     font_size: f32,
     padding: f32,
     selected: bool,
@@ -148,6 +203,8 @@ impl MenuItemRenderObject {
     pub fn new(label: String, font_size: f32, padding: f32, selected: bool) -> Self {
         Self {
             label,
+            icon: None,
+            icon_size: IconSize::Small,
             font_size,
             padding,
             selected,
@@ -158,11 +215,30 @@ impl MenuItemRenderObject {
         }
     }
 
+    fn with_icon(mut self, icon: Option<Icon>, icon_size: IconSize) -> Self {
+        self.icon = icon;
+        self.icon_size = icon_size;
+        self
+    }
+
     /// Estimate menu item size based on label
     fn estimate_size(&self) -> Size {
-        let (text_w, text_h) = graphics::measure_text_sized(&self.label, self.font_size);
-        let width = text_w as f32 + self.padding * 2.0;
-        let height = text_h as f32 + self.padding * 2.0;
+        let (text_w, text_h) = if self.label.is_empty() {
+            (0, 0)
+        } else {
+            graphics::measure_text_sized(&self.label, self.font_size)
+        };
+        let icon_size = self
+            .icon
+            .map(|_| self.icon_size.logical_pixels() as f32)
+            .unwrap_or(0.0);
+        let spacing = if self.icon.is_some() && !self.label.is_empty() {
+            4.0
+        } else {
+            0.0
+        };
+        let width = text_w as f32 + icon_size + spacing + self.padding * 2.0;
+        let height = (text_h as f32).max(icon_size) + self.padding * 2.0;
 
         Size { width, height }
     }
@@ -261,6 +337,8 @@ impl ElementRenderObject for MenuItemRenderObject {
     fn update(&mut self, new_view: &dyn crate::view::View) -> crate::element::UpdateResult {
         if let Some(view) = new_view.as_any().downcast_ref::<MenuItem>() {
             self.label = view.label.clone();
+            self.icon = view.icon;
+            self.icon_size = view.icon_size;
             self.font_size = view.font_size;
             self.padding = view.padding;
             self.selected = view.selected;
@@ -343,15 +421,46 @@ impl ElementRenderObject for MenuItemRenderObject {
             );
         }
 
-        let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
-        let x = origin.x + ((self.size.width - text_w as f32) / 2.0).max(0.0);
-        let y = origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0);
-        ctx.draw_text(
-            Point::new(x, y),
-            self.label.clone(),
-            text_color,
-            self.font_size,
-        );
+        let (text_w, _text_h) = if self.label.is_empty() {
+            (0, 0)
+        } else {
+            graphics::measure_text_sized(&self.label, self.font_size)
+        };
+        let icon_size = self
+            .icon
+            .map(|_| self.icon_size.logical_pixels() as f32)
+            .unwrap_or(0.0);
+        let spacing = if self.icon.is_some() && !self.label.is_empty() {
+            4.0
+        } else {
+            0.0
+        };
+        let group_width = icon_size + spacing + text_w as f32;
+        let group_x = origin.x + ((self.size.width - group_width) / 2.0).max(0.0);
+        if let Some(icon) = self.icon {
+            crate::views::icon::paint_icon(
+                ctx,
+                Point::new(
+                    group_x,
+                    origin.y + ((self.size.height - icon_size) / 2.0).max(0.0),
+                ),
+                icon_size,
+                icon,
+                IconStyle::default(),
+                text_color,
+            );
+        }
+        if !self.label.is_empty() {
+            let text_x = group_x + icon_size + spacing;
+            let text_y =
+                origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0);
+            ctx.draw_text(
+                Point::new(text_x, text_y),
+                self.label.clone(),
+                text_color,
+                self.font_size,
+            );
+        }
         true
     }
 }

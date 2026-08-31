@@ -819,7 +819,7 @@ mod tests {
         assert_eq!(
             SplitAxisPolicy::AdaptiveStack.resolve(
                 SplitAxis::Horizontal,
-                InteractionMode::Hybrid,
+                InteractionMode::Pointer,
                 900.0,
                 640.0,
             ),
@@ -852,7 +852,7 @@ mod tests {
     #[test]
     fn adaptive_touch_layout_stacks_panes_and_uses_a_horizontal_divider_hit_area() {
         let _environment = crate::input_environment::install_test_input_environment(
-            crate::InputEnvironment::new(1, None, None, true, false, false, false),
+            crate::InputEnvironment::new(1, Some(true), None, true, false, false, false),
         );
         let mut render_object = SplitViewRenderObject::<Text, Text>::from_view(
             &SplitView::new(Text::new("A"), Text::new("B"))

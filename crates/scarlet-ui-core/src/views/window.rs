@@ -18,14 +18,14 @@ use crate::color::{Color, ColorPalette};
 use crate::element::{
     Element, ElementId, ElementRenderObject, LayoutConstraints, UpdateResult, WindowSizeLimits,
 };
-use crate::geometry::{Point, Rect, Size};
+use crate::geometry::{EdgeInsets, Point, Rect, Size};
 use crate::menu_model::MenuBarModel;
 use crate::pipeline::{MountContext, PipelineId};
 use crate::platform::{WindowDecoration, WindowFrame, WindowPlacement, WindowTitleBar};
 use crate::renderer::PaintContext;
 use crate::state::Listenable;
 use crate::view::View;
-use crate::views::style;
+use crate::views::style::{self, ElevationRole};
 
 /// Window types (matching sws_protocol::window_types)
 pub mod window_type {
@@ -33,6 +33,7 @@ pub mod window_type {
     pub const ALWAYS_ON_TOP: u32 = 1;
     pub const TASKBAR: u32 = 2;
     pub const DESKTOP: u32 = 3;
+    pub const IME_POPUP: u32 = 4;
 }
 
 /// Window information
@@ -50,6 +51,26 @@ pub struct WindowInfo {
     pub decoration: WindowDecoration,
     pub corner_radius: f32,
     pub placement: WindowPlacement,
+    /// Non-interactive decoration between the surface and managed window geometry.
+    pub window_geometry_insets: EdgeInsets,
+    /// Shadow drawn around the managed window geometry.
+    pub shadow_elevation: ElevationRole,
+}
+
+fn normalized_window_geometry_insets(insets: EdgeInsets) -> EdgeInsets {
+    EdgeInsets::new(
+        insets.left.max(0.0),
+        insets.top.max(0.0),
+        insets.right.max(0.0),
+        insets.bottom.max(0.0),
+    )
+}
+
+fn size_with_outsets(size: Size, outsets: EdgeInsets) -> Size {
+    Size::new(
+        size.width + outsets.left + outsets.right,
+        size.height + outsets.top + outsets.bottom,
+    )
 }
 
 impl WindowInfo {
@@ -78,6 +99,8 @@ impl WindowInfo {
             decoration: WindowDecoration::CUSTOM,
             corner_radius: style::metrics().window_radius,
             placement,
+            window_geometry_insets: EdgeInsets::ZERO,
+            shadow_elevation: ElevationRole::Flat,
         }
     }
 
@@ -93,9 +116,37 @@ impl WindowInfo {
         self
     }
 
+    /// Set non-interactive decoration around the managed window geometry.
+    ///
+    /// # Arguments
+    ///
+    /// * `insets` - Logical pixels reserved for effects such as a drop shadow.
+    ///
+    /// # Returns
+    ///
+    /// The updated window metadata.
+    pub fn with_window_geometry_insets(mut self, insets: EdgeInsets) -> Self {
+        self.window_geometry_insets = normalized_window_geometry_insets(insets);
+        self
+    }
+
+    /// Set the semantic shadow drawn around the managed window geometry.
+    ///
+    /// # Arguments
+    ///
+    /// * `elevation` - Shadow role resolved by the window declaration.
+    ///
+    /// # Returns
+    ///
+    /// The updated window metadata.
+    pub const fn with_shadow_elevation(mut self, elevation: ElevationRole) -> Self {
+        self.shadow_elevation = elevation;
+        self
+    }
+
     /// Return the radius that applies to the rendered window surface.
     pub fn effective_corner_radius(&self) -> f32 {
-        if self.decoration.frame.is_custom() {
+        if self.decoration.frame.is_custom() || self.shadow_elevation != ElevationRole::Flat {
             self.corner_radius.max(0.0)
         } else {
             0.0
@@ -104,7 +155,10 @@ impl WindowInfo {
 
     /// Return whether the platform surface can be advertised as fully opaque.
     pub fn platform_surface_is_opaque(&self) -> bool {
-        self.opaque && self.effective_corner_radius() <= 0.0
+        self.opaque
+            && self.effective_corner_radius() <= 0.0
+            && self.window_geometry_insets == EdgeInsets::ZERO
+            && self.shadow_elevation == ElevationRole::Flat
     }
 
     /// Return the clear color behind the window's explicitly painted shape.
@@ -115,6 +169,20 @@ impl WindowInfo {
             Color::TRANSPARENT
         }
     }
+}
+
+/// Policy for a top-level ScarletUI window shadow.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowShadow {
+    /// Follow the selected platform backend's normal-window policy.
+    #[default]
+    PlatformDefault,
+    /// Always draw ScarletUI's standard top-level window shadow.
+    Enabled,
+    /// Draw the supplied semantic elevation around the top-level body.
+    Elevation(ElevationRole),
+    /// Never add a standard top-level window shadow.
+    Disabled,
 }
 
 /// Constants for window decorations (matching Scarlet_old design)
@@ -230,6 +298,8 @@ pub struct Window<V: View> {
     focus_on_create: bool,
     active_on_focus: bool,
     placement: WindowPlacement,
+    window_geometry_insets: EdgeInsets,
+    shadow: WindowShadow,
     scene_key: Option<String>,
     opens_at_launch: bool,
     content: V,
@@ -323,6 +393,8 @@ impl<V: View> Window<V> {
             focus_on_create: true,
             active_on_focus: true,
             placement: WindowPlacement::Default,
+            window_geometry_insets: EdgeInsets::ZERO,
+            shadow: WindowShadow::PlatformDefault,
             scene_key: None,
             opens_at_launch: true,
             content,
@@ -446,6 +518,113 @@ impl<V: View> Window<V> {
         self
     }
 
+    /// Set non-interactive decoration around the managed window geometry.
+    ///
+    /// This is intended for pixels such as client-rendered drop shadows. The
+    /// complete surface still includes these pixels, while supported window
+    /// managers use the inset rectangle for placement and input targeting.
+    ///
+    /// # Arguments
+    ///
+    /// * `insets` - Logical pixels excluded from managed window geometry.
+    ///
+    /// # Returns
+    ///
+    /// The updated window declaration.
+    pub fn window_geometry_insets(mut self, insets: EdgeInsets) -> Self {
+        self.window_geometry_insets = normalized_window_geometry_insets(insets);
+        self
+    }
+
+    /// Override the platform's standard top-level window shadow policy.
+    ///
+    /// # Arguments
+    ///
+    /// * `enabled` - `true` to force a shadow, `false` to suppress it.
+    ///
+    /// # Returns
+    ///
+    /// The updated window declaration.
+    pub fn shadow(mut self, enabled: bool) -> Self {
+        self.shadow = if enabled {
+            WindowShadow::Enabled
+        } else {
+            WindowShadow::Disabled
+        };
+        self
+    }
+
+    /// Set the full top-level window shadow policy.
+    ///
+    /// # Arguments
+    ///
+    /// * `shadow` - Platform-default, forced-on, or forced-off policy.
+    ///
+    /// # Returns
+    ///
+    /// The updated window declaration.
+    pub fn shadow_policy(mut self, shadow: WindowShadow) -> Self {
+        self.shadow = shadow;
+        self
+    }
+
+    /// Set the semantic elevation drawn outside the managed window body.
+    ///
+    /// The platform surface and managed geometry are resolved automatically
+    /// from the selected elevation's paint outsets.
+    ///
+    /// # Arguments
+    ///
+    /// * `elevation` - Semantic shadow strength for this top-level surface.
+    ///
+    /// # Returns
+    ///
+    /// The updated window declaration.
+    pub fn shadow_elevation(mut self, elevation: ElevationRole) -> Self {
+        self.shadow = WindowShadow::Elevation(elevation);
+        self
+    }
+
+    fn resolved_shadow_elevation(&self) -> ElevationRole {
+        match self.shadow {
+            WindowShadow::Enabled => ElevationRole::Window,
+            WindowShadow::Elevation(elevation) => elevation,
+            WindowShadow::Disabled => ElevationRole::Flat,
+            WindowShadow::PlatformDefault => {
+                if self.window_type == window_type::NORMAL
+                    && self.decoration.frame.is_custom()
+                    && crate::platform::platform_standard_window_shadow()
+                {
+                    ElevationRole::Window
+                } else {
+                    ElevationRole::Flat
+                }
+            }
+        }
+    }
+
+    fn resolved_surface_presentation(&self) -> (Size, EdgeInsets, ElevationRole, bool) {
+        let shadow_elevation = self.resolved_shadow_elevation();
+        if self.window_geometry_insets != EdgeInsets::ZERO {
+            return (
+                self.size,
+                self.window_geometry_insets,
+                shadow_elevation,
+                false,
+            );
+        }
+        if shadow_elevation == ElevationRole::Flat {
+            return (self.size, EdgeInsets::ZERO, shadow_elevation, false);
+        }
+        let outsets = shadow_elevation.paint_outsets();
+        (
+            size_with_outsets(self.size, outsets),
+            outsets,
+            shadow_elevation,
+            true,
+        )
+    }
+
     /// Set menu bar model for the window
     pub fn menu_bar(mut self, menu_bar: MenuBarModel) -> Self {
         self.menu_bar = Some(menu_bar);
@@ -542,6 +721,8 @@ impl<V: View + Clone> Clone for Window<V> {
             focus_on_create: self.focus_on_create,
             active_on_focus: self.active_on_focus,
             placement: self.placement,
+            window_geometry_insets: self.window_geometry_insets,
+            shadow: self.shadow,
             scene_key: self.scene_key.clone(),
             opens_at_launch: self.opens_at_launch,
             content: self.content.clone(),
@@ -551,10 +732,11 @@ impl<V: View + Clone> Clone for Window<V> {
 
 impl<V: View + Clone> WindowViewInfo for Window<V> {
     fn window_info(&self) -> WindowInfo {
+        let (surface_size, insets, shadow_elevation, _) = self.resolved_surface_presentation();
         WindowInfo::new(
             self.app_id.clone(),
             self.title.clone(),
-            self.size,
+            surface_size,
             self.window_type,
             self.menu_bar.clone(),
             self.focus_on_create,
@@ -565,12 +747,27 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
         )
         .with_decoration(self.decoration)
         .with_corner_radius(self.corner_radius)
+        .with_window_geometry_insets(insets)
+        .with_shadow_elevation(shadow_elevation)
     }
 
     fn window_size_limits(&self) -> WindowSizeLimits {
+        let (_, insets, _, adds_outsets) = self.resolved_surface_presentation();
         WindowSizeLimits {
-            min: self.min_size,
-            max: self.max_size,
+            min: self.min_size.map(|size| {
+                if adds_outsets {
+                    size_with_outsets(size, insets)
+                } else {
+                    size
+                }
+            }),
+            max: self.max_size.map(|size| {
+                if adds_outsets {
+                    size_with_outsets(size, insets)
+                } else {
+                    size
+                }
+            }),
             resizable: self.resizable,
         }
     }
@@ -595,13 +792,8 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
 impl<V: View + Clone + 'static> View for Window<V> {
     fn create_element(&self) -> Box<dyn Element> {
         // Create WindowRenderObject for the background and border.
-        let render_object = WindowRenderObject::new(
-            self.title.clone(),
-            self.size,
-            self.decoration,
-            self.corner_radius,
-            self.background_color,
-        );
+        let window_info = self.window_info();
+        let render_object = WindowRenderObject::from_window_info(&window_info);
 
         // Create child elements. The titlebar is a separate render element so
         // content repaints do not repaint window decorations.
@@ -1009,6 +1201,13 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
             .then_some(0)
     }
 
+    fn managed_event_position(&self, x: i32, y: i32) -> (i32, i32) {
+        (
+            x.saturating_sub(self.render_object.window_geometry_insets.left as i32),
+            y.saturating_sub(self.render_object.window_geometry_insets.top as i32),
+        )
+    }
+
     fn titlebar_render_object_mut(&mut self) -> Option<&mut WindowTitleBarRenderObject> {
         let index = self.titlebar_child_index()?;
         self.children
@@ -1212,9 +1411,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
 
         match event {
             crate::event::Event::Mouse(crate::event::MouseEvent::Moved { x, y }) => {
-                // SWS coordinates are already window-relative
-                let local_x = *x;
-                let local_y = *y;
+                let (local_x, local_y) = self.managed_event_position(*x, *y);
 
                 // Only update if position or pressed state changed
                 if local_x != self.last_mouse_x || local_y != self.last_mouse_y {
@@ -1234,12 +1431,10 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                 button: crate::event::MouseButton::Left,
                 ..
             }) => {
-                // SWS coordinates are already window-relative
-                let local_x = *x;
-                let local_y = *y;
+                let (local_x, local_y) = self.managed_event_position(*x, *y);
 
                 // Check if click is in titlebar
-                let width = self.render_object.size.width as u32;
+                let width = self.render_object.window_geometry_size().width as u32;
                 let titlebar_height = titlebar_height() as i32;
 
                 if local_y >= 0 && local_y < titlebar_height {
@@ -1297,12 +1492,10 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
             }) => {
                 // Only handle if we had a button pressed
                 if self.pressed_button != 0 {
-                    // SWS coordinates are already window-relative
-                    let local_x = *x;
-                    let local_y = *y;
+                    let (local_x, local_y) = self.managed_event_position(*x, *y);
 
                     // Check which button we're releasing on
-                    let width = self.render_object.size.width as u32;
+                    let width = self.render_object.window_geometry_size().width as u32;
                     let titlebar_height = titlebar_height() as i32;
 
                     if local_y >= 0 && local_y < titlebar_height {
@@ -1406,6 +1599,8 @@ pub struct WindowRenderObject {
     decoration: WindowDecoration,
     corner_radius: f32,
     background_color: Color,
+    window_geometry_insets: EdgeInsets,
+    shadow_elevation: ElevationRole,
     buffer: Option<Buffer>,
 }
 
@@ -1422,8 +1617,45 @@ impl WindowRenderObject {
             decoration,
             corner_radius: corner_radius.max(0.0),
             background_color,
+            window_geometry_insets: EdgeInsets::ZERO,
+            shadow_elevation: ElevationRole::Flat,
             buffer: None,
         }
+    }
+
+    /// Create a render object from resolved top-level window metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `info` - Resolved surface size, geometry, decoration, and shadow.
+    ///
+    /// # Returns
+    ///
+    /// A render object whose body is inset inside the complete surface.
+    pub fn from_window_info(info: &WindowInfo) -> Self {
+        Self {
+            size: info.size,
+            decoration: info.decoration,
+            corner_radius: info.corner_radius.max(0.0),
+            background_color: info.background_color,
+            window_geometry_insets: info.window_geometry_insets,
+            shadow_elevation: info.shadow_elevation,
+            buffer: None,
+        }
+    }
+
+    fn window_geometry_rect(&self, origin: Point) -> Rect {
+        let insets = self.window_geometry_insets;
+        Rect::from_xywh(
+            origin.x + insets.left,
+            origin.y + insets.top,
+            (self.size.width - insets.left - insets.right).max(1.0),
+            (self.size.height - insets.top - insets.bottom).max(1.0),
+        )
+    }
+
+    fn window_geometry_size(&self) -> Size {
+        self.window_geometry_rect(Point::ZERO).size
     }
 
     /// Get the window background color.
@@ -1433,7 +1665,7 @@ impl WindowRenderObject {
 
     /// Return the radius currently applied to the outer surface.
     pub fn effective_corner_radius(&self) -> f32 {
-        if self.decoration.frame.is_custom() {
+        if self.decoration.frame.is_custom() || self.shadow_elevation != ElevationRole::Flat {
             self.corner_radius.max(0.0)
         } else {
             0.0
@@ -1444,12 +1676,16 @@ impl WindowRenderObject {
         let changed = self.size != info.size
             || self.decoration != info.decoration
             || self.corner_radius != info.corner_radius
-            || self.background_color != info.background_color;
+            || self.background_color != info.background_color
+            || self.window_geometry_insets != info.window_geometry_insets
+            || self.shadow_elevation != info.shadow_elevation;
 
         self.size = info.size;
         self.decoration = info.decoration;
         self.corner_radius = info.corner_radius.max(0.0);
         self.background_color = info.background_color;
+        self.window_geometry_insets = info.window_geometry_insets;
+        self.shadow_elevation = info.shadow_elevation;
 
         if changed {
             UpdateResult::Updated
@@ -1504,6 +1740,7 @@ impl WindowRenderObject {
         let width = libm::ceilf(self.size.width) as usize;
         let height = libm::ceilf(self.size.height) as usize;
         let custom_frame = self.decoration.frame.is_custom();
+        let geometry = self.window_geometry_rect(Point::ZERO);
 
         // Create or resize buffer
         let w = width as u32;
@@ -1525,12 +1762,30 @@ impl WindowRenderObject {
             let w = canvas.width();
             let h = canvas.height();
 
-            // Fill background with the specified color, including explicit transparency.
-            canvas.fill_rect(0, 0, w, h, self.background_color);
+            // Shadow outsets remain transparent in the legacy buffer path.
+            // Retained rendering below supplies the real blurred shadow.
+            canvas.fill_rect(0, 0, w, h, Color::TRANSPARENT);
+            let geometry_x = geometry.origin.x.max(0.0) as i32;
+            let geometry_y = geometry.origin.y.max(0.0) as i32;
+            let geometry_width = geometry.size.width.max(1.0) as u32;
+            let geometry_height = geometry.size.height.max(1.0) as u32;
+            canvas.fill_rect(
+                geometry_x,
+                geometry_y,
+                geometry_width,
+                geometry_height,
+                self.background_color,
+            );
 
             // Draw border
             if custom_frame {
-                Self::draw_border_canvas(&mut canvas, width as u32, height as u32);
+                Self::draw_border_canvas(
+                    &mut canvas,
+                    geometry_x,
+                    geometry_y,
+                    geometry_width,
+                    geometry_height,
+                );
             }
         }
     }
@@ -1743,7 +1998,13 @@ impl WindowRenderObject {
     }
 
     /// Draw window border (exact Scarlet_old design)
-    fn draw_border_canvas(canvas: &mut crate::graphics::Canvas, width: u32, height: u32) {
+    fn draw_border_canvas(
+        canvas: &mut crate::graphics::Canvas,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) {
         if crate::debug::is_enabled() {
             crate::logln!(
                 "[WindowRenderObject] draw_border_canvas: {}x{}",
@@ -1758,7 +2019,7 @@ impl WindowRenderObject {
             return;
         }
 
-        canvas.draw_rect(0, 0, width, height, border_color);
+        canvas.draw_rect(x, y, width, height, border_color);
     }
 }
 
@@ -1807,10 +2068,13 @@ impl ElementRenderObject for WindowRenderObject {
         let content_layout = WindowContentLayout::for_decoration(self.decoration);
         let content_offset = content_layout.offset();
         let decoration_size = content_layout.decoration_size();
-        let content_x = content_offset.x;
-        let content_y = content_offset.y;
-        let content_width = libm::ceilf(size.width - decoration_size.width).max(1.0);
-        let content_height = libm::ceilf(size.height - decoration_size.height).max(1.0);
+        let window_geometry = self.window_geometry_rect(Point::ZERO);
+        let content_x = window_geometry.origin.x + content_offset.x;
+        let content_y = window_geometry.origin.y + content_offset.y;
+        let content_width =
+            libm::ceilf(window_geometry.size.width - decoration_size.width).max(1.0);
+        let content_height =
+            libm::ceilf(window_geometry.size.height - decoration_size.height).max(1.0);
 
         if crate::debug::is_enabled() {
             crate::logln!(
@@ -1826,10 +2090,10 @@ impl ElementRenderObject for WindowRenderObject {
             && let Some(titlebar) = children.get_mut(0)
         {
             titlebar.layout(LayoutConstraints::tight(
-                size.width,
+                window_geometry.size.width,
                 titlebar_height() as f32,
             ));
-            titlebar.set_position(Point::ZERO);
+            titlebar.set_position(window_geometry.origin);
         }
 
         let content_index = if self.decoration.title_bar.is_custom() {
@@ -1864,6 +2128,10 @@ impl ElementRenderObject for WindowRenderObject {
 
     fn size(&self) -> Size {
         self.size
+    }
+
+    fn hit_test(&self, point: Point) -> bool {
+        self.window_geometry_rect(Point::ZERO).contains(point)
     }
 
     fn render(&mut self) {
@@ -1901,10 +2169,15 @@ impl ElementRenderObject for WindowRenderObject {
     }
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
-        let width = libm::ceilf(self.size.width.max(0.0));
-        let height = libm::ceilf(self.size.height.max(0.0));
-        let rect = Rect::from_xywh(origin.x, origin.y, width, height);
+        let rect = self.window_geometry_rect(origin);
         let radius = self.effective_corner_radius();
+        style::elevation_shadow(
+            ctx,
+            rect,
+            radius,
+            ColorPalette::default().shadow(),
+            self.shadow_elevation,
+        );
         if radius > 0.0 {
             ctx.fill_rounded_rect(rect, radius, self.background_color);
         } else {
@@ -1914,12 +2187,13 @@ impl ElementRenderObject for WindowRenderObject {
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext<'_>, origin: Point) -> bool {
-        let width = libm::ceilf(self.size.width.max(0.0));
-        let height = libm::ceilf(self.size.height.max(0.0));
-        if self.decoration.frame.is_custom() && width > 0.0 && height > 0.0 {
+        let border_rect = self.window_geometry_rect(origin);
+        if self.decoration.frame.is_custom()
+            && border_rect.size.width > 0.0
+            && border_rect.size.height > 0.0
+        {
             let border_color = ColorPalette::default().window_border();
             let stroke_width = WINDOW_BORDER_WIDTH as f32;
-            let border_rect = Rect::from_xywh(origin.x, origin.y, width, height);
             ctx.stroke_rounded_rect(
                 border_rect,
                 self.effective_corner_radius(),
@@ -1932,12 +2206,7 @@ impl ElementRenderObject for WindowRenderObject {
     }
 
     fn clip_bounds(&self, origin: Point) -> Option<(Rect, f32)> {
-        let width = libm::ceilf(self.size.width.max(0.0));
-        let height = libm::ceilf(self.size.height.max(0.0));
-        Some((
-            Rect::from_xywh(origin.x, origin.y, width, height),
-            self.effective_corner_radius(),
-        ))
+        Some((self.window_geometry_rect(origin), self.effective_corner_radius()))
     }
 
     fn update(&mut self, _new_view: &dyn View) -> UpdateResult {
@@ -1963,6 +2232,70 @@ mod tests {
 
         let custom = frameless.decorated(true);
         assert_eq!(custom.get_decoration(), WindowDecoration::CUSTOM);
+    }
+
+    #[test]
+    fn window_geometry_insets_reach_platform_metadata_and_clamp_negative_edges() {
+        let window = Window::new("Shadowed", Text::new("Content"))
+            .window_geometry_insets(EdgeInsets::new(10.0, 6.0, -4.0, 14.0));
+
+        assert_eq!(
+            window.window_info().window_geometry_insets,
+            EdgeInsets::new(10.0, 6.0, 0.0, 14.0)
+        );
+    }
+
+    #[test]
+    fn forced_standard_shadow_expands_surface_without_shrinking_managed_size() {
+        let managed_size = Size::new(800.0, 600.0);
+        let window = Window::new("Shadowed", Text::new("Content"))
+            .size(managed_size)
+            .shadow(true);
+        let info = window.window_info();
+        let outsets = ElevationRole::Window.paint_outsets();
+
+        assert_eq!(info.shadow_elevation, ElevationRole::Window);
+        assert_eq!(info.window_geometry_insets, outsets);
+        assert_eq!(info.size, size_with_outsets(managed_size, outsets));
+        assert!(!info.platform_surface_is_opaque());
+
+        let render = WindowRenderObject::from_window_info(&info);
+        assert_eq!(render.window_geometry_size(), managed_size);
+        assert!(!render.hit_test(Point::new(0.0, 0.0)));
+        assert!(render.hit_test(Point::new(outsets.left, outsets.top)));
+    }
+
+    #[test]
+    fn explicit_shadow_disable_preserves_legacy_surface_geometry() {
+        let size = Size::new(800.0, 600.0);
+        let info = Window::new("Flat", Text::new("Content"))
+            .size(size)
+            .shadow(false)
+            .window_info();
+
+        assert_eq!(info.size, size);
+        assert_eq!(info.window_geometry_insets, EdgeInsets::ZERO);
+        assert_eq!(info.shadow_elevation, ElevationRole::Flat);
+    }
+
+    #[test]
+    fn frameless_floating_window_expands_around_the_managed_body_once() {
+        let body_size = Size::new(304.0, 240.0);
+        let window = Window::new("Popover", Text::new("Content"))
+            .size(body_size)
+            .decorated(false)
+            .corner_radius(8.0)
+            .shadow_elevation(ElevationRole::Floating);
+        let info = window.window_info();
+        let outsets = ElevationRole::Floating.paint_outsets();
+
+        assert_eq!(info.size, size_with_outsets(body_size, outsets));
+        assert_eq!(info.window_geometry_insets, outsets);
+        assert_eq!(info.effective_corner_radius(), 8.0);
+
+        let render = WindowRenderObject::from_window_info(&info);
+        assert_eq!(render.window_geometry_size(), body_size);
+        assert_eq!(render.effective_corner_radius(), 8.0);
     }
 
     #[test]

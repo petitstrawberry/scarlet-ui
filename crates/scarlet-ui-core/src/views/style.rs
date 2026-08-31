@@ -33,6 +33,14 @@ const RAISED_SHADOW_BLUR: f32 = 4.0;
 const RAISED_SHADOW_OPACITY: f32 = 0.40;
 const RAISED_OUTSETS: EdgeInsets = EdgeInsets::new(4.0, 3.0, 4.0, 5.0);
 
+const WINDOW_AMBIENT_OFFSET: Offset = Offset::new(0.0, 1.0);
+const WINDOW_AMBIENT_BLUR: f32 = 4.0;
+const WINDOW_AMBIENT_OPACITY: f32 = 0.45;
+const WINDOW_KEY_OFFSET: Offset = Offset::new(0.0, 5.0);
+const WINDOW_KEY_BLUR: f32 = 11.0;
+const WINDOW_KEY_OPACITY: f32 = 0.65;
+const WINDOW_OUTSETS: EdgeInsets = EdgeInsets::new(11.0, 6.0, 11.0, 16.0);
+
 const OVERLAY_AMBIENT_OFFSET: Offset = Offset::new(0.0, 2.0);
 const OVERLAY_AMBIENT_BLUR: f32 = 8.0;
 const OVERLAY_AMBIENT_OPACITY: f32 = 0.65;
@@ -158,10 +166,27 @@ pub enum ElevationRole {
     Flat,
     /// A card-like surface resting just above its parent plane.
     Raised,
+    /// An ordinary top-level application window.
+    Window,
     /// Menus, popovers, and expanded selects.
     Floating,
     /// Dialogs and modal sheets.
     Overlay,
+}
+
+impl ElevationRole {
+    /// Return the paint space required outside an elevated surface's layout
+    /// bounds.
+    ///
+    /// Top-level transparent windows can add these insets around their visible
+    /// surface so the semantic shadow is not clipped by the platform surface.
+    ///
+    /// # Returns
+    ///
+    /// The conservative logical-pixel outsets for this elevation role.
+    pub const fn paint_outsets(self) -> EdgeInsets {
+        elevation_outsets(self)
+    }
 }
 
 pub(crate) fn metrics() -> VisualMetrics {
@@ -171,7 +196,7 @@ pub(crate) fn metrics() -> VisualMetrics {
 const fn metrics_for_mode(mode: InteractionMode) -> VisualMetrics {
     match mode {
         InteractionMode::Pointer => DESKTOP_VISUAL_METRICS,
-        InteractionMode::Touch | InteractionMode::Hybrid => TOUCH_VISUAL_METRICS,
+        InteractionMode::Touch => TOUCH_VISUAL_METRICS,
     }
 }
 
@@ -278,6 +303,7 @@ pub(crate) const fn elevation_outsets(elevation: ElevationRole) -> EdgeInsets {
     match elevation {
         ElevationRole::Flat => EdgeInsets::ZERO,
         ElevationRole::Raised => RAISED_OUTSETS,
+        ElevationRole::Window => WINDOW_OUTSETS,
         ElevationRole::Floating => FLOATING_OUTSETS,
         ElevationRole::Overlay => OVERLAY_OUTSETS,
     }
@@ -301,6 +327,24 @@ pub(crate) fn elevation_shadow(
                 RAISED_SHADOW_BLUR,
                 0.0,
                 shadow.with_opacity(shadow.a * RAISED_SHADOW_OPACITY),
+            );
+        }
+        ElevationRole::Window => {
+            ctx.draw_rounded_rect_shadow(
+                rect,
+                radius,
+                WINDOW_AMBIENT_OFFSET,
+                WINDOW_AMBIENT_BLUR,
+                0.0,
+                shadow.with_opacity(shadow.a * WINDOW_AMBIENT_OPACITY),
+            );
+            ctx.draw_rounded_rect_shadow(
+                rect,
+                radius,
+                WINDOW_KEY_OFFSET,
+                WINDOW_KEY_BLUR,
+                0.0,
+                shadow.with_opacity(shadow.a * WINDOW_KEY_OPACITY),
             );
         }
         ElevationRole::Floating => {
@@ -393,10 +437,9 @@ mod tests {
     use crate::renderer::PaintCommand;
 
     #[test]
-    fn touch_and_hybrid_metrics_materially_expand_interactive_targets() {
+    fn tablet_metrics_materially_expand_interactive_targets() {
         let desktop = metrics_for_mode(InteractionMode::Pointer);
         let touch = metrics_for_mode(InteractionMode::Touch);
-        let hybrid = metrics_for_mode(InteractionMode::Hybrid);
 
         assert_eq!(desktop.minimum_control_height, 24.0);
         assert!(touch.minimum_control_height >= 44.0);
@@ -405,7 +448,6 @@ mod tests {
         assert!(touch.scrollbar_thickness > desktop.scrollbar_thickness);
         assert!(touch.slider_height > desktop.slider_height);
         assert!(touch.toggle_height > desktop.toggle_height);
-        assert_eq!(hybrid, touch);
     }
 
     #[test]

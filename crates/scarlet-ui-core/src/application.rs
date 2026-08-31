@@ -222,6 +222,7 @@ impl ApplicationRunner {
     pub fn run<A: Application + View>(&mut self, app: &mut A) -> Result<()> {
         crate::debug::set_enabled(app.debug_logging());
         crate::debug::set_wheel_log_enabled(wheel_log_env_enabled());
+        crate::platform::install_platform_window_defaults(self.backend.window_defaults());
         install_input_environment(self.backend.initial_input_environment());
         app.init();
 
@@ -295,6 +296,7 @@ impl ApplicationRunner {
             opaque: window_info.platform_surface_is_opaque(),
             decoration: window_info.decoration,
             placement: window_info.placement,
+            window_geometry_insets: window_info.window_geometry_insets,
         };
 
         let mut window = self.backend.create_window(request)?;

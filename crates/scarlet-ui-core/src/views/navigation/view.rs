@@ -33,9 +33,9 @@ const MINIMUM_AUTOMATIC_CONTENT_WIDTH: f32 = 320.0;
 
 /// Policy controlling how a navigation view presents its destinations.
 ///
-/// Automatic presentation responds to both the live interaction mode and the
-/// available width. Direct-touch environments use a bottom bar. Pointer and
-/// hybrid environments retain a sidebar while at least 320 logical pixels
+/// Automatic presentation responds to tablet posture and the available width.
+/// Tablet mode uses a bottom bar. Laptop mode retains a sidebar while at least
+/// 320 logical pixels
 /// remain for content, then fall back to a bottom bar at narrower widths.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NavigationPresentation {
@@ -53,7 +53,7 @@ impl NavigationPresentation {
     ///
     /// # Arguments
     ///
-    /// * `interaction_mode` - Current pointer, touch, or hybrid input mode.
+    /// * `interaction_mode` - Current laptop or tablet interface mode.
     /// * `available_width` - Total width available to the navigation view.
     /// * `sidebar_width` - Width reserved by the sidebar presentation.
     ///
@@ -503,7 +503,7 @@ mod tests {
             NavigationPresentation::Sidebar
         );
         assert_eq!(
-            NavigationPresentation::Automatic.resolve(InteractionMode::Hybrid, 519.0, 200.0),
+            NavigationPresentation::Automatic.resolve(InteractionMode::Pointer, 519.0, 200.0),
             NavigationPresentation::BottomBar
         );
     }

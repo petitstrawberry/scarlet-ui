@@ -447,6 +447,7 @@ impl PreviewHost {
                 opaque: true,
                 decoration: crate::platform::WindowDecoration::CUSTOM,
                 placement: crate::platform::WindowPlacement::Default,
+                window_geometry_insets: crate::geometry::EdgeInsets::ZERO,
             })
             .map_err(|error| error.to_string())?;
         window.set_title(session.title());

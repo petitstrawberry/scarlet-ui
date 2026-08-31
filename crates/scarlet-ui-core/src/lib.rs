@@ -130,8 +130,8 @@ pub use pipeline::{
     DirtyPhase, MountContext, PipelineId, PipelineOwner, RenderingPipeline, StateRegistry,
 };
 pub use platform::{
-    PlatformBackend, PlatformWindow, WindowCreateRequest, WindowDecoration, WindowFrame,
-    WindowPlacement, WindowTitleBar,
+    PlatformBackend, PlatformWindow, PlatformWindowDefaults, WindowCreateRequest,
+    WindowDecoration, WindowFrame, WindowPlacement, WindowTitleBar,
 };
 pub use render::{RenderNode, RenderTree};
 pub use renderer::{
@@ -153,7 +153,8 @@ pub use views::{
 };
 pub use views::{
     Button, ElevationRole, HStack, LazyVStack, Rectangle, Spacer, SplitAxis, SplitAxisPolicy,
-    SplitView, Surface, SurfaceRole, Text, TextField, VStack, Window, WindowContentLayout, ZStack,
+    SplitView, Surface, SurfaceRole, Text, TextField, VStack, Window, WindowContentLayout,
+    WindowShadow, ZStack,
 };
 pub use views::{
     EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView, TextViewRenderObject,
@@ -191,7 +192,9 @@ pub mod prelude {
         InputEnvironment, InteractionMode, current_input_environment,
     };
     pub use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
-    pub use crate::platform::{WindowDecoration, WindowFrame, WindowTitleBar};
+    pub use crate::platform::{
+        PlatformWindowDefaults, WindowDecoration, WindowFrame, WindowTitleBar,
+    };
     pub use crate::renderer::{CompositorBackendKind, RendererBackendKind};
     pub use crate::scene::{
         Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowGroup, WindowId,
@@ -211,7 +214,7 @@ pub mod prelude {
     pub use crate::views::{
         Button, Either, Either3, Either4, Either5, Either6, ElevationRole, HStack, LazyVStack,
         NavigationPresentation, Rectangle, Spacer, SplitAxis, SplitAxisPolicy, SplitView, Surface,
-        SurfaceRole, Text, TextField, VStack, Window, WindowContentLayout, ZStack,
+        SurfaceRole, Text, TextField, VStack, Window, WindowContentLayout, WindowShadow, ZStack,
     };
     pub use crate::views::{
         EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView,

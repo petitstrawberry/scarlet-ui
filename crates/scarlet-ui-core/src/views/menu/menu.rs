@@ -19,7 +19,6 @@ use core::any::Any;
 const MENU_EDGE_PADDING: f32 = 2.0;
 const MENU_SEPARATOR_HEIGHT: f32 = 1.0;
 const MENU_TEXT_INSET: f32 = 8.0;
-const MENU_SURFACE_BORDER_WIDTH: f32 = 1.0;
 
 /// Menu item action
 #[derive(Clone, Copy)]
@@ -153,16 +152,15 @@ impl Menu {
     ///
     /// # Returns
     ///
-    /// The compact pointer row height or the touch-sized row height. Touch and
-    /// hybrid environments always return at least 44 logical pixels.
+    /// The compact laptop row height or the tablet-sized row height.
     pub fn adaptive_item_height() -> f32 {
         style::metrics().minimum_control_height
     }
 
     /// Request a custom item height.
     ///
-    /// The requested value is still clamped to the live adaptive minimum so
-    /// direct-touch rows remain usable.
+    /// An explicit height is preserved across input-environment changes. Leave
+    /// the height unspecified to use the adaptive density policy.
     ///
     /// # Arguments
     ///
@@ -220,11 +218,11 @@ pub struct MenuRenderObject {
 }
 
 impl MenuRenderObject {
-    /// Create a menu render object with a requested row height.
+    /// Create a menu render object with an explicit row height.
     ///
-    /// The requested height remains a lower bound: layout applies the current
-    /// adaptive minimum so rows are at least 44 logical pixels in touch and
-    /// hybrid environments.
+    /// Explicit geometry is not enlarged solely because the input environment
+    /// reports touch or tablet posture. Use [`MenuRenderObject::new_adaptive`]
+    /// when environment-driven density is desired.
     ///
     /// # Arguments
     ///
@@ -234,8 +232,7 @@ impl MenuRenderObject {
     ///
     /// # Returns
     ///
-    /// A render object that uses the requested height subject to live input
-    /// density constraints.
+    /// A render object that preserves the requested height.
     pub fn new(items: Vec<MenuItemContent>, item_height: f32, width: f32) -> Self {
         Self::with_requested_item_height(items, Some(item_height), width)
     }
@@ -253,8 +250,8 @@ impl MenuRenderObject {
     ///
     /// # Returns
     ///
-    /// A render object with compact pointer rows and touch/hybrid rows of at
-    /// least 44 logical pixels.
+    /// A render object with compact laptop rows and tablet rows of at least 44
+    /// logical pixels.
     pub fn new_adaptive(items: Vec<MenuItemContent>, width: f32) -> Self {
         Self::with_requested_item_height(items, None, width)
     }
@@ -272,7 +269,7 @@ impl MenuRenderObject {
                 } else {
                     requested_item_height
                         .unwrap_or_else(Menu::adaptive_item_height)
-                        .max(Menu::adaptive_item_height())
+                        .max(0.0)
                 }
             })
             .sum::<f32>()
@@ -354,7 +351,7 @@ impl MenuRenderObject {
     fn effective_item_height(&self) -> f32 {
         self.requested_item_height
             .unwrap_or_else(Menu::adaptive_item_height)
-            .max(Menu::adaptive_item_height())
+            .max(0.0)
     }
 }
 
@@ -418,31 +415,10 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
             let width = canvas.width();
             let height = canvas.height();
 
-            // The retained path paints a rounded floating surface. Canvas has
-            // no rounded primitive, so rasterize the equivalent geometry here.
-            canvas.fill_rect(0, 0, width, height, crate::color::Color::TRANSPARENT);
-            canvas_fill_rounded_rect(
-                &mut canvas,
-                0,
-                0,
-                width,
-                height,
-                style::surface_radius(style::SurfaceRole::Floating),
-                border_color,
-            );
-            if width > 2 && height > 2 {
-                canvas_fill_rounded_rect(
-                    &mut canvas,
-                    MENU_SURFACE_BORDER_WIDTH as i32,
-                    MENU_SURFACE_BORDER_WIDTH as i32,
-                    width - 2,
-                    height - 2,
-                    (style::surface_radius(style::SurfaceRole::Floating)
-                        - MENU_SURFACE_BORDER_WIDTH)
-                        .max(0.0),
-                    bg_color,
-                );
-            }
+            // Legacy popup windows are opaque. Keep their full rectangular
+            // background so transparent rounded corners cannot appear black.
+            canvas.fill_rect(0, 0, width, height, bg_color);
+            canvas.draw_rect(0, 0, width, height, border_color);
 
             // Draw items
             let mut current_y = MENU_EDGE_PADDING;
@@ -463,13 +439,11 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
                 } else {
                     // Draw hover background
                     if self.hovered_index == Some(i) {
-                        canvas_fill_rounded_rect(
-                            &mut canvas,
+                        canvas.fill_rect(
                             MENU_EDGE_PADDING as i32,
                             current_y as i32,
                             width.saturating_sub((MENU_EDGE_PADDING * 2.0) as u32),
                             libm::ceilf(item_height) as u32,
-                            style::metrics().item_radius,
                             hover_color,
                         );
                     }
@@ -612,42 +586,9 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
     }
 }
 
-fn canvas_fill_rounded_rect(
-    canvas: &mut graphics::Canvas<'_>,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    radius: f32,
-    color: crate::color::Color,
-) {
-    if width == 0 || height == 0 {
-        return;
-    }
-
-    let radius = radius
-        .max(0.0)
-        .min(width as f32 * 0.5)
-        .min(height as f32 * 0.5);
-    for row in 0..height {
-        for column in 0..width {
-            let point_x = column as f32 + 0.5;
-            let point_y = row as f32 + 0.5;
-            let nearest_x = point_x.clamp(radius, width as f32 - radius);
-            let nearest_y = point_y.clamp(radius, height as f32 - radius);
-            let dx = point_x - nearest_x;
-            let dy = point_y - nearest_y;
-            if dx * dx + dy * dy <= radius * radius {
-                canvas.put_pixel(x + column as i32, y + row as i32, color);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::color::Color;
     use crate::element::{ElementRenderObject, LayoutConstraints};
     use crate::input_environment::{
         InputEnvironment, install_input_environment, install_test_input_environment,
@@ -681,12 +622,12 @@ mod tests {
     }
 
     #[test]
-    fn custom_rows_keep_the_touch_minimum() {
+    fn explicit_rows_do_not_grow_in_touch_environment() {
         let _environment = install_test_input_environment(touch_environment());
         let mut menu =
             MenuRenderObject::new(alloc::vec![MenuItemContent::new("Open")], 28.0, 120.0);
 
-        assert_eq!(menu.layout(LayoutConstraints::unconstrained()).height, 48.0);
+        assert_eq!(menu.layout(LayoutConstraints::unconstrained()).height, 32.0);
     }
 
     #[test]
@@ -709,7 +650,7 @@ mod tests {
         let buffer = menu
             .get_buffer()
             .expect("layout creates a legacy popup buffer");
-        assert_eq!(buffer.get_pixel(0, 0), Some(Color::TRANSPARENT.to_bgra()));
+        assert_eq!(buffer.get_pixel(0, 0), Some(palette.border().to_bgra()));
         assert_eq!(buffer.get_pixel(60, 0), Some(palette.border().to_bgra()));
         assert_eq!(
             buffer.get_pixel(50, 10),
