@@ -564,7 +564,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -764,7 +764,7 @@ dependencies = [
 [[package]]
 name = "gpu-raw"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#be3cd95b068ea29694ed31699e0f4778b03c6817"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2cbe28413b8a609a3c50de71fd7f751fd0c7d8ad"
 dependencies = [
  "scarlet-os",
  "scarlet-std",
@@ -1712,7 +1712,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1733,12 +1733,12 @@ dependencies = [
 [[package]]
 name = "scarlet-abi"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#be3cd95b068ea29694ed31699e0f4778b03c6817"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2cbe28413b8a609a3c50de71fd7f751fd0c7d8ad"
 
 [[package]]
 name = "scarlet-os"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#be3cd95b068ea29694ed31699e0f4778b03c6817"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2cbe28413b8a609a3c50de71fd7f751fd0c7d8ad"
 dependencies = [
  "scarlet-abi",
  "scarlet-rt",
@@ -1748,7 +1748,7 @@ dependencies = [
 [[package]]
 name = "scarlet-rt"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#be3cd95b068ea29694ed31699e0f4778b03c6817"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2cbe28413b8a609a3c50de71fd7f751fd0c7d8ad"
 dependencies = [
  "lock_api",
  "scarlet-sys",
@@ -1759,7 +1759,7 @@ dependencies = [
 [[package]]
 name = "scarlet-std"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#be3cd95b068ea29694ed31699e0f4778b03c6817"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2cbe28413b8a609a3c50de71fd7f751fd0c7d8ad"
 dependencies = [
  "hashbrown 0.15.5",
  "scarlet-abi",
@@ -1772,7 +1772,7 @@ dependencies = [
 [[package]]
 name = "scarlet-sys"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#be3cd95b068ea29694ed31699e0f4778b03c6817"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2cbe28413b8a609a3c50de71fd7f751fd0c7d8ad"
 dependencies = [
  "scarlet-abi",
 ]
@@ -1975,7 +1975,7 @@ dependencies = [
 [[package]]
 name = "sgfx"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#be3cd95b068ea29694ed31699e0f4778b03c6817"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2cbe28413b8a609a3c50de71fd7f751fd0c7d8ad"
 dependencies = [
  "gpu-raw",
  "raw-window-handle",
@@ -2003,7 +2003,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-scarlet-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#be3cd95b068ea29694ed31699e0f4778b03c6817"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2cbe28413b8a609a3c50de71fd7f751fd0c7d8ad"
 dependencies = [
  "gpu-raw",
  "scarlet-os",
@@ -2015,7 +2015,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-wgpu"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#be3cd95b068ea29694ed31699e0f4778b03c6817"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2cbe28413b8a609a3c50de71fd7f751fd0c7d8ad"
 dependencies = [
  "bytemuck",
  "pollster",
@@ -2038,7 +2038,7 @@ dependencies = [
 [[package]]
 name = "sgfx-codegen-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#be3cd95b068ea29694ed31699e0f4778b03c6817"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2cbe28413b8a609a3c50de71fd7f751fd0c7d8ad"
 dependencies = [
  "sgfx-core",
 ]
@@ -2046,7 +2046,7 @@ dependencies = [
 [[package]]
 name = "sgfx-core"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#be3cd95b068ea29694ed31699e0f4778b03c6817"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2cbe28413b8a609a3c50de71fd7f751fd0c7d8ad"
 
 [[package]]
 name = "shlex"
@@ -2234,7 +2234,7 @@ dependencies = [
 [[package]]
 name = "sws-client"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#be3cd95b068ea29694ed31699e0f4778b03c6817"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2cbe28413b8a609a3c50de71fd7f751fd0c7d8ad"
 dependencies = [
  "scarlet-os",
  "scarlet-std",
@@ -2244,7 +2244,7 @@ dependencies = [
 [[package]]
 name = "sws-protocol"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#be3cd95b068ea29694ed31699e0f4778b03c6817"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#2cbe28413b8a609a3c50de71fd7f751fd0c7d8ad"
 dependencies = [
  "scarlet-std",
 ]
@@ -2776,7 +2776,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
