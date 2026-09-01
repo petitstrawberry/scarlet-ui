@@ -407,31 +407,10 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             !self.retired.is_empty(),
         )?;
 
-        // A successful SWS window resize is an explicit presentation
-        // discontinuity: SWS switches the window back to its resized SHM
-        // backing and releases every retained image from the old extent. Wait
-        // for those releases, deregister the images, and drop the complete old
-        // session before allocating replacements. Keeping the old three-image
-        // session alive while materializing another three images creates a
-        // roughly 50 MiB transient color-buffer peak at 1080p and can fail on
-        // otherwise healthy low-memory systems.
-        if let Some(previous) = self.session.take() {
-            self.retired.push(RetiredGeneration {
-                session: previous,
-                identities: self.slots.map(|slot| slot.registered),
-                retained: self.slots.map(|slot| slot.retained),
-            });
-            self.encoder = None;
-            self.slots = [SlotState::new(); PRESENTATION_SLOT_COUNT];
-            self.next_slot = 0;
-            self.front_slot = None;
-        }
-        self.cleanup_retired()?;
-        // Preserve the new identity generation even if materializing its
-        // physical images fails. Retrying an allocation must not reuse an
-        // identity that SWS has already observed for the retired extent.
-        self.generation = next_generation;
-
+        // Materialize the replacement before retiring the current session.
+        // SWS continues presenting the old generation until the first frame
+        // from this session reaches the display, then releases the old commit
+        // through the regular shared-frame lifecycle.
         let encoder = SgfxPaintEncoder::with_target_count(
             self.physical_width,
             self.physical_height,
@@ -451,7 +430,13 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             .create_mapped_target_session(encoder.resource_table(), &targets)
             .map_err(|_| Error::Sgfx(Stage::CreateSession))?;
 
-        self.session = Some(session);
+        if let Some(previous) = self.session.replace(session) {
+            self.retired.push(RetiredGeneration {
+                session: previous,
+                identities: self.slots.map(|slot| slot.registered),
+                retained: self.slots.map(|slot| slot.retained),
+            });
+        }
         self.encoder = Some(encoder);
         self.generation = next_generation;
         self.slots = [SlotState::new(); PRESENTATION_SLOT_COUNT];
