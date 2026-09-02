@@ -441,6 +441,17 @@ impl RenderingPipeline {
         let Some(cached) = cache.as_ref() else {
             return false;
         };
+        Self::paint_cached_window_backdrop(ctx, cached, damage_clip);
+        true
+    }
+
+    fn paint_cached_window_backdrop<'a>(
+        ctx: &mut PaintContext<'a>,
+        cached: &WindowBackdropCache,
+        damage_clip: Option<&[Rect]>,
+    ) {
+        let backdrop = cached.backdrop;
+        let origin = cached.origin;
         for source in backdrop.shadow_visible_regions() {
             if Self::paint_bounds_is_empty(source) {
                 continue;
@@ -455,7 +466,6 @@ impl RenderingPipeline {
             ctx.draw_buffer_rect_shared(destination, source, cached.buffer.clone(), 1.0);
         }
         backdrop.paint_body(ctx, origin);
-        true
     }
 
     fn extract_background_color(&self) -> crate::color::Color {
@@ -636,7 +646,8 @@ impl RenderingPipeline {
                 );
             }
             if self.layer_store.root_graph_valid_for(size, scale) {
-                if self.prepare_retained_composite_path(background_color) {
+                if self.prepare_retained_composite_path(background_color, window_backdrop_retained)
+                {
                     return self.render_prepared_retained_composite(background_color);
                 }
                 if crate::debug::repaint_boundary_log_enabled() {
@@ -793,7 +804,11 @@ impl RenderingPipeline {
         }
     }
 
-    fn prepare_retained_composite_path(&mut self, background_color: crate::color::Color) -> bool {
+    fn prepare_retained_composite_path(
+        &mut self,
+        background_color: crate::color::Color,
+        include_window_backdrop: bool,
+    ) -> bool {
         self.dirty_scratch.clear_for_frame();
         self.dirty_scratch
             .ids
@@ -901,6 +916,16 @@ impl RenderingPipeline {
         self.store_paint_damage(partial);
 
         self.retained_ctx.clear();
+        if include_window_backdrop {
+            let Some(cached_backdrop) = self.window_backdrop_cache.as_ref() else {
+                return false;
+            };
+            Self::paint_cached_window_backdrop(
+                &mut self.retained_ctx,
+                cached_backdrop,
+                Some(self.dirty_scratch.rects.as_slice()),
+            );
+        }
         if !Self::composite_layer_container(
             &mut self.retained_ctx,
             &self.layer_store,
@@ -3404,6 +3429,51 @@ mod tests {
             buffer.get_pixel(0, 0),
             Some(crate::color::Color::TRANSPARENT.to_bgra())
         );
+    }
+
+    #[test]
+    fn transparent_window_warm_scroll_preserves_unpainted_background() {
+        let background = crate::color::Color::rgb(38, 48, 64);
+        let scroll = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::TRANSPARENT)
+                .frame(100.0, 600.0),
+        )
+        .content_size(100.0, 600.0)
+        .wheel_sensitivity(1.0)
+        .scrollbar_visibility(ScrollbarVisibility::Never)
+        .frame(100.0, 100.0);
+        let window = Window::new("Transparent scroll gap", scroll)
+            .background_color(background)
+            .shadow(true)
+            .size(Size::new(120.0, 160.0));
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(window.create_element());
+        pipeline.layout_initial();
+        pipeline
+            .render_with_damage()
+            .expect("initial transparent window frame should render");
+        pipeline.reset_paint_test_counters();
+
+        for _ in 0..4 {
+            assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+                delta_x: 0,
+                delta_y: 40,
+                x: 60,
+                y: 80,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Wheel,
+            })));
+            let (buffer, damage) = pipeline
+                .render_with_damage()
+                .expect("warm transparent scroll frame should render");
+            assert!(damage_contains_rect(
+                damage,
+                Rect::from_xywh(60.0, 80.0, 1.0, 1.0)
+            ));
+            assert_eq!(buffer.get_pixel(60, 80), Some(background.to_bgra()));
+        }
+        assert!(pipeline.paint_test_counters().retained_composites > 0);
     }
 
     #[test]
