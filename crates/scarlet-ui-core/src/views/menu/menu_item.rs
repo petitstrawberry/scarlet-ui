@@ -31,6 +31,9 @@ pub struct MenuItem {
     font_size: f32,
     padding: f32,
     selected: bool,
+    foreground_color: Option<Color>,
+    hover_background_color: Option<Color>,
+    active_background_color: Option<Color>,
 }
 
 impl MenuItem {
@@ -46,6 +49,9 @@ impl MenuItem {
             font_size: 14.0,
             padding: 6.0,
             selected: false,
+            foreground_color: None,
+            hover_background_color: None,
+            active_background_color: None,
         }
     }
 
@@ -105,6 +111,39 @@ impl MenuItem {
     /// Set the selected state
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Override the foreground used for both the label and optional icon.
+    ///
+    /// # Arguments
+    ///
+    /// * `color` - Foreground color used by this menu item.
+    ///
+    /// # Returns
+    ///
+    /// The updated menu item.
+    pub fn foreground_color(mut self, color: Color) -> Self {
+        self.foreground_color = Some(color);
+        self
+    }
+
+    /// Override the backgrounds used for pointer hover and active states.
+    ///
+    /// This changes only interaction-state paint. It does not affect the menu
+    /// item's intrinsic size, padding, icon geometry, or idle background.
+    ///
+    /// # Arguments
+    ///
+    /// * `hover` - Background painted while the pointer hovers the item.
+    /// * `active` - Background painted while the item is pressed or selected.
+    ///
+    /// # Returns
+    ///
+    /// The updated menu item.
+    pub fn interaction_background_colors(mut self, hover: Color, active: Color) -> Self {
+        self.hover_background_color = Some(hover);
+        self.active_background_color = Some(active);
         self
     }
 
@@ -171,7 +210,12 @@ impl View for MenuItem {
                 self.padding,
                 self.selected,
             )
-            .with_icon(self.icon, self.icon_size),
+            .with_icon(self.icon, self.icon_size)
+            .with_foreground_color(self.foreground_color)
+            .with_interaction_background_colors(
+                self.hover_background_color,
+                self.active_background_color,
+            ),
         ))
     }
 
@@ -192,6 +236,9 @@ pub struct MenuItemRenderObject {
     font_size: f32,
     padding: f32,
     selected: bool,
+    foreground_color: Option<Color>,
+    hover_background_color: Option<Color>,
+    active_background_color: Option<Color>,
     hovered: bool,
     pressed: bool,
     size: Size,
@@ -208,6 +255,9 @@ impl MenuItemRenderObject {
             font_size,
             padding,
             selected,
+            foreground_color: None,
+            hover_background_color: None,
+            active_background_color: None,
             hovered: false,
             pressed: false,
             size: Size::ZERO,
@@ -218,6 +268,21 @@ impl MenuItemRenderObject {
     fn with_icon(mut self, icon: Option<Icon>, icon_size: IconSize) -> Self {
         self.icon = icon;
         self.icon_size = icon_size;
+        self
+    }
+
+    fn with_foreground_color(mut self, color: Option<Color>) -> Self {
+        self.foreground_color = color;
+        self
+    }
+
+    fn with_interaction_background_colors(
+        mut self,
+        hover: Option<Color>,
+        active: Option<Color>,
+    ) -> Self {
+        self.hover_background_color = hover;
+        self.active_background_color = active;
         self
     }
 
@@ -266,9 +331,11 @@ impl MenuItemRenderObject {
     fn current_background(&self) -> Color {
         let palette = ColorPalette::default();
         if self.pressed || self.selected {
-            palette.menu_active()
+            self.active_background_color
+                .unwrap_or_else(|| palette.menu_active())
         } else if self.hovered {
-            palette.menu_hover()
+            self.hover_background_color
+                .unwrap_or_else(|| palette.menu_hover())
         } else {
             Color::rgba(0.0, 0.0, 0.0, 0.0) // Transparent
         }
@@ -342,6 +409,9 @@ impl ElementRenderObject for MenuItemRenderObject {
             self.font_size = view.font_size;
             self.padding = view.padding;
             self.selected = view.selected;
+            self.foreground_color = view.foreground_color;
+            self.hover_background_color = view.hover_background_color;
+            self.active_background_color = view.active_background_color;
             crate::element::UpdateResult::Updated
         } else {
             crate::element::UpdateResult::Replaced
@@ -371,7 +441,9 @@ impl ElementRenderObject for MenuItemRenderObject {
         }
         let background = self.current_background();
         let palette = ColorPalette::default();
-        let text_color = palette.text_primary();
+        let text_color = self
+            .foreground_color
+            .unwrap_or_else(|| palette.text_primary());
 
         if let Some(ref mut buffer) = self.buffer {
             let mut canvas = graphics::Canvas::for_buffer(buffer);
@@ -406,7 +478,9 @@ impl ElementRenderObject for MenuItemRenderObject {
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let background = self.current_background();
         let palette = ColorPalette::default();
-        let text_color = palette.text_primary();
+        let text_color = self
+            .foreground_color
+            .unwrap_or_else(|| palette.text_primary());
 
         if self.hovered || self.pressed || self.selected {
             style::item_highlight(
@@ -461,5 +535,38 @@ impl ElementRenderObject for MenuItemRenderObject {
             );
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreground_override_does_not_change_menu_item_geometry() {
+        let ordinary = MenuItemRenderObject::new(String::from("Status"), 13.0, 3.0, false)
+            .with_icon(Some(Icon::Volume), IconSize::Small);
+        let tinted = MenuItemRenderObject::new(String::from("Status"), 13.0, 3.0, false)
+            .with_icon(Some(Icon::Volume), IconSize::Small)
+            .with_foreground_color(Some(Color::rgb(1.0, 1.0, 1.0)));
+
+        assert_eq!(ordinary.estimate_size(), tinted.estimate_size());
+    }
+
+    #[test]
+    fn interaction_color_override_does_not_change_geometry_and_uses_exact_states() {
+        let hover = Color::rgba(0.0, 0.0, 0.0, 0.24);
+        let active = Color::rgba(0.0, 0.0, 0.0, 0.36);
+        let ordinary = MenuItemRenderObject::new(String::from("Status"), 13.0, 3.0, false)
+            .with_icon(Some(Icon::Volume), IconSize::Small);
+        let mut tinted = MenuItemRenderObject::new(String::from("Status"), 13.0, 3.0, false)
+            .with_icon(Some(Icon::Volume), IconSize::Small)
+            .with_interaction_background_colors(Some(hover), Some(active));
+
+        assert_eq!(ordinary.estimate_size(), tinted.estimate_size());
+        tinted.set_hovered(true);
+        assert_eq!(tinted.current_background(), hover);
+        tinted.set_pressed(true);
+        assert_eq!(tinted.current_background(), active);
     }
 }
