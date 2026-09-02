@@ -242,6 +242,27 @@ pub trait PlatformWindow: Any {
         CompositorBackendKind::Unknown
     }
 
+    /// Return whether this window supports compositor-paced frame callbacks.
+    ///
+    /// # Returns
+    ///
+    /// `true` when [`Self::request_frame`] can provide one-shot frame grants.
+    fn frame_callbacks_supported(&self) -> bool {
+        false
+    }
+
+    /// Request one compositor-paced frame opportunity.
+    ///
+    /// Backends without frame callback support retain the runner's existing
+    /// timer pacing through this backwards-compatible no-op default.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` after the request is accepted or when callbacks are unsupported.
+    fn request_frame(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     /// Take the platform-owned external paint backend, when one is available.
     ///
     /// This method is called once during window setup. Returning an error keeps

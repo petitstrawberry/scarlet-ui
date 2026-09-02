@@ -715,7 +715,11 @@ pub struct SWSPlatformWindow {
     current_size: Size,
     window_geometry_insets: EdgeInsets,
     window_geometry_supported: bool,
+    frame_callbacks_supported: bool,
+    next_frame_callback_id: u64,
+    pending_frame_callback_id: Option<u64>,
     fullscreen: bool,
+    suspended: bool,
     pointer_locked: bool,
     pointer_lock_requested: Option<bool>,
     pending_events: Vec<Event>,
@@ -1120,6 +1124,8 @@ impl SWSPlatformWindow {
         let capabilities = conn.get_capabilities().ok();
         let window_geometry_supported =
             capabilities.is_some_and(|capabilities| capabilities.supports_window_geometry());
+        let frame_callbacks_supported =
+            capabilities.is_some_and(|capabilities| capabilities.supports_frame_callbacks());
         let configured_creation_supported = capabilities
             .is_some_and(|capabilities| capabilities.supports_configured_window_creation());
         let scale_milli = conn
@@ -1257,7 +1263,11 @@ impl SWSPlatformWindow {
             current_size,
             window_geometry_insets,
             window_geometry_supported,
+            frame_callbacks_supported,
+            next_frame_callback_id: 1,
+            pending_frame_callback_id: None,
             fullscreen: false,
+            suspended: false,
             pointer_locked: false,
             pointer_lock_requested: None,
             pending_events: Vec::new(),
@@ -1813,6 +1823,23 @@ impl PlatformWindow for SWSPlatformWindow {
 
     fn compositor_backend(&self) -> CompositorBackendKind {
         self.compositor_backend
+    }
+
+    fn frame_callbacks_supported(&self) -> bool {
+        self.frame_callbacks_supported
+    }
+
+    fn request_frame(&mut self) -> Result<()> {
+        if !self.frame_callbacks_supported || self.pending_frame_callback_id.is_some() {
+            return Ok(());
+        }
+        let callback_id = self.next_frame_callback_id.max(1);
+        self.next_frame_callback_id = callback_id.wrapping_add(1).max(1);
+        self.conn
+            .request_frame(self.surface_id, callback_id)
+            .map_err(|_| Error::IoError)?;
+        self.pending_frame_callback_id = Some(callback_id);
+        Ok(())
     }
 
     fn take_paint_backend(&mut self) -> Result<Option<Box<dyn PaintBackend>>> {
@@ -2502,6 +2529,24 @@ impl SWSPlatformWindow {
                     self.fullscreen = fullscreen;
                     self.push_event(Event::FullscreenChanged { fullscreen });
                 }
+                let suspended = state_flags & sws::window_state::SUSPENDED != 0;
+                if suspended != self.suspended {
+                    self.suspended = suspended;
+                    self.push_event(Event::WindowSuspendedChanged { suspended });
+                }
+            }
+            SwsEvent::FrameDone {
+                surface_id,
+                callback_id,
+                presentation_time_ns,
+            } if surface_id == self.surface_id => {
+                if self.pending_frame_callback_id != Some(callback_id) {
+                    return;
+                }
+                self.pending_frame_callback_id = None;
+                self.push_event(Event::FrameReady {
+                    presentation_time_ns,
+                });
             }
             SwsEvent::PointerLockChanged { window_id, locked } if window_id == self.surface_id => {
                 if !apply_pointer_lock_confirmation(

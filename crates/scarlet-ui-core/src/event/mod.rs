@@ -28,6 +28,18 @@ pub enum Event {
     /// Window fullscreen state changed on the platform.
     FullscreenChanged { fullscreen: bool },
 
+    /// One compositor-paced frame opportunity is ready for this window.
+    FrameReady {
+        /// Compositor monotonic timestamp in nanoseconds.
+        presentation_time_ns: u64,
+    },
+
+    /// The compositor started or stopped presenting this window.
+    WindowSuspendedChanged {
+        /// `true` while the compositor is not presenting this window.
+        suspended: bool,
+    },
+
     /// Window pointer-lock state changed on the platform.
     PointerLockChanged { locked: bool },
 

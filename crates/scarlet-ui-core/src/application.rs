@@ -106,6 +106,17 @@ pub trait Application: Clone + 'static {
     /// Handle a platform fullscreen state change.
     fn on_window_fullscreen_changed(&mut self, _ctx: &WindowContext, _fullscreen: bool) {}
 
+    /// Handle a compositor presentation-suspension transition.
+    ///
+    /// Suspended windows retain their latest scene state, but the runner does
+    /// not render new frames until the compositor presents them again.
+    ///
+    /// # Arguments
+    ///
+    /// * `_ctx` - Context for the window whose presentation state changed
+    /// * `_suspended` - `true` while the compositor is withholding presentation
+    fn on_window_suspended_changed(&mut self, _ctx: &WindowContext, _suspended: bool) {}
+
     /// Handle a platform pointer-lock state change.
     ///
     /// This reports the state confirmed by the backend, including forced
@@ -331,12 +342,18 @@ impl ApplicationRunner {
 
         app.on_window_created(&context, window.as_mut());
         sync_text_input(window.as_mut(), &pipeline);
+        let frame_pacing_enabled =
+            window.frame_callbacks_supported() && window.request_frame().is_ok();
 
         Ok(WindowSlot {
             context,
             pipeline,
             window,
             presented_this_cycle: false,
+            frame_pacing_enabled,
+            frame_ready: !frame_pacing_enabled,
+            frame_request_outstanding: frame_pacing_enabled,
+            suspended: false,
             _app: PhantomData,
         })
     }
@@ -421,17 +438,24 @@ impl ApplicationRunner {
             for slot in slots.iter_mut() {
                 app.on_window_sync(&slot.context, slot.window.as_mut());
                 sync_text_input(slot.window.as_mut(), &slot.pipeline);
-                if slot.pipeline.has_dirty() && !slot.presented_this_cycle {
+                let frame_granted = !slot.frame_pacing_enabled || slot.frame_ready;
+                if slot.pipeline.has_dirty()
+                    && !slot.presented_this_cycle
+                    && !slot.suspended
+                    && frame_granted
+                {
                     match present_pipeline(&mut slot.pipeline, slot.window.as_mut())? {
                         Presentation::Cpu => {
                             slot.presented_this_cycle = true;
                             any_presented = true;
-                            application_paced_present = true;
+                            request_next_frame(slot);
+                            application_paced_present |= !slot.frame_pacing_enabled;
                             app.on_frame_presented(&slot.context);
                         }
                         Presentation::External => {
                             slot.presented_this_cycle = true;
                             any_presented = true;
+                            request_next_frame(slot);
                             app.on_frame_presented(&slot.context);
                         }
                         Presentation::Idle => {}
@@ -528,7 +552,27 @@ struct WindowSlot<A: Application> {
     pipeline: RenderingPipeline,
     window: Box<dyn PlatformWindow>,
     presented_this_cycle: bool,
+    frame_pacing_enabled: bool,
+    frame_ready: bool,
+    frame_request_outstanding: bool,
+    suspended: bool,
     _app: PhantomData<A>,
+}
+
+fn request_next_frame<A: Application>(slot: &mut WindowSlot<A>) {
+    if !slot.frame_pacing_enabled {
+        return;
+    }
+    slot.frame_ready = false;
+    slot.frame_request_outstanding = false;
+    if slot.window.request_frame().is_ok() {
+        slot.frame_request_outstanding = true;
+    } else {
+        // Preserve compatibility if a negotiated compositor disappears or
+        // rejects pacing at runtime: resume the established timer path.
+        slot.frame_pacing_enabled = false;
+        slot.frame_ready = true;
+    }
 }
 
 fn collect_scene_declarations<A: Application>(app: &A) -> Result<Vec<WindowDeclaration>> {
@@ -720,6 +764,21 @@ fn handle_window_event<A: Application>(
         }
         Event::FullscreenChanged { fullscreen } => {
             app.on_window_fullscreen_changed(&slot.context, fullscreen);
+        }
+        Event::FrameReady {
+            presentation_time_ns,
+        } => {
+            let _ = presentation_time_ns;
+            if slot.frame_pacing_enabled && slot.frame_request_outstanding {
+                slot.frame_request_outstanding = false;
+                slot.frame_ready = true;
+            }
+        }
+        Event::WindowSuspendedChanged { suspended } => {
+            if slot.suspended != suspended {
+                slot.suspended = suspended;
+                app.on_window_suspended_changed(&slot.context, suspended);
+            }
         }
         Event::PointerLockChanged { locked } => {
             let _ = slot
@@ -1161,6 +1220,12 @@ mod tests {
         environment_emitted: bool,
         quit_emitted: [bool; 2],
         poll_calls: [usize; 2],
+        frame_pacing: bool,
+        frame_requests: [usize; 2],
+        frame_ready_emitted: [bool; 2],
+        suspended_emitted: [bool; 2],
+        resumed_emitted: [bool; 2],
+        pacing_waits: usize,
     }
 
     struct EnvironmentTestBackend {
@@ -1210,6 +1275,30 @@ mod tests {
         fn poll_event(&mut self) -> Option<Event> {
             let mut probe = self.probe.borrow_mut();
             probe.poll_calls[self.index] += 1;
+            if probe.frame_pacing {
+                if !probe.frame_ready_emitted[self.index] {
+                    probe.frame_ready_emitted[self.index] = true;
+                    return Some(Event::FrameReady {
+                        presentation_time_ns: 1,
+                    });
+                }
+                if !probe.suspended_emitted[self.index] {
+                    probe.suspended_emitted[self.index] = true;
+                    return Some(Event::WindowSuspendedChanged { suspended: true });
+                }
+                if probe.pacing_waits == 0 {
+                    return None;
+                }
+                if !probe.resumed_emitted[self.index] {
+                    probe.resumed_emitted[self.index] = true;
+                    return Some(Event::WindowSuspendedChanged { suspended: false });
+                }
+                if !probe.presents[self.index].is_empty() && !probe.quit_emitted[self.index] {
+                    probe.quit_emitted[self.index] = true;
+                    return Some(Event::Quit);
+                }
+                return None;
+            }
             let both_presented_initially =
                 probe.presents.iter().all(|presents| !presents.is_empty());
             if self.index == 0 && both_presented_initially && !probe.environment_emitted {
@@ -1241,7 +1330,21 @@ mod tests {
             None
         }
 
-        fn wait_for_event(&mut self, _timeout: Duration) {}
+        fn wait_for_event(&mut self, _timeout: Duration) {
+            let mut probe = self.probe.borrow_mut();
+            if probe.frame_pacing {
+                probe.pacing_waits += 1;
+            }
+        }
+
+        fn frame_callbacks_supported(&self) -> bool {
+            self.probe.borrow().frame_pacing
+        }
+
+        fn request_frame(&mut self) -> Result<()> {
+            self.probe.borrow_mut().frame_requests[self.index] += 1;
+            Ok(())
+        }
 
         fn present(&mut self, buffer: &crate::Buffer) {
             let mut probe = self.probe.borrow_mut();
@@ -1451,6 +1554,59 @@ mod tests {
         for sizes in &probe.present_sizes {
             assert_eq!(sizes.first().copied(), Some((320, 240)));
         }
+    }
+
+    #[derive(Clone)]
+    struct FramePacingApp {
+        suspended_changes: Rc<RefCell<Vec<bool>>>,
+    }
+
+    impl Application for FramePacingApp {
+        fn scenes(&self) -> impl Scene {
+            Window::new("Paced", Text::new("Paced")).size(Size::new(180.0, 120.0))
+        }
+
+        fn on_window_suspended_changed(&mut self, _ctx: &WindowContext, suspended: bool) {
+            self.suspended_changes.borrow_mut().push(suspended);
+        }
+    }
+
+    impl View for FramePacingApp {
+        fn create_element(&self) -> Box<dyn Element> {
+            Text::new("Paced").create_element()
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn compositor_frame_grant_waits_across_suspension_before_presenting() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe {
+            frame_pacing: true,
+            ..EnvironmentRunnerProbe::default()
+        }));
+        let suspended_changes = Rc::new(RefCell::new(Vec::new()));
+        let mut app = FramePacingApp {
+            suspended_changes: suspended_changes.clone(),
+        };
+        let backend = EnvironmentTestBackend {
+            probe: probe.clone(),
+            next_window: 0,
+            negotiated_size: None,
+        };
+
+        ApplicationRunner::new(Box::new(backend))
+            .run(&mut app)
+            .expect("paced runner should resume, present, and quit");
+
+        let probe = probe.borrow();
+        assert_eq!(probe.presents[0].len(), 1);
+        assert_eq!(probe.frame_requests[0], 2);
+        assert!(probe.pacing_waits >= 1);
+        assert_eq!(&*suspended_changes.borrow(), &[true, false]);
     }
 
     fn wheel(delta_y: i32, phase: WheelPhase, source: ScrollSource) -> Event {
