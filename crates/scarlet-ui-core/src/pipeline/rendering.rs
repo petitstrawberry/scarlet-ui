@@ -3347,7 +3347,7 @@ mod tests {
     fn warm_scroll_event() -> Event {
         Event::Mouse(MouseEvent::Wheel {
             delta_x: 0,
-            delta_y: 40,
+            delta_y: -40,
             x: 10,
             y: 10,
             phase: WheelPhase::Moved,
@@ -3410,7 +3410,7 @@ mod tests {
 
         assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
             delta_x: 0,
-            delta_y: 40,
+            delta_y: -40,
             x: 10,
             y: 40,
             phase: WheelPhase::Moved,
@@ -3458,7 +3458,7 @@ mod tests {
         for _ in 0..4 {
             assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
                 delta_x: 0,
-                delta_y: 40,
+                delta_y: -40,
                 x: 60,
                 y: 80,
                 phase: WheelPhase::Moved,
@@ -3816,7 +3816,7 @@ mod tests {
 
         assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
             delta_x: 0,
-            delta_y: 40,
+            delta_y: -40,
             x: 100,
             y: 120,
             phase: WheelPhase::Moved,
@@ -3902,7 +3902,7 @@ mod tests {
 
         assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
             delta_x: 0,
-            delta_y: 40,
+            delta_y: -40,
             x: 220,
             y: 10,
             phase: WheelPhase::Moved,
@@ -4042,7 +4042,7 @@ mod tests {
 
         assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
             delta_x: 0,
-            delta_y: 40,
+            delta_y: -40,
             x: 220,
             y: 10,
             phase: WheelPhase::Moved,
@@ -4213,7 +4213,7 @@ mod tests {
 
         assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
             delta_x: 0,
-            delta_y: 240,
+            delta_y: -240,
             x: 220,
             y: 30,
             phase: WheelPhase::Moved,
@@ -4350,7 +4350,7 @@ mod tests {
 
         assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
             delta_x: 0,
-            delta_y: 900,
+            delta_y: -900,
             x: 10,
             y: 10,
             phase: WheelPhase::Moved,
@@ -4391,7 +4391,7 @@ mod tests {
 
         assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
             delta_x: 0,
-            delta_y: 40,
+            delta_y: -40,
             x: 10,
             y: 10,
             phase: WheelPhase::Moved,

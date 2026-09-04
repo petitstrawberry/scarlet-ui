@@ -1057,10 +1057,10 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let mut next_y = self.offset_y;
 
         if self.axes.allows_x() {
-            next_x += scaled_x;
+            next_x -= scaled_x;
         }
         if self.axes.allows_y() {
-            next_y += scaled_y;
+            next_y -= scaled_y;
         }
 
         let offset_changed = self.set_offset(next_x, next_y);
@@ -1173,7 +1173,7 @@ mod tests {
     use crate::views::Text;
 
     #[test]
-    fn wheel_updates_vertical_offset_and_clamps() {
+    fn wheel_content_direction_updates_vertical_offset_and_clamps() {
         let mut render_object = ScrollViewRenderObject::<Text>::new(
             ScrollAxis::Vertical,
             Some(Size::new(100.0, 300.0)),
@@ -1184,7 +1184,7 @@ mod tests {
         assert!(render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
                 delta_x: 0,
-                delta_y: 80,
+                delta_y: -80,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1197,7 +1197,7 @@ mod tests {
         assert!(render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
                 delta_x: 0,
-                delta_y: 10_000,
+                delta_y: -10_000,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1206,6 +1206,19 @@ mod tests {
             Phase::Target,
         ));
         assert_eq!(render_object.offset(), (0.0, 200.0));
+
+        assert!(render_object.handle_event(
+            &Event::Mouse(MouseEvent::Wheel {
+                delta_x: 0,
+                delta_y: 80,
+                x: 10,
+                y: 10,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Trackpad,
+            }),
+            Phase::Target,
+        ));
+        assert_eq!(render_object.offset(), (0.0, 180.0));
     }
 
     #[test]
@@ -1219,8 +1232,8 @@ mod tests {
 
         assert!(render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
-                delta_x: 80,
-                delta_y: 10,
+                delta_x: -80,
+                delta_y: -10,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1243,7 +1256,7 @@ mod tests {
 
         assert!(render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
-                delta_x: -100,
+                delta_x: 100,
                 delta_y: 0,
                 x: 10,
                 y: 10,
@@ -1256,7 +1269,7 @@ mod tests {
 
         assert!(render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
-                delta_x: 50,
+                delta_x: -50,
                 delta_y: 0,
                 x: 10,
                 y: 10,
@@ -1280,7 +1293,7 @@ mod tests {
         assert!(!render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
                 delta_x: 0,
-                delta_y: 80,
+                delta_y: -80,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1292,8 +1305,8 @@ mod tests {
 
         assert!(!render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
-                delta_x: 8,
-                delta_y: 40,
+                delta_x: -8,
+                delta_y: -40,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1305,8 +1318,8 @@ mod tests {
 
         assert!(!render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
-                delta_x: 28,
-                delta_y: 8,
+                delta_x: -28,
+                delta_y: -8,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1318,7 +1331,7 @@ mod tests {
 
         assert!(render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
-                delta_x: 4,
+                delta_x: -4,
                 delta_y: 0,
                 x: 10,
                 y: 10,
@@ -1331,8 +1344,8 @@ mod tests {
 
         assert!(render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
-                delta_x: 80,
-                delta_y: 8,
+                delta_x: -80,
+                delta_y: -8,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1354,7 +1367,7 @@ mod tests {
 
         assert!(!render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
-                delta_x: 80,
+                delta_x: -80,
                 delta_y: 0,
                 x: 10,
                 y: 10,
@@ -1367,8 +1380,8 @@ mod tests {
 
         assert!(!render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
-                delta_x: 40,
-                delta_y: 8,
+                delta_x: -40,
+                delta_y: -8,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1380,8 +1393,8 @@ mod tests {
 
         assert!(!render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
-                delta_x: 8,
-                delta_y: 28,
+                delta_x: -8,
+                delta_y: -28,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1394,7 +1407,7 @@ mod tests {
         assert!(render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
                 delta_x: 0,
-                delta_y: 4,
+                delta_y: -4,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1406,8 +1419,8 @@ mod tests {
 
         assert!(render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
-                delta_x: 8,
-                delta_y: 80,
+                delta_x: -8,
+                delta_y: -80,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1430,7 +1443,7 @@ mod tests {
         assert!(!render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
                 delta_x: 0,
-                delta_y: -40,
+                delta_y: 40,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1443,7 +1456,7 @@ mod tests {
         assert!(render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
                 delta_x: 0,
-                delta_y: 100,
+                delta_y: -100,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1456,7 +1469,7 @@ mod tests {
         assert!(!render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
                 delta_x: 0,
-                delta_y: 40,
+                delta_y: -40,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1479,7 +1492,7 @@ mod tests {
         assert!(!render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
                 delta_x: 0,
-                delta_y: 40,
+                delta_y: -40,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,
@@ -1546,8 +1559,8 @@ mod tests {
         outer.layout(LayoutConstraints::tight(100.0, 100.0));
 
         let wheel = Event::Mouse(MouseEvent::Wheel {
-            delta_x: 8,
-            delta_y: 40,
+            delta_x: -8,
+            delta_y: -40,
             x: 10,
             y: 10,
             phase: WheelPhase::Moved,
@@ -1584,7 +1597,7 @@ mod tests {
 
         let wheel = Event::Mouse(MouseEvent::Wheel {
             delta_x: 0,
-            delta_y: 32,
+            delta_y: -32,
             x: 10,
             y: 10,
             phase: WheelPhase::Moved,
@@ -1640,7 +1653,7 @@ mod tests {
         assert!(render_object.handle_event(
             &Event::Mouse(MouseEvent::Wheel {
                 delta_x: 0,
-                delta_y: 40,
+                delta_y: -40,
                 x: 10,
                 y: 10,
                 phase: WheelPhase::Moved,

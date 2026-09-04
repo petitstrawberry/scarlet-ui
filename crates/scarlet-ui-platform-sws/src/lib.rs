@@ -2284,16 +2284,16 @@ impl SWSPlatformWindow {
         if scarlet_ui_core::debug::wheel_log_enabled() {
             logln!(
                 "[Wheel] sws normalized delta=({}, {}) cursor=({}, {})",
-                -delta_x,
-                -delta_y,
+                delta_x,
+                delta_y,
                 self.pointer_x,
                 self.pointer_y
             );
         }
 
         self.push_event(Event::Mouse(MouseEvent::Wheel {
-            delta_x: -delta_x,
-            delta_y: -delta_y,
+            delta_x,
+            delta_y,
             x: self.pointer_x,
             y: self.pointer_y,
             phase: WheelPhase::Moved,
@@ -2850,14 +2850,16 @@ mod tests {
     }
 
     #[test]
-    fn wheel_delta_prefers_hi_res_over_discrete() {
+    fn wheel_delta_prefers_hi_res_and_preserves_direction() {
         let mut pending = PendingWheelDelta::default();
+        pending.add_discrete_x(-10);
+        pending.add_hi_res_x(-120);
         pending.add_discrete_y(10);
         pending.add_hi_res_y(120);
 
         let (delta_x, delta_y) = pending.take_normalized().unwrap();
 
-        assert_eq!(delta_x, 0);
+        assert_eq!(delta_x, -WHEEL_LINE_DELTA);
         assert_eq!(delta_y, WHEEL_LINE_DELTA);
     }
 

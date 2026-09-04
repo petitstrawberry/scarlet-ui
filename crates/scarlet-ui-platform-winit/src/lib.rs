@@ -911,16 +911,7 @@ impl ApplicationHandler for WinitPumpHandler {
                 state.push(Event::Mouse(event));
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
-                let (delta_x, delta_y, source) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => {
-                        ((-x * 32.0) as i32, (-y * 32.0) as i32, ScrollSource::Wheel)
-                    }
-                    MouseScrollDelta::PixelDelta(delta) => (
-                        -physical_to_logical_pos(delta.x, state.scale_factor),
-                        -physical_to_logical_pos(delta.y, state.scale_factor),
-                        ScrollSource::Trackpad,
-                    ),
-                };
+                let (delta_x, delta_y, source) = map_winit_wheel_delta(delta, state.scale_factor);
                 let x = state.cursor_x;
                 let y = state.cursor_y;
                 let mapped_phase = map_wheel_phase(phase);
@@ -1617,6 +1608,19 @@ fn physical_to_logical_pos(value: f64, scale_factor: f64) -> i32 {
     (value / scale_factor.max(0.001)).round() as i32
 }
 
+fn map_winit_wheel_delta(delta: MouseScrollDelta, scale_factor: f64) -> (i32, i32, ScrollSource) {
+    match delta {
+        MouseScrollDelta::LineDelta(x, y) => {
+            ((x * 32.0) as i32, (y * 32.0) as i32, ScrollSource::Wheel)
+        }
+        MouseScrollDelta::PixelDelta(delta) => (
+            physical_to_logical_pos(delta.x, scale_factor),
+            physical_to_logical_pos(delta.y, scale_factor),
+            ScrollSource::Trackpad,
+        ),
+    }
+}
+
 fn f64_to_i32_saturated(value: f64) -> i32 {
     if value <= i32::MIN as f64 {
         i32::MIN
@@ -1704,6 +1708,25 @@ mod tests {
                 WindowTitleBar::System,
             )),
             Err(Error::WindowDecorationUnsupported)
+        );
+    }
+
+    #[test]
+    fn line_wheel_mapping_preserves_platform_direction() {
+        assert_eq!(
+            map_winit_wheel_delta(MouseScrollDelta::LineDelta(1.0, -2.0), 1.0),
+            (32, -64, ScrollSource::Wheel)
+        );
+    }
+
+    #[test]
+    fn trackpad_mapping_preserves_platform_direction_while_scaling() {
+        assert_eq!(
+            map_winit_wheel_delta(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(20.0, -10.0)),
+                2.0,
+            ),
+            (10, -5, ScrollSource::Trackpad)
         );
     }
 

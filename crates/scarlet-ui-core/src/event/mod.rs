@@ -145,7 +145,9 @@ pub enum MouseEvent {
 
     /// Mouse wheel scrolled.
     ///
-    /// Positive deltas move the content offset right/down.
+    /// Positive deltas move the content right/down. Platform input policy
+    /// applies the user's scroll-direction preference before delivery, and
+    /// ScarletUI adapters preserve that normalized direction.
     Wheel {
         delta_x: i32,
         delta_y: i32,

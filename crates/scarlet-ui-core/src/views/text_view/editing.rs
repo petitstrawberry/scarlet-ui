@@ -400,8 +400,8 @@ fn scroll_view(
     delta_y: i32,
 ) -> bool {
     let requested = super::TextViewScroll {
-        x: render_object.scroll.x + delta_x as f32,
-        y: render_object.scroll.y + delta_y as f32,
+        x: render_object.scroll.x - delta_x as f32,
+        y: render_object.scroll.y - delta_y as f32,
     };
     set_scroll(view, render_object, requested);
     true

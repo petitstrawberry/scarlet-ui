@@ -272,7 +272,7 @@ mod tests {
         .expect("list should contain a ScrollView element");
         let wheel = Event::Mouse(MouseEvent::Wheel {
             delta_x: 0,
-            delta_y: 400,
+            delta_y: -400,
             x: 10,
             y: 10,
             phase: WheelPhase::Moved,

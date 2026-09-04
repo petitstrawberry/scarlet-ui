@@ -1322,7 +1322,7 @@ fn mouse_wheel_scrolls_vertically_and_clamps() {
         &mut render_object,
         &MouseEvent::Wheel {
             delta_x: 0,
-            delta_y: 10_000,
+            delta_y: -10_000,
             x: 0,
             y: 0,
             phase: WheelPhase::Moved,
@@ -1353,7 +1353,7 @@ fn mouse_wheel_scrolls_horizontally_without_wrapping() {
         &view,
         &mut render_object,
         &MouseEvent::Wheel {
-            delta_x: 40,
+            delta_x: -40,
             delta_y: 0,
             x: 0,
             y: 0,
