@@ -1,11 +1,6 @@
 //! OS compatibility layer for ScarletUI.
 
 #[cfg(feature = "std")]
-pub use std::fs::File;
-#[cfg(feature = "std")]
-pub use std::io::Read;
-
-#[cfg(feature = "std")]
 pub struct Mutex<T> {
     inner: std::sync::Mutex<T>,
 }

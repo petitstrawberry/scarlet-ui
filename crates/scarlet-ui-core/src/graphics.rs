@@ -12,10 +12,17 @@ use ab_glyph::{Font, FontRef, Glyph, InvalidFont, PxScale, PxScaleFont, ScaleFon
 use crate::buffer::Buffer;
 use crate::color::Color;
 use crate::geometry::Rect;
+#[cfg(not(feature = "std"))]
 use crate::logln as println;
+#[cfg(not(feature = "std"))]
+use crate::os::File;
+use crate::os::Mutex;
+
 #[cfg(feature = "std")]
-use crate::os::Read;
-use crate::os::{File, Mutex};
+mod font_discovery;
+
+#[cfg(feature = "std")]
+use font_discovery::{DiscoveredFont, FontDiscovery};
 
 static CURRENT_SCALE_MILLI: AtomicU32 = AtomicU32::new(1000);
 
@@ -243,58 +250,10 @@ fn glyph_cache_get_or_rasterize(
     Some(entry)
 }
 
-#[cfg(any(not(feature = "std"), all(feature = "std", target_os = "scarlet")))]
+#[cfg(not(feature = "std"))]
 const DEFAULT_FONT_PATH: &str = "/fonts/Mplus1-Regular.ttf";
-#[cfg(any(not(feature = "std"), all(feature = "std", target_os = "scarlet")))]
+#[cfg(not(feature = "std"))]
 const FALLBACK_FONT_PATHS: &[&str] = &["/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"];
-
-#[cfg(all(feature = "std", target_os = "scarlet"))]
-const STD_DEFAULT_FONT_PATHS: &[&str] = &[DEFAULT_FONT_PATH];
-
-#[cfg(all(feature = "std", target_os = "scarlet"))]
-const STD_FALLBACK_FONT_PATHS: &[&str] = FALLBACK_FONT_PATHS;
-
-#[cfg(all(feature = "std", target_os = "macos"))]
-const STD_DEFAULT_FONT_PATHS: &[&str] = &[
-    "/System/Library/Fonts/SFNS.ttf",
-    concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../bundles/desktop/fs/system/scarlet/fonts/Mplus1-Regular.ttf"
-    ),
-    "/Library/Fonts/OpenSans-Regular.ttf",
-];
-
-#[cfg(all(feature = "std", target_os = "macos"))]
-const STD_FALLBACK_FONT_PATHS: &[&str] = &[
-    concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../bundles/desktop/fs/system/scarlet/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"
-    ),
-    "/System/Library/Fonts/SFNSMono.ttf",
-    "/System/Library/Fonts/Apple Symbols.ttf",
-];
-
-#[cfg(all(feature = "std", not(any(target_os = "scarlet", target_os = "macos"))))]
-const STD_DEFAULT_FONT_PATHS: &[&str] = &[
-    concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../bundles/desktop/fs/system/scarlet/fonts/Mplus1-Regular.ttf"
-    ),
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-];
-
-#[cfg(all(feature = "std", not(any(target_os = "scarlet", target_os = "macos"))))]
-const STD_FALLBACK_FONT_PATHS: &[&str] = &[
-    concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../bundles/desktop/fs/system/scarlet/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"
-    ),
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-];
 
 static NEXT_FONT_STACK_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -376,6 +335,8 @@ impl FontStack {
 struct DefaultFontState {
     font: Option<FontRef<'static>>,
     fallback_fonts: Vec<FontRef<'static>>,
+    #[cfg(feature = "std")]
+    discovery: Option<FontDiscovery>,
     cache_id: usize,
     load_attempted: bool,
 }
@@ -383,6 +344,8 @@ struct DefaultFontState {
 static DEFAULT_FONT: Mutex<DefaultFontState> = Mutex::new(DefaultFontState {
     font: None,
     fallback_fonts: Vec::new(),
+    #[cfg(feature = "std")]
+    discovery: None,
     cache_id: 0,
     load_attempted: false,
 });
@@ -407,6 +370,10 @@ pub fn set_default_font(font_bytes: &'static [u8]) -> Result<(), InvalidFont> {
     let font = FontRef::try_from_slice(font_bytes)?;
     let mut state = DEFAULT_FONT.lock();
     state.font = Some(font);
+    #[cfg(feature = "std")]
+    {
+        state.discovery = None;
+    }
     state.cache_id = next_font_stack_id();
     drop(state);
     clear_text_caches();
@@ -435,6 +402,10 @@ pub fn set_default_font_stack(font_stack: FontStack) {
     let mut state = DEFAULT_FONT.lock();
     state.font = Some(primary);
     state.fallback_fonts = fallbacks;
+    #[cfg(feature = "std")]
+    {
+        state.discovery = None;
+    }
     state.cache_id = cache_id;
     drop(state);
     clear_text_caches();
@@ -456,6 +427,10 @@ pub fn add_default_font_fallback(font_bytes: &'static [u8]) -> Result<(), Invali
     let font = FontRef::try_from_slice(font_bytes)?;
     let mut state = DEFAULT_FONT.lock();
     state.fallback_fonts.push(font);
+    #[cfg(feature = "std")]
+    {
+        state.discovery = None;
+    }
     state.cache_id = next_font_stack_id();
     drop(state);
     clear_text_caches();
@@ -470,21 +445,28 @@ pub fn add_default_font_fallback(font_bytes: &'static [u8]) -> Result<(), Invali
 pub fn clear_default_font_fallbacks() {
     let mut state = DEFAULT_FONT.lock();
     state.fallback_fonts.clear();
+    #[cfg(feature = "std")]
+    {
+        state.discovery = None;
+    }
     state.cache_id = next_font_stack_id();
     drop(state);
     clear_text_caches();
 }
 
+#[cfg(not(feature = "std"))]
 fn set_default_font_owned(font_bytes: Vec<u8>) -> Result<(), InvalidFont> {
     let leaked: &'static [u8] = Box::leak(font_bytes.into_boxed_slice());
     set_default_font(leaked)
 }
 
+#[cfg(not(feature = "std"))]
 fn add_fallback_font_owned(font_bytes: Vec<u8>) -> Result<(), InvalidFont> {
     let leaked: &'static [u8] = Box::leak(font_bytes.into_boxed_slice());
     add_default_font_fallback(leaked)
 }
 
+#[cfg(not(feature = "std"))]
 fn read_font_file(path: &str) -> Option<Vec<u8>> {
     let mut file = match File::open(path) {
         Ok(f) => f,
@@ -512,6 +494,7 @@ fn read_font_file(path: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+#[cfg(feature = "std")]
 fn load_fonts_from_rootfs_once() {
     let should_try = {
         let mut state = DEFAULT_FONT.lock();
@@ -527,47 +510,110 @@ fn load_fonts_from_rootfs_once() {
         return;
     }
 
-    for path in default_font_paths() {
-        if let Some(bytes) = read_font_file(path)
-            && set_default_font_owned(bytes).is_ok()
-        {
-            break;
-        }
-    }
+    let mut discovery = FontDiscovery::new();
+    let Some(font) = ['A', 'a', '日']
+        .into_iter()
+        .find_map(|ch| discovery.font_for_char(ch))
+    else {
+        return;
+    };
+    let Ok(font) = discovered_font_ref(font) else {
+        return;
+    };
 
-    if DEFAULT_FONT.lock().font.is_none() {
+    let mut state = DEFAULT_FONT.lock();
+    if state.font.is_none() {
+        state.font = Some(font);
+        state.discovery = Some(discovery);
+        state.cache_id = next_font_stack_id();
+    }
+}
+
+#[cfg(not(feature = "std"))]
+fn load_fonts_from_rootfs_once() {
+    let should_try = {
+        let mut state = DEFAULT_FONT.lock();
+        if state.font.is_some() || state.load_attempted {
+            false
+        } else {
+            state.load_attempted = true;
+            true
+        }
+    };
+
+    if !should_try {
         return;
     }
 
-    for path in fallback_font_paths() {
-        if let Some(bytes) = read_font_file(path)
-            && add_fallback_font_owned(bytes).is_ok()
-        {
-            continue;
+    if let Some(bytes) = read_font_file(DEFAULT_FONT_PATH) {
+        let _ = set_default_font_owned(bytes);
+    }
+    if DEFAULT_FONT.lock().font.is_none() {
+        return;
+    }
+    for path in FALLBACK_FONT_PATHS {
+        if let Some(bytes) = read_font_file(path) {
+            let _ = add_fallback_font_owned(bytes);
         }
     }
 }
 
-fn default_font_paths() -> &'static [&'static str] {
-    #[cfg(feature = "std")]
-    {
-        STD_DEFAULT_FONT_PATHS
+#[cfg(feature = "std")]
+fn discovered_font_ref(font: DiscoveredFont) -> Result<FontRef<'static>, InvalidFont> {
+    let leaked: &'static [u8] = Box::leak(font.bytes.into_boxed_slice());
+    FontRef::try_from_slice_and_index(leaked, font.index)
+}
+
+#[cfg(feature = "std")]
+fn ensure_default_font_coverage(text: &str) {
+    let mut changed = false;
+    let mut state = DEFAULT_FONT.lock();
+    for ch in text.chars().filter(|ch| !ch.is_control()) {
+        let covered = state
+            .font
+            .as_ref()
+            .is_some_and(|font| font.glyph_id(ch).0 != 0)
+            || state
+                .fallback_fonts
+                .iter()
+                .any(|font| font.glyph_id(ch).0 != 0);
+        if covered || state.fallback_fonts.len() >= u8::MAX as usize {
+            continue;
+        }
+        let Some(candidate) = state
+            .discovery
+            .as_mut()
+            .and_then(|discovery| discovery.font_for_char(ch))
+        else {
+            continue;
+        };
+        let Ok(font) = discovered_font_ref(candidate) else {
+            continue;
+        };
+        state.fallback_fonts.push(font);
+        state.cache_id = next_font_stack_id();
+        changed = true;
     }
-    #[cfg(not(feature = "std"))]
-    {
-        &[DEFAULT_FONT_PATH]
+    drop(state);
+    if changed {
+        clear_text_caches();
     }
 }
 
-fn fallback_font_paths() -> &'static [&'static str] {
+fn clone_default_font_stack() -> Option<FontStack> {
+    let state = DEFAULT_FONT.lock();
+    state.font.clone().map(|primary| FontStack {
+        primary,
+        fallbacks: state.fallback_fonts.clone(),
+        cache_id: state.cache_id,
+    })
+}
+
+fn default_font_stack_for_text(text: &str) -> Option<FontStack> {
+    load_fonts_from_rootfs_once();
     #[cfg(feature = "std")]
-    {
-        STD_FALLBACK_FONT_PATHS
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        FALLBACK_FONT_PATHS
-    }
+    ensure_default_font_coverage(text);
+    clone_default_font_stack()
 }
 
 /// Return the current system-wide default font stack.
@@ -577,12 +623,7 @@ fn fallback_font_paths() -> &'static [&'static str] {
 /// The default font stack when a primary font is available.
 pub fn default_font_stack() -> Option<FontStack> {
     load_fonts_from_rootfs_once();
-    let state = DEFAULT_FONT.lock();
-    state.font.clone().map(|primary| FontStack {
-        primary,
-        fallbacks: state.fallback_fonts.clone(),
-        cache_id: state.cache_id,
-    })
+    clone_default_font_stack()
 }
 
 fn fullwidth_ascii_fallback(ch: char) -> Option<char> {
@@ -636,7 +677,7 @@ fn select_font_for_char(ch: char, font_stack: &FontStack) -> (FontRef<'static>, 
 ///
 /// Owned positioned glyph masks in drawing order.
 pub fn rasterize_text(text: &str, font_size_px: f32, scale_milli: u32) -> Vec<RasterizedGlyph> {
-    let Some(font_stack) = default_font_stack() else {
+    let Some(font_stack) = default_font_stack_for_text(text) else {
         return Vec::new();
     };
     rasterize_text_with_font_stack(text, font_size_px, scale_milli, &font_stack)
@@ -702,7 +743,7 @@ pub fn rasterize_text_with_font_stack(
 ///
 /// Returns `(width, height)` in pixels
 pub fn measure_text_sized(text: &str, font_size_px: f32) -> (u32, u32) {
-    if let Some(font_stack) = default_font_stack() {
+    if let Some(font_stack) = default_font_stack_for_text(text) {
         measure_text_sized_with_font_stack(text, font_size_px, &font_stack)
     } else {
         fallback_text_metrics(text, font_size_px)
@@ -1015,7 +1056,7 @@ impl<'a> Canvas<'a> {
     ///
     /// `x,y` is the **top-left** of the text line
     pub fn draw_text_sized(&mut self, x: i32, y: i32, text: &str, color: Color, font_size_px: f32) {
-        let Some(font_stack) = default_font_stack() else {
+        let Some(font_stack) = default_font_stack_for_text(text) else {
             return;
         };
         self.draw_text_sized_with_font_stack_internal(
@@ -1050,7 +1091,7 @@ impl<'a> Canvas<'a> {
         clip_rect: Rect,
         corner_radius: f32,
     ) {
-        let Some(font_stack) = default_font_stack() else {
+        let Some(font_stack) = default_font_stack_for_text(text) else {
             return;
         };
         self.draw_text_sized_with_font_stack_internal(
