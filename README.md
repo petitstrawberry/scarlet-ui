@@ -261,6 +261,31 @@ scarlet-ui = { path = "crates/scarlet-ui", default-features = false, features = 
 `platform-sws` and `platform-winit` are mutually exclusive. `std` and
 `legacy-scarlet-std` are also mutually exclusive.
 
+### SGFX dependency
+
+The SGFX renderer and platform backends use the standalone
+[SGFX repository](https://github.com/petitstrawberry/sgfx). Applications that also
+use SGFX directly should depend on that repository:
+
+```toml
+[dependencies]
+sgfx = { git = "https://github.com/petitstrawberry/sgfx" }
+```
+
+`Cargo.lock` records the resolved commits; no `rev` pin or compatibility patch
+for the old Scarlet SGFX source is needed.
+
+When migrating an existing lockfile, also update the external Adreno backend
+so it no longer imports SGFX core from Scarlet:
+
+```bash
+cargo update -p sgfx-backend-scarlet-adreno
+cargo tree --locked --invert sgfx-core
+```
+
+The second command fails if the graph still contains multiple SGFX core
+sources. CI repeats this check for the host and both Scarlet targets.
+
 ## Crate Layout
 
 ```text
