@@ -5,26 +5,80 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  SCARLET_TOOLCHAIN: github:petitstrawberry/scarlet-rust-nix/2b4ddd555389a8c53806bbc2586440b2662c38dd#scarlet-rust-toolchain
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [scarlet, upstream]
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2025-12-31
+      CARGO_TARGET_DIR: target/${{ matrix.toolchain }}-host
 
     steps:
     - uses: actions/checkout@v4
+    - uses: cachix/install-nix-action@v31
+      if: matrix.toolchain == 'scarlet'
+      with:
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+        extra_nix_config: |
+          accept-flake-config = true
+          extra-substituters = https://scarlet-rust-toolchain.cachix.org
+          extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
+    - name: Install the pinned Scarlet Rust toolchain
+      if: matrix.toolchain == 'scarlet'
+      run: |
+        scarlet_toolchain_path="$(nix build "${SCARLET_TOOLCHAIN}^out" --no-link --print-out-paths)"
+        echo "$scarlet_toolchain_path/bin" >> "$GITHUB_PATH"
+    - name: Install upstream Rust for portability checks
+      if: matrix.toolchain == 'upstream'
+      run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+    - name: Show the selected compiler
+      run: |
+        rustc -vV
+        rustc --print sysroot
+    - name: Check SGFX core source identity
+      # An ambiguous sgfx-core package means that its IR types are duplicated.
+      run: cargo tree --locked -p scarlet-ui --no-default-features --features std,platform-winit --invert sgfx-core
     - name: Build
-      # The SWS backend links Scarlet's no_std syscall layer and is built by
-      # the Scarlet target pipeline. Keep this host CI job focused on the
-      # portable UI/core/rendering crates; compiling the SWS package for the
-      # host cannot provide an architecture-specific syscall module.
-      run: cargo build --verbose -p scarlet-ui --features platform-winit
+      # The host uses winit; the Scarlet jobs below check the std-enabled SWS
+      # integration with the built-in Scarlet targets.
+      run: cargo build --locked --verbose -p scarlet-ui --no-default-features --features std,platform-winit
     - name: Run tests
       # This allocation-budget assertion is host-runtime sensitive (it is
       # stable on the supported Scarlet runners but can observe allocator
       # bookkeeping from the Linux test harness). Keep the rest of the suite
       # strict while leaving the targeted regression available locally.
-      run: cargo test --verbose --workspace --exclude scarlet-ui-platform-sws --exclude scarlet-ui-renderer-sgfx -- --skip default_scroll_view_warm_scroll_allocates_zero_after_warmup
+      run: cargo test --locked --verbose --workspace --exclude scarlet-ui-platform-sws -- --skip default_scroll_view_warm_scroll_allocates_zero_after_warmup
+
+  scarlet:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [riscv64gc-unknown-scarlet, aarch64-unknown-scarlet]
+    env:
+      CARGO_TARGET_DIR: target/scarlet-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            accept-flake-config = true
+            extra-substituters = https://scarlet-rust-toolchain.cachix.org
+            extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
+      - name: Check SGFX core source identity
+        run: nix shell "$SCARLET_TOOLCHAIN" --command cargo tree --locked -p scarlet-ui --no-default-features --features std,platform-sws --target '${{ matrix.target }}' --invert sgfx-core
+      - name: Check std-enabled SWS integration
+        run: nix shell "$SCARLET_TOOLCHAIN" --command cargo check --locked -p scarlet-ui --no-default-features --features std,platform-sws --target '${{ matrix.target }}'
