@@ -2061,7 +2061,7 @@ dependencies = [
 [[package]]
 name = "sgfx"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fc2d1cdb2f92bb0ceed0f79f5ae614d1b714bc3a"
+source = "git+https://github.com/petitstrawberry/sgfx#0e9102358ed302d6703a22b892a00be38abba8cb"
 dependencies = [
  "gpu-raw",
  "raw-window-handle",
@@ -2089,7 +2089,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-scarlet-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fc2d1cdb2f92bb0ceed0f79f5ae614d1b714bc3a"
+source = "git+https://github.com/petitstrawberry/sgfx#0e9102358ed302d6703a22b892a00be38abba8cb"
 dependencies = [
  "gpu-raw",
  "scarlet-os",
@@ -2101,7 +2101,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-wgpu"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fc2d1cdb2f92bb0ceed0f79f5ae614d1b714bc3a"
+source = "git+https://github.com/petitstrawberry/sgfx#0e9102358ed302d6703a22b892a00be38abba8cb"
 dependencies = [
  "bytemuck",
  "pollster",
@@ -2124,7 +2124,7 @@ dependencies = [
 [[package]]
 name = "sgfx-codegen-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fc2d1cdb2f92bb0ceed0f79f5ae614d1b714bc3a"
+source = "git+https://github.com/petitstrawberry/sgfx#0e9102358ed302d6703a22b892a00be38abba8cb"
 dependencies = [
  "sgfx-core",
 ]
@@ -2132,7 +2132,7 @@ dependencies = [
 [[package]]
 name = "sgfx-core"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fc2d1cdb2f92bb0ceed0f79f5ae614d1b714bc3a"
+source = "git+https://github.com/petitstrawberry/sgfx#0e9102358ed302d6703a22b892a00be38abba8cb"
 
 [[package]]
 name = "shlex"
