@@ -60,11 +60,9 @@ jobs:
       # integration with the built-in Scarlet targets.
       run: cargo build --locked --verbose -p scarlet-ui --no-default-features --features std,platform-winit
     - name: Run tests
-      # This allocation-budget assertion is host-runtime sensitive (it is
-      # stable on the supported Scarlet runners but can observe allocator
-      # bookkeeping from the Linux test harness). Keep the rest of the suite
-      # strict while leaving the targeted regression available locally.
-      run: cargo test --locked --verbose --workspace --exclude scarlet-ui-platform-sws -- --skip default_scroll_view_warm_scroll_allocates_zero_after_warmup
+      # Include the warm-scroll allocation regression under both compilers.
+      # Only the target-specific SWS platform package is excluded on the host.
+      run: cargo test --locked --verbose --workspace --exclude scarlet-ui-platform-sws
 
   scarlet:
     runs-on: ubuntu-latest
