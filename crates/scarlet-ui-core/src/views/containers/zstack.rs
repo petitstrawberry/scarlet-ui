@@ -14,7 +14,9 @@ use core::any::Any;
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust
+/// use scarlet_ui_core::{Alignment, Color, Rectangle, Text, ZStack};
+///
 /// let stack = ZStack::new((
 ///     Rectangle::new().fill(Color::BLUE),
 ///     Text::new("Overlay"),

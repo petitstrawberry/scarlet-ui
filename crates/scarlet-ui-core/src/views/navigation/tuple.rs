@@ -15,13 +15,15 @@ use alloc::rc::Rc;
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust
+/// use scarlet_ui_core::{NavigationLink, NavigationView, Text};
+///
 /// // Tuples of different sizes all implement NavigationLinkTuple
 /// let link1 = NavigationLink::new("Home", || Text::new("Home"));
 /// let link2 = NavigationLink::new("Settings", || Text::new("Settings"));
 ///
 /// // Works with 2 links
-/// let nav2 = NavigationView::new((link1, link2));
+/// let nav2 = NavigationView::new((link1.clone(), link2.clone()));
 ///
 /// // Works with 3 links
 /// let link3 = NavigationLink::new("Info", || Text::new("Info"));

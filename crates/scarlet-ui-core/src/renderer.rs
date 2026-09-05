@@ -2513,7 +2513,7 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    #[ignore]
+    #[ignore = "Manual visual inspection: writes scarlet_paint_test.ppm in the temp directory"]
     fn visual_dump() {
         let mut ctx = PaintContext::new();
         ctx.fill_rect(

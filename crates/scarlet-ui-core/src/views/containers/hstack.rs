@@ -14,7 +14,9 @@ use core::any::Any;
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust
+/// use scarlet_ui_core::{HStack, Spacer, Text};
+///
 /// let stack = HStack::new((
 ///     Text::new("Left"),
 ///     Spacer::new(),

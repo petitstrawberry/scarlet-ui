@@ -5,21 +5,34 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```rust
+//! use scarlet_ui_core::{Rectangle, Text};
+//! use scarlet_ui_core::views::Either;
+//! # let show = true;
+//! # fn settings_view() -> Text { Text::new("Settings") }
+//! # fn clock_view() -> Rectangle { Rectangle::new() }
+//!
 //! match show {
 //!     true => Either::A(settings_view()),
 //!     false => Either::B(clock_view()),
-//! }
+//! };
 //! ```
 //!
 //! For 3+ branches, use `Either3`, `Either4`, etc.:
 //!
-//! ```ignore
+//! ```rust
+//! use scarlet_ui_core::{Rectangle, Text};
+//! use scarlet_ui_core::views::Either3;
+//! # let page = 0;
+//! # fn home() -> Text { Text::new("Home") }
+//! # fn settings() -> Rectangle { Rectangle::new() }
+//! # fn about() -> Text { Text::new("About") }
+//!
 //! match page {
 //!     0 => Either3::A(home()),
 //!     1 => Either3::B(settings()),
-//!     2 => Either3::C(about()),
-//! }
+//!     _ => Either3::C(about()),
+//! };
 //! ```
 
 use alloc::boxed::Box;

@@ -6,7 +6,9 @@
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust
+/// use scarlet_ui_core::{Alignment, Text, vstack};
+///
 /// let stack = vstack! {
 ///     Text::new("Hello"),
 ///     Text::new("World"),
@@ -28,7 +30,9 @@ macro_rules! vstack {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust
+/// use scarlet_ui_core::{Spacer, Text, hstack};
+///
 /// let stack = hstack! {
 ///     Text::new("Left"),
 ///     Spacer::new(),
@@ -50,7 +54,9 @@ macro_rules! hstack {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust
+/// use scarlet_ui_core::{Alignment, Color, Rectangle, Text, zstack};
+///
 /// let stack = zstack! {
 ///     Rectangle::new().fill(Color::BLUE),
 ///     Text::new("Overlay"),
@@ -71,7 +77,15 @@ macro_rules! zstack {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```no_run
+/// use scarlet_ui_core::{Application, Scene, Text, View, Window, scenes};
+/// # #[derive(Clone)]
+/// # struct MyApp;
+/// # impl MyApp {
+/// #     fn main_view(&self) -> impl View + Clone { Text::new("Main") }
+/// #     fn inspector_view(&self) -> impl View + Clone { Text::new("Inspector") }
+/// # }
+///
 /// impl Application for MyApp {
 ///     fn scenes(&self) -> impl Scene {
 ///         scenes! {
@@ -102,14 +116,21 @@ macro_rules! scenes {
 ///
 /// # Examples
 ///
-/// ```ignore
-/// if_view!(show, settings(), canvas())
+/// ```rust
+/// use scarlet_ui_core::{Rectangle, Text, if_view};
+/// # let (show, page) = (true, 0);
+/// # fn settings() -> Text { Text::new("Settings") }
+/// # fn canvas() -> Rectangle { Rectangle::new() }
+/// # fn home() -> Text { Text::new("Home") }
+/// # fn about() -> Text { Text::new("About") }
+///
+/// if_view!(show, settings(), canvas());
 ///
 /// if_view! {
 ///     page == 0 => home(),
 ///     page == 1 => settings(),
 ///     else => about(),
-/// }
+/// };
 /// ```
 #[macro_export]
 macro_rules! if_view {
@@ -161,17 +182,24 @@ macro_rules! if_view {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust
+/// use scarlet_ui_core::{Rectangle, Text, match_view};
+/// # let (show, page) = (true, 0);
+/// # fn settings() -> Text { Text::new("Settings") }
+/// # fn canvas() -> Rectangle { Rectangle::new() }
+/// # fn home() -> Text { Text::new("Home") }
+/// # fn about() -> Text { Text::new("About") }
+///
 /// match_view!(show, {
 ///     true => settings(),
 ///     false => canvas(),
-/// })
+/// });
 ///
 /// match_view!(page, {
 ///     0 => home(),
 ///     1 => settings(),
 ///     _ => about(),
-/// })
+/// });
 /// ```
 #[macro_export]
 macro_rules! match_view {
@@ -246,7 +274,9 @@ macro_rules! match_view {
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust
+/// use scarlet_ui_core::{NavigationLink, Text, navigation};
+///
 /// let nav = navigation! {
 ///     NavigationLink::new("Home", || Text::new("Home")),
 ///     NavigationLink::new("Settings", || Text::new("Settings")),

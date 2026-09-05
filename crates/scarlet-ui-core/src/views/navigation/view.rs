@@ -134,14 +134,17 @@ impl NavigationPresentation {
 ///
 /// # Important Notes
 ///
-/// - NavigationView does NOT implement Clone (closures don't support Clone)
+/// - NavigationView implements Clone when its link tuple implements Clone;
+///   NavigationLink shares its content closure through Rc
 /// - When selected_index changes, the entire view tree is rebuilt
 /// - The `navigation!` macro preserves selected item state across rebuilds
 /// - For page state preservation, use `State<T>` passed to link closures
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust
+/// use scarlet_ui_core::{NavigationLink, State, StateId, Text, ViewExt, navigation};
+///
 /// // Basic usage with macro (recommended)
 /// let nav = navigation! {
 ///     NavigationLink::new("Home", || Text::new("Home View")),
@@ -149,9 +152,9 @@ impl NavigationPresentation {
 /// };
 ///
 /// // With state preservation
-/// let home_state = State::new(StateId::new(1), HomeData::default());
+/// let home_state = State::new(StateId::new(1), 0_u32);
 /// let nav = navigation! {
-///     NavigationLink::new("Home", || HomeView::new(home_state.clone())),
+///     NavigationLink::new("Home", move || Text::new(format!("Count: {}", home_state.get()))),
 /// };
 ///
 /// // With modifiers
@@ -199,7 +202,9 @@ where
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```rust
+    /// use scarlet_ui_core::{NavigationLink, NavigationView, Text};
+    ///
     /// let nav = NavigationView::new((
     ///     NavigationLink::new("Home", || Text::new("Home")),
     ///     NavigationLink::new("Settings", || Text::new("Settings")),

@@ -16,8 +16,14 @@
 //!
 //! # Backend Integration
 //!
-//! ```ignore
-//! scarlet_ui_core::ApplicationRunner::new(Box::new(my_backend)).run(&mut app)
+//! ```no_run
+//! # use scarlet_ui_core::{Application, ApplicationRunner, View};
+//! # use scarlet_ui_core::platform::PlatformBackend;
+//! # fn run_with_backend<A: Application + View>(
+//! #     my_backend: Box<dyn PlatformBackend>, app: &mut A,
+//! # ) -> scarlet_ui_core::Result<()> {
+//! ApplicationRunner::new(my_backend).run(app)
+//! # }
 //! ```
 //!
 //! # Platform Features

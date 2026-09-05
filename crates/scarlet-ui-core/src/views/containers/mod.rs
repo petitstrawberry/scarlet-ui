@@ -27,7 +27,9 @@ pub use zstack::{ZStack, ZStackRenderObject};
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust
+/// use scarlet_ui_core::{Text, VStack};
+///
 /// let stack = VStack::new((
 ///     Text::new("Hello"),
 ///     Text::new("World"),

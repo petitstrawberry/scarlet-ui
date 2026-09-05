@@ -20,13 +20,15 @@ use alloc::string::String;
 /// The closure is wrapped in Rc to allow NavigationLink (and thus NavigationView) to be Clone-able.
 /// This is necessary to work with ScarletUI's RenderElement architecture.
 ///
-/// # Type Parameters
+/// # Content View
 ///
-/// * `V` - View type that the closure returns
+/// * `V` - View type inferred by [`NavigationLink::new`] from the closure's return value
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust
+/// use scarlet_ui_core::{Icon, NavigationLink, Text};
+///
 /// let link = NavigationLink::new("Home", || Text::new("Welcome to Home"))
 ///     .icon(Icon::Home);
 /// ```
@@ -64,8 +66,12 @@ impl NavigationLink {
     ///
     /// # Examples
     ///
-    /// ```ignore
-    /// NavigationLink::new("Settings", || SettingsView::new()).icon(Icon::Settings)
+    /// ```rust
+    /// use scarlet_ui_core::{Icon, NavigationLink, Text};
+    /// # struct SettingsView;
+    /// # impl SettingsView { fn new() -> Text { Text::new("Settings") } }
+    ///
+    /// NavigationLink::new("Settings", || SettingsView::new()).icon(Icon::Settings);
     /// ```
     pub fn new<V>(label: impl Into<String>, content_builder: impl Fn() -> V + 'static) -> Self
     where

@@ -14,7 +14,9 @@ use core::any::Any;
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```rust
+/// use scarlet_ui_core::{Alignment, Text, VStack};
+///
 /// let stack = VStack::new((
 ///     Text::new("Hello"),
 ///     Text::new("World"),
