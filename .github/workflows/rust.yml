@@ -27,6 +27,11 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Install Linux font discovery dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes --no-install-recommends libfontconfig-dev pkg-config
+        pkg-config --modversion fontconfig
     - uses: cachix/install-nix-action@v31
       if: matrix.toolchain == 'scarlet'
       with:
