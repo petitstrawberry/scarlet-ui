@@ -14,6 +14,7 @@ use scarlet_ui::{hstack, vstack};
 use scarlet_ui_macros::View;
 
 #[derive(View, Clone)]
+#[view(body = content)]
 struct CounterApp {
     count: State<i32>,
 }
@@ -72,9 +73,12 @@ selected platform backend.
 
 ## Application Model
 
-`Application::scenes()` is the application UI entry point. `body()` is still used
-by `#[derive(View)]` for reusable view components, but it is not the top-level
-application entry point.
+`Application::scenes()` is the application UI entry point. `#[derive(View)]`
+collects the application's State dependencies; scene-only applications do not
+need a component body method. Reusable View components select their child
+builder explicitly with `#[view(body = method_name)]`, as the counter above does
+with `content()`. Mounting a derived View without that attribute is a
+configuration error, not an alternate way to enter the application's scenes.
 
 Each scene declaration produces a top-level `Window`. At runtime, ScarletUI
 creates one `WindowSlot` per opened window:
@@ -113,7 +117,7 @@ use scarlet_ui::prelude::*;
 
 #[scarlet_ui::preview(width = 420.0, height = 260.0)]
 fn counter_preview() -> impl View + Clone + 'static {
-    CounterApp::default().content()
+    CounterApp::default()
 }
 
 #[scarlet_ui::preview]

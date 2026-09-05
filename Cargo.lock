@@ -1866,6 +1866,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "scarlet-ui-core",
+ "scarlet-ui-macros",
  "scarlet-ui-platform-sws",
  "scarlet-ui-platform-winit",
  "syn 2.0.119",
@@ -1906,6 +1907,7 @@ version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
+ "scarlet-ui",
  "syn 2.0.119",
 ]
 

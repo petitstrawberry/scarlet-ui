@@ -29,6 +29,7 @@ scarlet-ui-platform-winit = { path = "../scarlet-ui-platform-winit", default-fea
 
 [dev-dependencies]
 # For additional testing
+scarlet-ui-macros = { path = "../scarlet-ui-macros" }
 proc-macro2 = { version = "1.0", default-features = false }
 quote = { version = "1.0", default-features = false }
 syn = { version = "2.0", default-features = false, features = ["derive"] }

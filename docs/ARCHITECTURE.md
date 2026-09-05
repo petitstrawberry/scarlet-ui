@@ -148,6 +148,14 @@ handle, not the stored value, so the new description observes the same state.
 The View derive macro reports state fields through `listenables()`, and mounted
 Elements subscribe to those dependencies.
 
+A reusable derived View declares `#[view(body = method_name)]` to build its
+owned child description. `ComponentElement` retains the state-owning View and
+calls that method on creation and rebuild; it must not recreate the same
+derived View recursively. Scene-only application types may omit the attribute:
+the runner subscribes to the application's state and builds each window from
+`Application::scenes()`. Calling `create_element()` directly on such an
+application type is a configuration error and panics with an explanatory message.
+
 Use `InvalidationKind::Build` when a value can change View structure or
 configuration. Use `InvalidationKind::Paint` only when the existing render
 structure can consume the value directly without rebuilding or relayout.

@@ -15,45 +15,132 @@ use syn::{
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust
+/// use scarlet_ui::{State, Text, View as _};
+/// use scarlet_ui_macros::View;
+///
 /// #[derive(View, Clone)]
+/// #[view(body = content)]
 /// struct CounterApp {
 ///     count: State<i32>,
 /// }
+///
+/// impl CounterApp {
+///     fn content(&self) -> Text {
+///         Text::new("Counter")
+///     }
+/// }
+///
+/// let app = CounterApp::default();
+/// assert_eq!(app.count.get(), 0);
+/// assert_eq!(app.listenables().len(), 1);
+/// let element = app.create_element();
 /// ```
 ///
 /// This macro generates:
-/// - `impl View for CounterApp` - creates ComponentElement, collects listenables
+/// - `impl View for CounterApp` - collects listenables and creates ComponentElement when a body is specified
 /// - `impl Default for CounterApp` - auto-initializes State fields with auto-generated StateId
 ///
-/// Users can implement their own `new()` method and use `Default::default()`:
-/// ```ignore
-/// #![no_std]
+/// The type must implement `Clone`. Reusable components select an inherent
+/// method with `#[view(body = method_name)]`. It takes `&self` and returns an
+/// owned `View + Clone + 'static`. The child is built from that method, not
+/// from the derived view itself.
 ///
-/// extern crate scarlet_std;
+/// Application state containers can omit the body attribute: the application
+/// runner subscribes to their listenables and builds windows from `scenes()`.
+/// A body-less derive cannot itself be mounted as a child View.
+///
+/// # Panics
+///
+/// Calling the generated `create_element()` without a body attribute panics
+/// with a configuration diagnostic. Application startup does not call it.
+///
+/// Users can implement their own `new()` method and use `Default::default()`:
+/// ```rust
+/// use scarlet_ui::{Application, Scene, State, Text, Window, WindowGroup};
+/// use scarlet_ui_macros::View;
 ///
 /// #[derive(View, Clone)]
-/// struct MyApp { ... }
+/// struct MyApp {
+///     count: State<i32>,
+/// }
+///
+/// impl MyApp {
+///     fn new() -> Self {
+///         Self::default()
+///     }
+/// }
+///
+/// impl Application for MyApp {
+///     fn scenes(&self) -> impl Scene {
+///         WindowGroup::new("main", Window::new("My app", Text::new("Hello")))
+///     }
+/// }
+///
+/// assert_eq!(MyApp::new().count.get(), 0);
 /// ```
 ///
 /// # Note for `#![no_std]` environments
 ///
-/// In `#![no_std]` Scarlet contexts, import the Scarlet runtime and UI crates:
-/// ```ignore
-/// extern crate scarlet_std;
+/// The generated implementation does not require the caller's std prelude.
+/// Select the UI/runtime features separately: normal Scarlet targets support
+/// `std`, while legacy `no_std` binaries still provide their Scarlet runtime
+/// through `scarlet_std`. This host doctest checks the caller's `no_std` syntax,
+/// not a freestanding binary's runtime startup.
+///
+/// ```rust
+/// #![no_std]
+/// # extern crate std; // Host rustdoc executable; not part of the library example.
+/// use scarlet_ui::{State, StateId, Text};
+/// use scarlet_ui_macros::View;
+///
+/// #[derive(View, Clone)]
+/// #[view(body = content)]
+/// struct CounterApp {
+///     count: State<i32>,
+/// }
 ///
 /// impl CounterApp {
 ///     pub fn new(custom_value: i32) -> Self {
 ///         Self {
 ///             count: State::new(StateId::new(0), custom_value),
 ///         }
+///     }
+///
+///     fn content(&self) -> Text {
+///         Text::new("Counter")
+///     }
 /// }
-/// }
+/// # fn main() {
+/// #     let app = CounterApp::new(42);
+/// #     assert_eq!(app.count.get(), 42);
+/// #     let _element = scarlet_ui::View::create_element(&app);
+/// # }
 /// ```
-#[proc_macro_derive(View)]
+#[proc_macro_derive(View, attributes(view))]
 pub fn derive_view(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
+    let body = match view_body(&input) {
+        Ok(body) => body,
+        Err(error) => return error.into_compile_error().into(),
+    };
+    let create_element = match body {
+        Some(method) => quote! {
+            ::scarlet_ui::__private::Box::new(
+                ::scarlet_ui::element::ComponentElement::new_with_builder(
+                    self.clone(),
+                    |view| ::scarlet_ui::__private::Box::new(view.#method()),
+                ),
+            )
+        },
+        None => quote! {
+            ::core::panic!(
+                "a body-less #[derive(View)] is application state, not a mountable component; \
+                 add #[view(body = method_name)] to specify its child View"
+            )
+        },
+    };
 
     // Parse struct fields to find State<T> fields
     let (state_fields, state_indices) = match &input.data {
@@ -112,8 +199,7 @@ pub fn derive_view(input: TokenStream) -> TokenStream {
 
         impl ::scarlet_ui::view::View for #name {
             fn create_element(&self) -> ::scarlet_ui::__private::Box<dyn ::scarlet_ui::element::Element> {
-                // Create a ComponentElement to wrap this View
-                ::scarlet_ui::__private::Box::new(::scarlet_ui::element::ComponentElement::new(self.clone()))
+                #create_element
             }
 
             fn listenables(&self) -> ::scarlet_ui::__private::Vec<&dyn ::scarlet_ui::state::Listenable> {
@@ -131,15 +217,47 @@ pub fn derive_view(input: TokenStream) -> TokenStream {
     proc_macro::TokenStream::from(expanded)
 }
 
+fn view_body(input: &DeriveInput) -> syn::Result<Option<syn::Ident>> {
+    let mut body = None;
+    for attr in input
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("view"))
+    {
+        attr.parse_nested_meta(|meta| {
+            if !meta.path.is_ident("body") {
+                return Err(meta.error("expected `body = method_name`"));
+            }
+            if body.is_some() {
+                return Err(meta.error("duplicate view body"));
+            }
+            body = Some(meta.value()?.parse()?);
+            Ok(())
+        })?;
+    }
+    Ok(body)
+}
+
 /// Register a function as a ScarletUI preview.
 ///
 /// The function must return a `View + Clone + 'static` value. Multiple preview
 /// functions can be registered in the same crate; the preview wrapper exports a
 /// single dylib entrypoint that exposes all registered previews.
+/// The consuming crate must enable its `preview` feature; without it the
+/// annotated functions and registrations are omitted. The macro crate's
+/// matching feature lets CI exercise these examples with registration enabled.
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```rust
+/// use scarlet_ui::{Text, View};
+/// # #[derive(Default)]
+/// # struct CounterApp;
+/// # impl CounterApp {
+/// #     fn content(&self) -> Text { Text::new("Counter") }
+/// #     fn compact_content(&self) -> Text { Text::new("Compact counter") }
+/// # }
+///
 /// #[scarlet_ui::preview]
 /// fn counter_preview() -> impl View + Clone {
 ///     CounterApp::default().content()
@@ -152,8 +270,23 @@ pub fn derive_view(input: TokenStream) -> TokenStream {
 ///
 /// #[scarlet_ui::preview(width = 320.0, height = 180.0)]
 /// fn button_preview() -> impl View + Clone {
-///     Button::new("OK")
+///     scarlet_ui::Button::new("OK")
 /// }
+///
+/// # let mut library = scarlet_ui::preview::registered_preview_library();
+/// # let previews = library.previews();
+/// # #[cfg(feature = "preview")]
+/// # {
+/// #     assert_eq!(previews.len(), 3);
+/// #     let button = previews.iter().find(|entry| entry.name == "Button Preview")
+/// #         .expect("the attribute must register the button factory");
+/// #     let session = library.create(&button.id, Default::default())
+/// #         .expect("a registered factory must create a session");
+/// #     assert_eq!(session.title(), "Button Preview");
+/// #     assert_eq!(session.size(), scarlet_ui::Size::new(320.0, 180.0));
+/// # }
+/// # #[cfg(not(feature = "preview"))]
+/// # assert!(previews.is_empty(), "preview-disabled crates must not register factories");
 /// ```
 #[proc_macro_attribute]
 pub fn preview(attr: TokenStream, input: TokenStream) -> TokenStream {
@@ -279,23 +412,8 @@ fn extract_state_fields(fields: &Fields) -> Punctuated<syn::Ident, syn::token::C
 fn extract_state_fields_with_indices(
     fields: &Fields,
 ) -> (Punctuated<syn::Ident, syn::token::Comma>, Vec<usize>) {
-    let mut state_fields = Punctuated::new();
-    let mut state_indices = Vec::new();
-    let mut counter = 0usize;
-
-    if let Fields::Named(named_fields) = fields {
-        for field in &named_fields.named {
-            let field_name = field.ident.as_ref().unwrap();
-
-            // Check if field type is State<T>
-            if is_state_type(&field.ty) {
-                state_fields.push(field_name.clone());
-                state_indices.push(counter);
-                counter += 1;
-            }
-        }
-    }
-
+    let state_fields = extract_state_fields(fields);
+    let state_indices = (0..state_fields.len()).collect();
     (state_fields, state_indices)
 }
 
@@ -313,4 +431,63 @@ fn is_state_type(ty: &syn::Type) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::view_body;
+
+    #[test]
+    fn view_body_is_optional_for_application_state() {
+        let input = syn::parse_quote!(
+            struct App;
+        );
+        assert!(
+            view_body(&input)
+                .expect("valid application derive")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn view_body_selects_the_named_method() {
+        let input = syn::parse_quote!(
+            #[view(body = build_counter)]
+            struct Counter;
+        );
+        let body = view_body(&input)
+            .expect("valid body selector")
+            .expect("body method");
+        assert_eq!(body, "build_counter");
+    }
+
+    #[test]
+    fn view_body_rejects_unknown_or_malformed_options() {
+        for attr in [
+            "#[view(content = body)]",
+            "#[view(body)]",
+            "#[view(body = \"content\")]",
+            "#[view(body = 42)]",
+        ] {
+            let input = syn::parse_str(&format!("{attr} struct Counter;"))
+                .expect("syntactically valid derive input");
+            assert!(
+                view_body(&input).is_err(),
+                "accepted malformed option {attr}"
+            );
+        }
+    }
+
+    #[test]
+    fn view_body_rejects_duplicate_selectors() {
+        for attrs in [
+            "#[view(body = first, body = second)]",
+            "#[view(body = first)] #[view(body = second)]",
+        ] {
+            let input = syn::parse_str(&format!("{attrs} struct Counter;"))
+                .expect("syntactically valid derive input");
+            let error = view_body(&input).expect_err("duplicate body must be rejected");
+            assert!(error.to_string().contains("duplicate view body"));
+        }
+    }
 }
