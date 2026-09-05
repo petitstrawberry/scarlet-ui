@@ -63,6 +63,9 @@ jobs:
       # Include the warm-scroll allocation regression under both compilers.
       # Only the target-specific SWS platform package is excluded on the host.
       run: cargo test --locked --verbose --workspace --exclude scarlet-ui-platform-sws
+    - name: Test preview macro registration examples
+      # The destination crate's preview cfg must be enabled to test registration.
+      run: cargo test --locked -p scarlet-ui-macros --features preview --doc
 
   scarlet:
     runs-on: ubuntu-latest
