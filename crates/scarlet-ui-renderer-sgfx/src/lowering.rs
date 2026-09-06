@@ -25,6 +25,7 @@ use crate::error::{Error, FrameError, Result, Stage};
 use crate::geometry::{
     FloatRect, GeometryRange, MAX_FRAME_VERTICES, PixelBounds, Tessellator, Vertex,
 };
+use crate::{MAX_UPLOAD_BYTES, upload_texture};
 
 const PAINT_VERTEX_STRIDE: u32 = 40;
 const PASS_COMMANDS: usize = 2;
@@ -1460,6 +1461,23 @@ impl SgfxPaintEncoder {
             }
             texture_uploads.push(texture_index);
         }
+        let separate_texture_uploads = texture_uploads.iter().fold(0usize, |total, index| {
+            total.saturating_add(self.canvas_textures[*index].source.pixels.len())
+        }) > MAX_UPLOAD_BYTES;
+        if separate_texture_uploads {
+            for index in &texture_uploads {
+                let cached = &self.canvas_textures[*index];
+                let area = PixelRect::new(0, 0, cached.source.width, cached.source.height)
+                    .map_err(|_| Error::InvalidFrame)?;
+                upload_texture(
+                    executor,
+                    &table,
+                    cached.texture,
+                    TextureWrite::new(area, cached.source.width * 4, &cached.source.pixels)
+                        .map_err(|_| Error::InvalidFrame)?,
+                )?;
+            }
+        }
         let clear = ir_color(ui_color(frame.clear_color, 1.0)?)?;
         if frame.draws.is_empty() {
             let mut encoder = CommandEncoder::new(&table);
@@ -1511,7 +1529,11 @@ impl SgfxPaintEncoder {
             while draw_index < frame.draws.len() {
                 let mut encoder = CommandEncoder::new(&table);
                 let prefix_commands = if first_submission {
-                    uploads.len().saturating_add(texture_uploads.len())
+                    uploads.len().saturating_add(if separate_texture_uploads {
+                        0
+                    } else {
+                        texture_uploads.len()
+                    })
                 } else {
                     0
                 };
@@ -1525,7 +1547,9 @@ impl SgfxPaintEncoder {
                             .write_buffer(buffer, 0, bytes)
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                     }
-                    for texture_index in &texture_uploads {
+                    for texture_index in
+                        texture_uploads.iter().filter(|_| !separate_texture_uploads)
+                    {
                         let cached = &self.canvas_textures[*texture_index];
                         let texture = table
                             .texture_ref(cached.texture)
@@ -2040,6 +2064,24 @@ impl SgfxPaintEncoder {
             return Ok(());
         }
         let table = Rc::clone(&self.table);
+        if frame.uploads.iter().fold(0u64, |bytes, upload| {
+            bytes.saturating_add(u64::from(upload.width) * u64::from(upload.height) * 4)
+        }) > MAX_UPLOAD_BYTES as u64
+        {
+            for upload in &frame.uploads {
+                let area = PixelRect::new(upload.x, upload.y, upload.width, upload.height)
+                    .map_err(|_| Error::InvalidFrame)?;
+                upload_texture(
+                    executor,
+                    &table,
+                    upload.texture,
+                    TextureWrite::new(area, upload.bytes_per_row, upload.bytes.as_slice())
+                        .map_err(|_| Error::InvalidFrame)?,
+                )?;
+            }
+            self.commit_texture_uploads(frame);
+            return Ok(());
+        }
         let mut encoder = CommandEncoder::new(&table);
         for upload in &frame.uploads {
             let texture = table

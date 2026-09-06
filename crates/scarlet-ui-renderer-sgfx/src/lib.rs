@@ -18,6 +18,8 @@ mod canvas;
 mod error;
 mod geometry;
 mod lowering;
+mod submission;
+mod upload;
 
 pub use canvas::{
     SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
@@ -25,3 +27,5 @@ pub use canvas::{
 };
 pub use error::{Error, FrameError, Result, Stage};
 pub use lowering::SgfxPaintEncoder;
+pub use submission::{FrameExecutor, FrameSubmissionError};
+pub use upload::{MAX_UPLOAD_BYTES, upload_texture};
