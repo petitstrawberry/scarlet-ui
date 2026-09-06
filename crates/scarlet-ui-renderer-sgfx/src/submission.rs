@@ -94,7 +94,7 @@ impl<E: CommandSubmitter, F: FnMut() -> bool> FrameExecutor<E, F> {
             if submission.poll().map_err(|error| {
                 self.failed.set(true);
                 FrameSubmissionError::Completion(error)
-            })? == CompletionStatus::Pending
+            })? != CompletionStatus::Complete
             {
                 status = CompletionStatus::Pending;
             }
@@ -117,7 +117,7 @@ impl<E: CommandSubmitter, F: FnMut() -> bool> FrameExecutor<E, F> {
             if submission.wait(None).map_err(|error| {
                 self.failed.set(true);
                 FrameSubmissionError::Completion(error)
-            })? == CompletionStatus::Pending
+            })? != CompletionStatus::Complete
             {
                 return Ok(CompletionStatus::Pending);
             }
