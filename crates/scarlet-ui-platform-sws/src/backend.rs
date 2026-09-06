@@ -7,7 +7,8 @@ use scarlet_ui_core::color::Color;
 use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::geometry::{Rect, Size};
 use scarlet_ui_core::renderer::{BackendFrame, PaintBackend, PaintContext};
-use scarlet_ui_renderer_sgfx::SgfxPaintEncoder;
+use scarlet_ui_renderer_sgfx::{FrameExecutor, SgfxPaintEncoder};
+use sgfx::backend::CompletionStatus;
 use sgfx::{BackendKind, Context, Device, MappedTargetSession};
 
 use crate::{SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkStatus};
@@ -36,6 +37,8 @@ pub enum Stage {
     RegisterImage,
     /// Waiting for an SWS-retained image.
     WaitForRelease,
+    /// Establishing GPU retirement before handing an image to SWS.
+    WaitForGpu,
     /// Committing an image to SWS.
     CommitImage,
     /// Destroying a retired image registration.
@@ -102,7 +105,7 @@ struct RetiredGeneration {
 /// Native SGFX implementation of ScarletUI's backend-neutral paint contract.
 ///
 /// This platform object owns SWS presentation policy and alternates between
-/// exactly two images. The physical image/resource/context/queue association
+/// three images. The physical image/resource/context/queue association
 /// is owned by [`MappedTargetSession`], and command execution is delegated to
 /// its backend-owned executor.
 pub struct SgfxPaintBackend<S> {
@@ -123,6 +126,7 @@ pub struct SgfxPaintBackend<S> {
     front_slot: Option<usize>,
     supports_depth: bool,
     backend_kind: BackendKind,
+    render_failed: bool,
 }
 
 impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
@@ -185,6 +189,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             front_slot: None,
             supports_depth: capabilities.supports_depth(),
             backend_kind,
+            render_failed: false,
         };
         backend.initialize_shared_images()?;
         Ok(backend)
@@ -272,14 +277,22 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
     ///
     /// # Returns
     ///
-    /// Success after synchronous SGFX execution and SWS commit. An empty
-    /// damage slice is an idle frame and issues no protocol request.
+    /// Success after GPU completion and SWS commit. VirGL queues the frame's
+    /// streams asynchronously and waits at this cross-process handoff, not
+    /// after each submit. SWS release remains a separate condition for reuse.
+    /// Adreno retains its explicit legacy synchronous path until it supports
+    /// tracked submission. An empty damage slice is an idle frame and issues
+    /// no protocol request. Submission/completion failure poisons this backend;
+    /// an uncertain target is never committed or rendered into again.
     pub fn render_and_commit(
         &mut self,
         paint: &PaintContext<'_>,
         background: Color,
         physical_damage: Option<&[DamageRect]>,
     ) -> Result<()> {
+        if self.render_failed {
+            return Err(Error::Render);
+        }
         let render_areas = self.render_areas(physical_damage)?;
         if render_areas.is_empty() {
             return Ok(());
@@ -312,9 +325,17 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         {
             let encoder = self.encoder.as_mut().ok_or(Error::InvalidFrame)?;
             let session = self.session.as_mut().ok_or(Error::InvalidFrame)?;
-            let mut executor = session.executor();
-            encoder
-                .encode_frame(
+            if self.backend_kind == BackendKind::ScarletVirgl {
+                let mut attempts = 0;
+                let mut executor = FrameExecutor::new(session.executor(), || {
+                    attempts += 1;
+                    if attempts > 1_000 {
+                        return false;
+                    }
+                    std::thread::sleep(core::time::Duration::from_millis(1));
+                    true
+                });
+                if let Err(error) = encoder.encode_frame(
                     &mut executor,
                     slot,
                     copy_from,
@@ -322,8 +343,35 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                     background,
                     self.scale_milli,
                     &render_areas,
-                )
-                .map_err(|_| Error::Render)?;
+                ) {
+                    self.render_failed = true;
+                    std::println!("[ScarletUI] tracked SGFX frame failed: {error}");
+                    return Err(Error::Render);
+                }
+                match executor.wait() {
+                    Ok(CompletionStatus::Complete) => {}
+                    result => {
+                        self.render_failed = true;
+                        std::println!("[ScarletUI] SGFX frame did not retire: {result:?}");
+                        return Err(Error::Sgfx(Stage::WaitForGpu));
+                    }
+                }
+            } else {
+                // Adreno has not advertised async support. Keep its existing
+                // synchronous execution explicit, without a fabricated receipt.
+                let mut executor = session.executor();
+                encoder
+                    .encode_frame(
+                        &mut executor,
+                        slot,
+                        copy_from,
+                        paint,
+                        background,
+                        self.scale_milli,
+                        &render_areas,
+                    )
+                    .map_err(|_| Error::Render)?;
+            }
         }
 
         if self.slots[slot].registered != Some(identity) {

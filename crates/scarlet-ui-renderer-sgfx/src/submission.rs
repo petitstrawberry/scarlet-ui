@@ -195,14 +195,23 @@ mod tests {
     use sgfx::ir::{CommandEncoder, ResourceTable};
 
     #[derive(Debug)]
-    struct Receipt(Rc<Cell<usize>>);
+    struct Receipt {
+        waits: Rc<Cell<usize>>,
+        fail: Cell<bool>,
+    }
     impl Completion for Receipt {
         type Error = &'static str;
         fn poll(&self) -> Result<CompletionStatus, Self::Error> {
+            if self.fail.get() {
+                return Err("observation failed");
+            }
             Ok(CompletionStatus::Pending)
         }
         fn wait(&self, _: Option<Duration>) -> Result<CompletionStatus, Self::Error> {
-            self.0.set(self.0.get() + 1);
+            self.waits.set(self.waits.get() + 1);
+            if self.fail.get() {
+                return Err("observation failed");
+            }
             Ok(CompletionStatus::Complete)
         }
     }
@@ -228,7 +237,10 @@ mod tests {
             if core::mem::take(&mut self.busy) {
                 return Err(SubmitError::Busy);
             }
-            let receipt = Receipt(Rc::clone(&self.waits));
+            let receipt = Receipt {
+                waits: Rc::clone(&self.waits),
+                fail: Cell::new(false),
+            };
             if self.fail {
                 return Err(SubmitError::Failed {
                     error: "partial",
@@ -315,5 +327,72 @@ mod tests {
         frame.execute(&commands).unwrap();
         assert_eq!(waits.get(), 1);
         assert_eq!(frame.submissions.len(), MAX_IN_FLIGHT);
+    }
+
+    #[test]
+    fn failed_poll_or_wait_permanently_invalidates_the_frame() {
+        let table = ResourceTable::new();
+        let commands = CommandEncoder::new(&table).finish().unwrap();
+        for use_wait in [false, true] {
+            let mut frame = FrameExecutor::new(
+                Submitter {
+                    calls: 0,
+                    waits: Rc::new(Cell::new(0)),
+                    busy: false,
+                    fail: false,
+                },
+                || panic!("observation failure must not retry admission"),
+            );
+            frame.execute(&commands).unwrap();
+            frame.submissions[0].fail.set(true);
+            let result = if use_wait { frame.wait() } else { frame.poll() };
+            assert!(matches!(
+                result,
+                Err(FrameSubmissionError::Completion("observation failed"))
+            ));
+            frame.submissions[0].fail.set(false);
+            assert!(matches!(
+                frame.poll(),
+                Err(FrameSubmissionError::Invalidated)
+            ));
+            assert!(matches!(
+                frame.wait(),
+                Err(FrameSubmissionError::Invalidated)
+            ));
+            assert!(matches!(
+                frame.execute(&commands),
+                Err(FrameSubmissionError::Invalidated)
+            ));
+            assert_eq!(frame.executor.calls, 1);
+        }
+    }
+
+    #[test]
+    fn capacity_retirement_failure_never_submits_more_work() {
+        let table = ResourceTable::new();
+        let commands = CommandEncoder::new(&table).finish().unwrap();
+        let mut frame = FrameExecutor::new(
+            Submitter {
+                calls: 0,
+                waits: Rc::new(Cell::new(0)),
+                busy: false,
+                fail: false,
+            },
+            || panic!("retirement failure must not retry admission"),
+        );
+        for _ in 0..MAX_IN_FLIGHT {
+            frame.execute(&commands).unwrap();
+        }
+        frame.submissions[0].fail.set(true);
+        assert!(matches!(
+            frame.execute(&commands),
+            Err(FrameSubmissionError::Completion("observation failed"))
+        ));
+        assert_eq!(frame.executor.calls, MAX_IN_FLIGHT);
+        assert_eq!(frame.submissions.len(), MAX_IN_FLIGHT);
+        assert!(matches!(
+            frame.wait(),
+            Err(FrameSubmissionError::Invalidated)
+        ));
     }
 }
