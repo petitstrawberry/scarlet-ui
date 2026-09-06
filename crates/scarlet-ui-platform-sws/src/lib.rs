@@ -1817,6 +1817,27 @@ impl PlatformWindow for SWSPlatformWindow {
         self.scale_milli
     }
 
+    /// Wait for queued UI events or activity on the shared SWS connection.
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - Maximum idle wait; incoming notifications wake it early.
+    ///
+    /// # Returns
+    ///
+    /// Returns without consuming events. A transport error queues a quit event.
+    fn wait_for_event(&mut self, timeout: core::time::Duration) {
+        if self.transport_failed || self.pending_head < self.pending_events.len() {
+            return;
+        }
+        // The runner waits through its first window, but all SWS backend
+        // windows share this connection. Include every window's mailbox so a
+        // frame grant routed while another window was rendering is not lost.
+        if self.conn.wait_for_window_events(timeout).is_err() {
+            self.mark_transport_failed();
+        }
+    }
+
     fn renderer_backend(&self) -> RendererBackendKind {
         self.renderer_backend
     }
