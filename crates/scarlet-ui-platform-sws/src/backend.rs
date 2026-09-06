@@ -1,14 +1,16 @@
 //! Shared-image lifecycle and ScarletUI paint-backend integration.
 
+use alloc::format;
 use alloc::vec::Vec;
 use core::fmt;
 
 use scarlet_ui_core::color::Color;
 use scarlet_ui_core::compositor::DamageRect;
+use scarlet_ui_core::error::{RenderFailure, RenderFailureKind};
 use scarlet_ui_core::geometry::{Rect, Size};
 use scarlet_ui_core::renderer::{BackendFrame, PaintBackend, PaintContext};
-use scarlet_ui_renderer_sgfx::{FrameExecutor, SgfxPaintEncoder};
-use sgfx::backend::CompletionStatus;
+use scarlet_ui_renderer_sgfx::{FrameError, FrameExecutor, FrameSubmissionError, SgfxPaintEncoder};
+use sgfx::backend::{CompletionStatus, SubmitError};
 use sgfx::{BackendKind, Context, Device, MappedTargetSession};
 
 use crate::{SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkStatus};
@@ -46,12 +48,14 @@ pub enum Stage {
 }
 
 /// Error returned by the SWS SGFX paint backend.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// An SGFX facade operation failed.
     Sgfx(Stage),
     /// A portable ScarletUI encoding or execution operation failed.
     Render,
+    /// A discarded frame with an explicit recovery classification and cause.
+    FrameNotPresented(RenderFailure),
     /// An SWS sink operation failed.
     Sink { stage: Stage, source: SgfxSinkError },
     /// A frame dimension or lifecycle transition was invalid.
@@ -65,6 +69,7 @@ impl fmt::Display for Error {
         match self {
             Self::Sgfx(stage) => write!(formatter, "SGFX operation failed at {stage:?}"),
             Self::Render => formatter.write_str("ScarletUI SGFX rendering failed"),
+            Self::FrameNotPresented(failure) => failure.fmt(formatter),
             Self::Sink { stage, source } => {
                 write!(formatter, "SGFX sink failed at {stage:?}: {source}")
             }
@@ -127,6 +132,7 @@ pub struct SgfxPaintBackend<S> {
     supports_depth: bool,
     backend_kind: BackendKind,
     render_failed: bool,
+    full_redraw_required: bool,
 }
 
 impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
@@ -190,6 +196,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             supports_depth: capabilities.supports_depth(),
             backend_kind,
             render_failed: false,
+            full_redraw_required: false,
         };
         backend.initialize_shared_images()?;
         Ok(backend)
@@ -282,8 +289,11 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
     /// after each submit. SWS release remains a separate condition for reuse.
     /// Adreno retains its explicit legacy synchronous path until it supports
     /// tracked submission. An empty damage slice is an idle frame and issues
-    /// no protocol request. Submission/completion failure poisons this backend;
-    /// an uncertain target is never committed or rendered into again.
+    /// no protocol request. Recoverable rejection discards this frame, retires
+    /// its accepted prefix, and preserves the previous display. The next frame
+    /// is fully repainted; rejected commands are never automatically replayed.
+    /// Partial submission/completion failure poisons this backend; an uncertain
+    /// target is never committed or rendered into again.
     pub fn render_and_commit(
         &mut self,
         paint: &PaintContext<'_>,
@@ -291,8 +301,16 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         physical_damage: Option<&[DamageRect]>,
     ) -> Result<()> {
         if self.render_failed {
-            return Err(Error::Render);
+            return Err(Error::FrameNotPresented(RenderFailure {
+                kind: RenderFailureKind::RecoveryRequired,
+                reason: "an earlier GPU failure requires backend recreation".into(),
+            }));
         }
+        let physical_damage = if self.full_redraw_required {
+            None
+        } else {
+            physical_damage
+        };
         let render_areas = self.render_areas(physical_damage)?;
         if render_areas.is_empty() {
             return Ok(());
@@ -326,15 +344,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             let encoder = self.encoder.as_mut().ok_or(Error::InvalidFrame)?;
             let session = self.session.as_mut().ok_or(Error::InvalidFrame)?;
             if self.backend_kind == BackendKind::ScarletVirgl {
-                let mut attempts = 0;
-                let mut executor = FrameExecutor::new(session.executor(), || {
-                    attempts += 1;
-                    if attempts > 1_000 {
-                        return false;
-                    }
-                    std::thread::sleep(core::time::Duration::from_millis(1));
-                    true
-                });
+                let mut executor = FrameExecutor::new(session.executor());
                 if let Err(error) = encoder.encode_frame(
                     &mut executor,
                     slot,
@@ -344,16 +354,44 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                     self.scale_milli,
                     &render_areas,
                 ) {
-                    self.render_failed = true;
-                    std::println!("[ScarletUI] tracked SGFX frame failed: {error}");
-                    return Err(Error::Render);
+                    let recoverable = match &error {
+                        FrameError::Lowering(_)
+                        | FrameError::Execution(FrameSubmissionError::OutOfMemory) => {
+                            Some(RenderFailureKind::Rejected)
+                        }
+                        FrameError::Execution(FrameSubmissionError::Submit(SubmitError::Busy)) => {
+                            Some(RenderFailureKind::Busy)
+                        }
+                        FrameError::Execution(FrameSubmissionError::Submit(
+                            SubmitError::Rejected(source),
+                        )) if source.is_recoverable_rejection() => {
+                            Some(RenderFailureKind::Rejected)
+                        }
+                        _ => None,
+                    };
+                    let retirement = recoverable.map(|_| executor.discard());
+                    let kind = if matches!(retirement, Some(Ok(CompletionStatus::Complete))) {
+                        encoder.discard_frame();
+                        self.full_redraw_required = true;
+                        self.slots[slot].needs_full_commit = true;
+                        recoverable.unwrap_or(RenderFailureKind::RecoveryRequired)
+                    } else {
+                        self.render_failed = true;
+                        RenderFailureKind::RecoveryRequired
+                    };
+                    return Err(Error::FrameNotPresented(RenderFailure {
+                        kind,
+                        reason: format!("{error}; discarded-prefix retirement: {retirement:?}"),
+                    }));
                 }
                 match executor.wait() {
                     Ok(CompletionStatus::Complete) => {}
                     result => {
                         self.render_failed = true;
-                        std::println!("[ScarletUI] SGFX frame did not retire: {result:?}");
-                        return Err(Error::Sgfx(Stage::WaitForGpu));
+                        return Err(Error::FrameNotPresented(RenderFailure {
+                            kind: RenderFailureKind::RecoveryRequired,
+                            reason: format!("SGFX frame did not retire: {result:?}"),
+                        }));
                     }
                 }
             } else {
@@ -370,7 +408,13 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                         self.scale_milli,
                         &render_areas,
                     )
-                    .map_err(|_| Error::Render)?;
+                    .map_err(|error| {
+                        self.render_failed = true;
+                        Error::FrameNotPresented(RenderFailure {
+                            kind: RenderFailureKind::RecoveryRequired,
+                            reason: format!("untracked frame failed: {error}"),
+                        })
+                    })?;
             }
         }
 
@@ -406,6 +450,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         self.slots[slot].needs_full_commit = false;
         self.front_slot = Some(slot);
         self.next_slot = (slot + 1) % PRESENTATION_SLOT_COUNT;
+        self.full_redraw_required = false;
         self.cleanup_retired()?;
         Ok(())
     }
@@ -613,7 +658,12 @@ impl<S: SgfxFrameSink> PaintBackend for SgfxPaintBackend<S> {
         physical_damage: Option<&[DamageRect]>,
     ) -> scarlet_ui_core::Result<BackendFrame<'a>> {
         self.render_and_commit(context, background_color, physical_damage)
-            .map_err(|_| scarlet_ui_core::error::Error::RenderError)?;
+            .map_err(|error| match error {
+                Error::FrameNotPresented(failure) => {
+                    scarlet_ui_core::error::Error::RenderFailure(failure)
+                }
+                _ => scarlet_ui_core::error::Error::RenderError,
+            })?;
         Ok(BackendFrame::External)
     }
 }

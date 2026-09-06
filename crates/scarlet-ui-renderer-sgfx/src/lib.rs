@@ -28,4 +28,4 @@ pub use canvas::{
 pub use error::{Error, FrameError, Result, Stage};
 pub use lowering::SgfxPaintEncoder;
 pub use submission::{FrameExecutor, FrameSubmissionError};
-pub use upload::{MAX_UPLOAD_BYTES, upload_texture};
+pub use upload::upload_texture;

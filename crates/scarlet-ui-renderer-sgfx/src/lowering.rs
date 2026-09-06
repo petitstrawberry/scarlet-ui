@@ -25,7 +25,6 @@ use crate::error::{Error, FrameError, Result, Stage};
 use crate::geometry::{
     FloatRect, GeometryRange, MAX_FRAME_VERTICES, PixelBounds, Tessellator, Vertex,
 };
-use crate::{MAX_UPLOAD_BYTES, upload_texture};
 
 const PAINT_VERTEX_STRIDE: u32 = 40;
 const PASS_COMMANDS: usize = 2;
@@ -553,6 +552,21 @@ impl SgfxPaintEncoder {
     /// Shared ownership of this encoder's logical resource table.
     pub fn resource_table(&self) -> Rc<ResourceTable> {
         Rc::clone(&self.table)
+    }
+
+    /// Invalidate cached canvas contents after discarding a partially encoded frame.
+    ///
+    /// # Returns
+    ///
+    /// Nothing. Call only after all accepted work retired successfully. A canvas
+    /// may have been modified by an accepted pass before a later pass was rejected,
+    /// so its previous revision no longer certifies its pixels. Accepted mesh and
+    /// texture uploads remain valid and are not needlessly uploaded again. The
+    /// next presentation target must also be fully repainted by the platform.
+    pub fn discard_frame(&mut self) {
+        for target in &mut self.canvas_targets {
+            target.initialized = false;
+        }
     }
 
     /// Return the logical presentation texture for a target slot.
@@ -1461,23 +1475,6 @@ impl SgfxPaintEncoder {
             }
             texture_uploads.push(texture_index);
         }
-        let separate_texture_uploads = texture_uploads.iter().fold(0usize, |total, index| {
-            total.saturating_add(self.canvas_textures[*index].source.pixels.len())
-        }) > MAX_UPLOAD_BYTES;
-        if separate_texture_uploads {
-            for index in &texture_uploads {
-                let cached = &self.canvas_textures[*index];
-                let area = PixelRect::new(0, 0, cached.source.width, cached.source.height)
-                    .map_err(|_| Error::InvalidFrame)?;
-                upload_texture(
-                    executor,
-                    &table,
-                    cached.texture,
-                    TextureWrite::new(area, cached.source.width * 4, &cached.source.pixels)
-                        .map_err(|_| Error::InvalidFrame)?,
-                )?;
-            }
-        }
         let clear = ir_color(ui_color(frame.clear_color, 1.0)?)?;
         if frame.draws.is_empty() {
             let mut encoder = CommandEncoder::new(&table);
@@ -1529,11 +1526,7 @@ impl SgfxPaintEncoder {
             while draw_index < frame.draws.len() {
                 let mut encoder = CommandEncoder::new(&table);
                 let prefix_commands = if first_submission {
-                    uploads.len().saturating_add(if separate_texture_uploads {
-                        0
-                    } else {
-                        texture_uploads.len()
-                    })
+                    uploads.len().saturating_add(texture_uploads.len())
                 } else {
                     0
                 };
@@ -1547,9 +1540,7 @@ impl SgfxPaintEncoder {
                             .write_buffer(buffer, 0, bytes)
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                     }
-                    for texture_index in
-                        texture_uploads.iter().filter(|_| !separate_texture_uploads)
-                    {
+                    for texture_index in &texture_uploads {
                         let cached = &self.canvas_textures[*texture_index];
                         let texture = table
                             .texture_ref(cached.texture)
@@ -2064,24 +2055,6 @@ impl SgfxPaintEncoder {
             return Ok(());
         }
         let table = Rc::clone(&self.table);
-        if frame.uploads.iter().fold(0u64, |bytes, upload| {
-            bytes.saturating_add(u64::from(upload.width) * u64::from(upload.height) * 4)
-        }) > MAX_UPLOAD_BYTES as u64
-        {
-            for upload in &frame.uploads {
-                let area = PixelRect::new(upload.x, upload.y, upload.width, upload.height)
-                    .map_err(|_| Error::InvalidFrame)?;
-                upload_texture(
-                    executor,
-                    &table,
-                    upload.texture,
-                    TextureWrite::new(area, upload.bytes_per_row, upload.bytes.as_slice())
-                        .map_err(|_| Error::InvalidFrame)?,
-                )?;
-            }
-            self.commit_texture_uploads(frame);
-            return Ok(());
-        }
         let mut encoder = CommandEncoder::new(&table);
         for upload in &frame.uploads {
             let texture = table
@@ -2536,6 +2509,7 @@ mod tests {
     struct RecordingExecutor {
         command_kinds: Vec<Vec<&'static str>>,
         draw_vertices: Vec<u32>,
+        buffer_write_sizes: Vec<usize>,
     }
 
     impl CommandExecutor for RecordingExecutor {
@@ -2548,7 +2522,10 @@ mod tests {
             let mut kinds = Vec::new();
             for command in commands.commands() {
                 let kind = match command {
-                    Command::WriteBuffer { .. } => "write-buffer",
+                    Command::WriteBuffer { data, .. } => {
+                        self.buffer_write_sizes.push(data.len());
+                        "write-buffer"
+                    }
                     Command::WriteTexture { .. } => "write-texture",
                     Command::CopyTextureToTexture { .. } => "copy",
                     Command::BeginRenderPass(_) => "begin-pass",
@@ -2966,6 +2943,51 @@ mod tests {
 
         let too_many_meshes = vec![0; max_draws + 1];
         assert!(!canvas_pass_reaches_frame_end(&too_many_meshes, 0, 0));
+    }
+
+    #[test]
+    fn large_canvas_mesh_remains_one_persistent_buffer_and_one_logical_draw() {
+        let mut encoder = SgfxPaintEncoder::new(32, 32, false).unwrap();
+        let mut executor = RecordingExecutor::default();
+        let mesh = SgfxMesh::with_handle(SgfxMeshHandle::new(), 1, triangle(0.0).repeat(20_000));
+        let frame = SgfxCanvasFrame::new(1, UiColor::BLACK)
+            .draw(SgfxCanvasDraw::new(mesh, Transform::identity().columns()));
+        let target = encoder.canvas_target(1, 32, 32, false).unwrap();
+        encoder
+            .render_canvas(&mut executor, target, &frame)
+            .unwrap();
+        assert_eq!(executor.command_kinds.len(), 1);
+        assert_eq!(executor.buffer_write_sizes, [2_400_000]);
+        assert_eq!(executor.draw_vertices, [60_000]);
+        encoder
+            .render_canvas(&mut executor, target, &frame)
+            .unwrap();
+        assert_eq!(executor.command_kinds.len(), 2);
+        assert_eq!(executor.buffer_write_sizes, [2_400_000]);
+        assert_eq!(executor.draw_vertices, [60_000, 60_000]);
+    }
+
+    #[test]
+    fn discarded_canvas_contents_are_invalidated_without_reuploading_retired_meshes() {
+        let mut encoder = SgfxPaintEncoder::new(32, 32, false).unwrap();
+        let mut executor = RecordingExecutor::default();
+        let mesh = SgfxMesh::with_handle(SgfxMeshHandle::new(), 1, triangle(0.0));
+        let frame = SgfxCanvasFrame::new(1, UiColor::BLACK)
+            .draw(SgfxCanvasDraw::new(mesh, Transform::identity().columns()));
+        let target = encoder.canvas_target(1, 32, 32, false).unwrap();
+        encoder
+            .render_canvas(&mut executor, target, &frame)
+            .unwrap();
+        encoder.canvas_targets[target].initialized = true;
+        encoder.canvas_targets[target].revision = 1;
+        encoder.discard_frame();
+        assert!(!encoder.canvas_targets[target].initialized);
+        assert!(encoder.canvas_meshes[0].uploaded);
+        encoder
+            .render_canvas(&mut executor, target, &frame)
+            .unwrap();
+        assert_eq!(executor.buffer_write_sizes, [120]);
+        assert_eq!(executor.draw_vertices, [3, 3]);
     }
 
     #[test]

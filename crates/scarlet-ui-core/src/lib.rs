@@ -114,7 +114,7 @@ pub use element::{
     ComponentElement, DirtyFlags, Element, ElementId, ElementRenderObject, ElementTree,
     LayoutConstraints, RenderElement,
 };
-pub use error::{Error, Result};
+pub use error::{Error, RenderFailure, RenderFailureKind, Result};
 pub use event::{
     Event, EventDispatcher, FocusEvent, InputEvent, KeyCode, KeyEvent, LifecycleEvent, MouseButton,
     MouseEvent, ScrollSource, WheelPhase,

@@ -488,19 +488,11 @@ impl PaintBackend for SwsSgfxPaintBackend {
         &'a mut self,
         context: &PaintContext<'_>,
         background_color: Color,
-        _logical_damage: Option<&[Rect]>,
+        logical_damage: Option<&[Rect]>,
         physical_damage: Option<&[DamageRect]>,
     ) -> Result<BackendFrame<'a>> {
-        match self
-            .backend
-            .render_and_commit(context, background_color, physical_damage)
-        {
-            Ok(()) => Ok(BackendFrame::External),
-            Err(error) => {
-                logln!("[ScarletUI SGFX] render failed: {}", error);
-                Err(scarlet_ui_core::error::Error::RenderError)
-            }
-        }
+        self.backend
+            .render(context, background_color, logical_damage, physical_damage)
     }
 }
 

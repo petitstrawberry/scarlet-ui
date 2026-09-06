@@ -1,27 +1,25 @@
-//! Bounded independent texture uploads shared by UI and compositor consumers.
+//! Logical texture uploads; native packet scheduling belongs to the backend.
 
 use sgfx::backend::CommandExecutor;
-use sgfx::ir::{CommandEncoder, PixelRect, ResourceTable, TextureId, TextureWrite};
+use sgfx::ir::{CommandEncoder, ResourceTable, TextureId, TextureWrite};
 
 use crate::{Error, FrameError, Stage};
 
-/// Pixel-byte budget per logical upload, leaving room for native packet headers.
-pub const MAX_UPLOAD_BYTES: usize = 512 * 1024;
-
-/// Submit a texture update as ordered, bounded row strips.
+/// Submit a complete texture update as one logical operation.
 ///
 /// # Arguments
 ///
 /// * `executor` - Executor bound to `resources`; a frame tracker retains receipts.
 /// * `resources` - Logical resource descriptors.
 /// * `texture` - Destination texture identifier.
-/// * `write` - Complete source layout, validated before submitting any strip.
+/// * `write` - Complete source layout, validated before submission.
 ///
 /// # Returns
 ///
-/// Success after all strips are accepted, or a lowering/execution error. Earlier
-/// strips may have been accepted on execution failure; do not blindly replay.
-/// No GPU wait is performed here, and no bytes are borrowed after each execute.
+/// Success after acceptance, or a lowering/execution error. A backend may split
+/// the update into native packets, but owns their scheduling and completion.
+/// Execution failure must not be blindly replayed. No GPU wait is performed
+/// here, and no upload bytes are borrowed after execute returns.
 pub fn upload_texture<E: CommandExecutor>(
     executor: &mut E,
     resources: &ResourceTable,
@@ -30,40 +28,19 @@ pub fn upload_texture<E: CommandExecutor>(
 ) -> Result<(), FrameError<E::Error>> {
     let invalid = |_| Error::Sgfx(Stage::EncodeCommands);
     let texture = resources.texture_ref(texture).map_err(invalid)?;
-    // Validate the entire source and destination before accepting a prefix.
-    let mut validation = CommandEncoder::new(resources);
-    validation.write_texture(texture, write).map_err(invalid)?;
-    let descriptor = resources.texture(texture).map_err(invalid)?;
-    let area = write.destination();
-    let row_bytes = area.width() as usize * descriptor.format().bytes_per_pixel() as usize;
-    let stride = write.bytes_per_row() as usize;
-    // Native alpha-only formats expand to four-byte pixels during lowering.
-    let rows_per_strip = (MAX_UPLOAD_BYTES / (area.width() as usize * 4)).max(1) as u32;
-    let mut y = 0;
-    while y < area.height() {
-        let rows = rows_per_strip.min(area.height() - y);
-        let start = y as usize * stride;
-        let length = (rows as usize - 1) * stride + row_bytes;
-        let bytes = write
-            .data()
-            .get(start..start + length)
-            .ok_or(Error::InvalidFrame)?;
-        let strip = PixelRect::new(area.x(), area.y() + y, area.width(), rows).map_err(invalid)?;
-        let write = TextureWrite::new(strip, write.bytes_per_row(), bytes).map_err(invalid)?;
-        let mut encoder = CommandEncoder::new(resources);
-        encoder.write_texture(texture, write).map_err(invalid)?;
-        let commands = encoder.finish().map_err(invalid)?;
-        executor.execute(&commands).map_err(FrameError::Execution)?;
-        y += rows;
-    }
-    Ok(())
+    let mut encoder = CommandEncoder::new(resources);
+    encoder.write_texture(texture, write).map_err(invalid)?;
+    let commands = encoder.finish().map_err(invalid)?;
+    executor.execute(&commands).map_err(FrameError::Execution)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec::Vec;
-    use sgfx::ir::{Command, CommandBuffer, Extent2D, TextureDesc, TextureFormat, TextureUsage};
+    use sgfx::ir::{
+        Command, CommandBuffer, Extent2D, PixelRect, TextureDesc, TextureFormat, TextureUsage,
+    };
 
     #[derive(Default)]
     struct Recorder(Vec<(PixelRect, Vec<u8>)>);
@@ -80,7 +57,7 @@ mod tests {
     }
 
     #[test]
-    fn large_padded_uploads_are_split_in_order_without_a_padded_final_row() {
+    fn large_padded_upload_is_one_logical_operation_without_a_padded_final_row() {
         let table = ResourceTable::new();
         let texture = table
             .define_texture(
@@ -108,20 +85,13 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(recorder.0.len(), 3);
-        let mut y = 0;
-        for (area, data) in recorder.0 {
-            assert_eq!(area.y(), y);
-            assert!(area.width() as usize * area.height() as usize * 4 <= MAX_UPLOAD_BYTES);
-            let start = y as usize * stride;
-            assert_eq!(data, bytes[start..start + data.len()]);
-            y += area.height();
-        }
-        assert_eq!(y, 259);
+        assert_eq!(recorder.0.len(), 1);
+        assert_eq!(recorder.0[0].0, PixelRect::new(0, 0, 1024, 259).unwrap());
+        assert_eq!(recorder.0[0].1, bytes);
     }
 
     #[test]
-    fn invalid_complete_source_is_rejected_before_any_strip() {
+    fn invalid_complete_source_is_rejected_before_submission() {
         let table = ResourceTable::new();
         let texture = table
             .define_texture(
@@ -135,7 +105,7 @@ mod tests {
             .unwrap()
             .id();
         let mut recorder = Recorder::default();
-        let bytes = alloc::vec![0; MAX_UPLOAD_BYTES];
+        let bytes = alloc::vec![0; 512 * 1024];
         assert!(
             upload_texture(
                 &mut recorder,

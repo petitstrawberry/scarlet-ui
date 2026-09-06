@@ -11,7 +11,7 @@ use core::time::Duration;
 use crate::clock::Instant;
 use crate::command::{self, ApplicationCommand};
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult, WindowSizeLimits};
-use crate::error::{Error, Result};
+use crate::error::{Error, RenderFailure, RenderFailureKind, Result};
 use crate::event::{Event, MouseEvent, ScrollSource, WheelPhase};
 use crate::geometry::{Point, Rect, Size};
 use crate::input_environment::{
@@ -187,6 +187,27 @@ pub trait Application: Clone + 'static {
     /// external paint backend actually submitted a frame for the window.
     fn on_frame_presented(&mut self, _ctx: &WindowContext) {}
 
+    /// Observe a frame that was not presented, without treating it as success.
+    ///
+    /// # Arguments
+    ///
+    /// * `_ctx` - Window whose frame failed; its previous display is retained for
+    ///   recoverable failures.
+    /// * `failure` - Recovery classification and renderer diagnostic. Busy retries
+    ///   on a later event-loop tick. Rejected frames wait for scene invalidation;
+    ///   this hook can change application state (for example, reduce scene load).
+    ///   RecoveryRequired ends the runner with the error after this notification.
+    ///
+    /// # Returns
+    ///
+    /// Nothing. This is not a GPU completion or permission to replay commands.
+    /// The default logs non-transient failures and never calls on_frame_presented.
+    fn on_render_error(&mut self, _ctx: &WindowContext, failure: &RenderFailure) {
+        if failure.kind != RenderFailureKind::Busy {
+            crate::logln!("[ScarletUI] {failure}");
+        }
+    }
+
     /// Exit when all windows are closed.
     fn exit_when_all_windows_closed(&self) -> bool {
         true
@@ -354,6 +375,7 @@ impl ApplicationRunner {
             frame_ready: !frame_pacing_enabled,
             frame_request_outstanding: frame_pacing_enabled,
             suspended: false,
+            retry_render: false,
             _app: PhantomData,
         })
     }
@@ -439,12 +461,13 @@ impl ApplicationRunner {
                 app.on_window_sync(&slot.context, slot.window.as_mut());
                 sync_text_input(slot.window.as_mut(), &slot.pipeline);
                 let frame_granted = !slot.frame_pacing_enabled || slot.frame_ready;
-                if slot.pipeline.has_dirty()
+                if (slot.pipeline.has_dirty() || slot.retry_render)
                     && !slot.presented_this_cycle
                     && !slot.suspended
                     && frame_granted
                 {
-                    match present_pipeline(&mut slot.pipeline, slot.window.as_mut())? {
+                    let presentation = present_window(app, slot)?;
+                    match presentation {
                         Presentation::Cpu => {
                             slot.presented_this_cycle = true;
                             any_presented = true;
@@ -556,6 +579,7 @@ struct WindowSlot<A: Application> {
     frame_ready: bool,
     frame_request_outstanding: bool,
     suspended: bool,
+    retry_render: bool,
     _app: PhantomData<A>,
 }
 
@@ -621,6 +645,23 @@ enum Presentation {
     Cpu,
     External,
     Idle,
+}
+
+fn present_window<A: Application>(app: &mut A, slot: &mut WindowSlot<A>) -> Result<Presentation> {
+    slot.retry_render = false;
+    match present_pipeline(&mut slot.pipeline, slot.window.as_mut()) {
+        Ok(presentation) => Ok(presentation),
+        Err(Error::RenderFailure(failure)) => {
+            app.on_render_error(&slot.context, &failure);
+            match failure.kind {
+                RenderFailureKind::Busy => slot.retry_render = true,
+                RenderFailureKind::Rejected => {}
+                RenderFailureKind::RecoveryRequired => return Err(Error::RenderFailure(failure)),
+            }
+            Ok(Presentation::Idle)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn present_pipeline(
@@ -1180,6 +1221,128 @@ mod tests {
 
     use crate::input_environment::install_test_input_environment;
     use crate::views::{Text, Window};
+
+    #[derive(Clone)]
+    struct RenderFailureApp(Rc<RefCell<Vec<RenderFailure>>>);
+
+    impl Application for RenderFailureApp {
+        fn scenes(&self) -> impl Scene {
+            Window::new("Render failure", Text::new("frame")).size(Size::new(64.0, 64.0))
+        }
+        fn on_render_error(&mut self, _: &WindowContext, failure: &RenderFailure) {
+            self.0.borrow_mut().push(failure.clone());
+        }
+    }
+
+    impl View for RenderFailureApp {
+        fn create_element(&self) -> Box<dyn Element> {
+            Text::new("frame").create_element()
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[derive(Default)]
+    struct RenderProbe {
+        fail_next: Option<RenderFailureKind>,
+        attempts: usize,
+        presented: usize,
+        full_damage: Vec<bool>,
+    }
+
+    struct FailingPaintBackend(Rc<RefCell<RenderProbe>>);
+
+    impl crate::renderer::PaintBackend for FailingPaintBackend {
+        fn resize(&mut self, _: Size, _: u32) {}
+        fn render<'a>(
+            &'a mut self,
+            _: &crate::renderer::PaintContext<'_>,
+            _: crate::color::Color,
+            _: Option<&[Rect]>,
+            damage: Option<&[crate::compositor::DamageRect]>,
+        ) -> Result<crate::renderer::BackendFrame<'a>> {
+            let mut probe = self.0.borrow_mut();
+            probe.attempts += 1;
+            probe.full_damage.push(damage.is_none());
+            if let Some(kind) = probe.fail_next.take() {
+                return Err(Error::RenderFailure(RenderFailure {
+                    kind,
+                    reason: "injected limit or device failure".into(),
+                }));
+            }
+            probe.presented += 1;
+            Ok(crate::renderer::BackendFrame::External)
+        }
+    }
+
+    fn assert_render_failure_policy(kind: RenderFailureKind) {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let mut app = RenderFailureApp(Rc::new(RefCell::new(Vec::new())));
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: Rc::new(RefCell::new(EnvironmentRunnerProbe::default())),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slot = runner.create_slot(&mut app, declaration, true).unwrap();
+        let probe = Rc::new(RefCell::new(RenderProbe::default()));
+        slot.pipeline
+            .set_paint_backend(Box::new(FailingPaintBackend(probe.clone())));
+        assert_eq!(
+            present_window(&mut app, &mut slot).unwrap(),
+            Presentation::External
+        );
+        assert_eq!(probe.borrow().presented, 1);
+        let root = slot.pipeline.element_tree().root().unwrap().id();
+        slot.pipeline.pipeline_owner_mut().mark_needs_paint(root);
+        probe.borrow_mut().fail_next = Some(kind);
+        let result = present_window(&mut app, &mut slot);
+        assert_eq!(
+            probe.borrow().presented,
+            1,
+            "failed frame must preserve the front image"
+        );
+        assert_eq!(probe.borrow().attempts, 2, "never replay in the same call");
+        assert_eq!(app.0.borrow().len(), 1);
+        assert_eq!(app.0.borrow()[0].kind, kind);
+        assert_eq!(slot.retry_render, kind == RenderFailureKind::Busy);
+        assert!(
+            !slot.pipeline.has_dirty(),
+            "unchanged rejected input must not auto-retry"
+        );
+        if kind == RenderFailureKind::RecoveryRequired {
+            assert!(matches!(result, Err(Error::RenderFailure(_))));
+            return;
+        }
+        assert_eq!(result.unwrap(), Presentation::Idle);
+        if kind == RenderFailureKind::Rejected {
+            // A new scene invalidation, not a blind replay, permits another attempt.
+            slot.pipeline.pipeline_owner_mut().mark_needs_paint(root);
+        }
+        assert_eq!(
+            present_window(&mut app, &mut slot).unwrap(),
+            Presentation::External
+        );
+        assert_eq!(probe.borrow().presented, 2);
+        assert_eq!(probe.borrow().full_damage.last(), Some(&true));
+        assert!(!slot.retry_render);
+    }
+
+    #[test]
+    fn render_busy_preserves_display_notifies_and_retries_on_a_later_tick() {
+        assert_render_failure_policy(RenderFailureKind::Busy);
+    }
+
+    #[test]
+    fn render_rejection_preserves_display_and_requires_a_new_invalidation() {
+        assert_render_failure_policy(RenderFailureKind::Rejected);
+    }
+
+    #[test]
+    fn render_device_failure_notifies_then_ends_the_runner_without_reuse() {
+        assert_render_failure_policy(RenderFailureKind::RecoveryRequired);
+    }
 
     #[derive(Clone)]
     struct PointerLockLifecycleApp {

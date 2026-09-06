@@ -11,12 +11,37 @@ use scarlet_ui::vstack;
 use std::sync::Arc;
 use std::time::Instant;
 
+fn split_layout_for_selection(selection: usize) -> (SplitAxis, SplitAxisPolicy) {
+    match selection {
+        1 => (SplitAxis::Vertical, SplitAxisPolicy::Fixed),
+        2 => (SplitAxis::Horizontal, SplitAxisPolicy::AdaptiveStack),
+        _ => (SplitAxis::Horizontal, SplitAxisPolicy::Fixed),
+    }
+}
+
+fn split_minimum_extents_for_selection(selection: usize) -> (f32, f32) {
+    match selection {
+        1 | 2 => (40.0, 40.0),
+        _ => (72.0, 120.0),
+    }
+}
+
+fn tab_bar_placement_for_selection(selection: usize) -> TabBarPlacement {
+    match selection {
+        1 => TabBarPlacement::Bottom,
+        2 => TabBarPlacement::Automatic,
+        _ => TabBarPlacement::Top,
+    }
+}
+
 #[derive(Clone)]
 struct WidgetFactory {
     slider_value: State<f32>,
     toggle_on: State<bool>,
     text_value: State<String>,
     selected: State<usize>,
+    split_layout: State<usize>,
+    tab_bar_placement: State<usize>,
     text_document: State<TextDocument>,
     text_selection: State<TextSelection>,
     cube_canvas: SgfxCanvasHandle,
@@ -34,6 +59,8 @@ impl WidgetFactory {
             toggle_on: State::new(StateId::new(21), true),
             text_value: State::new(StateId::new(22), String::from("Factory text field")),
             selected: State::new(StateId::new(23), 1usize),
+            split_layout: State::new(StateId::new(27), 0usize),
+            tab_bar_placement: State::new(StateId::new(28), 0usize),
             text_document: State::new(
                 StateId::new(24),
                 TextDocument::from_str(
@@ -183,6 +210,9 @@ impl WidgetFactory {
     }
 
     fn split_view(&self) -> impl View + Clone + use<> {
+        let selection = self.split_layout.get();
+        let (axis, axis_policy) = split_layout_for_selection(selection);
+        let (min_first, min_second) = split_minimum_extents_for_selection(selection);
         SplitView::new(
             Text::new("Track List")
                 .font_size(13.0)
@@ -194,11 +224,24 @@ impl WidgetFactory {
                 .background(Color::rgb(252u8, 252u8, 253u8)),
         )
         .fraction(0.34)
-        .min_first(72.0)
-        .min_second(120.0)
-        .axis_policy(SplitAxisPolicy::AdaptiveStack)
+        .min_first(min_first)
+        .min_second(min_second)
+        .axis(axis)
+        .axis_policy(axis_policy)
         .adaptive_stack_narrow_width(420.0)
         .frame(320.0, 160.0)
+    }
+
+    fn split_layout_select(&self) -> impl View + Clone + use<> {
+        Select::new(
+            vec![
+                String::from("Horizontal"),
+                String::from("Vertical"),
+                String::from("Automatic"),
+            ],
+            self.split_layout.clone(),
+        )
+        .width(220.0)
     }
 
     fn tab_view(&self) -> impl View + Clone + use<> {
@@ -221,8 +264,32 @@ impl WidgetFactory {
                 .padding(12.0)
             }),
         ])
-        .tab_bar_placement(TabBarPlacement::Automatic)
+        .tab_bar_placement(tab_bar_placement_for_selection(
+            self.tab_bar_placement.get(),
+        ))
         .frame(320.0, 150.0)
+    }
+
+    fn tab_bar_placement_select(&self) -> impl View + Clone + use<> {
+        Select::new(
+            vec![
+                String::from("Top"),
+                String::from("Bottom"),
+                String::from("Automatic"),
+            ],
+            self.tab_bar_placement.clone(),
+        )
+        .width(220.0)
+    }
+
+    fn configurable_layouts(&self) -> impl View + Clone + use<> {
+        vstack! {
+            self.row("Split layout", self.split_layout_select()),
+            self.row("SplitView", self.split_view()),
+            self.row("Tab bar", self.tab_bar_placement_select()),
+            self.row("TabView", self.tab_view()),
+        }
+        .spacing(16.0)
     }
 
     fn overview_page(&self) -> impl View + Clone + use<> {
@@ -233,12 +300,11 @@ impl WidgetFactory {
             self.row("Rectangle", self.rectangle()),
             self.row("Divider", self.divider()),
             self.row("ScrollView both", self.scroll_view()),
-            self.row("SplitView", self.split_view()),
-            self.row("TabView", self.tab_view()),
+            self.configurable_layouts(),
         }
         .spacing(16.0)
         .padding(24.0);
-        self.scroll_page(content, 760.0)
+        self.scroll_page(content, 860.0)
     }
 
     fn sgfx_page(&self) -> impl View + Clone + use<> {
@@ -314,12 +380,11 @@ impl WidgetFactory {
             self.row("ScrollView both", self.scroll_view()),
             self.row("ScrollView x", self.horizontal_scroll_view()),
             self.row("ScrollView y", self.vertical_scroll_view()),
-            self.row("SplitView", self.split_view()),
-            self.row("TabView", self.tab_view()),
+            self.configurable_layouts(),
         }
         .spacing(16.0)
         .padding(24.0);
-        self.scroll_page(content, 940.0)
+        self.scroll_page(content, 1040.0)
     }
 }
 
@@ -334,6 +399,8 @@ impl View for WidgetFactory {
             &self.toggle_on,
             &self.text_value,
             &self.selected,
+            &self.split_layout,
+            &self.tab_bar_placement,
             &self.text_document,
             &self.text_selection,
         ]
@@ -537,4 +604,56 @@ fn perspective_matrix(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16]
         (near * far) / (near - far),
         0.0,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scarlet_ui::event::Phase;
+    use scarlet_ui::views::SplitViewRenderObject;
+
+    #[test]
+    fn factory_defaults_keep_the_original_layout() {
+        assert_eq!(
+            split_layout_for_selection(0),
+            (SplitAxis::Horizontal, SplitAxisPolicy::Fixed)
+        );
+        assert_eq!(tab_bar_placement_for_selection(0), TabBarPlacement::Top);
+    }
+
+    #[test]
+    fn vertical_split_modes_leave_room_to_drag_the_divider() {
+        for selection in [1, 2] {
+            let (axis, axis_policy) = split_layout_for_selection(selection);
+            let (min_first, min_second) = split_minimum_extents_for_selection(selection);
+            let split = SplitView::new(Text::new("A"), Text::new("B"))
+                .axis(axis)
+                .axis_policy(axis_policy)
+                .adaptive_stack_narrow_width(420.0)
+                .fraction(0.34)
+                .min_first(min_first)
+                .min_second(min_second);
+            let mut render_object = SplitViewRenderObject::from_view(&split);
+
+            render_object.layout(LayoutConstraints::tight(320.0, 160.0));
+            assert_eq!(render_object.effective_axis(), SplitAxis::Vertical);
+
+            let initial_extent = render_object.first_extent();
+            let divider_y = initial_extent.round() as i32;
+            assert!(render_object.handle_event(
+                &Event::Mouse(MouseEvent::ButtonPressed {
+                    button: MouseButton::Left,
+                    x: 20,
+                    y: divider_y,
+                    click_count: 1,
+                }),
+                Phase::Target,
+            ));
+            assert!(render_object.handle_event(
+                &Event::Mouse(MouseEvent::Moved { x: 20, y: 100 }),
+                Phase::Target,
+            ));
+            assert!(render_object.first_extent() > initial_extent + 20.0);
+        }
+    }
 }

@@ -97,6 +97,11 @@ the normal ScarletUI prelude, declares views and scenes, and calls `app.run()`.
 The normative runtime and reconciliation model is documented in
 [ScarletUI Architecture](docs/ARCHITECTURE.md).
 
+Frame admission, safe discard, and application recovery follow the
+[frame-failure contract](docs/FRAME_FAILURES.md). `Application::on_render_error`
+reports transient capacity pressure, rejected frames, and recovery-required GPU
+failures separately; a discarded frame is never reported as presented.
+
 ## Live Preview
 
 ScarletUI preview is a native desktop development tool. It is separate from the

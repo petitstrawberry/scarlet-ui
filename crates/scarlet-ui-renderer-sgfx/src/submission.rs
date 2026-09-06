@@ -50,32 +50,32 @@ impl<E: fmt::Display, S> fmt::Display for FrameSubmissionError<E, S> {
 /// All accepted receipts are retained until the frame's handoff boundary. Only
 /// bounded receipt-capacity pressure may wait earlier. Dropping this owner does
 /// not cancel accepted work or authorize shared-image reuse.
-pub struct FrameExecutor<E: CommandSubmitter, F> {
+pub struct FrameExecutor<E: CommandSubmitter> {
     executor: E,
     submissions: Vec<E::Submission>,
-    retry_busy: F,
     failed: Cell<bool>,
+    retirement_failed: Cell<bool>,
 }
 
-impl<E: CommandSubmitter, F: FnMut() -> bool> FrameExecutor<E, F> {
+impl<E: CommandSubmitter> FrameExecutor<E> {
     /// Begin tracking one frame using a backend-owned executor.
     ///
     /// # Arguments
     ///
     /// * `executor` - Executor bound to the encoder's logical resource table.
-    /// * `retry_busy` - Consumer admission policy, invoked only after a proven
-    ///   `Busy` rejection of the current stream. Return false to stop retrying.
-    ///   It must bound waiting; accepted/failed streams are never replayed.
+    /// Native packet splitting and transport retries belong to the backend
+    /// queue. On logical admission pressure this frame may retire its oldest
+    /// accepted submission; accepted/failed streams are never replayed.
     ///
     /// # Returns
     ///
     /// A frame-scoped executor with no submitted work yet.
-    pub fn new(executor: E, retry_busy: F) -> Self {
+    pub fn new(executor: E) -> Self {
         Self {
             executor,
             submissions: Vec::new(),
-            retry_busy,
             failed: Cell::new(false),
+            retirement_failed: Cell::new(false),
         }
     }
 
@@ -93,6 +93,7 @@ impl<E: CommandSubmitter, F: FnMut() -> bool> FrameExecutor<E, F> {
         for submission in &self.submissions {
             if submission.poll().map_err(|error| {
                 self.failed.set(true);
+                self.retirement_failed.set(true);
                 FrameSubmissionError::Completion(error)
             })? != CompletionStatus::Complete
             {
@@ -116,6 +117,37 @@ impl<E: CommandSubmitter, F: FnMut() -> bool> FrameExecutor<E, F> {
         for submission in &self.submissions {
             if submission.wait(None).map_err(|error| {
                 self.failed.set(true);
+                self.retirement_failed.set(true);
+                FrameSubmissionError::Completion(error)
+            })? != CompletionStatus::Complete
+            {
+                return Ok(CompletionStatus::Pending);
+            }
+        }
+        Ok(CompletionStatus::Complete)
+    }
+
+    /// Discard this frame and retire its accepted prefix without presenting it.
+    ///
+    /// # Returns
+    ///
+    /// Complete only after every accepted stream retired successfully, Pending
+    /// if retirement is still outstanding, or an error. Busy/rejection and CPU
+    /// lowering failure do not prevent this cleanup. A failed-prefix or observed
+    /// GPU failure does: no error proves quiescence. The caller must additionally
+    /// classify the immediate rejection as recoverable before reusing its backend.
+    /// This never replays commands, rolls back GPU writes, or makes the discarded
+    /// frame presentable. Subsequent execute/poll/wait calls stay invalidated.
+    pub fn discard(
+        &self,
+    ) -> Result<CompletionStatus, FrameSubmissionError<E::Error, E::Submission>> {
+        self.failed.set(true);
+        if self.retirement_failed.get() {
+            return Err(FrameSubmissionError::Invalidated);
+        }
+        for submission in &self.submissions {
+            if submission.wait(None).map_err(|error| {
+                self.retirement_failed.set(true);
                 FrameSubmissionError::Completion(error)
             })? != CompletionStatus::Complete
             {
@@ -126,7 +158,7 @@ impl<E: CommandSubmitter, F: FnMut() -> bool> FrameExecutor<E, F> {
     }
 }
 
-impl<E: CommandSubmitter, F: FnMut() -> bool> CommandExecutor for FrameExecutor<E, F> {
+impl<E: CommandSubmitter> CommandExecutor for FrameExecutor<E> {
     type Error = FrameSubmissionError<E::Error, E::Submission>;
 
     /// Submit one logical stream and retain its completion for the whole frame.
@@ -151,24 +183,39 @@ impl<E: CommandSubmitter, F: FnMut() -> bool> CommandExecutor for FrameExecutor<
         if result.is_err() {
             self.failed.set(true);
         }
+        if !matches!(
+            &result,
+            Ok(())
+                | Err(FrameSubmissionError::OutOfMemory | FrameSubmissionError::Pending)
+                | Err(FrameSubmissionError::Submit(
+                    SubmitError::Busy | SubmitError::Rejected(_)
+                ))
+        ) {
+            self.retirement_failed.set(true);
+        }
         result
     }
 }
 
-impl<E: CommandSubmitter, F: FnMut() -> bool> FrameExecutor<E, F> {
+impl<E: CommandSubmitter> FrameExecutor<E> {
+    fn retire_oldest(&mut self) -> Result<(), FrameSubmissionError<E::Error, E::Submission>> {
+        if self.submissions[0]
+            .wait(None)
+            .map_err(FrameSubmissionError::Completion)?
+            != CompletionStatus::Complete
+        {
+            return Err(FrameSubmissionError::Pending);
+        }
+        self.submissions.remove(0);
+        Ok(())
+    }
+
     fn submit_commands(
         &mut self,
         commands: &CommandBuffer<'_, '_>,
     ) -> Result<(), FrameSubmissionError<E::Error, E::Submission>> {
         if self.submissions.len() == MAX_IN_FLIGHT {
-            if self.submissions[0]
-                .wait(None)
-                .map_err(FrameSubmissionError::Completion)?
-                != CompletionStatus::Complete
-            {
-                return Err(FrameSubmissionError::Pending);
-            }
-            self.submissions.remove(0);
+            self.retire_oldest()?;
         }
         self.submissions
             .try_reserve(1)
@@ -179,7 +226,7 @@ impl<E: CommandSubmitter, F: FnMut() -> bool> FrameExecutor<E, F> {
                     self.submissions.push(submission);
                     return Ok(());
                 }
-                Err(SubmitError::Busy) if (self.retry_busy)() => {}
+                Err(SubmitError::Busy) if !self.submissions.is_empty() => self.retire_oldest()?,
                 Err(error) => return Err(FrameSubmissionError::Submit(error)),
             }
         }
@@ -198,6 +245,7 @@ mod tests {
     struct Receipt {
         waits: Rc<Cell<usize>>,
         fail: Cell<bool>,
+        pending: Cell<bool>,
     }
     impl Completion for Receipt {
         type Error = &'static str;
@@ -211,6 +259,9 @@ mod tests {
             self.waits.set(self.waits.get() + 1);
             if self.fail.get() {
                 return Err("observation failed");
+            }
+            if self.pending.get() {
+                return Ok(CompletionStatus::Pending);
             }
             Ok(CompletionStatus::Complete)
         }
@@ -240,6 +291,7 @@ mod tests {
             let receipt = Receipt {
                 waits: Rc::clone(&self.waits),
                 fail: Cell::new(false),
+                pending: Cell::new(false),
             };
             if self.fail {
                 return Err(SubmitError::Failed {
@@ -255,15 +307,12 @@ mod tests {
         let waits = Rc::new(Cell::new(0));
         let table = ResourceTable::new();
         let commands = CommandEncoder::new(&table).finish().unwrap();
-        let mut frame = FrameExecutor::new(
-            Submitter {
-                calls: 0,
-                waits: waits.clone(),
-                busy: false,
-                fail: false,
-            },
-            || false,
-        );
+        let mut frame = FrameExecutor::new(Submitter {
+            calls: 0,
+            waits: waits.clone(),
+            busy: false,
+            fail: false,
+        });
         for _ in 0..3 {
             frame.execute(&commands).unwrap();
         }
@@ -276,24 +325,21 @@ mod tests {
     fn retries_only_busy_and_never_replays_partial_acceptance() {
         let table = ResourceTable::new();
         let commands = CommandEncoder::new(&table).finish().unwrap();
-        let mut retries = 0;
-        let mut frame = FrameExecutor::new(
-            Submitter {
-                calls: 0,
-                waits: Rc::new(Cell::new(0)),
-                busy: true,
-                fail: true,
-            },
-            || {
-                retries += 1;
-                true
-            },
-        );
+        let waits = Rc::new(Cell::new(0));
+        let mut frame = FrameExecutor::new(Submitter {
+            calls: 0,
+            waits: Rc::clone(&waits),
+            busy: false,
+            fail: false,
+        });
+        frame.execute(&commands).unwrap();
+        frame.executor.busy = true;
+        frame.executor.fail = true;
         assert!(matches!(
             frame.execute(&commands),
             Err(FrameSubmissionError::Submit(SubmitError::Failed { .. }))
         ));
-        assert_eq!(frame.executor.calls, 2);
+        assert_eq!(frame.executor.calls, 3);
         assert!(matches!(
             frame.wait(),
             Err(FrameSubmissionError::Invalidated)
@@ -302,24 +348,39 @@ mod tests {
             frame.execute(&commands),
             Err(FrameSubmissionError::Invalidated)
         ));
-        assert_eq!(frame.executor.calls, 2);
-        drop(frame);
-        assert_eq!(retries, 1);
+        assert_eq!(frame.executor.calls, 3);
+        assert_eq!(waits.get(), 1);
     }
+    #[test]
+    fn busy_without_owned_work_does_not_start_a_transport_retry_loop() {
+        let table = ResourceTable::new();
+        let commands = CommandEncoder::new(&table).finish().unwrap();
+        let waits = Rc::new(Cell::new(0));
+        let mut frame = FrameExecutor::new(Submitter {
+            calls: 0,
+            waits: Rc::clone(&waits),
+            busy: true,
+            fail: false,
+        });
+        assert!(matches!(
+            frame.execute(&commands),
+            Err(FrameSubmissionError::Submit(SubmitError::Busy))
+        ));
+        assert_eq!(frame.executor.calls, 1);
+        assert_eq!(waits.get(), 0);
+    }
+
     #[test]
     fn receipt_capacity_waits_only_when_the_bounded_pool_is_full() {
         let table = ResourceTable::new();
         let commands = CommandEncoder::new(&table).finish().unwrap();
         let waits = Rc::new(Cell::new(0));
-        let mut frame = FrameExecutor::new(
-            Submitter {
-                calls: 0,
-                waits: waits.clone(),
-                busy: false,
-                fail: false,
-            },
-            || false,
-        );
+        let mut frame = FrameExecutor::new(Submitter {
+            calls: 0,
+            waits: waits.clone(),
+            busy: false,
+            fail: false,
+        });
         for _ in 0..MAX_IN_FLIGHT {
             frame.execute(&commands).unwrap();
         }
@@ -334,15 +395,12 @@ mod tests {
         let table = ResourceTable::new();
         let commands = CommandEncoder::new(&table).finish().unwrap();
         for use_wait in [false, true] {
-            let mut frame = FrameExecutor::new(
-                Submitter {
-                    calls: 0,
-                    waits: Rc::new(Cell::new(0)),
-                    busy: false,
-                    fail: false,
-                },
-                || panic!("observation failure must not retry admission"),
-            );
+            let mut frame = FrameExecutor::new(Submitter {
+                calls: 0,
+                waits: Rc::new(Cell::new(0)),
+                busy: false,
+                fail: false,
+            });
             frame.execute(&commands).unwrap();
             frame.submissions[0].fail.set(true);
             let result = if use_wait { frame.wait() } else { frame.poll() };
@@ -371,15 +429,12 @@ mod tests {
     fn capacity_retirement_failure_never_submits_more_work() {
         let table = ResourceTable::new();
         let commands = CommandEncoder::new(&table).finish().unwrap();
-        let mut frame = FrameExecutor::new(
-            Submitter {
-                calls: 0,
-                waits: Rc::new(Cell::new(0)),
-                busy: false,
-                fail: false,
-            },
-            || panic!("retirement failure must not retry admission"),
-        );
+        let mut frame = FrameExecutor::new(Submitter {
+            calls: 0,
+            waits: Rc::new(Cell::new(0)),
+            busy: false,
+            fail: false,
+        });
         for _ in 0..MAX_IN_FLIGHT {
             frame.execute(&commands).unwrap();
         }
@@ -394,5 +449,119 @@ mod tests {
             frame.wait(),
             Err(FrameSubmissionError::Invalidated)
         ));
+    }
+
+    struct RejectAfterOne(Submitter);
+
+    impl CommandExecutor for RejectAfterOne {
+        type Error = &'static str;
+        fn execute<'r, 'data>(&mut self, _: &CommandBuffer<'r, 'data>) -> Result<(), Self::Error> {
+            panic!("tracked path required")
+        }
+    }
+
+    impl CommandSubmitter for RejectAfterOne {
+        type Submission = Receipt;
+        fn submit<'r, 'data>(
+            &mut self,
+            commands: &CommandBuffer<'r, 'data>,
+        ) -> Result<Receipt, SubmitError<Self::Error, Receipt>> {
+            if self.0.calls == 1 {
+                self.0.calls += 1;
+                return Err(SubmitError::Rejected("submission too large"));
+            }
+            self.0.submit(commands)
+        }
+    }
+
+    #[test]
+    fn rejection_discards_and_retires_the_prefix_without_replay_then_allows_a_new_frame() {
+        let table = ResourceTable::new();
+        let commands = CommandEncoder::new(&table).finish().unwrap();
+        let waits = Rc::new(Cell::new(0));
+        let mut frame = FrameExecutor::new(RejectAfterOne(Submitter {
+            calls: 0,
+            waits: waits.clone(),
+            busy: false,
+            fail: false,
+        }));
+        frame.execute(&commands).unwrap();
+        assert!(matches!(
+            frame.execute(&commands),
+            Err(FrameSubmissionError::Submit(SubmitError::Rejected(
+                "submission too large"
+            )))
+        ));
+        assert!(matches!(
+            frame.wait(),
+            Err(FrameSubmissionError::Invalidated)
+        ));
+        assert_eq!(frame.discard().unwrap(), CompletionStatus::Complete);
+        assert_eq!(waits.get(), 1);
+        assert!(matches!(
+            frame.execute(&commands),
+            Err(FrameSubmissionError::Invalidated)
+        ));
+        assert_eq!(frame.executor.0.calls, 2);
+        let mut next = FrameExecutor::new(frame.executor);
+        next.execute(&commands).unwrap();
+        assert_eq!(next.wait().unwrap(), CompletionStatus::Complete);
+        assert_eq!(next.executor.0.calls, 3);
+    }
+
+    #[test]
+    fn discard_requires_successful_retirement_even_after_side_effect_free_rejection() {
+        let table = ResourceTable::new();
+        let commands = CommandEncoder::new(&table).finish().unwrap();
+        let mut frame = FrameExecutor::new(RejectAfterOne(Submitter {
+            calls: 0,
+            waits: Rc::new(Cell::new(0)),
+            busy: false,
+            fail: false,
+        }));
+        frame.execute(&commands).unwrap();
+        assert!(frame.execute(&commands).is_err());
+        frame.submissions[0].pending.set(true);
+        assert_eq!(frame.discard().unwrap(), CompletionStatus::Pending);
+        frame.submissions[0].pending.set(false);
+        frame.submissions[0].fail.set(true);
+        assert!(matches!(
+            frame.discard(),
+            Err(FrameSubmissionError::Completion(_))
+        ));
+        frame.submissions[0].fail.set(false);
+        assert!(matches!(
+            frame.discard(),
+            Err(FrameSubmissionError::Invalidated)
+        ));
+    }
+
+    #[test]
+    fn discarded_lowering_failure_retires_work_but_failed_prefix_never_certifies_recovery() {
+        let table = ResourceTable::new();
+        let commands = CommandEncoder::new(&table).finish().unwrap();
+        for partial in [false, true] {
+            let mut frame = FrameExecutor::new(Submitter {
+                calls: 0,
+                waits: Rc::new(Cell::new(0)),
+                busy: false,
+                fail: false,
+            });
+            frame.execute(&commands).unwrap();
+            if partial {
+                frame.executor.fail = true;
+                assert!(frame.execute(&commands).is_err());
+                assert!(matches!(
+                    frame.discard(),
+                    Err(FrameSubmissionError::Invalidated)
+                ));
+            } else {
+                assert_eq!(frame.discard().unwrap(), CompletionStatus::Complete);
+            }
+            assert!(matches!(
+                frame.wait(),
+                Err(FrameSubmissionError::Invalidated)
+            ));
+        }
     }
 }

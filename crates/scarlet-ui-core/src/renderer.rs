@@ -594,7 +594,10 @@ pub trait PaintBackend {
     /// # Returns
     ///
     /// A CPU buffer to present or confirmation that an external frame has
-    /// already been presented.
+    /// already been presented. A classified [`crate::error::Error::RenderFailure`]
+    /// must not be reported as External: recoverable failures retain the previous
+    /// display and certify retirement of the discarded frame's accepted work.
+    /// RecoveryRequired forbids reuse of uncertain targets until backend recovery.
     fn render<'a>(
         &'a mut self,
         context: &PaintContext<'_>,
