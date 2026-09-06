@@ -295,6 +295,14 @@ cargo tree --locked --invert sgfx-core
 The second command fails if the graph still contains multiple SGFX core
 sources. CI repeats this check for the host and both Scarlet targets.
 
+SGFX is the internal execution IR used by this renderer. Its Rust interfaces
+are updated and rebuilt with the consuming renderer/platform adapters using a
+compatible source and lockfile set; SGFX does not promise a separate 1.x Rust
+API freeze. See the [SGFX execution contract](https://github.com/petitstrawberry/sgfx/blob/main/docs/1.0-contract.md).
+ScarletUI's application-facing API and frame-failure contract remain separate.
+The direct SGFX renderer can remain in use, while a future Vulkan renderer can
+use the application's Vulkan graphics boundary instead.
+
 ## Crate Layout
 
 ```text
