@@ -600,7 +600,7 @@ impl SgfxPaintEncoder {
         self.height
     }
 
-    /// Encode and synchronously execute one ScarletUI frame.
+    /// Encode one ScarletUI frame and submit its ordered command buffers.
     ///
     /// # Arguments
     ///
@@ -615,8 +615,15 @@ impl SgfxPaintEncoder {
     ///
     /// # Returns
     ///
-    /// Success after all ordered command buffers execute, a portable lowering
-    /// error, or the executor's backend-owned error.
+    /// Success after the executor accepts all ordered command buffers, a portable
+    /// lowering error, or the executor's backend-owned error. Success alone does
+    /// not establish GPU completion. When using [`crate::FrameExecutor`], require
+    /// `CompletionStatus::Complete` from [`crate::FrameExecutor::wait`] before
+    /// handing the target to presentation.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the existing public frame-encoding signature source compatible"
+    )]
     pub fn encode_frame<E: CommandExecutor>(
         &mut self,
         executor: &mut E,

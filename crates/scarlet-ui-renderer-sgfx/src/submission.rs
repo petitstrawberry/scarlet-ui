@@ -63,6 +63,7 @@ impl<E: CommandSubmitter> FrameExecutor<E> {
     /// # Arguments
     ///
     /// * `executor` - Executor bound to the encoder's logical resource table.
+    ///
     /// Native packet splitting and transport retries belong to the backend
     /// queue. On logical admission pressure this frame may retire its oldest
     /// accepted submission; accepted/failed streams are never replayed.
