@@ -801,7 +801,7 @@ dependencies = [
 [[package]]
 name = "gpu-raw"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#3881958931c2f0a354035ca08f53fcb8f10f940d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#602bee5326965f7e5173c039365ac72769c942d2"
 dependencies = [
  "scarlet-os",
  "scarlet-std",
@@ -1815,12 +1815,12 @@ dependencies = [
 [[package]]
 name = "scarlet-abi"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#3881958931c2f0a354035ca08f53fcb8f10f940d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#602bee5326965f7e5173c039365ac72769c942d2"
 
 [[package]]
 name = "scarlet-os"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#3881958931c2f0a354035ca08f53fcb8f10f940d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#602bee5326965f7e5173c039365ac72769c942d2"
 dependencies = [
  "scarlet-abi",
  "scarlet-rt",
@@ -1830,7 +1830,7 @@ dependencies = [
 [[package]]
 name = "scarlet-rt"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#3881958931c2f0a354035ca08f53fcb8f10f940d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#602bee5326965f7e5173c039365ac72769c942d2"
 dependencies = [
  "lock_api",
  "scarlet-sys",
@@ -1841,7 +1841,7 @@ dependencies = [
 [[package]]
 name = "scarlet-std"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#3881958931c2f0a354035ca08f53fcb8f10f940d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#602bee5326965f7e5173c039365ac72769c942d2"
 dependencies = [
  "hashbrown 0.15.5",
  "scarlet-abi",
@@ -1854,7 +1854,7 @@ dependencies = [
 [[package]]
 name = "scarlet-sys"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#3881958931c2f0a354035ca08f53fcb8f10f940d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#602bee5326965f7e5173c039365ac72769c942d2"
 dependencies = [
  "scarlet-abi",
 ]
@@ -2061,7 +2061,7 @@ dependencies = [
 [[package]]
 name = "sgfx"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#0e9102358ed302d6703a22b892a00be38abba8cb"
+source = "git+https://github.com/petitstrawberry/sgfx#945c12724da2adc56269487afdbd3c900074a314"
 dependencies = [
  "gpu-raw",
  "raw-window-handle",
@@ -2089,7 +2089,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-scarlet-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#0e9102358ed302d6703a22b892a00be38abba8cb"
+source = "git+https://github.com/petitstrawberry/sgfx#945c12724da2adc56269487afdbd3c900074a314"
 dependencies = [
  "gpu-raw",
  "scarlet-os",
@@ -2101,7 +2101,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-wgpu"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#0e9102358ed302d6703a22b892a00be38abba8cb"
+source = "git+https://github.com/petitstrawberry/sgfx#945c12724da2adc56269487afdbd3c900074a314"
 dependencies = [
  "bytemuck",
  "pollster",
@@ -2124,7 +2124,7 @@ dependencies = [
 [[package]]
 name = "sgfx-codegen-virgl"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#0e9102358ed302d6703a22b892a00be38abba8cb"
+source = "git+https://github.com/petitstrawberry/sgfx#945c12724da2adc56269487afdbd3c900074a314"
 dependencies = [
  "sgfx-core",
 ]
@@ -2132,7 +2132,7 @@ dependencies = [
 [[package]]
 name = "sgfx-core"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/sgfx#0e9102358ed302d6703a22b892a00be38abba8cb"
+source = "git+https://github.com/petitstrawberry/sgfx#945c12724da2adc56269487afdbd3c900074a314"
 
 [[package]]
 name = "shlex"
@@ -2320,7 +2320,7 @@ dependencies = [
 [[package]]
 name = "sws-client"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#3881958931c2f0a354035ca08f53fcb8f10f940d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#602bee5326965f7e5173c039365ac72769c942d2"
 dependencies = [
  "scarlet-os",
  "scarlet-std",
@@ -2330,7 +2330,7 @@ dependencies = [
 [[package]]
 name = "sws-protocol"
 version = "0.16.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#3881958931c2f0a354035ca08f53fcb8f10f940d"
+source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#602bee5326965f7e5173c039365ac72769c942d2"
 dependencies = [
  "scarlet-std",
 ]
