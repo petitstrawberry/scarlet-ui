@@ -122,6 +122,15 @@ impl Default for SceneBuilder {
 /// Top-level application scene declaration.
 pub trait Scene {
     /// Build this scene into top-level window declarations.
+    ///
+    /// # Arguments
+    ///
+    /// * `builder` - Receives declarations in order, each with a unique scene key.
+    ///
+    /// # Returns
+    ///
+    /// Nothing. Declaring a window does not create a platform window. The runner
+    /// automatically opens only the first launch-eligible declaration.
     fn build(self, builder: &mut SceneBuilder);
 }
 
@@ -137,6 +146,18 @@ pub struct WindowGroup<V: View + Clone + 'static> {
 
 impl<V: View + Clone + 'static> WindowGroup<V> {
     /// Create a new window group declaration.
+    ///
+    /// The group supplies its own scene key and is launch-eligible, regardless
+    /// of `scene_key` or `open_at_launch` set on the wrapped `Window`.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Unique declaration key used for opening and dismissing instances.
+    /// * `window` - Description used for each runtime instance.
+    ///
+    /// # Returns
+    ///
+    /// A scene declaration, without creating a platform window.
     pub fn new(key: impl Into<SceneWindowKey>, window: Window<V>) -> Self {
         Self {
             key: key.into(),

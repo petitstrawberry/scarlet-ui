@@ -96,6 +96,9 @@ the normal ScarletUI prelude, declares views and scenes, and calls `app.run()`.
 
 The normative runtime and reconciliation model is documented in
 [ScarletUI Architecture](docs/ARCHITECTURE.md).
+The [1.0 application and extension contract](docs/1.0-contract.md) specifies
+public features, Scene/Window lifetime, launch/open/close behavior and platform
+extension responsibilities using the current implementation.
 
 Frame admission, safe discard, and application recovery follow the
 [frame-failure contract](docs/FRAME_FAILURES.md). `Application::on_render_error`

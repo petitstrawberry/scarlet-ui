@@ -637,7 +637,18 @@ impl<V: View> Window<V> {
         self
     }
 
-    /// Set whether this direct window scene opens when the application launches.
+    /// Set whether this direct window scene is eligible to open at launch.
+    ///
+    /// Only the first eligible declaration is opened automatically. A
+    /// `WindowGroup` supplies its own launch policy for the wrapped window.
+    ///
+    /// # Arguments
+    ///
+    /// * `opens_at_launch` - Whether startup may select this direct scene.
+    ///
+    /// # Returns
+    ///
+    /// The window description with the updated launch policy.
     pub fn open_at_launch(mut self, opens_at_launch: bool) -> Self {
         self.opens_at_launch = opens_at_launch;
         self

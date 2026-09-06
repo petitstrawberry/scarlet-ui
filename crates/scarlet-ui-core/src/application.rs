@@ -61,6 +61,15 @@ fn env_flag_enabled(value: &str) -> bool {
 /// Applications declare top-level windows via `scenes()`.
 pub trait Application: Clone + 'static {
     /// Returns the scene graph of top-level application windows.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - Application snapshot; shared `State` survives cloned snapshots.
+    ///
+    /// # Returns
+    ///
+    /// Declarations with unique scene keys. Only the first launch-eligible
+    /// declaration is opened automatically; further instances use window commands.
     fn scenes(&self) -> impl Scene;
 
     /// Return the process-live input environment used by built-in views.
@@ -88,7 +97,18 @@ pub trait Application: Clone + 'static {
     /// Handle active application change event from window server.
     fn on_active_app_changed(&mut self, _window_id: u32, _app_name: &str, _menu_titles: &str) {}
 
-    /// Configure a created platform window before the main loop starts.
+    /// Configure a created platform window before its first presentation.
+    ///
+    /// This also runs for windows opened by commands after the main loop starts.
+    ///
+    /// # Arguments
+    ///
+    /// * `_ctx` - Newly assigned runtime window identity.
+    /// * `_window` - Created platform window after size/paint-backend negotiation.
+    ///
+    /// # Returns
+    ///
+    /// Nothing. The default leaves the platform window unchanged.
     fn on_window_created(&mut self, _ctx: &WindowContext, _window: &mut dyn PlatformWindow) {}
 
     /// Handle a user request to close a window.
@@ -96,6 +116,14 @@ pub trait Application: Clone + 'static {
     /// Return `true` to allow the runner to close the window, or `false` to
     /// keep it open. Programmatic dismissal through [`crate::dismiss_window`]
     /// does not invoke this hook.
+    ///
+    /// # Arguments
+    ///
+    /// * `_ctx` - Runtime instance receiving the close request.
+    ///
+    /// # Returns
+    ///
+    /// Whether to close this instance; the default allows closing.
     fn on_window_close_requested(&mut self, _ctx: &WindowContext) -> bool {
         true
     }
@@ -181,10 +209,20 @@ pub trait Application: Clone + 'static {
     /// Handle idle ticks on the application main thread.
     fn on_idle(&mut self) {}
 
-    /// Observe a frame after its renderer and platform presentation completed.
+    /// Observe a frame accepted by its renderer/platform presentation path.
     ///
     /// Unlike [`Application::on_idle`], this is called only when a CPU or
     /// external paint backend actually submitted a frame for the window.
+    /// It is not a scanout timestamp, a GPU completion receipt, or permission
+    /// to reuse an externally leased buffer. Discarded frames never reach it.
+    ///
+    /// # Arguments
+    ///
+    /// * `_ctx` - Window whose complete frame was submitted for presentation.
+    ///
+    /// # Returns
+    ///
+    /// Nothing. The default does not perform any work.
     fn on_frame_presented(&mut self, _ctx: &WindowContext) {}
 
     /// Observe a frame that was not presented, without treating it as success.
@@ -1641,6 +1679,179 @@ mod tests {
         fn as_any(&self) -> &dyn Any {
             self
         }
+    }
+
+    #[derive(Clone)]
+    struct SceneContractApp {
+        keys: [&'static str; 2],
+        launch: [bool; 2],
+        created: Rc<RefCell<Vec<WindowContext>>>,
+        close_requests: Rc<Cell<usize>>,
+        shutdowns: Rc<Cell<usize>>,
+    }
+
+    impl SceneContractApp {
+        fn new(launch: [bool; 2]) -> Self {
+            Self {
+                keys: ["one", "two"],
+                launch,
+                created: Rc::new(RefCell::new(Vec::new())),
+                close_requests: Rc::new(Cell::new(0)),
+                shutdowns: Rc::new(Cell::new(0)),
+            }
+        }
+    }
+
+    impl Application for SceneContractApp {
+        fn scenes(&self) -> impl Scene {
+            (
+                Window::new("One", Text::new("One"))
+                    .scene_key(self.keys[0])
+                    .open_at_launch(self.launch[0]),
+                Window::new("Two", Text::new("Two"))
+                    .scene_key(self.keys[1])
+                    .open_at_launch(self.launch[1]),
+            )
+        }
+
+        fn on_window_created(&mut self, ctx: &WindowContext, _window: &mut dyn PlatformWindow) {
+            self.created.borrow_mut().push(ctx.clone());
+        }
+
+        fn on_window_close_requested(&mut self, _ctx: &WindowContext) -> bool {
+            self.close_requests.set(self.close_requests.get() + 1);
+            false
+        }
+
+        fn on_idle(&mut self) {
+            for ctx in self.created.borrow().iter() {
+                crate::dismiss_window(ctx.scene_key.clone());
+            }
+        }
+
+        fn on_shutdown(&mut self) {
+            self.shutdowns.set(self.shutdowns.get() + 1);
+        }
+    }
+
+    impl View for SceneContractApp {
+        fn create_element(&self) -> Box<dyn Element> {
+            Text::new("Scene contract").create_element()
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    fn scene_contract_runner() -> ApplicationRunner {
+        ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: Rc::new(RefCell::new(EnvironmentRunnerProbe::default())),
+            next_window: 0,
+            negotiated_size: None,
+        }))
+    }
+
+    #[test]
+    fn scene_contract_launch_opens_only_the_first_eligible_declaration() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        for (launch, expected) in [
+            ([true, true], Some("one")),
+            ([false, true], Some("two")),
+            ([false, false], None),
+        ] {
+            let mut app = SceneContractApp::new(launch);
+            scene_contract_runner()
+                .run(&mut app)
+                .expect("deterministic scene runner");
+            let created = app.created.borrow();
+            assert_eq!(created.len(), usize::from(expected.is_some()));
+            assert_eq!(created.first().map(|ctx| ctx.scene_key.as_str()), expected);
+            assert!(created.iter().all(|ctx| ctx.is_primary));
+            assert_eq!(
+                app.close_requests.get(),
+                0,
+                "programmatic dismissal bypasses veto"
+            );
+            assert_eq!(app.shutdowns.get(), 1);
+        }
+    }
+
+    #[test]
+    fn scene_contract_duplicate_keys_fail_before_window_creation() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let mut app = SceneContractApp::new([true, true]);
+        app.keys = ["same", "same"];
+        assert!(matches!(
+            scene_contract_runner().run(&mut app),
+            Err(Error::DuplicateSceneWindowKey)
+        ));
+        assert!(app.created.borrow().is_empty());
+        assert_eq!(
+            app.shutdowns.get(),
+            0,
+            "error return is not normal shutdown"
+        );
+    }
+
+    #[test]
+    fn scene_contract_commands_reuse_create_and_dismiss_all_matching_instances() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let mut app = SceneContractApp::new([false, false]);
+        let mut runner = scene_contract_runner();
+        let mut slots = Vec::new();
+        crate::open_window("missing");
+        crate::open_new_window("missing");
+        runner
+            .handle_application_commands(&mut app, &mut slots)
+            .expect("unknown keys are no-ops");
+        assert!(slots.is_empty());
+
+        crate::open_window("one");
+        crate::open_window("one");
+        crate::open_new_window("one");
+        runner
+            .handle_application_commands(&mut app, &mut slots)
+            .expect("open instances");
+        assert_eq!(slots.len(), 2);
+        assert_ne!(slots[0].context.window_id, slots[1].context.window_id);
+        assert_ne!(slots[0].context.pipeline_id, slots[1].context.pipeline_id);
+        assert!(slots[0].context.is_primary);
+        assert!(!slots[1].context.is_primary);
+
+        let mut close_ids = Vec::new();
+        assert!(!handle_window_close_request(
+            &mut app,
+            &mut slots[0],
+            &mut close_ids
+        ));
+        assert!(close_ids.is_empty());
+        crate::dismiss_window("one");
+        runner
+            .handle_application_commands(&mut app, &mut slots)
+            .expect("dismiss all instances");
+        assert!(slots.is_empty());
+        assert_eq!(
+            app.close_requests.get(),
+            1,
+            "dismissal must not call the veto hook"
+        );
+    }
+
+    #[test]
+    fn scene_contract_window_group_owns_key_and_launch_policy() {
+        let mut builder = SceneBuilder::new();
+        crate::scene::WindowGroup::new(
+            "group",
+            Window::new("Wrapped", Text::new("Content"))
+                .scene_key("ignored")
+                .open_at_launch(false),
+        )
+        .build(&mut builder);
+        let declarations = builder.into_declarations();
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].key.as_str(), "group");
+        assert!(declarations[0].opens_at_launch);
     }
 
     #[test]
