@@ -117,10 +117,7 @@ fn configured_font_paths() -> Vec<PathBuf> {
         .unwrap_or_default();
 
     #[cfg(target_os = "scarlet")]
-    paths.extend([
-        PathBuf::from("/fonts"),
-        PathBuf::from("/system/share/fonts"),
-    ]);
+    paths.push(PathBuf::from("/share/fonts"));
 
     paths.sort_unstable();
     paths.dedup();

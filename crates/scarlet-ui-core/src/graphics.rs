@@ -251,9 +251,9 @@ fn glyph_cache_get_or_rasterize(
 }
 
 #[cfg(not(feature = "std"))]
-const DEFAULT_FONT_PATH: &str = "/fonts/Mplus1-Regular.ttf";
+const DEFAULT_FONT_PATH: &str = "/share/fonts/Mplus1-Regular.ttf";
 #[cfg(not(feature = "std"))]
-const FALLBACK_FONT_PATHS: &[&str] = &["/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"];
+const FALLBACK_FONT_PATHS: &[&str] = &["/share/fonts/JetBrainsMonoNerdFontMono-Regular.ttf"];
 
 static NEXT_FONT_STACK_ID: AtomicUsize = AtomicUsize::new(1);
 
