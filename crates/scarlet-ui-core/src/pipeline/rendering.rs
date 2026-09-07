@@ -2992,6 +2992,7 @@ mod tests {
         Box::new(
             TextField::new(view.query.clone())
                 .autofocus(view.focus_requested.get())
+                .blur_on_empty(true)
                 .on_empty(move || empty_focus.set(false))
                 .on_key(move |event| match event {
                     KeyEvent::Char { c } if !c.is_control() => {
@@ -4565,6 +4566,28 @@ mod tests {
         })));
         pipeline.render_with_damage();
         assert_eq!(selection_moves.get(), 1);
+
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Pressed {
+            keycode: KeyCode::Delete,
+            modifiers: crate::event::KeyModifiers::default(),
+        })));
+        pipeline.render_with_damage();
+        assert!(query.get().is_empty());
+        assert!(!focus_requested.get());
+        assert!(pipeline.focused_text_input_state().is_none());
+
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Pressed {
+            keycode: KeyCode::Up,
+            modifiers: crate::event::KeyModifiers::default(),
+        })));
+        pipeline.render_with_damage();
+        assert_eq!(selection_moves.get(), 2);
+
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c: 'c' })));
+        pipeline.render_with_damage();
+        assert_eq!(query.get(), "c");
+        assert!(focus_requested.get());
+        assert!(pipeline.focused_text_input_state().is_some());
     }
 
     #[test]

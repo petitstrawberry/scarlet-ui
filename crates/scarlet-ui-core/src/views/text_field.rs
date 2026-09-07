@@ -36,6 +36,7 @@ pub struct TextField {
     on_cancel: Option<Arc<dyn Fn() + 'static>>,
     on_empty: Option<Arc<dyn Fn() + 'static>>,
     blur_on_submit: bool,
+    blur_on_empty: bool,
     autofocus: bool,
     background_color: Color,
     border_color: Color,
@@ -57,6 +58,7 @@ impl TextField {
             on_cancel: None,
             on_empty: None,
             blur_on_submit: false,
+            blur_on_empty: false,
             autofocus: false,
             background_color: style::surface_color(&palette, style::SurfaceRole::Canvas),
             border_color: palette.divider(),
@@ -80,6 +82,25 @@ impl TextField {
         self
     }
 
+    /// Set whether a deletion that leaves the field empty removes keyboard focus.
+    ///
+    /// Defaults to `false`, so the user can continue typing after clearing the
+    /// field. Applies to Backspace, Delete, and IME surrounding-text deletion,
+    /// including deletion attempts on an already empty field. The `on_empty`
+    /// callback is invoked independently of this setting.
+    ///
+    /// # Arguments
+    ///
+    /// * `blur` - Whether to remove focus when deletion leaves no text.
+    ///
+    /// # Returns
+    ///
+    /// The updated text field.
+    pub fn blur_on_empty(mut self, blur: bool) -> Self {
+        self.blur_on_empty = blur;
+        self
+    }
+
     /// Set the callback invoked when Enter is pressed while focused.
     pub fn on_submit(mut self, callback: impl Fn() + 'static) -> Self {
         self.on_submit = Some(Arc::new(callback));
@@ -93,6 +114,10 @@ impl TextField {
     }
 
     /// Set the callback invoked when editing removes all text.
+    ///
+    /// This also runs when deletion is attempted on an already empty field.
+    /// Registering a callback does not enable automatic focus removal; use
+    /// [`Self::blur_on_empty`] to opt into that behavior.
     pub fn on_empty(mut self, callback: impl Fn() + 'static) -> Self {
         self.on_empty = Some(Arc::new(callback));
         self
@@ -454,10 +479,12 @@ impl TextFieldRenderObject {
     }
 }
 
-fn blur_empty_text_field(field: &TextField, render_object: &mut TextFieldRenderObject) {
+fn handle_empty_text_field(field: &TextField, render_object: &mut TextFieldRenderObject) {
     if render_object.text_document.is_empty() {
         field.invoke_empty();
-        render_object.set_focused(false);
+        if field.blur_on_empty {
+            render_object.set_focused(false);
+        }
     }
 }
 
@@ -491,7 +518,7 @@ pub(crate) fn handle_text_field_keyboard(
         } => {
             render_object.clear_preedit();
             delete_backward(field, render_object);
-            blur_empty_text_field(field, render_object);
+            handle_empty_text_field(field, render_object);
             true
         }
         KeyEvent::Pressed {
@@ -500,7 +527,7 @@ pub(crate) fn handle_text_field_keyboard(
         } => {
             render_object.clear_preedit();
             delete_forward(field, render_object);
-            blur_empty_text_field(field, render_object);
+            handle_empty_text_field(field, render_object);
             true
         }
         KeyEvent::Pressed {
@@ -614,7 +641,7 @@ pub(crate) fn handle_text_field_text_input(
         } => {
             render_object.clear_preedit();
             delete_surrounding_text(field, render_object, *before_bytes, *after_bytes);
-            blur_empty_text_field(field, render_object);
+            handle_empty_text_field(field, render_object);
             true
         }
         crate::event::Event::TextInputDone { .. } => true,
@@ -1028,6 +1055,114 @@ mod tests {
         ));
         assert_eq!(text.get(), "ac");
         assert_eq!(render_object.selection.caret.byte, 1);
+    }
+
+    #[test]
+    fn empty_text_field_deletions_respect_opt_in_blur() {
+        for blur_on_empty in [false, true] {
+            for event in [
+                Event::Keyboard(KeyEvent::Pressed {
+                    keycode: KeyCode::Backspace,
+                    modifiers: KeyModifiers::default(),
+                }),
+                Event::Keyboard(KeyEvent::Pressed {
+                    keycode: KeyCode::Delete,
+                    modifiers: KeyModifiers::default(),
+                }),
+                Event::TextInputDeleteSurroundingText {
+                    context_id: 1,
+                    serial: 1,
+                    before_bytes: 3,
+                    after_bytes: 0,
+                },
+            ] {
+                let text = State::new(crate::state::generate_state_id(), String::from("あ"));
+                let empty_calls = State::new(crate::state::generate_state_id(), 0usize);
+                let callback_calls = empty_calls.clone();
+                let field = TextField::new(text.clone())
+                    .autofocus(true)
+                    .on_empty(move || callback_calls.update(|calls| *calls += 1));
+                let field = if blur_on_empty {
+                    field.blur_on_empty(true)
+                } else {
+                    field
+                };
+                let mut render_object = TextFieldRenderObject::from_view(&field);
+                if matches!(
+                    &event,
+                    Event::Keyboard(KeyEvent::Pressed {
+                        keycode: KeyCode::Delete,
+                        ..
+                    })
+                ) {
+                    render_object.selection = TextSelection::collapsed(0);
+                }
+
+                let handled = match event {
+                    Event::Keyboard(key) => {
+                        handle_text_field_keyboard(&field, &mut render_object, key)
+                    }
+                    event => handle_text_field_text_input(&field, &mut render_object, &event),
+                };
+                assert!(handled);
+                assert!(text.get().is_empty());
+                assert_eq!(empty_calls.get(), 1);
+                assert_eq!(render_object.is_focused(), !blur_on_empty);
+
+                let typed = handle_text_field_keyboard(
+                    &field,
+                    &mut render_object,
+                    KeyEvent::Char { c: 'b' },
+                );
+                assert_eq!(typed, !blur_on_empty);
+                assert_eq!(text.get(), if blur_on_empty { "" } else { "b" });
+            }
+        }
+    }
+
+    #[test]
+    fn deleting_from_an_empty_text_field_keeps_focus_by_default() {
+        let text = State::new(crate::state::generate_state_id(), String::new());
+        let field = TextField::new(text).autofocus(true);
+        let mut render_object = TextFieldRenderObject::from_view(&field);
+
+        for keycode in [KeyCode::Backspace, KeyCode::Delete] {
+            assert!(handle_text_field_keyboard(
+                &field,
+                &mut render_object,
+                KeyEvent::Pressed {
+                    keycode,
+                    modifiers: KeyModifiers::default(),
+                },
+            ));
+            assert!(render_object.is_focused());
+        }
+    }
+
+    #[test]
+    fn blur_on_empty_keeps_focus_until_the_last_character_is_deleted() {
+        let text = State::new(crate::state::generate_state_id(), String::from("ab"));
+        let empty_calls = State::new(crate::state::generate_state_id(), 0usize);
+        let callback_calls = empty_calls.clone();
+        let field = TextField::new(text.clone())
+            .autofocus(true)
+            .blur_on_empty(true)
+            .on_empty(move || callback_calls.update(|calls| *calls += 1));
+        let mut render_object = TextFieldRenderObject::from_view(&field);
+
+        for expected in ["a", ""] {
+            assert!(handle_text_field_keyboard(
+                &field,
+                &mut render_object,
+                KeyEvent::Pressed {
+                    keycode: KeyCode::Backspace,
+                    modifiers: KeyModifiers::default(),
+                },
+            ));
+            assert_eq!(text.get(), expected);
+            assert_eq!(render_object.is_focused(), !expected.is_empty());
+            assert_eq!(empty_calls.get(), usize::from(expected.is_empty()));
+        }
     }
 
     #[test]
