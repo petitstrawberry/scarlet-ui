@@ -235,19 +235,19 @@ build, so live reload works with or without an IDE driving the server.
 
 ## Platform Features
 
-`scarlet-ui` currently selects one platform feature per build. The feature pulls
+Applications explicitly select one platform feature per build. The feature pulls
 in the matching backend crate; `scarlet-ui-core` itself never depends on
 `sws-client`, `sws-protocol`, `winit`, or `softbuffer`.
 
 | Feature | Target | Notes |
 |---------|--------|-------|
-| `platform-sws` | Scarlet OS / SWS | Default platform feature. Pulls in `scarlet-ui-platform-sws`, which uses `sws-client` and `sws-protocol`. |
+| `platform-sws` | Scarlet OS / SWS | Pulls in `scarlet-ui-platform-sws`, which uses `sws-client` and `sws-protocol`. |
 | `platform-winit` | native desktop | Pulls in `scarlet-ui-platform-winit`, which uses `winit` and `softbuffer`; requires `std`. |
 
-The default feature set is:
+The default feature set enables the portable API without selecting a platform:
 
 ```toml
-default = ["std", "platform-sws"]
+default = ["std"]
 ```
 
 For native desktop builds, depend on ScarletUI with `platform-winit`:
