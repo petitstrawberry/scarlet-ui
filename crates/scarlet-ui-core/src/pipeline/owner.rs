@@ -10,12 +10,12 @@
 
 use crate::element::{ElementId, ElementTree, LayoutConstraints};
 use crate::geometry::Size;
+use crate::id::IdAllocator;
 use crate::os::Mutex;
 use crate::pipeline::StateRegistry;
 use crate::state::{State, StateId};
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
-use core::sync::atomic::{AtomicU64, Ordering};
 use std::println;
 
 /// Stable owner ID for dirty queues belonging to one rendering pipeline.
@@ -25,8 +25,8 @@ pub struct PipelineId(u64);
 impl PipelineId {
     /// Generate a globally unique pipeline ID.
     pub fn generate() -> Self {
-        static NEXT_PIPELINE_ID: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT_PIPELINE_ID.fetch_add(1, Ordering::SeqCst))
+        static NEXT_PIPELINE_ID: IdAllocator = IdAllocator::new();
+        Self(NEXT_PIPELINE_ID.allocate())
     }
 
     /// Create a pipeline ID from a raw numeric value.

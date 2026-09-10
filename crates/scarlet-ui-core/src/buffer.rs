@@ -4,25 +4,15 @@
 
 use crate::color::Color;
 use crate::geometry::Size;
+use crate::id::IdAllocator;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 const INITIAL_BUFFER_REVISION: u64 = 1;
-static NEXT_BUFFER_IDENTITY: AtomicU64 = AtomicU64::new(1);
+static NEXT_BUFFER_IDENTITY: IdAllocator = IdAllocator::new();
 
 fn allocate_buffer_identity() -> u64 {
-    loop {
-        let current = NEXT_BUFFER_IDENTITY.load(Ordering::Relaxed);
-        let identity = current.max(1);
-        let next = identity.wrapping_add(1).max(1);
-        if NEXT_BUFFER_IDENTITY
-            .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            return identity;
-        }
-    }
+    NEXT_BUFFER_IDENTITY.allocate()
 }
 
 /// Pixel buffer in BGRA format

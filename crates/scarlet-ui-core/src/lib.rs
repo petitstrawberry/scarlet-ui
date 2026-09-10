@@ -59,6 +59,7 @@ pub mod event;
 pub mod geometry;
 pub mod graphics;
 pub mod icon;
+mod id;
 pub mod input_environment;
 pub mod macros;
 pub mod menu_model;
@@ -78,6 +79,7 @@ pub mod views;
 
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::id::IdAllocator;
     pub use alloc::boxed::Box;
     pub use alloc::vec::Vec;
     #[cfg(feature = "preview")]

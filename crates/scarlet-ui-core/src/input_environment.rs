@@ -1,26 +1,134 @@
 //! Runtime input-device environment and interaction-mode resolution.
 
+#[cfg(target_has_atomic = "64")]
 use core::hint::spin_loop;
-use core::sync::atomic::{AtomicU64, Ordering};
+#[cfg(target_has_atomic = "64")]
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 
-const TABLET_KNOWN: u64 = 1 << 0;
-const TABLET_ON: u64 = 1 << 1;
-const LID_KNOWN: u64 = 1 << 2;
-const LID_CLOSED: u64 = 1 << 3;
-const DIRECT_TOUCH: u64 = 1 << 4;
-const FINE_POINTER: u64 = 1 << 5;
-const KEYBOARD: u64 = 1 << 6;
-const PEN: u64 = 1 << 7;
-const WINDOWING_KNOWN: u64 = 1 << 8;
-const WINDOWING_FOCUSED: u64 = 1 << 9;
-const TABLET_OVERRIDE_KNOWN: u64 = 1 << 10;
-const TABLET_OVERRIDE_ACTIVE: u64 = 1 << 11;
-const WINDOWING_OVERRIDE_KNOWN: u64 = 1 << 12;
-const WINDOWING_OVERRIDE_ACTIVE: u64 = 1 << 13;
+const TABLET_KNOWN: u32 = 1 << 0;
+const TABLET_ON: u32 = 1 << 1;
+const LID_KNOWN: u32 = 1 << 2;
+const LID_CLOSED: u32 = 1 << 3;
+const DIRECT_TOUCH: u32 = 1 << 4;
+const FINE_POINTER: u32 = 1 << 5;
+const KEYBOARD: u32 = 1 << 6;
+const PEN: u32 = 1 << 7;
+const WINDOWING_KNOWN: u32 = 1 << 8;
+const WINDOWING_FOCUSED: u32 = 1 << 9;
+const TABLET_OVERRIDE_KNOWN: u32 = 1 << 10;
+const TABLET_OVERRIDE_ACTIVE: u32 = 1 << 11;
+const WINDOWING_OVERRIDE_KNOWN: u32 = 1 << 12;
+const WINDOWING_OVERRIDE_ACTIVE: u32 = 1 << 13;
 
-static CURRENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-static CURRENT_GENERATION: AtomicU64 = AtomicU64::new(0);
-static CURRENT_FLAGS: AtomicU64 = AtomicU64::new(FINE_POINTER | KEYBOARD);
+static CURRENT_ENVIRONMENT: PublishedInputEnvironment = PublishedInputEnvironment::new();
+
+/// Publishes a generation and its flags as one coherent snapshot.
+///
+/// Targets with native 64-bit atomics keep the sequence-validated read path.
+/// Other targets protect the complete snapshot with one sleeping mutex.
+struct PublishedInputEnvironment {
+    #[cfg(target_has_atomic = "64")]
+    sequence: AtomicU64,
+    #[cfg(target_has_atomic = "64")]
+    generation: AtomicU64,
+    #[cfg(target_has_atomic = "64")]
+    flags: AtomicU32,
+    #[cfg(not(target_has_atomic = "64"))]
+    protected: ProtectedInputEnvironment,
+}
+
+impl PublishedInputEnvironment {
+    const fn new() -> Self {
+        Self {
+            #[cfg(target_has_atomic = "64")]
+            sequence: AtomicU64::new(0),
+            #[cfg(target_has_atomic = "64")]
+            generation: AtomicU64::new(0),
+            #[cfg(target_has_atomic = "64")]
+            flags: AtomicU32::new(FINE_POINTER | KEYBOARD),
+            #[cfg(not(target_has_atomic = "64"))]
+            protected: ProtectedInputEnvironment::new(),
+        }
+    }
+
+    fn load(&self) -> InputEnvironment {
+        #[cfg(target_has_atomic = "64")]
+        loop {
+            let sequence = self.sequence.load(Ordering::Acquire);
+            if sequence & 1 != 0 {
+                spin_loop();
+                continue;
+            }
+            let generation = self.generation.load(Ordering::Relaxed);
+            let flags = self.flags.load(Ordering::Relaxed);
+            // Keep both payload reads before validating the sequence. An
+            // acquire load alone would only order the reads that follow it.
+            fence(Ordering::Acquire);
+            if self.sequence.load(Ordering::Relaxed) == sequence {
+                return unpack_environment(generation, flags);
+            }
+        }
+        #[cfg(not(target_has_atomic = "64"))]
+        self.protected.load()
+    }
+
+    fn publish(&self, environment: InputEnvironment) {
+        #[cfg(target_has_atomic = "64")]
+        {
+            let mut sequence = self.sequence.load(Ordering::Relaxed);
+            loop {
+                if sequence & 1 != 0 {
+                    spin_loop();
+                    sequence = self.sequence.load(Ordering::Relaxed);
+                    continue;
+                }
+                match self.sequence.compare_exchange_weak(
+                    sequence,
+                    sequence.wrapping_add(1),
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(observed) => sequence = observed,
+                }
+            }
+
+            // A reader that observes either new payload word must also observe
+            // the odd sequence when its acquire fence validates the snapshot.
+            fence(Ordering::Release);
+            self.generation
+                .store(environment.generation, Ordering::Relaxed);
+            self.flags.store(pack_flags(environment), Ordering::Relaxed);
+            self.sequence
+                .store(sequence.wrapping_add(2), Ordering::Release);
+        }
+        #[cfg(not(target_has_atomic = "64"))]
+        self.protected.publish(environment);
+    }
+}
+
+#[cfg(any(test, not(target_has_atomic = "64")))]
+struct ProtectedInputEnvironment {
+    value: crate::os::Mutex<(u64, u32)>,
+}
+
+#[cfg(any(test, not(target_has_atomic = "64")))]
+impl ProtectedInputEnvironment {
+    const fn new() -> Self {
+        Self {
+            value: crate::os::Mutex::new((0, FINE_POINTER | KEYBOARD)),
+        }
+    }
+
+    fn load(&self) -> InputEnvironment {
+        let (generation, flags) = *self.value.lock();
+        unpack_environment(generation, flags)
+    }
+
+    fn publish(&self, environment: InputEnvironment) {
+        *self.value.lock() = (environment.generation, pack_flags(environment));
+    }
+}
 
 #[cfg(test)]
 std::thread_local! {
@@ -274,21 +382,10 @@ pub fn current_input_environment() -> InputEnvironment {
 }
 
 fn load_published_input_environment() -> InputEnvironment {
-    loop {
-        let sequence = CURRENT_SEQUENCE.load(Ordering::Acquire);
-        if sequence & 1 != 0 {
-            spin_loop();
-            continue;
-        }
-        let generation = CURRENT_GENERATION.load(Ordering::Relaxed);
-        let flags = CURRENT_FLAGS.load(Ordering::Relaxed);
-        if CURRENT_SEQUENCE.load(Ordering::Acquire) == sequence {
-            return unpack_environment(generation, flags);
-        }
-    }
+    CURRENT_ENVIRONMENT.load()
 }
 
-fn unpack_environment(generation: u64, flags: u64) -> InputEnvironment {
+fn unpack_environment(generation: u64, flags: u32) -> InputEnvironment {
     InputEnvironment::new(
         generation,
         option_flag(flags, TABLET_KNOWN, TABLET_ON),
@@ -313,27 +410,7 @@ fn unpack_environment(generation: u64, flags: u64) -> InputEnvironment {
 
 #[cfg_attr(test, allow(dead_code))] // Unit tests publish through the thread-local override.
 fn publish_input_environment(environment: InputEnvironment) {
-    let mut sequence = CURRENT_SEQUENCE.load(Ordering::Relaxed);
-    loop {
-        if sequence & 1 != 0 {
-            spin_loop();
-            sequence = CURRENT_SEQUENCE.load(Ordering::Relaxed);
-            continue;
-        }
-        match CURRENT_SEQUENCE.compare_exchange_weak(
-            sequence,
-            sequence.wrapping_add(1),
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => break,
-            Err(observed) => sequence = observed,
-        }
-    }
-
-    CURRENT_GENERATION.store(environment.generation, Ordering::Relaxed);
-    CURRENT_FLAGS.store(pack_flags(environment), Ordering::Relaxed);
-    CURRENT_SEQUENCE.store(sequence.wrapping_add(2), Ordering::Release);
+    CURRENT_ENVIRONMENT.publish(environment);
 }
 
 pub(crate) fn install_input_environment(environment: InputEnvironment) -> bool {
@@ -383,7 +460,7 @@ pub(crate) fn install_test_input_environment(
     }
 }
 
-const fn option_flag(flags: u64, known: u64, value: u64) -> Option<bool> {
+const fn option_flag(flags: u32, known: u32, value: u32) -> Option<bool> {
     if flags & known == 0 {
         None
     } else {
@@ -392,7 +469,7 @@ const fn option_flag(flags: u64, known: u64, value: u64) -> Option<bool> {
 }
 
 #[cfg_attr(test, allow(dead_code))] // Unit tests publish through the thread-local override.
-const fn pack_flags(environment: InputEnvironment) -> u64 {
+const fn pack_flags(environment: InputEnvironment) -> u32 {
     let mut flags = 0;
     if let Some(tablet) = environment.tablet_mode {
         flags |= TABLET_KNOWN;
@@ -442,6 +519,64 @@ const fn pack_flags(environment: InputEnvironment) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshots_preserve_full_width_generations_in_both_implementations() {
+        let selected = PublishedInputEnvironment::new();
+        let protected = ProtectedInputEnvironment::new();
+        assert_eq!(selected.load(), protected.load());
+        for generation in [u32::MAX as u64, u32::MAX as u64 + 1, u64::MAX] {
+            let environment =
+                InputEnvironment::new(generation, Some(true), Some(false), true, false, true, true)
+                    .with_system_mode(Some(WindowingMode::Focused), Some(true), Some(false));
+            selected.publish(environment);
+            protected.publish(environment);
+            assert_eq!(selected.load(), environment);
+            assert_eq!(protected.load(), environment);
+        }
+    }
+
+    #[test]
+    fn concurrent_publications_never_mix_generations_and_flags() {
+        let selected = PublishedInputEnvironment::new();
+        let protected = ProtectedInputEnvironment::new();
+        let first = InputEnvironment::new(1, Some(true), Some(false), true, false, false, true)
+            .with_system_mode(Some(WindowingMode::Focused), Some(true), Some(false));
+        let second = InputEnvironment::new(
+            u32::MAX as u64 + 1,
+            Some(false),
+            Some(true),
+            false,
+            true,
+            true,
+            false,
+        )
+        .with_system_mode(Some(WindowingMode::Freeform), Some(false), Some(true));
+        selected.publish(first);
+        protected.publish(first);
+        let barrier = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            for worker in 0..4 {
+                let selected = &selected;
+                let protected = &protected;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..2_000 {
+                        if worker < 2 {
+                            let environment = if worker == 0 { first } else { second };
+                            selected.publish(environment);
+                            protected.publish(environment);
+                        } else {
+                            for snapshot in [selected.load(), protected.load()] {
+                                assert!(snapshot == first || snapshot == second);
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
 
     #[test]
     fn interaction_mode_resolution_obeys_only_tablet_posture() {

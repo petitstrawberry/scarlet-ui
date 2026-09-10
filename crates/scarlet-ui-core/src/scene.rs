@@ -1,9 +1,9 @@
 //! Scene declarations for ScarletUI applications.
 
+use crate::id::IdAllocator;
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::view::View;
 use crate::views::Window;
@@ -43,8 +43,8 @@ pub struct WindowId(u64);
 impl WindowId {
     /// Generate a new runtime window ID.
     pub fn generate() -> Self {
-        static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT_WINDOW_ID.fetch_add(1, Ordering::SeqCst))
+        static NEXT_WINDOW_ID: IdAllocator = IdAllocator::new();
+        Self(NEXT_WINDOW_ID.allocate())
     }
 
     /// Return the raw numeric value.

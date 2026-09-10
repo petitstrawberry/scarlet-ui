@@ -4,7 +4,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
-use core::sync::atomic::{AtomicU64, Ordering};
+use scarlet_ui_core::__private::IdAllocator;
 
 use scarlet_ui_core::color::Color;
 use scarlet_ui_core::element::{Element, ElementRenderObject, LayoutConstraints, UpdateResult};
@@ -13,9 +13,9 @@ use scarlet_ui_core::renderer::PaintContext;
 use scarlet_ui_core::state::{Listenable, State};
 use scarlet_ui_core::view::View;
 
-static NEXT_CANVAS_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_MESH_ID: AtomicU64 = AtomicU64::new(1);
-static NEXT_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_CANVAS_ID: IdAllocator = IdAllocator::new();
+static NEXT_MESH_ID: IdAllocator = IdAllocator::new();
+static NEXT_TEXTURE_ID: IdAllocator = IdAllocator::new();
 
 /// Stable identity for retained resources owned by one SGFX canvas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -28,8 +28,7 @@ impl SgfxCanvasHandle {
     ///
     /// A handle suitable for reuse across ScarletUI view rebuilds.
     pub fn new() -> Self {
-        let id = NEXT_CANVAS_ID.fetch_add(1, Ordering::Relaxed);
-        Self(id.max(1))
+        Self(NEXT_CANVAS_ID.allocate())
     }
 
     pub(crate) const fn id(self) -> u64 {
@@ -54,8 +53,7 @@ impl SgfxMeshHandle {
     ///
     /// A handle suitable for reuse by successive revisions of one mesh.
     pub fn new() -> Self {
-        let id = NEXT_MESH_ID.fetch_add(1, Ordering::Relaxed);
-        Self(id.max(1))
+        Self(NEXT_MESH_ID.allocate())
     }
 
     pub(crate) const fn id(self) -> u64 {
@@ -134,7 +132,7 @@ impl SgfxTexture {
     /// A retained texture. Dimensions and byte length are validated when used.
     pub fn rgba8(width: u32, height: u32, pixels: Vec<u8>) -> Arc<Self> {
         Arc::new(Self {
-            id: NEXT_TEXTURE_ID.fetch_add(1, Ordering::Relaxed).max(1),
+            id: NEXT_TEXTURE_ID.allocate(),
             width,
             height,
             pixels: pixels.into(),
