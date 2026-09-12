@@ -13,7 +13,10 @@ use scarlet_ui_renderer_sgfx::{FrameError, FrameExecutor, FrameSubmissionError, 
 use sgfx::backend::{CompletionStatus, SubmitError};
 use sgfx::{BackendKind, Context, Device, MappedTargetSession};
 
-use crate::{SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkStatus};
+use crate::{
+    SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkStatus,
+    vulkan_canvas::SharedImageSource,
+};
 
 /// Default Scarlet graphics device used by the UI platform integration.
 pub const DEFAULT_GPU_DEVICE: &str = "/dev/gpu0";
@@ -37,6 +40,8 @@ pub enum Stage {
     Render,
     /// Registering a shared image with SWS.
     RegisterImage,
+    /// Importing an external image used by a canvas.
+    ImportExternalImage,
     /// Waiting for an SWS-retained image.
     WaitForRelease,
     /// Establishing GPU retirement before handing an image to SWS.
@@ -274,6 +279,36 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         Ok(())
     }
 
+    fn import_external_textures(&mut self, paint: &PaintContext<'_>) -> Result<()> {
+        let pending = self
+            .encoder
+            .as_mut()
+            .ok_or(Error::InvalidFrame)?
+            .prepare_external_textures(paint)
+            .map_err(|_| Error::Render)?;
+        for binding in pending {
+            let source = binding
+                .source()
+                .as_any()
+                .downcast_ref::<SharedImageSource>()
+                .ok_or(Error::Sgfx(Stage::ImportExternalImage))?;
+            let handle = source
+                .duplicate_handle()
+                .map_err(|_| Error::Sgfx(Stage::ImportExternalImage))?;
+            self.session
+                .as_mut()
+                .ok_or(Error::InvalidFrame)?
+                .import_shared_bgra_texture(binding.texture(), handle)
+                .map_err(|_| Error::Sgfx(Stage::ImportExternalImage))?;
+            self.encoder
+                .as_mut()
+                .ok_or(Error::InvalidFrame)?
+                .mark_external_texture_bound(binding.texture())
+                .map_err(|_| Error::Render)?;
+        }
+        Ok(())
+    }
+
     /// Render and atomically commit one frame.
     ///
     /// # Arguments
@@ -317,6 +352,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         }
         self.refresh_compositor_epoch()?;
         self.ensure_session()?;
+        self.import_external_textures(paint)?;
 
         let slot = self.next_slot;
         let identity = self.identity(slot)?;

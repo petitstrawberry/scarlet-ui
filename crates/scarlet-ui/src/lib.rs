@@ -42,6 +42,7 @@ pub use scarlet_ui_core::*;
 pub use scarlet_ui_platform_sws::{
     SWSPlatformWindow, SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle,
     SgfxCanvasRenderObject, SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture, SwsBackend,
+    VulkanCanvas, VulkanCanvasImage, VulkanCanvasImageError,
 };
 #[cfg(all(feature = "platform-winit", not(target_os = "scarlet")))]
 pub use scarlet_ui_platform_winit::{
@@ -102,14 +103,14 @@ pub mod prelude {
     pub use scarlet_ui_core::prelude::*;
 
     pub use crate::ApplicationRunExt;
-    #[cfg(all(feature = "platform-sws", target_os = "scarlet"))]
-    pub use crate::{
-        SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh,
-        SgfxMeshHandle, SgfxTexture,
-    };
     #[cfg(all(feature = "platform-winit", not(target_os = "scarlet")))]
     pub use crate::{
         SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh,
         SgfxMeshHandle, SgfxTexture,
+    };
+    #[cfg(all(feature = "platform-sws", target_os = "scarlet"))]
+    pub use crate::{
+        SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh,
+        SgfxMeshHandle, SgfxTexture, VulkanCanvas, VulkanCanvasImage, VulkanCanvasImageError,
     };
 }

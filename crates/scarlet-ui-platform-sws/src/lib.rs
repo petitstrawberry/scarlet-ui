@@ -11,6 +11,7 @@ extern crate scarlet_std as std;
 
 mod backend;
 mod sink;
+mod vulkan_canvas;
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -49,6 +50,7 @@ pub use sink::{
 };
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code, rel_code};
 use sws_client as sws;
+pub use vulkan_canvas::{VulkanCanvas, VulkanCanvasImage, VulkanCanvasImageError};
 
 #[cfg(feature = "std")]
 use std::time::{Duration, Instant};

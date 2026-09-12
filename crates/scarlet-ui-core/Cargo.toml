@@ -10,7 +10,7 @@ std = ["dep:fontique", "dep:raw-window-handle", "dep:unicode-script"]
 preview = ["std", "dep:inventory", "dep:libloading"]
 
 [dependencies]
-scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", branch = "dev", package = "scarlet-std", optional = true }
+scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", rev = "85f0cead4cb4c9add021360f1b469f08bf0d23a9", package = "scarlet-std", optional = true }
 libm = { version = "0.2", default-features = false }
 scarlet-ui-macros = { path = "../scarlet-ui-macros" }
 scarlet-ui-icons-tabler = { path = "../scarlet-ui-icons-tabler" }

@@ -26,6 +26,7 @@ pub use canvas::{
     SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
 };
 pub use error::{Error, FrameError, Result, Stage};
+pub use lowering::SgfxExternalTextureBinding;
 pub use lowering::SgfxPaintEncoder;
 pub use submission::{FrameExecutor, FrameSubmissionError};
 pub use upload::upload_texture;

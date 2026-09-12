@@ -22,6 +22,8 @@ pub enum Error {
     InvalidFrame,
     /// A canvas requested depth testing on a device without depth support.
     DepthUnsupported,
+    /// A platform external texture was not imported before command execution.
+    ExternalTextureUnbound,
     /// The frame exceeded SGFX's bounded IR command or resource limits.
     FrameTooComplex,
 }
@@ -39,6 +41,9 @@ impl fmt::Display for Error {
             Self::InvalidFrame => formatter.write_str("invalid ScarletUI frame"),
             Self::DepthUnsupported => {
                 formatter.write_str("SGFX device does not support canvas depth testing")
+            }
+            Self::ExternalTextureUnbound => {
+                formatter.write_str("ScarletUI external SGFX texture is not bound")
             }
             Self::FrameTooComplex => formatter.write_str("ScarletUI frame exceeds SGFX IR limits"),
         }

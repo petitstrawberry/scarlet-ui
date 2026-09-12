@@ -9,7 +9,7 @@ use scarlet_ui_core::__private::IdAllocator;
 use scarlet_ui_core::color::Color;
 use scarlet_ui_core::element::{Element, ElementRenderObject, LayoutConstraints, UpdateResult};
 use scarlet_ui_core::geometry::{Point, Rect, Size};
-use scarlet_ui_core::renderer::PaintContext;
+use scarlet_ui_core::renderer::{PaintContext, PaintExtension};
 use scarlet_ui_core::state::{Listenable, State};
 use scarlet_ui_core::view::View;
 
@@ -115,7 +115,13 @@ pub struct SgfxTexture {
     pub(crate) id: u64,
     pub(crate) width: u32,
     pub(crate) height: u32,
-    pub(crate) pixels: Arc<[u8]>,
+    pub(crate) source: SgfxTextureSource,
+}
+
+#[derive(Debug)]
+pub(crate) enum SgfxTextureSource {
+    Rgba8(Arc<[u8]>),
+    ExternalBgra8(Arc<dyn PaintExtension>),
 }
 
 impl SgfxTexture {
@@ -135,7 +141,22 @@ impl SgfxTexture {
             id: NEXT_TEXTURE_ID.allocate(),
             width,
             height,
-            pixels: pixels.into(),
+            source: SgfxTextureSource::Rgba8(pixels.into()),
+        })
+    }
+
+    /// Create a BGRA8 texture whose physical image is supplied by the active
+    /// platform SGFX backend.
+    ///
+    /// The payload identifies and owns the platform image capability. A backend
+    /// that recognizes it imports the image without a pixel readback or upload;
+    /// other backends reject the frame explicitly.
+    pub fn external_bgra8(width: u32, height: u32, source: Arc<dyn PaintExtension>) -> Arc<Self> {
+        Arc::new(Self {
+            id: NEXT_TEXTURE_ID.allocate(),
+            width,
+            height,
+            source: SgfxTextureSource::ExternalBgra8(source),
         })
     }
 
@@ -155,6 +176,20 @@ impl SgfxTexture {
     /// Height in pixels.
     pub const fn height(&self) -> u32 {
         self.height
+    }
+
+    pub(crate) fn rgba8_pixels(&self) -> Option<&[u8]> {
+        match &self.source {
+            SgfxTextureSource::Rgba8(pixels) => Some(pixels),
+            SgfxTextureSource::ExternalBgra8(_) => None,
+        }
+    }
+
+    pub(crate) fn external_source(&self) -> Option<&Arc<dyn PaintExtension>> {
+        match &self.source {
+            SgfxTextureSource::Rgba8(_) => None,
+            SgfxTextureSource::ExternalBgra8(source) => Some(source),
+        }
     }
 }
 
