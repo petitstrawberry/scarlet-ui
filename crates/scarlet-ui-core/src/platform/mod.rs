@@ -5,6 +5,7 @@ use crate::compositor::DamageRect;
 use crate::element::{TextInputElementState, WindowSizeLimits};
 use crate::error::Result;
 use crate::event::Event;
+use crate::geometry::Rect;
 use crate::geometry::{EdgeInsets, Point, Size};
 use crate::input_environment::InputEnvironment;
 use crate::renderer::{CompositorBackendKind, PaintBackend, RendererBackendKind};
@@ -173,6 +174,16 @@ pub struct WindowCreateRequest {
     pub placement: WindowPlacement,
     /// Non-interactive decoration excluded from managed window geometry.
     pub window_geometry_insets: EdgeInsets,
+}
+
+/// Surface-local material and input region in logical pixels. A backdrop
+/// samples the already composed scene, before this window's sharp content.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceRegion {
+    pub rect: Rect,
+    pub corner_radius: f32,
+    pub blur_radius: f32,
+    pub accepts_input: bool,
 }
 
 /// Creates platform windows for the application runner.
@@ -471,6 +482,17 @@ pub trait PlatformWindow: Any {
 
     /// Set whether the window contents are fully opaque.
     fn set_opaque(&mut self, opaque: bool) -> Result<()>;
+
+    /// Set backdrop areas and optionally limit pointer targeting to the input
+    /// regions. An empty restricted list makes a surface pass through input.
+    /// Backends without compositor materials keep their normal appearance.
+    fn set_surface_regions(
+        &mut self,
+        _restrict_input: bool,
+        _regions: &[SurfaceRegion],
+    ) -> Result<()> {
+        Ok(())
+    }
 
     /// Update menu titles for the window (format: "menu1|menu2|menu3")
     fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()>;
