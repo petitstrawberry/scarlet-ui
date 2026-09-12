@@ -709,6 +709,8 @@ pub struct SWSPlatformWindow {
     current_size: Size,
     window_geometry_insets: EdgeInsets,
     window_geometry_supported: bool,
+    surface_regions_cache: Option<(bool, Vec<sws_protocol::surface_regions::SurfaceRegion>)>,
+    surface_regions_supported: bool,
     frame_callbacks_supported: bool,
     next_frame_callback_id: u64,
     pending_frame_callback_id: Option<u64>,
@@ -1257,6 +1259,9 @@ impl SWSPlatformWindow {
             current_size,
             window_geometry_insets,
             window_geometry_supported,
+            surface_regions_cache: None,
+            surface_regions_supported: capabilities
+                .is_some_and(|caps| caps.supports_surface_regions()),
             frame_callbacks_supported,
             next_frame_callback_id: 1,
             pending_frame_callback_id: None,
@@ -2267,6 +2272,58 @@ impl PlatformWindow for SWSPlatformWindow {
         self.conn
             .set_window_has_alpha_content(self.surface_id, !opaque)
             .map_err(|_| scarlet_ui_core::error::Error::IoError)
+    }
+
+    fn set_surface_regions(
+        &mut self,
+        restrict_input: bool,
+        regions: &[scarlet_ui_core::platform::SurfaceRegion],
+    ) -> Result<()> {
+        if !self.surface_regions_supported {
+            return Ok(());
+        }
+        let scale = self.scale_milli.max(1) as f32 / 1000.0;
+        // These coordinates are nonnegative. Round without std-only float
+        // methods so legacy no_std desktop applications use the same API.
+        let pixels = |value: f32| ((value * scale).max(0.0) + 0.5) as u32;
+        let physical: Vec<_> = regions
+            .iter()
+            .map(|region| {
+                let width = pixels(region.rect.size.width).max(1);
+                let height = pixels(region.rect.size.height).max(1);
+                sws_protocol::surface_regions::SurfaceRegion {
+                    x: pixels(region.rect.origin.x).min(i32::MAX as u32) as i32,
+                    y: pixels(region.rect.origin.y).min(i32::MAX as u32) as i32,
+                    width,
+                    height,
+                    corner_radius: pixels(region.corner_radius).min(width.min(height) / 2),
+                    blur_radius: pixels(region.blur_radius).min(64),
+                    flags: if region.accepts_input {
+                        sws_protocol::surface_regions::INPUT
+                    } else {
+                        0
+                    } | if region.blur_radius > 0.0 {
+                        sws_protocol::surface_regions::BACKDROP
+                    } else {
+                        0
+                    },
+                }
+            })
+            .collect();
+        if self
+            .surface_regions_cache
+            .as_ref()
+            .is_some_and(|(cached_input, cached)| {
+                *cached_input == restrict_input && *cached == physical
+            })
+        {
+            return Ok(());
+        }
+        self.conn
+            .set_surface_regions(self.surface_id, restrict_input, &physical)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
+        self.surface_regions_cache = Some((restrict_input, physical));
+        Ok(())
     }
 
     fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()> {

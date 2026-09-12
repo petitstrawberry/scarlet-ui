@@ -24,7 +24,7 @@ use crate::renderer::PresentedFrame;
 use crate::scene::{
     Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowDeclaration, WindowId,
 };
-use crate::state::{InvalidationKind, StateId, SubscriptionId};
+use crate::state::{InvalidationKind, Listenable, StateId, SubscriptionId};
 use crate::view::View;
 
 const MAX_EVENTS_PER_WINDOW_PER_TICK: usize = 64;
@@ -71,6 +71,24 @@ pub trait Application: Clone + 'static {
     /// Declarations with unique scene keys. Only the first launch-eligible
     /// declaration is opened automatically; further instances use window commands.
     fn scenes(&self) -> impl Scene;
+
+    /// Select the application states that rebuild one scene's root.
+    ///
+    /// Return `None` to observe every application state, as usual. An explicit
+    /// list avoids repainting unrelated windows when, for example, a clock in
+    /// a separate status window changes. Descendant views retain their own
+    /// subscriptions. The chosen list must stay stable while the scene is open.
+    ///
+    /// # Arguments
+    ///
+    /// * `_scene_key` - Declaration key of the window being mounted.
+    ///
+    /// # Returns
+    ///
+    /// An optional stable subset of application state dependencies.
+    fn scene_listenables(&self, _scene_key: &SceneWindowKey) -> Option<Vec<&dyn Listenable>> {
+        None
+    }
 
     /// Return the process-live input environment used by built-in views.
     ///
@@ -1174,7 +1192,11 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
 
     fn mount(&mut self, ctx: &MountContext) {
         self.pipeline_id = ctx.pipeline_id();
-        for listenable in View::listenables(&self.app) {
+        let listenables = self
+            .app
+            .scene_listenables(&self.scene_key)
+            .unwrap_or_else(|| View::listenables(&self.app));
+        for listenable in listenables {
             let element_id = self.id;
             let pipeline_id = self.pipeline_id;
             let invalidation_kind = listenable.invalidation_kind();
@@ -1197,7 +1219,10 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
         if let Some(ref mut child) = self.child {
             child.unmount();
         }
-        let listenables = View::listenables(&self.app);
+        let listenables = self
+            .app
+            .scene_listenables(&self.scene_key)
+            .unwrap_or_else(|| View::listenables(&self.app));
         for (listenable, subscription_id) in listenables.iter().zip(self.subscriptions.iter()) {
             listenable.unsubscribe(*subscription_id);
         }
@@ -1259,6 +1284,78 @@ mod tests {
 
     use crate::input_environment::install_test_input_environment;
     use crate::views::{Text, Window};
+
+    #[derive(Clone)]
+    struct ScopedSceneApp {
+        clock: crate::state::State<u32>,
+        content: crate::state::State<u32>,
+    }
+
+    impl View for ScopedSceneApp {
+        fn create_element(&self) -> Box<dyn Element> {
+            Text::new("scenes").create_element()
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn listenables(&self) -> Vec<&dyn Listenable> {
+            vec![&self.clock, &self.content]
+        }
+    }
+
+    impl Application for ScopedSceneApp {
+        fn scenes(&self) -> impl Scene {
+            (
+                Window::new("Status", Text::new(alloc::format!("{}", self.clock.get())))
+                    .size(Size::new(100.0, 30.0)),
+                Window::new("Home", Text::new(alloc::format!("{}", self.content.get())))
+                    .scene_key("home")
+                    .size(Size::new(100.0, 100.0)),
+            )
+        }
+        fn scene_listenables(&self, key: &SceneWindowKey) -> Option<Vec<&dyn Listenable>> {
+            (key.as_str() == "home").then(|| vec![&self.content as &dyn Listenable])
+        }
+    }
+
+    #[test]
+    fn scoped_scene_ignores_unrelated_updates_and_unsubscribes_on_teardown() {
+        let app = ScopedSceneApp {
+            clock: crate::state::State::new(StateId::new(8101), 0),
+            content: crate::state::State::new(StateId::new(8102), 0),
+        };
+        let create = |key: SceneWindowKey| {
+            let mut pipeline = RenderingPipeline::new();
+            let root = SceneWindowRootElement::new(app.clone(), key, pipeline.pipeline_id());
+            pipeline.set_root(Box::new(root));
+            pipeline.layout_initial();
+            pipeline.render().unwrap();
+            pipeline
+        };
+        let mut status = create(SceneWindowKey::main());
+        let mut home = create("home".into());
+        assert!(!home.has_dirty() && !status.has_dirty());
+        app.clock.set(1);
+        assert!(
+            status.has_dirty(),
+            "the default still observes every app state"
+        );
+        assert!(
+            !home.has_dirty(),
+            "clock updates must not repaint another scene"
+        );
+        status.render().unwrap();
+        app.content.set(1);
+        assert!(home.has_dirty() && status.has_dirty());
+        home.render().unwrap();
+        home.teardown();
+        app.content.set(2);
+        assert!(
+            !home.has_dirty(),
+            "teardown must remove the scoped subscriptions"
+        );
+        status.teardown();
+    }
 
     #[derive(Clone)]
     struct RenderFailureApp(Rc<RefCell<Vec<RenderFailure>>>);

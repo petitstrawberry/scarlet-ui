@@ -52,8 +52,10 @@ impl ScrollAxis {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct SelectionScrollTarget {
+    axis: ScrollAxis,
     index: usize,
     item_extent: f32,
+    offset: f32,
 }
 
 /// Wheel direction for a scroll axis.
@@ -369,8 +371,49 @@ impl<V: View> ScrollView<V> {
         let item_extent = item_extent.max(1.0);
         self.selection_index_state = None;
         self.selection_item_extent = None;
-        self.selection_target = index.map(|index| SelectionScrollTarget { index, item_extent });
+        self.selection_target = index.map(|index| SelectionScrollTarget {
+            axis: ScrollAxis::Vertical,
+            index,
+            item_extent,
+            offset: 0.0,
+        });
         self
+    }
+
+    /// Keep a vertical content range visible, for sections of varying heights.
+    ///
+    /// * `start` - Top edge in logical content coordinates.
+    /// * `end` - Bottom edge in logical content coordinates.
+    ///
+    /// Returns the updated view. As with `scroll_to_index`, an unchanged target
+    /// preserves manual scrolling; non-finite or empty ranges clear the request.
+    pub fn scroll_to_vertical_range(mut self, start: f32, end: f32) -> Self {
+        self.set_selection_range(ScrollAxis::Vertical, start, end);
+        self
+    }
+
+    /// Keep a horizontal content range visible without recreating its content.
+    ///
+    /// `start` and `end` are logical content coordinates. An unchanged range
+    /// preserves manual scrolling; invalid or empty ranges clear the request.
+    pub fn scroll_to_horizontal_range(mut self, start: f32, end: f32) -> Self {
+        self.set_selection_range(ScrollAxis::Horizontal, start, end);
+        self
+    }
+
+    fn set_selection_range(&mut self, axis: ScrollAxis, start: f32, end: f32) {
+        self.selection_index_state = None;
+        self.selection_item_extent = None;
+        self.selection_target = if start.is_finite() && end.is_finite() && end > start.max(0.0) {
+            Some(SelectionScrollTarget {
+                axis,
+                index: 0,
+                offset: start.max(0.0),
+                item_extent: end - start.max(0.0),
+            })
+        } else {
+            None
+        };
     }
 
     /// Bind selection state and keep the selected fixed-height item visible.
@@ -392,17 +435,22 @@ impl<V: View> ScrollView<V> {
         let item_extent = item_extent.max(1.0);
         self.selection_index_state = Some(index.clone());
         self.selection_item_extent = Some(item_extent);
-        self.selection_target = index
-            .get()
-            .map(|index| SelectionScrollTarget { index, item_extent });
+        self.selection_target = index.get().map(|index| SelectionScrollTarget {
+            axis: ScrollAxis::Vertical,
+            index,
+            item_extent,
+            offset: 0.0,
+        });
         self
     }
 
     fn current_selection_target(&self) -> Option<SelectionScrollTarget> {
         if let Some(index) = &self.selection_index_state {
             return index.get().map(|index| SelectionScrollTarget {
+                axis: ScrollAxis::Vertical,
                 index,
                 item_extent: self.selection_item_extent.unwrap_or(1.0),
+                offset: 0.0,
             });
         }
         self.selection_target
@@ -675,26 +723,44 @@ impl<V: View> ScrollViewRenderObject<V> {
         (self.offset_x - old_x).abs() > 0.01 || (self.offset_y - old_y).abs() > 0.01
     }
 
-    fn ensure_selection_visible(&mut self) {
-        if !self.axes.allows_y() {
-            return;
+    fn selection_offset(&self) -> Option<(f32, f32)> {
+        let target = self.selection_target?;
+        let horizontal = target.axis == ScrollAxis::Horizontal;
+        if (horizontal && !self.axes.allows_x()) || (!horizontal && !self.axes.allows_y()) {
+            return None;
         }
-        let Some(target) = self.selection_target else {
-            return;
-        };
 
-        let item_top = target.index as f32 * target.item_extent;
+        let item_top = target.offset + target.index as f32 * target.item_extent;
         let item_bottom = item_top + target.item_extent;
-        let viewport_top = self.offset_y;
-        let viewport_bottom = viewport_top + self.viewport_size.height;
-        let next_offset = if item_top < viewport_top {
-            item_top
-        } else if item_bottom > viewport_bottom {
-            item_bottom - self.viewport_size.height
+        let viewport_top = if horizontal {
+            self.offset_x
         } else {
             self.offset_y
         };
-        self.set_offset(self.offset_x, next_offset);
+        let viewport_extent = if horizontal {
+            self.viewport_size.width
+        } else {
+            self.viewport_size.height
+        };
+        let viewport_bottom = viewport_top + viewport_extent;
+        let next_offset = if item_top < viewport_top {
+            item_top
+        } else if item_bottom > viewport_bottom {
+            item_bottom - viewport_extent
+        } else {
+            viewport_top
+        };
+        if horizontal {
+            Some((next_offset, self.offset_y))
+        } else {
+            Some((self.offset_x, next_offset))
+        }
+    }
+
+    fn ensure_selection_visible(&mut self) {
+        if let Some((x, y)) = self.selection_offset() {
+            self.set_offset(x, y);
+        }
     }
 
     fn normalized_wheel_delta(&self, delta_x: i32, delta_y: i32) -> (f32, f32) {
@@ -969,6 +1035,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let old_scrollbar_visibility = self.scrollbar_visibility;
         let old_scrollbar_color = self.scrollbar_color;
         let old_selection_target = self.selection_target;
+        let old_offset = self.offset();
 
         self.axes = scroll_view.scroll_axes();
         self.configured_content_size = scroll_view.configured_content_size();
@@ -988,6 +1055,15 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         if self.selection_target != old_selection_target && self.selection_target.is_some() {
             self.selection_scroll_pending = true;
         }
+        // A visible selection does not require layout. Keep the request pending
+        // until the next actual layout, which may have a new viewport or content
+        // extent; applying and clearing it here would use the previous geometry.
+        let selection_needs_layout = self.selection_scroll_pending
+            && (self.viewport_size.width <= 0.0
+                || self.viewport_size.height <= 0.0
+                || self
+                    .selection_offset()
+                    .is_some_and(|offset| offset != self.offset()));
         self.clamp_offsets();
 
         if self.axes != old_axes
@@ -1002,7 +1078,8 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
                 > 0.001
             || self.scrollbar_visibility != old_scrollbar_visibility
             || self.scrollbar_color != old_scrollbar_color
-            || self.selection_target != old_selection_target
+            || self.offset() != old_offset
+            || selection_needs_layout
         {
             crate::element::UpdateResult::Updated
         } else {
@@ -1064,6 +1141,9 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         }
 
         let offset_changed = self.set_offset(next_x, next_y);
+        if offset_changed {
+            self.selection_scroll_pending = false;
+        }
         let scrollbar_deactivated = old_scrollbar_active && !self.scrollbar_active;
         offset_changed || scrollbar_deactivated
     }
@@ -1518,6 +1598,118 @@ mod tests {
     }
 
     #[test]
+    fn vertical_range_reveals_variable_sections_and_preserves_manual_scroll() {
+        let view = ScrollView::new(Text::new("content"))
+            .content_size(100.0, 600.0)
+            .scroll_to_vertical_range(310.0, 390.0);
+        let mut render_object = ScrollViewRenderObject::<Text>::from_view(&view);
+        let mut children = alloc::vec![Text::new("content").create_element()];
+        let constraints = LayoutConstraints::tight(100.0, 100.0);
+        render_object.layout_with_children(constraints, &mut children);
+        assert_eq!(render_object.offset(), (0.0, 290.0));
+        render_object.set_offset(0.0, 200.0);
+        render_object.update(&view);
+        render_object.layout_with_children(constraints, &mut children);
+        assert_eq!(render_object.offset(), (0.0, 200.0));
+        render_object.update(&view.scroll_to_vertical_range(40.0, 90.0));
+        render_object.layout_with_children(constraints, &mut children);
+        assert_eq!(render_object.offset(), (0.0, 40.0));
+    }
+
+    #[test]
+    fn horizontal_range_reveals_selection_and_preserves_manual_scroll_on_rebuild() {
+        let view = ScrollView::new(Text::new("content"))
+            .horizontal()
+            .content_size(600.0, 100.0)
+            .scroll_to_horizontal_range(310.0, 390.0);
+        let mut render_object = ScrollViewRenderObject::<Text>::from_view(&view);
+        let mut children = alloc::vec![Text::new("content").create_element()];
+        let constraints = LayoutConstraints::tight(100.0, 100.0);
+        render_object.layout_with_children(constraints, &mut children);
+        assert_eq!(render_object.offset(), (290.0, 0.0));
+        render_object.set_offset(200.0, 0.0);
+        render_object.update(&view);
+        render_object.layout_with_children(constraints, &mut children);
+        assert_eq!(render_object.offset(), (200.0, 0.0));
+        render_object.update(&view.clone().scroll_to_horizontal_range(40.0, 90.0));
+        render_object.layout_with_children(constraints, &mut children);
+        assert_eq!(render_object.offset(), (40.0, 0.0));
+        render_object.update(&view.scroll_to_horizontal_range(570.0, 610.0));
+        render_object.layout_with_children(constraints, &mut children);
+        assert_eq!(
+            render_object.offset(),
+            (500.0, 0.0),
+            "clamp to content extent"
+        );
+    }
+
+    #[test]
+    fn selection_reveal_uses_the_next_content_and_viewport_geometry() {
+        let view = ScrollView::new(Text::new("content"))
+            .horizontal()
+            .content_size(300.0, 100.0)
+            .scroll_to_horizontal_range(40.0, 90.0);
+        let mut render_object = ScrollViewRenderObject::<Text>::from_view(&view);
+        let mut children = alloc::vec![Text::new("content").create_element()];
+        let constraints = LayoutConstraints::tight(100.0, 100.0);
+        render_object.layout_with_children(constraints, &mut children);
+
+        let grown = view
+            .content_size(600.0, 100.0)
+            .scroll_to_horizontal_range(510.0, 590.0);
+        assert!(matches!(
+            render_object.update(&grown),
+            crate::element::UpdateResult::Updated
+        ));
+        render_object.layout_with_children(constraints, &mut children);
+        assert_eq!(render_object.offset(), (490.0, 0.0));
+
+        // This target fits in the old viewport. Parent layout then shrinks it.
+        assert!(matches!(
+            render_object.update(&grown.scroll_to_horizontal_range(520.0, 580.0)),
+            crate::element::UpdateResult::NoChange
+        ));
+        render_object.layout_with_children(LayoutConstraints::tight(60.0, 100.0), &mut children);
+        assert_eq!(render_object.offset(), (520.0, 0.0));
+    }
+
+    #[test]
+    fn manual_scroll_cancels_pending_reveal_of_an_already_visible_range() {
+        let view = ScrollView::new(Text::new("content"))
+            .content_size(100.0, 600.0)
+            .wheel_sensitivity(1.0)
+            .scroll_to_vertical_range(40.0, 90.0);
+        let mut render_object = ScrollViewRenderObject::<Text>::from_view(&view);
+        let mut children = alloc::vec![Text::new("content").create_element()];
+        let constraints = LayoutConstraints::tight(100.0, 100.0);
+        render_object.layout_with_children(constraints, &mut children);
+
+        let next_view = view.scroll_to_vertical_range(50.0, 90.0);
+        assert!(matches!(
+            render_object.update(&next_view),
+            crate::element::UpdateResult::NoChange
+        ));
+        assert!(render_object.handle_event(
+            &Event::Mouse(MouseEvent::Wheel {
+                delta_x: 0,
+                delta_y: -200,
+                x: 10,
+                y: 10,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Trackpad,
+            }),
+            Phase::Target,
+        ));
+        assert_eq!(render_object.offset(), (0.0, 200.0));
+        assert!(matches!(
+            render_object.update(&next_view),
+            crate::element::UpdateResult::NoChange
+        ));
+        render_object.layout_with_children(constraints, &mut children);
+        assert_eq!(render_object.offset(), (0.0, 200.0));
+    }
+
+    #[test]
     fn selection_scroll_state_preserves_offset_when_new_item_is_visible() {
         let selected = State::new(generate_state_id(), Some(4));
         let view = ScrollView::new(Text::new("content"))
@@ -1536,7 +1728,7 @@ mod tests {
             .scroll_to_index_state(selected, 50.0);
         assert!(matches!(
             render_object.update(&next_view),
-            crate::element::UpdateResult::Updated
+            crate::element::UpdateResult::NoChange
         ));
         render_object.layout_with_children(LayoutConstraints::tight(100.0, 100.0), &mut children);
 
