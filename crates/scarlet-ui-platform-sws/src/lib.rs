@@ -10,8 +10,8 @@ extern crate alloc;
 extern crate scarlet_std as std;
 
 mod backend;
+mod shared_image;
 mod sink;
-mod vulkan_canvas;
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -44,13 +44,13 @@ pub use scarlet_ui_renderer_sgfx::{
     SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
 };
 use sgfx::ImageRef;
+pub use shared_image::{SharedImageError, shared_bgra8_texture, shared_bgra8_texture_from_raw};
 pub use sink::{
     SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkResult,
     SgfxSinkStatus,
 };
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code, rel_code};
 use sws_client as sws;
-pub use vulkan_canvas::{VulkanCanvas, VulkanCanvasImage, VulkanCanvasImageError};
 
 #[cfg(feature = "std")]
 use std::time::{Duration, Instant};

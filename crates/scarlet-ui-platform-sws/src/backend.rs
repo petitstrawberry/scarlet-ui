@@ -15,7 +15,7 @@ use sgfx::{BackendKind, Context, Device, MappedTargetSession};
 
 use crate::{
     SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkStatus,
-    vulkan_canvas::SharedImageSource,
+    shared_image::SharedImageSource,
 };
 
 /// Default Scarlet graphics device used by the UI platform integration.

@@ -41,8 +41,8 @@ pub use scarlet_ui_core::*;
 #[cfg(all(feature = "platform-sws", target_os = "scarlet"))]
 pub use scarlet_ui_platform_sws::{
     SWSPlatformWindow, SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle,
-    SgfxCanvasRenderObject, SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture, SwsBackend,
-    VulkanCanvas, VulkanCanvasImage, VulkanCanvasImageError,
+    SgfxCanvasRenderObject, SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
+    SharedImageError, SwsBackend, shared_bgra8_texture, shared_bgra8_texture_from_raw,
 };
 #[cfg(all(feature = "platform-winit", not(target_os = "scarlet")))]
 pub use scarlet_ui_platform_winit::{
@@ -111,6 +111,7 @@ pub mod prelude {
     #[cfg(all(feature = "platform-sws", target_os = "scarlet"))]
     pub use crate::{
         SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh,
-        SgfxMeshHandle, SgfxTexture, VulkanCanvas, VulkanCanvasImage, VulkanCanvasImageError,
+        SgfxMeshHandle, SgfxTexture, SharedImageError, shared_bgra8_texture,
+        shared_bgra8_texture_from_raw,
     };
 }
