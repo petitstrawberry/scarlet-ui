@@ -40,8 +40,9 @@ use scarlet_ui_core::renderer::{
     BackendFrame, CompositorBackendKind, PaintBackend, PaintContext, RendererBackendKind,
 };
 pub use scarlet_ui_renderer_sgfx::{
-    SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
-    SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
+    ExternalGpuSurface, ExternalGpuSurfaceRenderObject, SgfxCanvas, SgfxCanvasDraw,
+    SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject, SgfxCanvasVertex, SgfxMesh,
+    SgfxMeshHandle, SgfxTexture,
 };
 use sgfx::ImageRef;
 pub use shared_image::{SharedImageError, shared_bgra8_texture, shared_bgra8_texture_from_raw};

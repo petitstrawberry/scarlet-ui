@@ -16,6 +16,7 @@ extern crate alloc;
 
 mod canvas;
 mod error;
+mod external_surface;
 mod geometry;
 mod lowering;
 mod submission;
@@ -26,6 +27,7 @@ pub use canvas::{
     SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
 };
 pub use error::{Error, FrameError, Result, Stage};
+pub use external_surface::{ExternalGpuSurface, ExternalGpuSurfaceRenderObject};
 pub use lowering::SgfxExternalTextureBinding;
 pub use lowering::SgfxPaintEncoder;
 pub use submission::{FrameExecutor, FrameSubmissionError};
