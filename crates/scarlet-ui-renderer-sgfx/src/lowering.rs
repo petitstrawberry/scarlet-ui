@@ -2676,6 +2676,7 @@ mod tests {
                     }
                     Command::WriteTexture { .. } => "write-texture",
                     Command::CopyTextureToTexture { .. } => "copy",
+                    Command::BlitTexture { .. } => "blit-texture",
                     Command::BeginRenderPass(_) => "begin-pass",
                     Command::EndRenderPass => "end-pass",
                     Command::SetPipeline(_) => "set-pipeline",
@@ -2685,6 +2686,8 @@ mod tests {
                     Command::SetSampler(_) => "set-sampler",
                     Command::SetUniforms(_) => "set-uniforms",
                     Command::SetScissor(_) => "set-scissor",
+                    Command::SetViewport(_) => "set-viewport",
+                    Command::SetPushConstants { .. } => "set-push-constants",
                     Command::Draw { vertex_count, .. } => {
                         self.draw_vertices.push(*vertex_count);
                         "draw"
