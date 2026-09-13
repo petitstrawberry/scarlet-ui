@@ -564,7 +564,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1796,7 +1796,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1809,7 +1809,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2076,7 +2076,7 @@ dependencies = [
 [[package]]
 name = "sgfx"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=fd6c2f30ee7561a062af91606dbbca0f63f8e70e#fd6c2f30ee7561a062af91606dbbca0f63f8e70e"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=4511b0ab13821c71c81376f855031b7b1011287b#4511b0ab13821c71c81376f855031b7b1011287b"
 dependencies = [
  "gpu-raw",
  "pollster",
@@ -2106,7 +2106,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-scarlet-virgl"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=fd6c2f30ee7561a062af91606dbbca0f63f8e70e#fd6c2f30ee7561a062af91606dbbca0f63f8e70e"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=4511b0ab13821c71c81376f855031b7b1011287b#4511b0ab13821c71c81376f855031b7b1011287b"
 dependencies = [
  "gpu-raw",
  "scarlet-os",
@@ -2118,7 +2118,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-wgpu"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=fd6c2f30ee7561a062af91606dbbca0f63f8e70e#fd6c2f30ee7561a062af91606dbbca0f63f8e70e"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=4511b0ab13821c71c81376f855031b7b1011287b#4511b0ab13821c71c81376f855031b7b1011287b"
 dependencies = [
  "bytemuck",
  "pollster",
@@ -2141,7 +2141,7 @@ dependencies = [
 [[package]]
 name = "sgfx-codegen-virgl"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=fd6c2f30ee7561a062af91606dbbca0f63f8e70e#fd6c2f30ee7561a062af91606dbbca0f63f8e70e"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=4511b0ab13821c71c81376f855031b7b1011287b#4511b0ab13821c71c81376f855031b7b1011287b"
 dependencies = [
  "naga",
  "sgfx-core",
@@ -2887,7 +2887,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3060,15 +3060,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets",
 ]
