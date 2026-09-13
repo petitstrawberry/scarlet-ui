@@ -160,6 +160,44 @@ impl EventDispatcher {
             Event::ScreenSizeChanged { .. } => false,
             Event::Mouse(mouse_event) => self.dispatch_mouse(element_tree, mouse_event),
             Event::Keyboard(key_event) => self.dispatch_keyboard(element_tree, key_event),
+            Event::Gamepad(_) => {
+                // Route to element focus, or the window root when none exists.
+                let path = self
+                    .focused_id
+                    .and_then(|id| element_tree.find_path_ids(id))
+                    .or_else(|| element_tree.find_keyboard_focus_path_ids());
+                if let Some(path) = path {
+                    for id in path.iter().take(path.len().saturating_sub(1)) {
+                        if element_tree
+                            .find_element_mut(*id)
+                            .is_some_and(|e| e.handle_event(event, Phase::Capture))
+                        {
+                            return true;
+                        }
+                    }
+                    if let Some(id) = path.last() {
+                        if element_tree
+                            .find_element_mut(*id)
+                            .is_some_and(|e| e.handle_event(event, Phase::Target))
+                        {
+                            return true;
+                        }
+                    }
+                    for id in path.iter().rev().skip(1) {
+                        if element_tree
+                            .find_element_mut(*id)
+                            .is_some_and(|e| e.handle_event(event, Phase::Bubble))
+                        {
+                            return true;
+                        }
+                    }
+                    false
+                } else {
+                    element_tree
+                        .root_mut()
+                        .is_some_and(|e| e.handle_event(event, Phase::Target))
+                }
+            }
             Event::Focus(focus_event) => self.dispatch_focus(element_tree, focus_event),
             Event::Lifecycle(lifecycle_event) => {
                 self.dispatch_lifecycle(element_tree, lifecycle_event)
@@ -1387,6 +1425,7 @@ mod tests {
     use alloc::rc::Rc;
     use core::any::Any;
     use core::cell::Cell;
+    use core::cell::RefCell;
 
     struct WheelTestElement {
         id: ElementId,
@@ -1396,6 +1435,8 @@ mod tests {
         wheel_count: Rc<Cell<u32>>,
         render_object: WheelCaptureRenderObject,
         children: Vec<Box<dyn Element>>,
+        gamepad_phases: Option<Rc<RefCell<Vec<(ElementId, Phase)>>>>,
+        consume_gamepad: Option<Phase>,
     }
 
     struct WheelCaptureRenderObject {
@@ -1448,6 +1489,8 @@ mod tests {
                     captures_wheel,
                 },
                 children,
+                gamepad_phases: None,
+                consume_gamepad: None,
             }
         }
     }
@@ -1502,6 +1545,12 @@ mod tests {
         }
 
         fn handle_event(&mut self, event: &Event, phase: Phase) -> bool {
+            if matches!(event, Event::Gamepad(_)) {
+                if let Some(phases) = &self.gamepad_phases {
+                    phases.borrow_mut().push((self.id, phase));
+                }
+                return self.consume_gamepad == Some(phase);
+            }
             if !self.handles_wheel || !matches!(phase, Phase::Target | Phase::Bubble) {
                 return false;
             }
@@ -1515,6 +1564,64 @@ mod tests {
         fn render_object(&self) -> Option<&dyn ElementRenderObject> {
             Some(&self.render_object)
         }
+    }
+
+    #[test]
+    fn gamepad_routes_to_element_focus_and_capture_can_consume_it() {
+        let phases = Rc::new(RefCell::new(Vec::new()));
+        let mut child = WheelTestElement::new(
+            2,
+            Point::ZERO,
+            Size::new(10.0, 10.0),
+            false,
+            false,
+            Rc::new(Cell::new(0)),
+            Vec::new(),
+        );
+        child.gamepad_phases = Some(phases.clone());
+        let mut root = WheelTestElement::new(
+            1,
+            Point::ZERO,
+            Size::new(10.0, 10.0),
+            false,
+            false,
+            Rc::new(Cell::new(0)),
+            alloc::vec![Box::new(child)],
+        );
+        root.gamepad_phases = Some(phases.clone());
+        let mut tree = ElementTree::new();
+        tree.set_root(Box::new(root));
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.focused_id = Some(ElementId::new(2));
+        let event = Event::Gamepad(crate::event::GamepadEvent::default());
+        assert!(!dispatcher.dispatch(&mut tree, &event));
+        assert_eq!(
+            *phases.borrow(),
+            alloc::vec![
+                (ElementId::new(1), Phase::Capture),
+                (ElementId::new(2), Phase::Target),
+                (ElementId::new(1), Phase::Bubble)
+            ]
+        );
+        phases.borrow_mut().clear();
+        tree.root_mut()
+            .unwrap()
+            .as_any_mut()
+            .downcast_mut::<WheelTestElement>()
+            .unwrap()
+            .consume_gamepad = Some(Phase::Capture);
+        assert!(dispatcher.dispatch(&mut tree, &event));
+        assert_eq!(
+            *phases.borrow(),
+            alloc::vec![(ElementId::new(1), Phase::Capture)]
+        );
+        phases.borrow_mut().clear();
+        dispatcher.focused_id = Some(ElementId::new(99));
+        assert!(!dispatcher.dispatch(&mut tree, &event));
+        assert_eq!(
+            *phases.borrow(),
+            alloc::vec![(ElementId::new(1), Phase::Target)]
+        );
     }
 
     fn wheel_event(y: i32, phase: WheelPhase) -> Event {

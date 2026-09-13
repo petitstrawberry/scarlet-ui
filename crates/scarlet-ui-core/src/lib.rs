@@ -118,8 +118,8 @@ pub use element::{
 };
 pub use error::{Error, RenderFailure, RenderFailureKind, Result};
 pub use event::{
-    Event, EventDispatcher, FocusEvent, InputEvent, KeyCode, KeyEvent, LifecycleEvent, MouseButton,
-    MouseEvent, ScrollSource, WheelPhase,
+    Event, EventDispatcher, FocusEvent, GamepadButton, GamepadEvent, InputEvent, KeyCode, KeyEvent,
+    LifecycleEvent, MouseButton, MouseEvent, ScrollSource, WheelPhase,
 };
 pub use geometry::{Alignment, EdgeInsets, Offset, Point, Rect, Size};
 pub use graphics::{
@@ -188,8 +188,8 @@ pub mod prelude {
     };
     pub use crate::error::{Error, Result};
     pub use crate::event::{
-        Event, FocusEvent, KeyEvent, LifecycleEvent, MouseButton, MouseEvent, ScrollSource,
-        WheelPhase,
+        Event, FocusEvent, GamepadButton, GamepadEvent, KeyEvent, LifecycleEvent, MouseButton,
+        MouseEvent, ScrollSource, WheelPhase,
     };
     pub use crate::geometry::*;
     pub use crate::graphics::{

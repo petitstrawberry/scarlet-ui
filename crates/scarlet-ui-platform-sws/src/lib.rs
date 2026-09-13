@@ -872,6 +872,7 @@ fn map_sws_input_environment(environment: sws::InputEnvironment) -> InputEnviron
         environment.has_keyboard(),
         environment.has_pen(),
     )
+    .with_gamepad(environment.has_gamepad())
     .with_system_mode(
         environment.windowing_mode().map(|mode| match mode {
             sws::WindowingMode::Freeform => WindowingMode::Freeform,
@@ -1239,6 +1240,10 @@ impl SWSPlatformWindow {
             return Err(scarlet_ui_core::error::Error::IoError);
         }
         let event_receiver = conn.subscribe_window_events(surface_id);
+        if capabilities.is_some_and(|caps| caps.supports_gamepad_input()) {
+            conn.set_gamepad_input(surface_id, true, true)
+                .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
+        }
         let current_size = Size::new(
             Self::physical_to_logical_len_with_scale(actual_width, scale_milli) as f32,
             Self::physical_to_logical_len_with_scale(actual_height, scale_milli) as f32,
@@ -2267,6 +2272,19 @@ impl PlatformWindow for SWSPlatformWindow {
             .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
+    fn set_gamepad_input(&mut self, enabled: bool, navigation: bool) -> Result<()> {
+        if !self
+            .conn
+            .get_capabilities()
+            .is_ok_and(|caps| caps.supports_gamepad_input())
+        {
+            return Ok(());
+        }
+        self.conn
+            .set_gamepad_input(self.surface_id, enabled, navigation)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)
+    }
+
     fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()> {
         self.conn
             .set_window_menu_titles(self.surface_id, menu_titles)
@@ -2509,6 +2527,22 @@ impl SWSPlatformWindow {
                     }
                     _ => {}
                 }
+            }
+            SwsEvent::GamepadInput { surface_id, state } if surface_id == self.surface_id => {
+                self.push_event(Event::Gamepad(scarlet_ui_core::event::GamepadEvent {
+                    device_id: state.device_id,
+                    time_ns: state.time_ns,
+                    buttons: state.buttons,
+                    left_x: state.left_x,
+                    left_y: state.left_y,
+                    right_x: state.right_x,
+                    right_y: state.right_y,
+                    left_trigger: state.left_trigger,
+                    right_trigger: state.right_trigger,
+                    hat_x: state.hat_x,
+                    hat_y: state.hat_y,
+                    reset: state.flags & sws_protocol::gamepad::RESET != 0,
+                }));
             }
             SwsEvent::SurfaceConfigure {
                 surface_id,

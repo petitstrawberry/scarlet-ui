@@ -471,6 +471,10 @@ pub trait PlatformWindow: Any {
 
     /// Set whether the window contents are fully opaque.
     fn set_opaque(&mut self, opaque: bool) -> Result<()>;
+    /// Select native gamepad delivery and optional menu navigation for this window.
+    fn set_gamepad_input(&mut self, _enabled: bool, _navigation: bool) -> Result<()> {
+        Ok(())
+    }
 
     /// Update menu titles for the window (format: "menu1|menu2|menu3")
     fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()>;

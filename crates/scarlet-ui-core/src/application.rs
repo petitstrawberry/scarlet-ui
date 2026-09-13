@@ -60,6 +60,8 @@ fn env_flag_enabled(value: &str) -> bool {
 ///
 /// Applications declare top-level windows via `scenes()`.
 pub trait Application: Clone + 'static {
+    /// Native gamepad input not consumed by a focused element.
+    fn on_gamepad(&mut self, _ctx: &WindowContext, _event: crate::event::GamepadEvent) {}
     /// Returns the scene graph of top-level application windows.
     ///
     /// # Arguments
@@ -828,6 +830,12 @@ fn handle_window_event<A: Application>(
             if install_input_environment(environment) {
                 app.on_input_environment_changed(environment);
             }
+        }
+        Event::Gamepad(gamepad) => {
+            if !slot.pipeline.handle_event(&Event::Gamepad(gamepad)) {
+                app.on_gamepad(&slot.context, gamepad);
+            }
+            sync_after_event(slot)?;
         }
         Event::Window(crate::event::WindowEvent::CloseRequested) => {
             return Ok(handle_window_close_request(app, slot, close_ids));
