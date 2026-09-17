@@ -27,8 +27,9 @@ use scarlet_ui_core::platform::{
 #[cfg(feature = "sgfx")]
 use scarlet_ui_core::renderer::PaintBackend;
 pub use scarlet_ui_renderer_sgfx::{
-    SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
-    SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
+    ExternalGpuSurface, ExternalGpuSurfaceRenderObject, SgfxCanvas, SgfxCanvasDraw,
+    SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject, SgfxCanvasVertex, SgfxMesh,
+    SgfxMeshHandle, SgfxTexture,
 };
 #[cfg(feature = "sgfx")]
 use sgfx_renderer::SgfxWindowPaintBackend;
