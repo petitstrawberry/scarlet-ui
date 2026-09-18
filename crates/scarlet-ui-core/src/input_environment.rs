@@ -19,6 +19,7 @@ const TABLET_OVERRIDE_KNOWN: u32 = 1 << 10;
 const TABLET_OVERRIDE_ACTIVE: u32 = 1 << 11;
 const WINDOWING_OVERRIDE_KNOWN: u32 = 1 << 12;
 const WINDOWING_OVERRIDE_ACTIVE: u32 = 1 << 13;
+const GAMEPAD: u32 = 1 << 14;
 
 static CURRENT_ENVIRONMENT: PublishedInputEnvironment = PublishedInputEnvironment::new();
 
@@ -176,6 +177,8 @@ pub struct InputEnvironment {
     pub keyboard: bool,
     /// Whether pen input is available.
     pub pen: bool,
+    /// Whether a gamepad device is available.
+    pub gamepad: bool,
     /// Effective system-wide windowing policy, when the platform reports it.
     pub windowing_mode: Option<WindowingMode>,
     /// Whether posture is forced instead of hardware-driven, when known.
@@ -217,10 +220,17 @@ impl InputEnvironment {
             fine_pointer,
             keyboard,
             pen,
+            gamepad: false,
             windowing_mode: None,
             tablet_mode_override_active: None,
             windowing_mode_override_active: None,
         }
+    }
+
+    /// Attach gamepad availability without implying a hardware keyboard.
+    pub const fn with_gamepad(mut self, available: bool) -> Self {
+        self.gamepad = available;
+        self
     }
 
     /// Attach system-wide presentation policy to this input snapshot.
@@ -328,6 +338,9 @@ impl InputEnvironment {
     pub const fn has_pen(self) -> bool {
         self.pen
     }
+    pub const fn has_gamepad(self) -> bool {
+        self.gamepad
+    }
 
     /// Return the effective system-wide windowing policy.
     ///
@@ -395,6 +408,7 @@ fn unpack_environment(generation: u64, flags: u32) -> InputEnvironment {
         flags & KEYBOARD != 0,
         flags & PEN != 0,
     )
+    .with_gamepad(flags & GAMEPAD != 0)
     .with_system_mode(
         if flags & WINDOWING_KNOWN == 0 {
             None
@@ -494,6 +508,9 @@ const fn pack_flags(environment: InputEnvironment) -> u32 {
     }
     if environment.pen {
         flags |= PEN;
+    }
+    if environment.gamepad {
+        flags |= GAMEPAD;
     }
     if let Some(windowing_mode) = environment.windowing_mode {
         flags |= WINDOWING_KNOWN;

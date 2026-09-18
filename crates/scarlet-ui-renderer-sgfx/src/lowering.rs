@@ -9,7 +9,7 @@ use scarlet_ui_core::color::Color as UiColor;
 use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::graphics::{GlyphRasterKey, rasterize_text};
 use scarlet_ui_core::icon::{IconMaskKey, rasterize_icon};
-use scarlet_ui_core::renderer::{BufferHandle, PaintCommand, PaintContext};
+use scarlet_ui_core::renderer::{BufferHandle, PaintCommand, PaintContext, PaintExtension};
 use sgfx::backend::CommandExecutor;
 use sgfx::ir::{
     AddressMode, BlendState, BufferDesc, BufferId, BufferUsage, Color, CommandEncoder,
@@ -22,6 +22,7 @@ use sgfx::ir::{
 
 use crate::canvas::{SgfxCanvasFrame, SgfxCanvasPaint, SgfxCanvasVertex, SgfxMesh, SgfxTexture};
 use crate::error::{Error, FrameError, Result, Stage};
+use crate::external_surface::ExternalGpuSurfacePaint;
 use crate::geometry::{
     FloatRect, GeometryRange, MAX_FRAME_VERTICES, PixelBounds, Tessellator, Vertex,
 };
@@ -364,6 +365,26 @@ struct CanvasTexture {
     texture: TextureId,
     source: Arc<SgfxTexture>,
     uploaded: bool,
+    external_bound: bool,
+}
+
+/// One logical texture awaiting a platform image import.
+#[derive(Clone, Debug)]
+pub struct SgfxExternalTextureBinding {
+    texture: TextureId,
+    source: Arc<dyn PaintExtension>,
+}
+
+impl SgfxExternalTextureBinding {
+    /// Logical sampled texture that must be mapped by the active SGFX session.
+    pub const fn texture(&self) -> TextureId {
+        self.texture
+    }
+
+    /// Type-erased platform image owner associated with this texture.
+    pub fn source(&self) -> &dyn PaintExtension {
+        self.source.as_ref()
+    }
 }
 
 /// Persistent logical SGFX resources and retained ScarletUI paint caches.
@@ -552,6 +573,74 @@ impl SgfxPaintEncoder {
     /// Shared ownership of this encoder's logical resource table.
     pub fn resource_table(&self) -> Rc<ResourceTable> {
         Rc::clone(&self.table)
+    }
+
+    /// Define external canvas textures referenced by this paint list and return
+    /// every image that the platform session has not imported yet.
+    pub fn prepare_external_textures(
+        &mut self,
+        paint: &PaintContext<'_>,
+    ) -> Result<Vec<SgfxExternalTextureBinding>> {
+        let mut pending = Vec::new();
+        for command in paint.commands() {
+            let PaintCommand::Extension { payload, .. } = command else {
+                continue;
+            };
+            if let Some(surface) = payload
+                .as_ref()
+                .as_any()
+                .downcast_ref::<ExternalGpuSurfacePaint>()
+            {
+                self.prepare_external_texture(&surface.texture, &mut pending)?;
+            } else if let Some(canvas) = payload.as_ref().as_any().downcast_ref::<SgfxCanvasPaint>()
+            {
+                for draw in &canvas.frame.draws {
+                    if let Some(texture) = draw.texture.as_ref() {
+                        self.prepare_external_texture(texture, &mut pending)?;
+                    }
+                }
+            }
+        }
+        Ok(pending)
+    }
+
+    fn prepare_external_texture(
+        &mut self,
+        texture: &Arc<SgfxTexture>,
+        pending: &mut Vec<SgfxExternalTextureBinding>,
+    ) -> Result<()> {
+        let Some(source) = texture.external_source() else {
+            return Ok(());
+        };
+        let source = Arc::clone(source);
+        let index = self.canvas_texture(texture)?;
+        let cached = &self.canvas_textures[index];
+        if cached.external_bound
+            || pending
+                .iter()
+                .any(|binding| binding.texture == cached.texture)
+        {
+            return Ok(());
+        }
+        pending.push(SgfxExternalTextureBinding {
+            texture: cached.texture,
+            source,
+        });
+        Ok(())
+    }
+
+    /// Record that the active backend session imported an external texture.
+    pub fn mark_external_texture_bound(&mut self, texture: TextureId) -> Result<()> {
+        let cached = self
+            .canvas_textures
+            .iter_mut()
+            .find(|cached| cached.texture == texture)
+            .ok_or(Error::InvalidFrame)?;
+        if cached.source.external_source().is_none() {
+            return Err(Error::InvalidFrame);
+        }
+        cached.external_bound = true;
+        Ok(())
     }
 
     /// Invalidate cached canvas contents after discarding a partially encoded frame.
@@ -1136,6 +1225,38 @@ impl SgfxPaintEncoder {
                     opacity = finite_unit(*next_opacity)?;
                 }
                 PaintCommand::Extension { rect, payload } => {
+                    if let Some(surface) = payload
+                        .as_ref()
+                        .as_any()
+                        .downcast_ref::<ExternalGpuSurfacePaint>()
+                    {
+                        if surface.texture.external_source().is_none() {
+                            return Err(Error::InvalidFrame);
+                        }
+                        let texture_index = self.canvas_texture(&surface.texture)?;
+                        let texture = &self.canvas_textures[texture_index];
+                        if !texture.external_bound {
+                            return Err(Error::ExternalTextureUnbound);
+                        }
+                        let destination = FloatRect::new(
+                            truncated_scaled(rect.origin.x, scale),
+                            truncated_scaled(rect.origin.y, scale),
+                            truncated_scaled(rect.size.width, scale),
+                            truncated_scaled(rect.size.height, scale),
+                        );
+                        if let Some(geometry) =
+                            tessellator.textured_rect(destination, CANVAS_TARGET_TEX_COORDS)?
+                        {
+                            push_draw(
+                                &mut draws,
+                                &mut tessellator,
+                                geometry,
+                                [1.0, 1.0, 1.0, opacity],
+                                DrawSource::Texture(texture.texture),
+                            )?;
+                        }
+                        continue;
+                    }
                     let Some(canvas) = payload.as_ref().as_any().downcast_ref::<SgfxCanvasPaint>()
                     else {
                         continue;
@@ -1365,33 +1486,37 @@ impl SgfxPaintEncoder {
         {
             return Ok(index);
         }
-        let expected_len = usize::try_from(texture.width)
-            .ok()
-            .and_then(|width| {
-                usize::try_from(texture.height)
-                    .ok()
-                    .and_then(|height| width.checked_mul(height))
-            })
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or(Error::FrameTooComplex)?;
         if self.canvas_textures.len() >= MAX_CANVAS_TEXTURES
             || texture.width == 0
             || texture.height == 0
-            || texture.pixels.len() != expected_len
         {
             return Err(Error::InvalidFrame);
         }
-        let texture_id = define_sampled_texture(
-            &self.table,
-            TextureFormat::Rgba8Unorm,
-            texture.width,
-            texture.height,
-        )?;
+        let (format, external_bound) = if let Some(pixels) = texture.rgba8_pixels() {
+            let expected_len = usize::try_from(texture.width)
+                .ok()
+                .and_then(|width| {
+                    usize::try_from(texture.height)
+                        .ok()
+                        .and_then(|height| width.checked_mul(height))
+                })
+                .and_then(|pixels| pixels.checked_mul(4))
+                .ok_or(Error::FrameTooComplex)?;
+            if pixels.len() != expected_len {
+                return Err(Error::InvalidFrame);
+            }
+            (TextureFormat::Rgba8Unorm, true)
+        } else {
+            (TextureFormat::Bgra8Unorm, false)
+        };
+        let texture_id =
+            define_sampled_texture(&self.table, format, texture.width, texture.height)?;
         self.canvas_textures.push(CanvasTexture {
             texture_id: texture.id,
             texture: texture_id,
             source: Arc::clone(texture),
             uploaded: false,
+            external_bound,
         });
         Ok(self.canvas_textures.len() - 1)
     }
@@ -1475,9 +1600,14 @@ impl SgfxPaintEncoder {
         }
         let mut texture_uploads = Vec::new();
         for texture_index in texture_indices.iter().flatten().copied() {
-            if self.canvas_textures[texture_index].uploaded
-                || texture_uploads.contains(&texture_index)
-            {
+            let cached = &self.canvas_textures[texture_index];
+            if cached.source.external_source().is_some() {
+                if !cached.external_bound {
+                    return Err(Error::ExternalTextureUnbound.into());
+                }
+                continue;
+            }
+            if cached.uploaded || texture_uploads.contains(&texture_index) {
                 continue;
             }
             texture_uploads.push(texture_index);
@@ -1560,9 +1690,12 @@ impl SgfxPaintEncoder {
                             .width
                             .checked_mul(4)
                             .ok_or(Error::FrameTooComplex)?;
-                        let write =
-                            TextureWrite::new(destination, bytes_per_row, &cached.source.pixels)
-                                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                        let pixels = cached
+                            .source
+                            .rgba8_pixels()
+                            .ok_or(Error::ExternalTextureUnbound)?;
+                        let write = TextureWrite::new(destination, bytes_per_row, pixels)
+                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                         encoder
                             .write_texture(texture, write)
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -2529,26 +2662,40 @@ mod tests {
             let mut kinds = Vec::new();
             for command in commands.commands() {
                 let kind = match command {
+                    Command::CopyBufferToBuffer { .. } => "copy-buffer",
+                    Command::SetProgrammablePipeline(_) => "set-programmable-pipeline",
+                    Command::SetBindGroup { .. } => "set-bind-group",
+                    Command::BeginComputePass => "begin-compute-pass",
+                    Command::EndComputePass => "end-compute-pass",
+                    Command::SetComputePipeline(_) => "set-compute-pipeline",
+                    Command::Dispatch { .. } => "dispatch",
+                    Command::ResourceBarrier(_) => "resource-barrier",
                     Command::WriteBuffer { data, .. } => {
                         self.buffer_write_sizes.push(data.len());
                         "write-buffer"
                     }
                     Command::WriteTexture { .. } => "write-texture",
                     Command::CopyTextureToTexture { .. } => "copy",
+                    Command::BlitTexture { .. } => "blit-texture",
                     Command::BeginRenderPass(_) => "begin-pass",
                     Command::EndRenderPass => "end-pass",
                     Command::SetPipeline(_) => "set-pipeline",
                     Command::SetVertexBuffer { .. } => "set-vertex-buffer",
+                    Command::SetVertexBufferSlot { .. } => "set-vertex-buffer-slot",
                     Command::SetIndexBuffer { .. } => "set-index-buffer",
                     Command::SetTexture(_) => "set-texture",
                     Command::SetSampler(_) => "set-sampler",
                     Command::SetUniforms(_) => "set-uniforms",
                     Command::SetScissor(_) => "set-scissor",
+                    Command::SetViewport(_) => "set-viewport",
+                    Command::SetPushConstants { .. } => "set-push-constants",
                     Command::Draw { vertex_count, .. } => {
                         self.draw_vertices.push(*vertex_count);
                         "draw"
                     }
+                    Command::DrawInstanced { .. } => "draw-instanced",
                     Command::DrawIndexed { .. } => "draw-indexed",
+                    Command::DrawIndexedInstanced { .. } => "draw-indexed-instanced",
                 };
                 kinds.push(kind);
             }
@@ -2892,6 +3039,89 @@ mod tests {
         let colors = encoded_paint_colors(&frame.vertex_bytes);
         assert!(colors.iter().any(|color| color == &[1.0, 1.0, 1.0, 1.0]));
         assert!(colors.iter().any(|color| color == &[0.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn external_canvas_texture_requires_one_platform_import() {
+        #[derive(Debug)]
+        struct ExternalImage;
+
+        let texture = SgfxTexture::external_bgra8(16, 16, Arc::new(ExternalImage));
+        let mesh = SgfxMesh::new(alloc::vec![
+            SgfxCanvasVertex::new([-1.0, -1.0, 0.0, 1.0], [1.0; 4]),
+            SgfxCanvasVertex::new([1.0, -1.0, 0.0, 1.0], [1.0; 4]),
+            SgfxCanvasVertex::new([0.0, 1.0, 0.0, 1.0], [1.0; 4]),
+        ]);
+        let frame = Arc::new(
+            SgfxCanvasFrame::new(1, UiColor::BLACK)
+                .draw(SgfxCanvasDraw::new(mesh, Transform::identity().columns()).texture(texture)),
+        );
+        let mut paint = PaintContext::new();
+        paint.draw_extension(
+            Rect::from_xywh(0.0, 0.0, 16.0, 16.0),
+            Arc::new(SgfxCanvasPaint {
+                handle: crate::canvas::SgfxCanvasHandle::new(),
+                frame,
+            }),
+        );
+        let mut encoder = SgfxPaintEncoder::new(16, 16, false).unwrap();
+
+        let pending = encoder.prepare_external_textures(&paint).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].source().as_any().is::<ExternalImage>());
+        encoder
+            .mark_external_texture_bound(pending[0].texture())
+            .unwrap();
+        assert!(
+            encoder
+                .prepare_external_textures(&paint)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn external_gpu_surface_imports_once_and_skips_the_canvas_pass() {
+        #[derive(Debug)]
+        struct ExternalImage;
+
+        let texture = SgfxTexture::external_bgra8(16, 16, Arc::new(ExternalImage));
+        let mut paint = PaintContext::new();
+        paint.draw_extension(
+            Rect::from_xywh(2.0, 3.0, 12.0, 10.0),
+            Arc::new(ExternalGpuSurfacePaint { texture }),
+        );
+        let mut encoder = SgfxPaintEncoder::new(16, 16, false).unwrap();
+
+        let pending = encoder.prepare_external_textures(&paint).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].source().as_any().is::<ExternalImage>());
+        encoder
+            .mark_external_texture_bound(pending[0].texture())
+            .unwrap();
+
+        let mut executor = RecordingExecutor::default();
+        encoder
+            .encode_frame(
+                &mut executor,
+                0,
+                None,
+                &paint,
+                UiColor::BLACK,
+                1_000,
+                &[(0, 0, 16, 16)],
+            )
+            .unwrap();
+
+        assert!(encoder.canvas_targets.is_empty());
+        assert_eq!(executor.command_kinds.len(), 1);
+        assert_eq!(executor.draw_vertices, [6, 3]);
+        assert!(
+            encoder
+                .prepare_external_textures(&paint)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

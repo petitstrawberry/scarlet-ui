@@ -10,6 +10,7 @@ extern crate alloc;
 extern crate scarlet_std as std;
 
 mod backend;
+mod shared_image;
 mod sink;
 
 use alloc::boxed::Box;
@@ -39,10 +40,12 @@ use scarlet_ui_core::renderer::{
     BackendFrame, CompositorBackendKind, PaintBackend, PaintContext, RendererBackendKind,
 };
 pub use scarlet_ui_renderer_sgfx::{
-    SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
-    SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
+    ExternalGpuSurface, ExternalGpuSurfaceRenderObject, SgfxCanvas, SgfxCanvasDraw,
+    SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject, SgfxCanvasVertex, SgfxMesh,
+    SgfxMeshHandle, SgfxTexture,
 };
 use sgfx::ImageRef;
+pub use shared_image::{SharedImageError, shared_bgra8_texture, shared_bgra8_texture_from_raw};
 pub use sink::{
     SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkResult,
     SgfxSinkStatus,
@@ -707,6 +710,8 @@ pub struct SWSPlatformWindow {
     current_size: Size,
     window_geometry_insets: EdgeInsets,
     window_geometry_supported: bool,
+    surface_regions_cache: Option<(bool, Vec<sws_protocol::surface_regions::SurfaceRegion>)>,
+    surface_regions_supported: bool,
     frame_callbacks_supported: bool,
     next_frame_callback_id: u64,
     pending_frame_callback_id: Option<u64>,
@@ -872,6 +877,7 @@ fn map_sws_input_environment(environment: sws::InputEnvironment) -> InputEnviron
         environment.has_keyboard(),
         environment.has_pen(),
     )
+    .with_gamepad(environment.has_gamepad())
     .with_system_mode(
         environment.windowing_mode().map(|mode| match mode {
             sws::WindowingMode::Freeform => WindowingMode::Freeform,
@@ -1239,6 +1245,10 @@ impl SWSPlatformWindow {
             return Err(scarlet_ui_core::error::Error::IoError);
         }
         let event_receiver = conn.subscribe_window_events(surface_id);
+        if capabilities.is_some_and(|caps| caps.supports_gamepad_input()) {
+            conn.set_gamepad_input(surface_id, true, true)
+                .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
+        }
         let current_size = Size::new(
             Self::physical_to_logical_len_with_scale(actual_width, scale_milli) as f32,
             Self::physical_to_logical_len_with_scale(actual_height, scale_milli) as f32,
@@ -1255,6 +1265,9 @@ impl SWSPlatformWindow {
             current_size,
             window_geometry_insets,
             window_geometry_supported,
+            surface_regions_cache: None,
+            surface_regions_supported: capabilities
+                .is_some_and(|caps| caps.supports_surface_regions()),
             frame_callbacks_supported,
             next_frame_callback_id: 1,
             pending_frame_callback_id: None,
@@ -2267,6 +2280,71 @@ impl PlatformWindow for SWSPlatformWindow {
             .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
 
+    fn set_gamepad_input(&mut self, enabled: bool, navigation: bool) -> Result<()> {
+        if !self
+            .conn
+            .get_capabilities()
+            .is_ok_and(|caps| caps.supports_gamepad_input())
+        {
+            return Ok(());
+        }
+        self.conn
+            .set_gamepad_input(self.surface_id, enabled, navigation)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)
+    }
+
+    fn set_surface_regions(
+        &mut self,
+        restrict_input: bool,
+        regions: &[scarlet_ui_core::platform::SurfaceRegion],
+    ) -> Result<()> {
+        if !self.surface_regions_supported {
+            return Ok(());
+        }
+        let scale = self.scale_milli.max(1) as f32 / 1000.0;
+        // These coordinates are nonnegative. Round without std-only float
+        // methods so legacy no_std desktop applications use the same API.
+        let pixels = |value: f32| ((value * scale).max(0.0) + 0.5) as u32;
+        let physical: Vec<_> = regions
+            .iter()
+            .map(|region| {
+                let width = pixels(region.rect.size.width).max(1);
+                let height = pixels(region.rect.size.height).max(1);
+                sws_protocol::surface_regions::SurfaceRegion {
+                    x: pixels(region.rect.origin.x).min(i32::MAX as u32) as i32,
+                    y: pixels(region.rect.origin.y).min(i32::MAX as u32) as i32,
+                    width,
+                    height,
+                    corner_radius: pixels(region.corner_radius).min(width.min(height) / 2),
+                    blur_radius: pixels(region.blur_radius).min(64),
+                    flags: if region.accepts_input {
+                        sws_protocol::surface_regions::INPUT
+                    } else {
+                        0
+                    } | if region.blur_radius > 0.0 {
+                        sws_protocol::surface_regions::BACKDROP
+                    } else {
+                        0
+                    },
+                }
+            })
+            .collect();
+        if self
+            .surface_regions_cache
+            .as_ref()
+            .is_some_and(|(cached_input, cached)| {
+                *cached_input == restrict_input && *cached == physical
+            })
+        {
+            return Ok(());
+        }
+        self.conn
+            .set_surface_regions(self.surface_id, restrict_input, &physical)
+            .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
+        self.surface_regions_cache = Some((restrict_input, physical));
+        Ok(())
+    }
+
     fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()> {
         self.conn
             .set_window_menu_titles(self.surface_id, menu_titles)
@@ -2509,6 +2587,22 @@ impl SWSPlatformWindow {
                     }
                     _ => {}
                 }
+            }
+            SwsEvent::GamepadInput { surface_id, state } if surface_id == self.surface_id => {
+                self.push_event(Event::Gamepad(scarlet_ui_core::event::GamepadEvent {
+                    device_id: state.device_id,
+                    time_ns: state.time_ns,
+                    buttons: state.buttons,
+                    left_x: state.left_x,
+                    left_y: state.left_y,
+                    right_x: state.right_x,
+                    right_y: state.right_y,
+                    left_trigger: state.left_trigger,
+                    right_trigger: state.right_trigger,
+                    hat_x: state.hat_x,
+                    hat_y: state.hat_y,
+                    reset: state.flags & sws_protocol::gamepad::RESET != 0,
+                }));
             }
             SwsEvent::SurfaceConfigure {
                 surface_id,

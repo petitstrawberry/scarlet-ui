@@ -25,22 +25,22 @@ dependencies = [
 [[package]]
 name = "adreno-a6xx-layout"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#fcff35b4b01ef71631f163d44302460abb3a4f00"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git?rev=45f244eee6230cb4521d5e90f9f322a8943aa072#45f244eee6230cb4521d5e90f9f322a8943aa072"
 
 [[package]]
 name = "adreno-a6xx-pm4"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#fcff35b4b01ef71631f163d44302460abb3a4f00"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git?rev=45f244eee6230cb4521d5e90f9f322a8943aa072#45f244eee6230cb4521d5e90f9f322a8943aa072"
 
 [[package]]
 name = "adreno-a6xx-shader-pack"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#fcff35b4b01ef71631f163d44302460abb3a4f00"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git?rev=45f244eee6230cb4521d5e90f9f322a8943aa072#45f244eee6230cb4521d5e90f9f322a8943aa072"
 
 [[package]]
 name = "adreno-a6xx-submit-wire"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#fcff35b4b01ef71631f163d44302460abb3a4f00"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git?rev=45f244eee6230cb4521d5e90f9f322a8943aa072#45f244eee6230cb4521d5e90f9f322a8943aa072"
 dependencies = [
  "adreno-a6xx-shader-pack",
 ]
@@ -564,7 +564,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -587,6 +587,12 @@ name = "find-msvc-tools"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
+
+[[package]]
+name = "fixedbitset"
+version = "0.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "foldhash"
@@ -800,7 +806,7 @@ dependencies = [
 [[package]]
 name = "gpu-raw"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#615c221055454fc9938891b7b1d7e57c2eec95eb"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 dependencies = [
  "scarlet-os",
  "scarlet-std",
@@ -1124,6 +1130,7 @@ dependencies = [
  "hexf-parse",
  "indexmap",
  "log",
+ "petgraph",
  "rustc-hash",
  "spirv",
  "strum",
@@ -1572,6 +1579,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "petgraph"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3672b37090dbd86368a4145bc067582552b29c27377cad4e0a306c97f9bd7772"
+dependencies = [
+ "fixedbitset",
+ "indexmap",
+]
+
+[[package]]
 name = "pin-project"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1779,7 +1796,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1792,7 +1809,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1813,12 +1830,12 @@ dependencies = [
 [[package]]
 name = "scarlet-abi"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#615c221055454fc9938891b7b1d7e57c2eec95eb"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 
 [[package]]
 name = "scarlet-os"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#615c221055454fc9938891b7b1d7e57c2eec95eb"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 dependencies = [
  "scarlet-abi",
  "scarlet-rt",
@@ -1828,7 +1845,7 @@ dependencies = [
 [[package]]
 name = "scarlet-rt"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#615c221055454fc9938891b7b1d7e57c2eec95eb"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 dependencies = [
  "lock_api",
  "scarlet-sys",
@@ -1839,7 +1856,7 @@ dependencies = [
 [[package]]
 name = "scarlet-std"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#615c221055454fc9938891b7b1d7e57c2eec95eb"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 dependencies = [
  "hashbrown 0.15.5",
  "scarlet-abi",
@@ -1852,7 +1869,7 @@ dependencies = [
 [[package]]
 name = "scarlet-sys"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#615c221055454fc9938891b7b1d7e57c2eec95eb"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 dependencies = [
  "scarlet-abi",
 ]
@@ -2059,21 +2076,23 @@ dependencies = [
 [[package]]
 name = "sgfx"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fbc0cf2267b1c37377cb07670ae6b70a1a0ab168"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=540084a844301f048e27762bea9bed75e18fa1cd#540084a844301f048e27762bea9bed75e18fa1cd"
 dependencies = [
  "gpu-raw",
+ "pollster",
  "raw-window-handle",
  "scarlet-std",
  "sgfx-backend-scarlet-adreno",
  "sgfx-backend-scarlet-virgl",
  "sgfx-backend-wgpu",
  "sgfx-core",
+ "wgpu",
 ]
 
 [[package]]
 name = "sgfx-backend-scarlet-adreno"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#fcff35b4b01ef71631f163d44302460abb3a4f00"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git?rev=45f244eee6230cb4521d5e90f9f322a8943aa072#45f244eee6230cb4521d5e90f9f322a8943aa072"
 dependencies = [
  "adreno-a6xx-layout",
  "adreno-a6xx-submit-wire",
@@ -2087,7 +2106,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-scarlet-virgl"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fbc0cf2267b1c37377cb07670ae6b70a1a0ab168"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=540084a844301f048e27762bea9bed75e18fa1cd#540084a844301f048e27762bea9bed75e18fa1cd"
 dependencies = [
  "gpu-raw",
  "scarlet-os",
@@ -2099,9 +2118,10 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-wgpu"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fbc0cf2267b1c37377cb07670ae6b70a1a0ab168"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=540084a844301f048e27762bea9bed75e18fa1cd#540084a844301f048e27762bea9bed75e18fa1cd"
 dependencies = [
  "bytemuck",
+ "naga",
  "pollster",
  "raw-window-handle",
  "sgfx-core",
@@ -2111,7 +2131,7 @@ dependencies = [
 [[package]]
 name = "sgfx-codegen-adreno-a6xx"
 version = "0.1.0"
-source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git#fcff35b4b01ef71631f163d44302460abb3a4f00"
+source = "git+https://github.com/petitstrawberry/scarlet-project-chromebook.git?rev=45f244eee6230cb4521d5e90f9f322a8943aa072#45f244eee6230cb4521d5e90f9f322a8943aa072"
 dependencies = [
  "adreno-a6xx-layout",
  "adreno-a6xx-pm4",
@@ -2122,15 +2142,16 @@ dependencies = [
 [[package]]
 name = "sgfx-codegen-virgl"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fbc0cf2267b1c37377cb07670ae6b70a1a0ab168"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=540084a844301f048e27762bea9bed75e18fa1cd#540084a844301f048e27762bea9bed75e18fa1cd"
 dependencies = [
+ "naga",
  "sgfx-core",
 ]
 
 [[package]]
 name = "sgfx-core"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx#fbc0cf2267b1c37377cb07670ae6b70a1a0ab168"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=0213c76bdc9777ddb2a3a25e30b54ac8c5e01912#0213c76bdc9777ddb2a3a25e30b54ac8c5e01912"
 
 [[package]]
 name = "shlex"
@@ -2318,7 +2339,7 @@ dependencies = [
 [[package]]
 name = "sws-client"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#615c221055454fc9938891b7b1d7e57c2eec95eb"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 dependencies = [
  "scarlet-os",
  "scarlet-std",
@@ -2328,7 +2349,7 @@ dependencies = [
 [[package]]
 name = "sws-protocol"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?branch=dev#615c221055454fc9938891b7b1d7e57c2eec95eb"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 dependencies = [
  "scarlet-std",
 ]
@@ -2786,6 +2807,7 @@ dependencies = [
  "arrayvec",
  "bit-vec",
  "bitflags 2.13.1",
+ "bytemuck",
  "cfg_aliases",
  "document-features",
  "indexmap",
@@ -2866,7 +2888,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3039,15 +3061,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets",
 ]

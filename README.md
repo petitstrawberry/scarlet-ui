@@ -73,6 +73,10 @@ selected platform backend.
 
 ## Application Model
 
+SWS windows support native gamepad events and optional menu navigation.
+See [gamepad input](docs/GAMEPAD_INPUT.md) for game controls, reset handling,
+and per-window policy.
+
 `Application::scenes()` is the application UI entry point. `#[derive(View)]`
 collects the application's State dependencies; scene-only applications do not
 need a component body method. Reusable View components select their child

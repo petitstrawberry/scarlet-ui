@@ -84,7 +84,11 @@ jobs:
             accept-flake-config = true
             extra-substituters = https://scarlet-rust-toolchain.cachix.org
             extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
+      - name: Install the pinned Scarlet Rust toolchain
+        run: |
+          scarlet_toolchain_path="$(nix build "${SCARLET_TOOLCHAIN}^out" --no-link --print-out-paths)"
+          echo "$scarlet_toolchain_path/bin" >> "$GITHUB_PATH"
       - name: Check SGFX core source identity
-        run: nix shell "$SCARLET_TOOLCHAIN" --command cargo tree --locked -p scarlet-ui --no-default-features --features std,platform-sws --target '${{ matrix.target }}' --invert sgfx-core
+        run: cargo tree --locked -p scarlet-ui --no-default-features --features std,platform-sws --target '${{ matrix.target }}' --invert sgfx-core
       - name: Check std-enabled SWS integration
-        run: nix shell "$SCARLET_TOOLCHAIN" --command cargo check --locked -p scarlet-ui --no-default-features --features std,platform-sws --target '${{ matrix.target }}'
+        run: cargo check --locked -p scarlet-ui --no-default-features --features std,platform-sws --target '${{ matrix.target }}'

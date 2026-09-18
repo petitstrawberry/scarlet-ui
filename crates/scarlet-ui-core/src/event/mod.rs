@@ -5,7 +5,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 mod dispatcher;
+mod gamepad;
 mod gesture;
+pub use gamepad::{GamepadButton, GamepadEvent};
 
 pub use dispatcher::{EventDispatcher, HitResult, Phase};
 pub use gesture::{
@@ -51,6 +53,8 @@ pub enum Event {
 
     /// Keyboard event
     Keyboard(KeyEvent),
+    /// Native gamepad snapshot, separate from optional menu navigation keys.
+    Gamepad(GamepadEvent),
 
     /// Input event (from SWS)
     Input(InputEvent),
