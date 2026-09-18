@@ -808,8 +808,8 @@ name = "gpu-raw"
 version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 dependencies = [
- "scarlet-os 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
- "scarlet-std 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
+ "scarlet-os",
+ "scarlet-std",
 ]
 
 [[package]]
@@ -1846,28 +1846,13 @@ version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 
 [[package]]
-name = "scarlet-abi"
-version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4#8340078937951f6096e6f3273b547665368f70f4"
-
-[[package]]
 name = "scarlet-os"
 version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 dependencies = [
- "scarlet-abi 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
- "scarlet-rt 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
- "scarlet-sys 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
-]
-
-[[package]]
-name = "scarlet-os"
-version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4#8340078937951f6096e6f3273b547665368f70f4"
-dependencies = [
- "scarlet-abi 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4)",
- "scarlet-rt 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4)",
- "scarlet-sys 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4)",
+ "scarlet-abi",
+ "scarlet-rt",
+ "scarlet-sys",
 ]
 
 [[package]]
@@ -1876,18 +1861,7 @@ version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 dependencies = [
  "lock_api",
- "scarlet-sys 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
- "spin",
- "talc",
-]
-
-[[package]]
-name = "scarlet-rt"
-version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4#8340078937951f6096e6f3273b547665368f70f4"
-dependencies = [
- "lock_api",
- "scarlet-sys 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4)",
+ "scarlet-sys",
  "spin",
  "talc",
 ]
@@ -1898,23 +1872,10 @@ version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 dependencies = [
  "hashbrown 0.15.5",
- "scarlet-abi 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
- "scarlet-os 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
- "scarlet-rt 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
- "scarlet-sys 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
- "spin",
-]
-
-[[package]]
-name = "scarlet-std"
-version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4#8340078937951f6096e6f3273b547665368f70f4"
-dependencies = [
- "hashbrown 0.15.5",
- "scarlet-abi 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4)",
- "scarlet-os 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4)",
- "scarlet-rt 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4)",
- "scarlet-sys 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4)",
+ "scarlet-abi",
+ "scarlet-os",
+ "scarlet-rt",
+ "scarlet-sys",
  "spin",
 ]
 
@@ -1923,15 +1884,7 @@ name = "scarlet-sys"
 version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 dependencies = [
- "scarlet-abi 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
-]
-
-[[package]]
-name = "scarlet-sys"
-version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4#8340078937951f6096e6f3273b547665368f70f4"
-dependencies = [
- "scarlet-abi 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4)",
+ "scarlet-abi",
 ]
 
 [[package]]
@@ -1960,7 +1913,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "raw-window-handle",
- "scarlet-std 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4)",
+ "scarlet-std",
  "scarlet-ui-icons-tabler",
  "scarlet-ui-macros",
  "syn 2.0.119",
@@ -1990,7 +1943,7 @@ dependencies = [
 name = "scarlet-ui-platform-sws"
 version = "1.0.0"
 dependencies = [
- "scarlet-std 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4)",
+ "scarlet-std",
  "scarlet-ui-core",
  "scarlet-ui-renderer-sgfx",
  "sgfx",
@@ -2141,7 +2094,7 @@ dependencies = [
  "gpu-raw",
  "pollster",
  "raw-window-handle",
- "scarlet-std 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
+ "scarlet-std",
  "sgfx-backend-scarlet-adreno",
  "sgfx-backend-scarlet-maxwell",
  "sgfx-backend-scarlet-virgl",
@@ -2158,8 +2111,8 @@ dependencies = [
  "adreno-a6xx-layout",
  "adreno-a6xx-submit-wire",
  "gpu-raw",
- "scarlet-os 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
- "scarlet-std 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
+ "scarlet-os",
+ "scarlet-std",
  "sgfx-codegen-adreno-a6xx",
  "sgfx-core",
 ]
@@ -2171,8 +2124,8 @@ source = "git+https://github.com/petitstrawberry/scarlet-project-switch?rev=8286
 dependencies = [
  "gpu-raw",
  "maxwell-submit-wire",
- "scarlet-os 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
- "scarlet-std 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
+ "scarlet-os",
+ "scarlet-std",
  "sgfx-codegen-maxwell",
  "sgfx-core",
 ]
@@ -2183,8 +2136,8 @@ version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/sgfx?rev=29df40a39730b9e24764a115c9a6b9f93d05a178#29df40a39730b9e24764a115c9a6b9f93d05a178"
 dependencies = [
  "gpu-raw",
- "scarlet-os 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
- "scarlet-std 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
+ "scarlet-os",
+ "scarlet-std",
  "sgfx-codegen-virgl",
  "sgfx-core",
 ]
@@ -2423,19 +2376,19 @@ dependencies = [
 [[package]]
 name = "sws-client"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4#8340078937951f6096e6f3273b547665368f70f4"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 dependencies = [
- "scarlet-os 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4)",
- "scarlet-std 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4)",
+ "scarlet-os",
+ "scarlet-std",
  "sws-protocol",
 ]
 
 [[package]]
 name = "sws-protocol"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4#8340078937951f6096e6f3273b547665368f70f4"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871#54bfdf3048a100fc4bfba5198e59bdb184702871"
 dependencies = [
- "scarlet-std 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=8340078937951f6096e6f3273b547665368f70f4)",
+ "scarlet-std",
 ]
 
 [[package]]
