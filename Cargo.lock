@@ -2145,7 +2145,7 @@ dependencies = [
 [[package]]
 name = "sgfx"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=df2e2e78dcd00a316f8cd42738eee329a2920957#df2e2e78dcd00a316f8cd42738eee329a2920957"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=b7182ba9d906ce4c8a4209a438c9a5004dc489e6#b7182ba9d906ce4c8a4209a438c9a5004dc489e6"
 dependencies = [
  "gpu-raw 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
  "pollster",
@@ -2189,7 +2189,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-scarlet-virgl"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=df2e2e78dcd00a316f8cd42738eee329a2920957#df2e2e78dcd00a316f8cd42738eee329a2920957"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=b7182ba9d906ce4c8a4209a438c9a5004dc489e6#b7182ba9d906ce4c8a4209a438c9a5004dc489e6"
 dependencies = [
  "gpu-raw 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
  "scarlet-os 1.0.0 (git+https://github.com/petitstrawberry/Scarlet?rev=54bfdf3048a100fc4bfba5198e59bdb184702871)",
@@ -2201,7 +2201,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-wgpu"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=df2e2e78dcd00a316f8cd42738eee329a2920957#df2e2e78dcd00a316f8cd42738eee329a2920957"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=b7182ba9d906ce4c8a4209a438c9a5004dc489e6#b7182ba9d906ce4c8a4209a438c9a5004dc489e6"
 dependencies = [
  "bytemuck",
  "naga",
@@ -2235,7 +2235,7 @@ dependencies = [
 [[package]]
 name = "sgfx-codegen-virgl"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=df2e2e78dcd00a316f8cd42738eee329a2920957#df2e2e78dcd00a316f8cd42738eee329a2920957"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=b7182ba9d906ce4c8a4209a438c9a5004dc489e6#b7182ba9d906ce4c8a4209a438c9a5004dc489e6"
 dependencies = [
  "naga",
  "sgfx-core 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=0213c76bdc9777ddb2a3a25e30b54ac8c5e01912)",
