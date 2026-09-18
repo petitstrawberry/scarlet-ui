@@ -2681,6 +2681,7 @@ mod tests {
                     Command::EndRenderPass => "end-pass",
                     Command::SetPipeline(_) => "set-pipeline",
                     Command::SetVertexBuffer { .. } => "set-vertex-buffer",
+                    Command::SetVertexBufferSlot { .. } => "set-vertex-buffer-slot",
                     Command::SetIndexBuffer { .. } => "set-index-buffer",
                     Command::SetTexture(_) => "set-texture",
                     Command::SetSampler(_) => "set-sampler",
@@ -2692,7 +2693,9 @@ mod tests {
                         self.draw_vertices.push(*vertex_count);
                         "draw"
                     }
+                    Command::DrawInstanced { .. } => "draw-instanced",
                     Command::DrawIndexed { .. } => "draw-indexed",
+                    Command::DrawIndexedInstanced { .. } => "draw-indexed-instanced",
                 };
                 kinds.push(kind);
             }
