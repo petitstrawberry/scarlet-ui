@@ -1602,7 +1602,9 @@ fn fill_polygon(
     let data = buffer.as_mut_slice();
     let n = path.len();
 
-    for y in min_y..=max_y {
+    // The bottom of a damage/clip rectangle is exclusive, like its right
+    // edge. Drawing one extra row can clear retained content outside damage.
+    for y in min_y..max_y {
         if y < 0 || y >= bh {
             continue;
         }

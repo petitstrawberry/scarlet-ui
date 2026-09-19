@@ -286,6 +286,16 @@ impl RenderingPipeline {
         self.pipeline_owner.has_dirty()
     }
 
+    /// Present the retained scene again after its platform surface is exposed.
+    /// Cached images and layout remain valid; the next frame repairs the full
+    /// output, including a compositor that withheld the old hidden contents.
+    pub fn request_redraw(&mut self) {
+        self.paint_needs_full = true;
+        if let Some(root) = self.element_tree.root() {
+            self.pipeline_owner.mark_needs_composite(root.id());
+        }
+    }
+
     /// Invalidate the complete pipeline after a runtime input-environment change.
     ///
     /// This schedules build, layout, and paint so device-dependent metrics are
@@ -613,9 +623,6 @@ impl RenderingPipeline {
         let repaint_composite_damage = has_paint_extensions
             && self.pipeline_owner.last_paint_ids().is_empty()
             && !self.pipeline_owner.last_composite_ids().is_empty();
-        let transparent_surface_changed = background_color.a < 1.0
-            && (!self.pipeline_owner.last_paint_ids().is_empty()
-                || !self.pipeline_owner.last_composite_ids().is_empty());
 
         if self.paint_renderer.is_none() {
             self.paint_renderer = Some(CpuPaintRenderer::new(size, scale, background_color));
@@ -624,12 +631,6 @@ impl RenderingPipeline {
         let mut force_full = self.paint_needs_full
             || creating_renderer
             || self.paint_background_color != Some(background_color)
-            // A transparent top-level surface cannot clear and rebuild only a
-            // retained descendant: transparent pixels in that descendant need
-            // the window background beneath them, while the rounded exterior
-            // must stay transparent. Recompose from the root until transparent
-            // damage has its own ancestor-aware clear path.
-            || (transparent_surface_changed && !window_backdrop_retained)
             || self.last_paint_ids_require_full_refresh();
 
         if !has_paint_extensions
@@ -724,6 +725,14 @@ impl RenderingPipeline {
         }
         let mut ctx = PaintContext::new();
         let damage_clip = has_dirty_rects.then_some(self.dirty_scratch.rects.as_slice());
+        // Transparent pixels need every ancestor and overlapping sibling in
+        // paint order. Reuse the complete retained scene, while the backend
+        // clears and composites only the damaged output rectangles.
+        let walk_damage = if background_color.a < 1.0 && !window_backdrop_retained {
+            None
+        } else {
+            damage_clip
+        };
         let any_painted = if let Some(root) = self.element_tree.root() {
             let Some(paint_renderer) = self.paint_renderer.as_mut() else {
                 return Err(crate::error::Error::RenderError);
@@ -742,7 +751,7 @@ impl RenderingPipeline {
                 &mut ctx,
                 root,
                 Point::ZERO,
-                damage_clip,
+                walk_damage,
                 &mut self.paint_caches,
                 &mut self.layer_store,
                 paint_renderer,
@@ -757,7 +766,7 @@ impl RenderingPipeline {
         } else {
             false
         };
-        if damage_clip.is_none() {
+        if walk_damage.is_none() {
             if let Some(root) = self.element_tree.root() {
                 Self::rebuild_root_layer_refs(
                     root,
@@ -1525,7 +1534,6 @@ impl RenderingPipeline {
         let ordinal = *next_ordinal;
         *next_ordinal = (*next_ordinal).saturating_add(1);
         let chunk_id = LayerId::Chunk { owner, ordinal };
-        let logical_bounds = Rect::new(Point::ZERO, container_size);
         if let Some(chunk) = layer_store.chunk_mut(chunk_id)
             && let Some(buffer) = Arc::get_mut(&mut chunk.buffer)
         {
@@ -1542,7 +1550,7 @@ impl RenderingPipeline {
                 chunk_ctx,
                 None,
             );
-            chunk.logical_bounds = logical_bounds;
+            chunk.logical_bounds = Self::compact_picture_chunk(buffer);
             chunk.generation = layer_generation;
             layer_store.mark_chunk(chunk_id, layer_generation);
             layer_store.finish_chunk_rebuild(chunk_id);
@@ -1569,6 +1577,7 @@ impl RenderingPipeline {
             chunk_ctx,
             None,
         );
+        let logical_bounds = Self::compact_picture_chunk(&mut buffer);
         if let Some(chunk) = layer_store.chunk_mut(chunk_id) {
             chunk.buffer = Arc::new(buffer);
             chunk.logical_bounds = logical_bounds;
@@ -1596,6 +1605,76 @@ impl RenderingPipeline {
         true
     }
 
+    // A picture chunk covers only the paint before/between/after nested layers.
+    // Storing the entire parent viewport for every chunk multiplies transparent
+    // pixels (and GPU uploads) with nesting, especially after a HiDPI resize.
+    // Keep the exact raster pixels and ordered child layers; trim only padding.
+    fn compact_picture_chunk(buffer: &mut Buffer) -> Rect {
+        let (width, height) = (buffer.width(), buffer.height());
+        let mut left = width;
+        let mut top = height;
+        let mut right = 0;
+        let mut bottom = 0;
+        for (y, row) in buffer.as_slice().chunks(width.max(1) as usize).enumerate() {
+            if let Some(first) = row.iter().position(|pixel| pixel >> 24 != 0) {
+                left = left.min(first as u32);
+                right =
+                    right.max(row.iter().rposition(|pixel| pixel >> 24 != 0).unwrap() as u32 + 1);
+                top = top.min(y as u32);
+                bottom = y as u32 + 1;
+            }
+        }
+        if right == 0 {
+            *buffer = Buffer::empty();
+            return Rect::new(Point::ZERO, Size::ZERO);
+        }
+        let scale = buffer.scale_milli();
+        let mut divisor = scale;
+        let mut remainder = 1000;
+        while remainder != 0 {
+            (divisor, remainder) = (remainder, divisor % remainder);
+        }
+        // Align the origin to whole physical AND logical pixels. This preserves
+        // truncation at arbitrary ancestor offsets, including fractional DPI.
+        let physical_step = scale / divisor;
+        let logical_step = 1000 / divisor;
+        left = left / physical_step * physical_step;
+        top = top / physical_step * physical_step;
+        let logical_width = (right - left).div_ceil(physical_step) * logical_step;
+        let logical_height = (bottom - top).div_ceil(physical_step) * logical_step;
+        if left == 0
+            && top == 0
+            && logical_width >= buffer.logical_width()
+            && logical_height >= buffer.logical_height()
+        {
+            return Rect::new(
+                Point::ZERO,
+                Size::new(
+                    buffer.logical_width() as f32,
+                    buffer.logical_height() as f32,
+                ),
+            );
+        }
+        let mut compact =
+            Buffer::from_logical_dimensions_with_scale(logical_width, logical_height, scale);
+        let stride = compact.width() as usize;
+        let copy_width = compact.width().min(width - left) as usize;
+        let copy_height = compact.height().min(height - top) as usize;
+        let destination = compact.as_mut_slice();
+        for y in 0..copy_height {
+            let start = (top as usize + y) * width as usize + left as usize;
+            destination[y * stride..y * stride + copy_width]
+                .copy_from_slice(&buffer.as_slice()[start..start + copy_width]);
+        }
+        *buffer = compact;
+        Rect::from_xywh(
+            (left / physical_step * logical_step) as f32,
+            (top / physical_step * logical_step) as f32,
+            logical_width as f32,
+            logical_height as f32,
+        )
+    }
+
     fn composite_layer_container<'a>(
         ctx: &mut PaintContext<'a>,
         layer_store: &LayerStore,
@@ -1610,6 +1689,13 @@ impl RenderingPipeline {
             match *child {
                 LayerChild::Chunk { id, offset, .. } => {
                     if let Some(chunk) = layer_store.chunk(id) {
+                        // An empty retained picture is still a valid cache hit.
+                        painted = true;
+                        if chunk.logical_bounds.size.width <= 0.0
+                            || chunk.logical_bounds.size.height <= 0.0
+                        {
+                            continue;
+                        }
                         let dst = Rect::new(
                             Point::new(
                                 origin.x + offset.x + chunk.logical_bounds.origin.x,
@@ -1619,7 +1705,7 @@ impl RenderingPipeline {
                         );
                         ctx.draw_buffer_rect_shared(
                             dst,
-                            chunk.logical_bounds,
+                            Rect::new(Point::ZERO, chunk.logical_bounds.size),
                             chunk.buffer.clone(),
                             1.0,
                         );
@@ -2523,22 +2609,25 @@ impl RenderingPipeline {
     }
 
     fn merge_overlapping_rects(rects: &mut Vec<Rect>) {
-        let mut index = 0;
-        while index < rects.len() {
-            let mut other = index + 1;
-            while other < rects.len() {
-                if rects[index].overlaps(&rects[other]) {
+        // A bounding union can overlap an earlier rectangle that was skipped.
+        // Repeat to a fixed point or alpha content is blended twice in that
+        // overlap when the CPU backend replays each damage clip.
+        'merge: loop {
+            for index in 0..rects.len() {
+                for other in index + 1..rects.len() {
+                    if !rects[index].overlaps(&rects[other]) {
+                        continue;
+                    }
                     let left = rects[index].left().min(rects[other].left());
                     let top = rects[index].top().min(rects[other].top());
                     let right = rects[index].right().max(rects[other].right());
                     let bottom = rects[index].bottom().max(rects[other].bottom());
                     rects[index] = Rect::from_xywh(left, top, right - left, bottom - top);
                     rects.remove(other);
-                } else {
-                    other += 1;
+                    continue 'merge;
                 }
             }
-            index += 1;
+            break;
         }
     }
 
@@ -2780,6 +2869,10 @@ impl Default for RenderingPipeline {
         Self::new()
     }
 }
+
+#[cfg(test)]
+#[path = "rebuild_tests.rs"]
+mod rebuild_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3421,7 +3514,10 @@ mod tests {
             .render_with_damage()
             .expect("transparent scroll frame should render");
 
-        assert!(damage.is_none(), "transparent damage must include the root");
+        assert!(
+            damage.is_some(),
+            "transparent damage can retain the unchanged exterior"
+        );
         assert_eq!(
             buffer.get_pixel(10, 40),
             Some(crate::color::Color::rgb(220, 40, 40).to_bgra())
@@ -4994,6 +5090,56 @@ mod tests {
             outer.children.last(),
             Some(LayerChild::Chunk { .. })
         ));
+    }
+
+    #[test]
+    fn compact_picture_chunks_preserve_pixels_at_fractional_scale_and_origin() {
+        for scale in [1000, 1250, 1500, 2000, 2750] {
+            let mut original = Buffer::from_logical_dimensions_with_scale(120, 90, scale);
+            original.clear_rect(23, 17, 9, 7, crate::color::Color::rgba(220, 80, 40, 127));
+            let mut compact = original.clone();
+            let bounds = RenderingPipeline::compact_picture_chunk(&mut compact);
+            assert!(compact.data().len() < original.data().len() / 4);
+            let origin = Point::new(3.25, 4.75);
+            let mut before = PaintContext::new();
+            before.draw_buffer_rect_ref(
+                Rect::new(origin, Size::new(120.0, 90.0)),
+                Rect::from_xywh(0.0, 0.0, 120.0, 90.0),
+                &original,
+                1.0,
+            );
+            let mut after = PaintContext::new();
+            after.draw_buffer_rect_ref(
+                Rect::new(
+                    Point::new(origin.x + bounds.origin.x, origin.y + bounds.origin.y),
+                    bounds.size,
+                ),
+                Rect::new(Point::ZERO, bounds.size),
+                &compact,
+                1.0,
+            );
+            let mut expected = Buffer::from_logical_dimensions_with_scale(140, 110, scale);
+            let mut actual = expected.clone();
+            let mut renderer =
+                CpuPaintRenderer::new(Size::new(140.0, 110.0), scale, crate::color::Color::BLACK);
+            renderer.execute_into_external_buffer(
+                &mut expected,
+                crate::color::Color::BLACK,
+                &before,
+                None,
+            );
+            renderer.execute_into_external_buffer(
+                &mut actual,
+                crate::color::Color::BLACK,
+                &after,
+                None,
+            );
+            assert_eq!(actual.data(), expected.data(), "scale={scale}");
+        }
+        let mut empty = Buffer::from_dimensions(1024, 1024);
+        let bounds = RenderingPipeline::compact_picture_chunk(&mut empty);
+        assert_eq!(bounds.size, Size::ZERO);
+        assert!(empty.data().is_empty());
     }
 
     #[test]

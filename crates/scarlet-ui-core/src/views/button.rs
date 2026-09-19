@@ -679,6 +679,22 @@ impl ElementRenderObject for ButtonRenderObject {
         let Some(button) = new_view.as_any().downcast_ref::<Button>() else {
             return crate::element::UpdateResult::Replaced;
         };
+        if self.label == button.label
+            && self.icon == button.icon
+            && self.icon_size == button.icon_size
+            && self.icon_style == button.icon_style
+            && self.icon_color == button.icon_color
+            && self.background_color == button.background_color
+            && self.hover_background_color == button.hover_background_color
+            && self.pressed_background_color == button.pressed_background_color
+            && self.border_color == button.border_color
+            && self.text_color == button.text_color
+            && self.font_size == button.font_size
+            && self.padding == button.padding
+            && self.appearance == button.appearance
+        {
+            return crate::element::UpdateResult::NoChange;
+        }
         self.label = button.label.clone();
         self.icon = button.icon;
         self.icon_size = button.icon_size;

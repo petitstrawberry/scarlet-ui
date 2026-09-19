@@ -198,7 +198,8 @@ where
     F: Fn() + Clone + 'static,
 {
     render_object.set_callback(Box::new(view.callback.clone()));
-    UpdateResult::Updated
+    // Updating a callback changes input behavior, not the child's pixels.
+    UpdateResult::NoChange
 }
 
 /// Click RenderObject
@@ -971,7 +972,7 @@ where
     F: Fn(KeyEvent) -> bool + Clone + 'static,
 {
     render_object.set_callback(Box::new(view.callback.clone()));
-    UpdateResult::Updated
+    UpdateResult::NoChange
 }
 
 /// Render object for [`OnKey`].

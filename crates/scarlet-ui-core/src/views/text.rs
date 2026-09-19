@@ -269,7 +269,11 @@ impl ElementRenderObject for TextRenderObject {
         let Some(text) = new_view.as_any().downcast_ref::<Text>() else {
             return UpdateResult::Replaced;
         };
-        self.content = text.content_for_render();
+        let content = text.content_for_render();
+        if self.content == content && self.font_size == text.font_size && self.color == text.color {
+            return UpdateResult::NoChange;
+        }
+        self.content = content;
         self.font_size = text.font_size;
         self.color = text.color;
         UpdateResult::Updated

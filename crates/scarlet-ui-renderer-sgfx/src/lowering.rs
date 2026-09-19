@@ -2195,24 +2195,30 @@ impl SgfxPaintEncoder {
             return Ok(());
         }
         let table = Rc::clone(&self.table);
-        let mut encoder = CommandEncoder::new(&table);
-        for upload in &frame.uploads {
-            let texture = table
-                .texture_ref(upload.texture)
-                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-            let destination = PixelRect::new(upload.x, upload.y, upload.width, upload.height)
-                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-            let write =
-                TextureWrite::new(destination, upload.bytes_per_row, upload.bytes.as_slice())
+        // A frame may update many independent cached pictures. Keep each
+        // texture's complete updates in its own logical submission instead of
+        // aggregating the whole frame into one potentially oversized stream.
+        // Native splitting of an individual upload remains backend-owned.
+        for uploads in frame.uploads.chunk_by(|a, b| a.texture == b.texture) {
+            let mut encoder = CommandEncoder::new(&table);
+            for upload in uploads {
+                let texture = table
+                    .texture_ref(upload.texture)
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-            encoder
-                .write_texture(texture, write)
+                let destination = PixelRect::new(upload.x, upload.y, upload.width, upload.height)
+                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                let write =
+                    TextureWrite::new(destination, upload.bytes_per_row, upload.bytes.as_slice())
+                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                encoder
+                    .write_texture(texture, write)
+                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            }
+            let commands = encoder
+                .finish()
                 .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            executor.execute(&commands).map_err(FrameError::Execution)?;
         }
-        let commands = encoder
-            .finish()
-            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-        executor.execute(&commands).map_err(FrameError::Execution)?;
         self.commit_texture_uploads(frame);
         Ok(())
     }
@@ -3312,6 +3318,102 @@ mod tests {
             .unwrap();
 
         assert_eq!(executor.texture_write_counts, [1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn independent_pictures_submit_separately_without_splitting_their_uploads() {
+        struct LimitedExecutor {
+            writes: Vec<(u32, u32, usize)>,
+            drew: bool,
+            reject_second: bool,
+        }
+        impl CommandExecutor for LimitedExecutor {
+            type Error = ();
+            fn execute<'r, 'data>(
+                &mut self,
+                commands: &CommandBuffer<'r, 'data>,
+            ) -> core::result::Result<(), ()> {
+                let mut bytes = 0;
+                for command in commands.commands() {
+                    match command {
+                        Command::WriteTexture { write, .. } => {
+                            assert!(!self.drew);
+                            let bounds = write.destination();
+                            self.writes
+                                .push((bounds.width(), bounds.height(), write.data().len()));
+                            bytes += write.data().len();
+                        }
+                        Command::BeginRenderPass(_) => {
+                            assert_eq!(self.writes.len(), 2);
+                            self.drew = true;
+                        }
+                        _ => {}
+                    }
+                }
+                assert!(
+                    bytes <= 16 * 1024 * 1024,
+                    "independent pictures must not be aggregated into an oversized stream"
+                );
+                if self.reject_second && self.writes.len() == 2 {
+                    return Err(());
+                }
+                Ok(())
+            }
+        }
+        let first = Buffer::from_dimensions(2048, 1100);
+        let second = Buffer::from_dimensions(2048, 1100);
+        let mut paint = PaintContext::new();
+        paint.draw_buffer_ref(Rect::from_xywh(0.0, 0.0, 2048.0, 1100.0), &first);
+        paint.draw_buffer_ref(Rect::from_xywh(32.0, 0.0, 2048.0, 1100.0), &second);
+        let mut encoder = SgfxPaintEncoder::new(64, 32, false).unwrap();
+        let mut rejected = LimitedExecutor {
+            writes: Vec::new(),
+            drew: false,
+            reject_second: true,
+        };
+        assert!(matches!(
+            encoder.encode_frame(
+                &mut rejected,
+                0,
+                None,
+                &paint,
+                UiColor::BLACK,
+                1000,
+                &[(0, 0, 64, 32)]
+            ),
+            Err(FrameError::Execution(()))
+        ));
+        assert!(!rejected.drew);
+        assert!(
+            encoder
+                .buffer_textures
+                .iter()
+                .all(|texture| texture.upload_state == TextureUploadState::Pending)
+        );
+        let mut executor = LimitedExecutor {
+            writes: Vec::new(),
+            drew: false,
+            reject_second: false,
+        };
+        encoder
+            .encode_frame(
+                &mut executor,
+                0,
+                None,
+                &paint,
+                UiColor::BLACK,
+                1000,
+                &[(0, 0, 64, 32)],
+            )
+            .unwrap();
+        assert_eq!(
+            executor.writes,
+            [
+                (2048, 1100, first.data().len()),
+                (2048, 1100, second.data().len())
+            ]
+        );
+        assert!(executor.drew);
     }
 
     fn assert_encode_frame_texture_upload_retry(paint: &PaintContext<'_>) {

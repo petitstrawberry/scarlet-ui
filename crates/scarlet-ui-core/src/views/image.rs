@@ -32,6 +32,34 @@ pub enum ImageSource {
     Placeholder { width: u32, height: u32 },
 }
 
+impl ImageSource {
+    // Immutable shared sources can be compared without scanning their pixels
+    // during every parent rebuild. A new allocation still requests repaint.
+    fn same_source(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Bitmap(a), Self::Bitmap(b)) => {
+                a.width == b.width && a.height == b.height && Arc::ptr_eq(&a.data, &b.data)
+            }
+            (Self::Vector(a), Self::Vector(b)) => {
+                a.width == b.width
+                    && a.height == b.height
+                    && Arc::ptr_eq(&a.triangles, &b.triangles)
+            }
+            (
+                Self::Placeholder {
+                    width: aw,
+                    height: ah,
+                },
+                Self::Placeholder {
+                    width: bw,
+                    height: bh,
+                },
+            ) => aw == bw && ah == bh,
+            _ => false,
+        }
+    }
+}
+
 /// Decoded bitmap image data.
 #[derive(Clone)]
 pub struct BitmapImage {
@@ -474,6 +502,9 @@ impl ElementRenderObject for ImageRenderObject {
         let Some(image) = new_view.as_any().downcast_ref::<Image>() else {
             return crate::element::UpdateResult::Replaced;
         };
+        if self.fit_mode == image.fit_mode && self.source.same_source(&image.source) {
+            return crate::element::UpdateResult::NoChange;
+        }
         self.source = image.source.clone();
         self.fit_mode = image.fit_mode;
         crate::element::UpdateResult::Updated

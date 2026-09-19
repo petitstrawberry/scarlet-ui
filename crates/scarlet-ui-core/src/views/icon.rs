@@ -233,6 +233,13 @@ impl ElementRenderObject for IconRenderObject {
         let Some(icon) = new_view.as_any().downcast_ref::<IconView>() else {
             return crate::element::UpdateResult::Replaced;
         };
+        if self.icon == icon.icon
+            && self.preferred_size == icon.size
+            && self.style == icon.style
+            && self.color == icon.color
+        {
+            return crate::element::UpdateResult::NoChange;
+        }
         self.icon = icon.icon;
         self.preferred_size = icon.size;
         self.style = icon.style;

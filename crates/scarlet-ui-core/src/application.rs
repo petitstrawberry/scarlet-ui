@@ -148,7 +148,8 @@ pub trait Application: Clone + 'static {
         true
     }
 
-    /// Synchronize application-managed window state.
+    /// Synchronize application-managed window state. A size change made here
+    /// is applied to the rendering pipeline before the next presentation.
     fn on_window_sync(&mut self, _ctx: &WindowContext, _window: &mut dyn PlatformWindow) {}
 
     /// Handle a platform fullscreen state change.
@@ -516,7 +517,7 @@ impl ApplicationRunner {
             }
 
             for slot in slots.iter_mut() {
-                app.on_window_sync(&slot.context, slot.window.as_mut());
+                sync_application_window(app, slot);
                 sync_text_input(slot.window.as_mut(), &slot.pipeline);
                 let frame_granted = !slot.frame_pacing_enabled || slot.frame_ready;
                 if (slot.pipeline.has_dirty() || slot.retry_render)
@@ -832,6 +833,20 @@ fn sync_output_scale(pipeline: &mut RenderingPipeline, window: &dyn PlatformWind
     }
 }
 
+fn sync_application_window<A: Application>(app: &mut A, slot: &mut WindowSlot<A>) {
+    let previous_size = slot.window.size();
+    app.on_window_sync(&slot.context, slot.window.as_mut());
+    let size = slot.window.size();
+    sync_output_scale(&mut slot.pipeline, slot.window.as_ref());
+    if size != previous_size {
+        // Client-managed panels need not receive a configure event after
+        // resize(). Keep layout, retained caches, damage and backend extent
+        // in step with the surface, including secondary scene windows.
+        slot.pipeline.resize(size);
+        app.on_window_resize(&slot.context, size.width as u32, size.height as u32);
+    }
+}
+
 fn handle_window_event<A: Application>(
     app: &mut A,
     slot: &mut WindowSlot<A>,
@@ -882,6 +897,9 @@ fn handle_window_event<A: Application>(
         Event::WindowSuspendedChanged { suspended } => {
             if slot.suspended != suspended {
                 slot.suspended = suspended;
+                if !suspended {
+                    slot.pipeline.request_redraw();
+                }
                 app.on_window_suspended_changed(&slot.context, suspended);
             }
         }
@@ -2036,6 +2054,74 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct SyncResizeApp {
+        sizes: Rc<Cell<[Size; 2]>>,
+    }
+
+    impl Application for SyncResizeApp {
+        fn scenes(&self) -> impl Scene {
+            (
+                Window::new("Home", Text::new("Home")).scene_key("home"),
+                Window::new("Controls", Text::new("WS 1  WS 2  WS 3")).scene_key("controls"),
+            )
+        }
+
+        fn on_window_sync(&mut self, ctx: &WindowContext, window: &mut dyn PlatformWindow) {
+            let index = usize::from(ctx.scene_key.as_str() == "controls");
+            let size = self.sizes.get()[index];
+            if window.size() != size {
+                window
+                    .resize(size.width as u32, size.height as u32)
+                    .unwrap();
+            }
+        }
+    }
+
+    impl View for SyncResizeApp {
+        fn create_element(&self) -> Box<dyn Element> {
+            Text::new("Managed windows").create_element()
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn application_resizes_update_each_scene_before_present_without_configure_events() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        let mut app = SyncResizeApp {
+            sizes: Rc::new(Cell::new([Size::new(320.0, 240.0), Size::new(320.0, 44.0)])),
+        };
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: probe.clone(),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declarations = collect_scene_declarations(&app).unwrap();
+        let mut slots = runner.create_slots(&mut app, declarations).unwrap();
+        for sizes in [
+            [Size::new(320.0, 240.0), Size::new(320.0, 44.0)],
+            [Size::new(900.0, 600.0), Size::new(900.0, 68.0)],
+            [Size::new(480.0, 320.0), Size::new(480.0, 44.0)],
+        ] {
+            app.sizes.set(sizes);
+            for (index, slot) in slots.iter_mut().enumerate() {
+                sync_application_window(&mut app, slot);
+                assert_eq!(present_window(&mut app, slot).unwrap(), Presentation::Cpu);
+                let expected = (sizes[index].width as u32, sizes[index].height as u32);
+                assert_eq!(probe.borrow().present_sizes[index].last(), Some(&expected));
+                assert!(!slot.pipeline.has_dirty());
+                sync_application_window(&mut app, slot);
+                assert!(
+                    !slot.pipeline.has_dirty(),
+                    "an unchanged surface must retain its caches and remain idle"
+                );
+            }
+        }
+    }
+
+    #[derive(Clone)]
     struct FramePacingApp {
         suspended_changes: Rc<RefCell<Vec<bool>>>,
     }
@@ -2058,6 +2144,66 @@ mod tests {
         fn as_any(&self) -> &dyn Any {
             self
         }
+    }
+
+    #[test]
+    fn unchanged_scene_resumes_with_a_frame_without_waiting_for_input() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let mut app = RenderFailureApp(Rc::new(RefCell::new(Vec::new())));
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: Rc::new(RefCell::new(EnvironmentRunnerProbe::default())),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slot = runner.create_slot(&mut app, declaration, true).unwrap();
+        let probe = Rc::new(RefCell::new(RenderProbe::default()));
+        slot.pipeline
+            .set_paint_backend(Box::new(FailingPaintBackend(probe.clone())));
+        present_window(&mut app, &mut slot).unwrap();
+        assert!(!slot.pipeline.has_dirty());
+        let mut closed = Vec::new();
+        for _ in 0..3 {
+            handle_window_event(
+                &mut app,
+                &mut slot,
+                Event::WindowSuspendedChanged { suspended: true },
+                &mut closed,
+            )
+            .unwrap();
+            assert!(slot.suspended);
+            assert!(!slot.pipeline.has_dirty());
+            handle_window_event(
+                &mut app,
+                &mut slot,
+                Event::WindowSuspendedChanged { suspended: false },
+                &mut closed,
+            )
+            .unwrap();
+            assert!(!slot.suspended);
+            assert!(
+                slot.pipeline.has_dirty(),
+                "resume must schedule presentation without user input"
+            );
+            assert_eq!(
+                present_window(&mut app, &mut slot).unwrap(),
+                Presentation::External
+            );
+            assert!(!slot.pipeline.has_dirty());
+            handle_window_event(
+                &mut app,
+                &mut slot,
+                Event::WindowSuspendedChanged { suspended: false },
+                &mut closed,
+            )
+            .unwrap();
+            assert!(
+                !slot.pipeline.has_dirty(),
+                "duplicate visibility events must remain idle"
+            );
+        }
+        assert_eq!(probe.borrow().presented, 4);
+        assert!(probe.borrow().full_damage.iter().all(|full| *full));
     }
 
     #[test]

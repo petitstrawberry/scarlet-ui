@@ -60,9 +60,16 @@ impl<C: ViewTuple + Clone> Clone for ZStack<C> {
 
 impl<C: ViewTuple + Clone + 'static> View for ZStack<C> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_view_children(
+        Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
             |view| ZStackRenderObject::new(view.alignment, view.content.clone_views().len()),
+            |render, view| {
+                if render.alignment == view.alignment {
+                    return crate::element::UpdateResult::NoChange;
+                }
+                render.alignment = view.alignment;
+                crate::element::UpdateResult::Updated
+            },
             |view| view.content.clone_views(),
         ))
     }
@@ -99,6 +106,10 @@ impl ZStackRenderObject {
 }
 
 impl ElementRenderObject for ZStackRenderObject {
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         if constraints.is_tight() {
             let width = constraints.max_width;

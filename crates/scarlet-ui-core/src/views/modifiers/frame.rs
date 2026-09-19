@@ -114,7 +114,7 @@ impl<V: View> Frame<V> {
 
 impl<V: View + Clone> View for Frame<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_view_children(
+        Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
             |view| {
                 FrameRenderObject::new(
@@ -125,6 +125,24 @@ impl<V: View + Clone> View for Frame<V> {
                     view.max_width,
                     view.max_height,
                 )
+            },
+            |render, view| {
+                if render.width == view.width
+                    && render.height == view.height
+                    && render.min_width == view.min_width
+                    && render.min_height == view.min_height
+                    && render.max_width == view.max_width
+                    && render.max_height == view.max_height
+                {
+                    return crate::element::UpdateResult::NoChange;
+                }
+                render.width = view.width;
+                render.height = view.height;
+                render.min_width = view.min_width;
+                render.min_height = view.min_height;
+                render.max_width = view.max_width;
+                render.max_height = view.max_height;
+                crate::element::UpdateResult::Updated
             },
             |view| vec![view.inner.clone_view()],
         ))
@@ -225,6 +243,10 @@ impl FrameRenderObject {
 }
 
 impl ElementRenderObject for FrameRenderObject {
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         if crate::debug::is_enabled() {
             crate::logln!(

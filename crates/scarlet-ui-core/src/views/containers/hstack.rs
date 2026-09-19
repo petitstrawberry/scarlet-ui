@@ -75,9 +75,17 @@ impl<C: ViewTuple + Clone> Clone for HStack<C> {
 
 impl<C: ViewTuple + Clone + 'static> View for HStack<C> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_view_children(
+        Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
             |view| HStackRenderObject::new(view.spacing, view.alignment),
+            |render, view| {
+                if render.spacing == view.spacing && render.alignment == view.alignment {
+                    return crate::element::UpdateResult::NoChange;
+                }
+                render.spacing = view.spacing;
+                render.alignment = view.alignment;
+                crate::element::UpdateResult::Updated
+            },
             |view| view.content.clone_views(),
         ))
     }
@@ -115,6 +123,10 @@ impl HStackRenderObject {
 }
 
 impl ElementRenderObject for HStackRenderObject {
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         self.size = Size {
             width: constraints.min_width.min(constraints.max_width),

@@ -7,7 +7,7 @@
 
 use crate::color::Color;
 use crate::element::{Element, ElementRenderObject, LayoutConstraints, RenderElement};
-use crate::geometry::{EdgeInsets, Point, Rect, Size};
+use crate::geometry::{Point, Rect, Size};
 use crate::renderer::PaintContext;
 use crate::view::View;
 use alloc::boxed::Box;
@@ -67,9 +67,21 @@ impl<V: View> Border<V> {
 
 impl<V: View + Clone> View for Border<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_view_children(
+        Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
             |view| BorderRenderObject::new(view.color, view.width, view.corner_radius),
+            |render, view| {
+                if render.color == view.color
+                    && render.width == view.width
+                    && render.corner_radius == view.corner_radius
+                {
+                    return crate::element::UpdateResult::NoChange;
+                }
+                render.color = view.color;
+                render.width = view.width;
+                render.corner_radius = view.corner_radius;
+                crate::element::UpdateResult::Updated
+            },
             |view| vec![view.inner.clone_view()],
         ))
     }
@@ -144,10 +156,10 @@ impl ElementRenderObject for BorderRenderObject {
         if self.width <= 0.0 {
             return false;
         }
-        // Inset by half the stroke width so the border stays fully inside the
-        // element bounds (SwiftUI's strokeBorder semantics).
-        let half = self.width * 0.5;
-        let rect = Rect::new(origin, self.size).inset(EdgeInsets::all(half));
+        // Rectangle strokes already grow inward in the paint contract (CPU
+        // and SGFX). Insetting again leaves a strip of the child outside its
+        // border and makes rounded borders disagree with the child's clip.
+        let rect = Rect::new(origin, self.size);
         if self.corner_radius > 0.0 {
             ctx.stroke_rounded_rect(rect, self.corner_radius, self.width, self.color);
         } else {
@@ -196,8 +208,8 @@ mod tests {
             } => {
                 assert_eq!(*stroke_width, 2.0);
                 assert_eq!(*color, Color::rgb(255, 0, 0));
-                assert_eq!(rect.origin, Point::new(1.0, 1.0));
-                assert_eq!(rect.size, Size::new(98.0, 58.0));
+                assert_eq!(rect.origin, Point::ZERO);
+                assert_eq!(rect.size, Size::new(100.0, 60.0));
             }
             other => panic!("expected StrokeRect, got {:?}", other),
         }
@@ -236,9 +248,61 @@ mod tests {
         ro.paint_overlay(&mut ctx, Point::new(10.0, 20.0));
         match ctx.commands().first() {
             Some(PaintCommand::StrokeRect { rect, .. }) => {
-                assert_eq!(rect.origin, Point::new(11.0, 21.0));
+                assert_eq!(rect.origin, Point::new(10.0, 20.0));
             }
             other => panic!("expected StrokeRect, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn border_covers_the_child_edge_without_changing_its_bounds() {
+        use crate::renderer::CpuPaintRenderer;
+
+        let background = Color::BLACK;
+        let content = Color::rgb(0, 255, 0);
+        let border = Color::rgb(255, 0, 0);
+        for scale in [1000, 1250, 1500, 2000] {
+            for radius in [0.0, 16.0] {
+                for width in [1.0, 2.0] {
+                    let ro = sized_border(width, radius);
+                    let origin = Point::new(4.0, 4.0);
+                    let mut ctx = PaintContext::new();
+                    ctx.fill_rounded_rect(Rect::new(origin, ro.size()), radius, content);
+                    ro.paint_overlay(&mut ctx, origin);
+                    let mut renderer =
+                        CpuPaintRenderer::new(Size::new(112.0, 72.0), scale, background);
+                    renderer.execute(&ctx);
+                    let px = |value: u32| value * scale / 1000;
+                    let buffer = renderer.buffer();
+                    for (x, y) in [
+                        (px(4), px(34)),
+                        (px(104) - 1, px(34)),
+                        (px(54), px(4)),
+                        (px(54), px(64) - 1),
+                    ] {
+                        assert_eq!(
+                            buffer.get_pixel(x, y),
+                            Some(border.to_bgra()),
+                            "child edge exposed: scale={scale}, radius={radius}, width={width}, ({x}, {y})"
+                        );
+                    }
+                    for (x, y) in [
+                        (px(4) - 1, px(34)),
+                        (px(104), px(34)),
+                        (px(54), px(4) - 1),
+                        (px(54), px(64)),
+                    ] {
+                        assert_eq!(buffer.get_pixel(x, y), Some(background.to_bgra()));
+                    }
+                    assert_eq!(buffer.get_pixel(px(54), px(34)), Some(content.to_bgra()));
+                    if radius > 0.0 && width == 2.0 {
+                        // Both curves must share a center; moving the stroke's
+                        // rectangle inwards also shifts the corner silhouette.
+                        assert_eq!(buffer.get_pixel(px(9), px(9)), Some(border.to_bgra()));
+                        assert_eq!(buffer.get_pixel(px(4), px(4)), Some(background.to_bgra()));
+                    }
+                }
+            }
         }
     }
 }

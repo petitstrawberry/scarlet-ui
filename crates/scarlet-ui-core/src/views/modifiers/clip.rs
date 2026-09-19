@@ -29,9 +29,16 @@ impl<V: View> Clip<V> {
 
 impl<V: View + Clone> View for Clip<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_view_children(
+        Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
             |view| ClipRenderObject::new(view.radius),
+            |render, view| {
+                if render.radius == view.radius {
+                    return crate::element::UpdateResult::NoChange;
+                }
+                render.radius = view.radius;
+                crate::element::UpdateResult::Updated
+            },
             |view| vec![view.inner.clone_view()],
         ))
     }

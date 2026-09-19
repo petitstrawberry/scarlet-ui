@@ -45,9 +45,16 @@ impl<V: View> Padding<V> {
 
 impl<V: View + Clone> View for Padding<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_view_children(
+        Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
             |view| PaddingRenderObject::new(view.insets),
+            |render, view| {
+                if render.insets == view.insets {
+                    return crate::element::UpdateResult::NoChange;
+                }
+                render.insets = view.insets;
+                crate::element::UpdateResult::Updated
+            },
             |view| vec![view.inner.clone_view()],
         ))
     }
@@ -78,6 +85,10 @@ impl PaddingRenderObject {
 }
 
 impl ElementRenderObject for PaddingRenderObject {
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         // Calculate padding contribution
         let horizontal_padding = self.insets.left + self.insets.right;

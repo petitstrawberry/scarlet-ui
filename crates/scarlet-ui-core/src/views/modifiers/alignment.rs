@@ -37,9 +37,16 @@ impl<V: View> AlignmentFrame<V> {
 
 impl<V: View + Clone> View for AlignmentFrame<V> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_view_children(
+        Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
             |view| AlignmentRenderObject::new(view.alignment),
+            |render, view| {
+                if render.alignment == view.alignment {
+                    return crate::element::UpdateResult::NoChange;
+                }
+                render.alignment = view.alignment;
+                crate::element::UpdateResult::Updated
+            },
             |view| vec![view.inner.clone_view()],
         ))
     }
@@ -75,6 +82,10 @@ impl AlignmentRenderObject {
 }
 
 impl ElementRenderObject for AlignmentRenderObject {
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         // Alignment frame takes all available space
         let width = if constraints.max_width > 0.0 {
