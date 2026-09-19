@@ -379,7 +379,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         {
             let encoder = self.encoder.as_mut().ok_or(Error::InvalidFrame)?;
             let session = self.session.as_mut().ok_or(Error::InvalidFrame)?;
-            if self.backend_kind == BackendKind::ScarletVirgl {
+            if sgfx::backend::CommandSubmitter::supports_async_submission(&session.executor()) {
                 let mut executor = FrameExecutor::new(session.executor());
                 if let Err(error) = encoder.encode_frame(
                     &mut executor,
@@ -431,8 +431,8 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                     }
                 }
             } else {
-                // Adreno has not advertised async support. Keep its existing
-                // synchronous execution explicit, without a fabricated receipt.
+                // Older kernels can expose synchronous queues. Select that
+                // path from the negotiated capability, not the backend name.
                 let mut executor = session.executor();
                 encoder
                     .encode_frame(
