@@ -122,6 +122,7 @@ pub struct SgfxTexture {
 pub(crate) enum SgfxTextureSource {
     Rgba8(Arc<[u8]>),
     ExternalBgra8(Arc<dyn PaintExtension>),
+    ExternalNv12(Arc<dyn PaintExtension>),
 }
 
 impl SgfxTexture {
@@ -160,6 +161,30 @@ impl SgfxTexture {
         })
     }
 
+    /// An immutable two-plane image sampled directly by a compatible platform.
+    pub fn external_nv12(width: u32, height: u32, source: Arc<dyn PaintExtension>) -> Arc<Self> {
+        let mut texture = Self::external_bgra8(width, height, source.clone());
+        Arc::get_mut(&mut texture).unwrap().source = SgfxTextureSource::ExternalNv12(source);
+        texture
+    }
+    /// Append this external image directly to the paint order, without an
+    /// intermediate canvas target or CPU pixel upload.
+    pub fn paint(
+        self: &Arc<Self>,
+        ctx: &mut scarlet_ui_core::renderer::PaintContext<'_>,
+        rect: scarlet_ui_core::geometry::Rect,
+    ) {
+        ctx.draw_extension(
+            rect,
+            Arc::new(crate::external_surface::ExternalGpuSurfacePaint {
+                texture: Arc::clone(self),
+            }),
+        );
+    }
+    pub(crate) fn is_nv12(&self) -> bool {
+        matches!(self.source, SgfxTextureSource::ExternalNv12(_))
+    }
+
     /// Return the texture width.
     ///
     /// # Returns
@@ -181,14 +206,16 @@ impl SgfxTexture {
     pub(crate) fn rgba8_pixels(&self) -> Option<&[u8]> {
         match &self.source {
             SgfxTextureSource::Rgba8(pixels) => Some(pixels),
-            SgfxTextureSource::ExternalBgra8(_) => None,
+            SgfxTextureSource::ExternalBgra8(_) | SgfxTextureSource::ExternalNv12(_) => None,
         }
     }
 
     pub(crate) fn external_source(&self) -> Option<&Arc<dyn PaintExtension>> {
         match &self.source {
             SgfxTextureSource::Rgba8(_) => None,
-            SgfxTextureSource::ExternalBgra8(source) => Some(source),
+            SgfxTextureSource::ExternalBgra8(source) | SgfxTextureSource::ExternalNv12(source) => {
+                Some(source)
+            }
         }
     }
 }

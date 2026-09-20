@@ -298,6 +298,25 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
     }
 
     fn import_external_textures(&mut self, paint: &PaintContext<'_>) -> Result<()> {
+        let retired = self
+            .encoder
+            .as_ref()
+            .ok_or(Error::InvalidFrame)?
+            .unused_external_textures(paint);
+        for (texture, bound) in retired {
+            if bound {
+                self.session
+                    .as_mut()
+                    .ok_or(Error::InvalidFrame)?
+                    .release_imported_texture(texture)
+                    .map_err(|_| Error::Sgfx(Stage::ImportExternalImage))?;
+            }
+            self.encoder
+                .as_mut()
+                .ok_or(Error::InvalidFrame)?
+                .retire_external_texture(texture)
+                .map_err(|_| Error::Render)?;
+        }
         let pending = self
             .encoder
             .as_mut()
@@ -313,11 +332,13 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             let handle = source
                 .duplicate_handle()
                 .map_err(|_| Error::Sgfx(Stage::ImportExternalImage))?;
-            self.session
-                .as_mut()
-                .ok_or(Error::InvalidFrame)?
-                .import_shared_bgra_texture(binding.texture(), handle)
-                .map_err(|_| Error::Sgfx(Stage::ImportExternalImage))?;
+            let session = self.session.as_mut().ok_or(Error::InvalidFrame)?;
+            if let Some(conversion) = source.conversion {
+                session.import_ycbcr_texture(binding.texture(), handle, conversion)
+            } else {
+                session.import_shared_bgra_texture(binding.texture(), handle)
+            }
+            .map_err(|_| Error::Sgfx(Stage::ImportExternalImage))?;
             self.encoder
                 .as_mut()
                 .ok_or(Error::InvalidFrame)?

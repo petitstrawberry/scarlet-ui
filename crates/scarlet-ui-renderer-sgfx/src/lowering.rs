@@ -410,6 +410,7 @@ pub struct SgfxPaintEncoder {
     canvas_targets: Vec<CanvasTarget>,
     canvas_meshes: Vec<CanvasMesh>,
     canvas_textures: Vec<CanvasTexture>,
+    free_external_textures: Vec<(TextureId, TextureFormat, u32, u32)>,
     frame_serial: u64,
     width: u32,
     height: u32,
@@ -559,6 +560,7 @@ impl SgfxPaintEncoder {
             canvas_targets: Vec::new(),
             canvas_meshes: Vec::new(),
             canvas_textures: Vec::new(),
+            free_external_textures: Vec::new(),
             frame_serial: 0,
             width,
             height,
@@ -573,6 +575,56 @@ impl SgfxPaintEncoder {
     /// Shared ownership of this encoder's logical resource table.
     pub fn resource_table(&self) -> Rc<ResourceTable> {
         Rc::clone(&self.table)
+    }
+
+    /// External slots no longer referenced by this frame. A bound slot must
+    /// be detached only after accepted GPU work retires, before recycling it.
+    pub fn unused_external_textures(&self, paint: &PaintContext<'_>) -> Vec<(TextureId, bool)> {
+        let mut active = Vec::new();
+        for command in paint.commands() {
+            let PaintCommand::Extension { payload, .. } = command else {
+                continue;
+            };
+            if let Some(surface) = payload
+                .as_ref()
+                .as_any()
+                .downcast_ref::<ExternalGpuSurfacePaint>()
+            {
+                active.push(surface.texture.id);
+            } else if let Some(canvas) = payload.as_ref().as_any().downcast_ref::<SgfxCanvasPaint>()
+            {
+                for draw in &canvas.frame.draws {
+                    if let Some(texture) = &draw.texture {
+                        active.push(texture.id);
+                    }
+                }
+            }
+        }
+        self.canvas_textures
+            .iter()
+            .filter(|t| t.source.external_source().is_some() && !active.contains(&t.texture_id))
+            .map(|t| (t.texture, t.external_bound))
+            .collect()
+    }
+
+    /// Recycle an external logical slot after the platform has retired its reads
+    /// and detached the old image. Descriptor-compatible slots avoid exhausting
+    /// the immutable resource table during indefinite video playback.
+    pub fn retire_external_texture(&mut self, texture: TextureId) -> Result<()> {
+        let index = self
+            .canvas_textures
+            .iter()
+            .position(|t| t.texture == texture && t.source.external_source().is_some())
+            .ok_or(Error::InvalidFrame)?;
+        let old = self.canvas_textures.remove(index);
+        let format = if old.source.is_nv12() {
+            TextureFormat::Nv12
+        } else {
+            TextureFormat::Bgra8Unorm
+        };
+        self.free_external_textures
+            .push((texture, format, old.source.width, old.source.height));
+        Ok(())
     }
 
     /// Define external canvas textures referenced by this paint list and return
@@ -1507,10 +1559,26 @@ impl SgfxPaintEncoder {
             }
             (TextureFormat::Rgba8Unorm, true)
         } else {
-            (TextureFormat::Bgra8Unorm, false)
+            (
+                if texture.is_nv12() {
+                    TextureFormat::Nv12
+                } else {
+                    TextureFormat::Bgra8Unorm
+                },
+                false,
+            )
         };
-        let texture_id =
-            define_sampled_texture(&self.table, format, texture.width, texture.height)?;
+        let reusable = self
+            .free_external_textures
+            .iter()
+            .position(|&(_, f, w, h)| {
+                !external_bound && f == format && w == texture.width && h == texture.height
+            });
+        let texture_id = if let Some(index) = reusable {
+            self.free_external_textures.swap_remove(index).0
+        } else {
+            define_sampled_texture(&self.table, format, texture.width, texture.height)?
+        };
         self.canvas_textures.push(CanvasTexture {
             texture_id: texture.id,
             texture: texture_id,
@@ -2430,7 +2498,11 @@ fn define_sampled_texture(
     let descriptor = TextureDesc::new(
         format,
         extent,
-        TextureUsage::SAMPLED | TextureUsage::COPY_DST,
+        if format == TextureFormat::Nv12 {
+            TextureUsage::SAMPLED
+        } else {
+            TextureUsage::SAMPLED | TextureUsage::COPY_DST
+        },
     )
     .map_err(|_| Error::sgfx(Stage::DefineResources))?;
     table
@@ -3045,6 +3117,40 @@ mod tests {
         let colors = encoded_paint_colors(&frame.vertex_bytes);
         assert!(colors.iter().any(|color| color == &[1.0, 1.0, 1.0, 1.0]));
         assert!(colors.iter().any(|color| color == &[0.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn streaming_nv12_recycles_external_slot_and_releases_old_source() {
+        #[derive(Debug)]
+        struct Image;
+        let mut encoder = SgfxPaintEncoder::new(16, 16, false).unwrap();
+        let mut first = None;
+        let mut previous = None;
+        for _ in 0..2048 {
+            let source = Arc::new(Image);
+            let texture = SgfxTexture::external_nv12(16, 16, source.clone());
+            let mut paint = PaintContext::new();
+            texture.paint(&mut paint, Rect::from_xywh(0.0, 0.0, 16.0, 16.0));
+            for (slot, bound) in encoder.unused_external_textures(&paint) {
+                assert!(bound);
+                // Platform retirement is a precondition of this cache operation.
+                encoder.retire_external_texture(slot).unwrap();
+            }
+            if let Some(old) = previous.take() {
+                assert_eq!(Arc::strong_count(&old), 1);
+            }
+            let pending = encoder.prepare_external_textures(&paint).unwrap();
+            assert_eq!(pending.len(), 1);
+            let slot = pending[0].texture();
+            if let Some(first) = first {
+                assert_eq!(slot, first);
+            } else {
+                first = Some(slot);
+            }
+            encoder.mark_external_texture_bound(slot).unwrap();
+            assert_eq!(encoder.canvas_textures.len(), 1);
+            previous = Some(source);
+        }
     }
 
     #[test]
