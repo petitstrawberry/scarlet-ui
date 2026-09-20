@@ -10,6 +10,7 @@ std = ["dep:fontique", "dep:raw-window-handle", "dep:unicode-script"]
 preview = ["std", "dep:inventory", "dep:libloading"]
 
 [dependencies]
+scarlet-scroll-motion = { path = "../scarlet-scroll-motion" }
 scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", rev = "af2bb5e8d062fef5558f106bc55c21c1f512b7f4", package = "scarlet-std", optional = true }
 libm = { version = "0.2", default-features = false }
 scarlet-ui-macros = { path = "../scarlet-ui-macros" }

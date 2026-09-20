@@ -166,6 +166,8 @@ pub struct SliderRenderObject {
     size: Size,
     buffer: Option<Buffer>,
     dragging: bool,
+    mouse_dragging: bool,
+    active_touch_id: Option<u64>,
 }
 
 impl SliderRenderObject {
@@ -210,6 +212,8 @@ impl SliderRenderObject {
             size: Size::new(200.0, metrics.slider_height),
             buffer: None,
             dragging,
+            mouse_dragging: false,
+            active_touch_id: None,
         }
     }
 
@@ -228,7 +232,34 @@ impl SliderRenderObject {
     }
 
     pub fn set_dragging(&mut self, dragging: bool) {
-        self.dragging = dragging;
+        self.mouse_dragging = dragging;
+        self.dragging = dragging || self.active_touch_id.is_some();
+    }
+
+    pub fn is_mouse_dragging(&self) -> bool {
+        self.mouse_dragging
+    }
+
+    pub fn active_touch_id(&self) -> Option<u64> {
+        self.active_touch_id
+    }
+
+    pub fn begin_touch_drag(&mut self, id: u64) -> bool {
+        if self.active_touch_id.is_some() {
+            return false;
+        }
+        self.active_touch_id = Some(id);
+        self.dragging = true;
+        true
+    }
+
+    pub fn end_touch_drag(&mut self, id: u64) -> bool {
+        if self.active_touch_id != Some(id) {
+            return false;
+        }
+        self.active_touch_id = None;
+        self.dragging = self.mouse_dragging;
+        true
     }
 
     pub fn value_from_local_x(&self, local_x: f32) -> f32 {
@@ -330,6 +361,10 @@ impl SliderRenderObject {
 }
 
 impl ElementRenderObject for SliderRenderObject {
+    fn touch_drag_axis(&self, _local_point: Point) -> Option<crate::event::TouchDragAxis> {
+        Some(crate::event::TouchDragAxis::Horizontal)
+    }
+
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
         // Slider has fixed height (20px), flexible width
         let width = if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
@@ -446,7 +481,8 @@ impl ElementRenderObject for SliderRenderObject {
                 self.value = new_value;
                 changed = true;
             }
-            let dragging = slider.dragging.get();
+            let dragging =
+                slider.dragging.get() || self.mouse_dragging || self.active_touch_id.is_some();
             if self.dragging != dragging {
                 self.dragging = dragging;
                 changed = true;

@@ -1246,7 +1246,13 @@ impl SWSPlatformWindow {
         }
         let event_receiver = conn.subscribe_window_events(surface_id);
         if capabilities.is_some_and(|caps| caps.supports_gamepad_input()) {
-            conn.set_gamepad_input(surface_id, true, true)
+            // Standard widgets receive seat navigation. Applications that
+            // consume raw snapshots opt in explicitly with navigation off.
+            conn.set_gamepad_input(surface_id, false, true)
+                .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
+        }
+        if capabilities.is_some_and(|caps| caps.supports_touch_input()) {
+            conn.set_touch_input(surface_id, true)
                 .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
         }
         let current_size = Size::new(
@@ -2608,6 +2614,35 @@ impl SWSPlatformWindow {
                     hat_x: state.hat_x,
                     hat_y: state.hat_y,
                     reset: state.flags & sws_protocol::gamepad::RESET != 0,
+                }));
+            }
+            SwsEvent::TouchFrame { surface_id, frame } if surface_id == self.surface_id => {
+                use scarlet_ui_core::event::{TouchChange, TouchFrame, TouchPhase};
+                let changes = frame
+                    .changes
+                    .into_iter()
+                    .map(|change| TouchChange {
+                        seat_id: frame.seat_id,
+                        serial: frame.serial,
+                        time_ns: frame.time_ns,
+                        id: change.id,
+                        phase: match change.phase {
+                            sws_protocol::touch::Phase::Down => TouchPhase::Down,
+                            sws_protocol::touch::Phase::Move => TouchPhase::Move,
+                            sws_protocol::touch::Phase::Up => TouchPhase::Up,
+                            sws_protocol::touch::Phase::Cancel => TouchPhase::Cancel,
+                        },
+                        x: self.physical_to_logical_pos(change.x),
+                        y: self.physical_to_logical_pos(change.y),
+                        pressure: change.pressure,
+                        touch_major: change.touch_major,
+                    })
+                    .collect();
+                self.push_event(Event::TouchFrame(TouchFrame {
+                    seat_id: frame.seat_id,
+                    serial: frame.serial,
+                    time_ns: frame.time_ns,
+                    changes,
                 }));
             }
             SwsEvent::SurfaceConfigure {

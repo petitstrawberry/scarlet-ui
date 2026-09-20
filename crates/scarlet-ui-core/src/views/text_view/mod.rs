@@ -18,7 +18,7 @@ use core::any::Any;
 pub use document::{EditDelta, TextDocument, TextPosition};
 pub(crate) use editing::{
     handle_text_view_focus, handle_text_view_keyboard, handle_text_view_mouse,
-    handle_text_view_text_input,
+    handle_text_view_text_input, handle_text_view_touch,
 };
 pub use layout::{TextViewLayout, VisualLine};
 pub use selection::{TabMode, TextSelection, TextViewScroll, WrapMode};

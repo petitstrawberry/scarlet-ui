@@ -5,9 +5,14 @@
 
 use crate::clock::Instant;
 use crate::element::{Element, ElementId, ElementTree};
-use crate::event::Event;
+use crate::event::{
+    Event, GesturePhase, TouchArena, TouchChange, TouchDragAxis, TouchFrame, TouchGesture,
+    TouchPhase,
+};
 use crate::geometry::Point;
 use alloc::vec::Vec;
+use core::time::Duration;
+use scarlet_scroll_motion::{ScrollMomentum, ScrollVelocityTracker};
 
 /// Discrete mouse wheels carry no gesture phase, so this idle window acts as
 /// the gesture boundary that decides when a locked scroll target may be
@@ -94,6 +99,26 @@ pub struct EventDispatcher {
     pointer_lock_target_id: Option<ElementId>,
     /// Events emitted by elements during event handling
     emitted_events: Vec<Event>,
+    touch_routes: Vec<TouchRoute>,
+    touch_arena: TouchArena,
+    scroll_momentum: Option<MomentumRoute>,
+}
+
+struct TouchRoute {
+    id: u64,
+    path: Vec<ElementId>,
+    scrollable: bool,
+    drag_axis: Option<TouchDragAxis>,
+    scroll_target: Option<ElementId>,
+    scroll_last_consumer: Option<ElementId>,
+    scroll_consumers: Vec<ElementId>,
+    velocity: ScrollVelocityTracker,
+}
+
+struct MomentumRoute {
+    id: u64,
+    target: ElementId,
+    motion: ScrollMomentum,
 }
 
 impl EventDispatcher {
@@ -117,12 +142,89 @@ impl EventDispatcher {
             pointer_lock_candidate_id: None,
             pointer_lock_target_id: None,
             emitted_events: Vec::new(),
+            touch_routes: Vec::new(),
+            touch_arena: TouchArena::default(),
+            scroll_momentum: None,
         }
     }
 
     /// Set the root element ID
     pub fn set_root(&mut self, id: ElementId) {
         self.root_id = Some(id);
+        self.scroll_momentum = None;
+        self.touch_routes.clear();
+        self.touch_arena = TouchArena::default();
+    }
+
+    /// Whether this window still has UI-owned scrolling motion to animate.
+    pub fn has_active_animation(&self) -> bool {
+        self.scroll_momentum.is_some()
+    }
+
+    /// Advance UI-owned motion using the elapsed time since the previous tick.
+    pub fn advance_animations(
+        &mut self,
+        element_tree: &mut ElementTree,
+        elapsed: Duration,
+    ) -> bool {
+        let Some(mut route) = self.scroll_momentum.take() else {
+            return false;
+        };
+        let Some(path) = element_tree.find_path_ids(route.target) else {
+            return false;
+        };
+        let (delta_x, delta_y, active) = route.motion.advance(elapsed);
+        if delta_x != 0 || delta_y != 0 {
+            let (_, consumer) = self.dispatch_touch_to_path(
+                element_tree,
+                &path,
+                &Event::TouchGesture(TouchGesture::ScrollMomentum {
+                    id: route.id,
+                    phase: GesturePhase::Moved,
+                    delta_x,
+                    delta_y,
+                }),
+            );
+            let Some(consumer) = consumer else {
+                Self::send_momentum_terminal(element_tree, &route, GesturePhase::Ended);
+                return false;
+            };
+            if consumer != route.target {
+                Self::send_momentum_terminal(element_tree, &route, GesturePhase::Ended);
+                route.target = consumer;
+            }
+        }
+        if active {
+            self.scroll_momentum = Some(route);
+        } else {
+            Self::send_momentum_terminal(element_tree, &route, GesturePhase::Ended);
+        }
+        true
+    }
+
+    /// Stop a fling when a new interaction or presentation suspension takes over.
+    pub fn cancel_animations(&mut self, element_tree: &mut ElementTree) {
+        if let Some(route) = self.scroll_momentum.take() {
+            Self::send_momentum_terminal(element_tree, &route, GesturePhase::Cancelled);
+        }
+    }
+
+    fn send_momentum_terminal(
+        element_tree: &mut ElementTree,
+        route: &MomentumRoute,
+        phase: GesturePhase,
+    ) {
+        if let Some(element) = element_tree.find_element_mut(route.target) {
+            element.handle_event(
+                &Event::TouchGesture(TouchGesture::ScrollMomentum {
+                    id: route.id,
+                    phase,
+                    delta_x: 0,
+                    delta_y: 0,
+                }),
+                Phase::Target,
+            );
+        }
     }
 
     /// Emit an event (called by elements during event handling)
@@ -139,6 +241,17 @@ impl EventDispatcher {
     pub fn dispatch(&mut self, element_tree: &mut ElementTree, event: &Event) -> bool {
         if crate::debug::is_enabled() {
             crate::logln!("[EventDispatcher] dispatch: {:?}", event);
+        }
+        if matches!(
+            event,
+            Event::Mouse(
+                crate::event::MouseEvent::Wheel { .. }
+                    | crate::event::MouseEvent::ButtonPressed { .. }
+            ) | Event::Keyboard(crate::event::KeyEvent::Pressed { .. })
+                | Event::Focus(crate::event::FocusEvent::Lost)
+        ) || matches!(event, Event::TouchFrame(frame) if frame.changes.iter().any(|change| change.phase == TouchPhase::Down))
+        {
+            self.cancel_animations(element_tree);
         }
         match event {
             Event::Quit => {
@@ -159,6 +272,8 @@ impl EventDispatcher {
             }
             Event::ScreenSizeChanged { .. } => false,
             Event::Mouse(mouse_event) => self.dispatch_mouse(element_tree, mouse_event),
+            Event::TouchFrame(frame) => self.dispatch_touch_frame(element_tree, frame),
+            Event::Touch(_) | Event::TouchGesture(_) => false,
             Event::Keyboard(key_event) => self.dispatch_keyboard(element_tree, key_event),
             Event::Gamepad(_) => {
                 // Route to element focus, or the window root when none exists.
@@ -230,6 +345,334 @@ impl EventDispatcher {
         // Handle window resize
         // In a full implementation, this would mark elements for relayout
         let _ = (width, height);
+    }
+
+    fn dispatch_touch_frame(&mut self, element_tree: &mut ElementTree, frame: &TouchFrame) -> bool {
+        let mut handled = false;
+        for &change in &frame.changes {
+            if change.phase == TouchPhase::Down {
+                let point = Point::new(change.x as f32, change.y as f32);
+                let Some(path) = self.hit_test_with_path_ids(element_tree, point) else {
+                    continue;
+                };
+                let scrollable = path.iter().any(|id| {
+                    element_tree.find_element_mut(*id).is_some_and(|element| {
+                        element
+                            .render_object()
+                            .is_some_and(|object| object.accepts_touch_scroll())
+                    })
+                });
+                let origins = Self::path_origins(element_tree, &path);
+                let drag_axis = path.iter().zip(&origins).rev().find_map(|(id, origin)| {
+                    let local = Point::new(point.x - origin.x, point.y - origin.y);
+                    element_tree
+                        .find_element_mut(*id)
+                        .and_then(|element| element.render_object())
+                        .and_then(|object| object.touch_drag_axis(local))
+                });
+                if let Some(focus_id) = element_tree.nearest_focusable_in_path(&path)
+                    && let Some(focus_path) = element_tree.find_path_ids(focus_id)
+                {
+                    self.set_focused_element(element_tree, focus_id, &focus_path);
+                }
+                self.touch_routes.retain(|route| route.id != change.id);
+                self.touch_routes.push(TouchRoute {
+                    id: change.id,
+                    path,
+                    scrollable,
+                    drag_axis,
+                    scroll_target: None,
+                    scroll_last_consumer: None,
+                    scroll_consumers: Vec::new(),
+                    velocity: ScrollVelocityTracker::new(change.time_ns, change.x, change.y),
+                });
+            }
+            let Some(route_index) = self
+                .touch_routes
+                .iter()
+                .position(|route| route.id == change.id)
+            else {
+                continue;
+            };
+            let path = self.touch_routes[route_index].path.clone();
+            if path
+                .last()
+                .is_none_or(|id| element_tree.find_path_ids(*id).is_none())
+            {
+                let mut cancel = change;
+                cancel.phase = TouchPhase::Cancel;
+                self.touch_arena.process(cancel, false);
+                self.touch_routes.remove(route_index);
+                continue;
+            }
+            let scrollable = self.touch_routes[route_index].scrollable;
+            let drag_axis = self.touch_routes[route_index].drag_axis;
+            if change.phase == TouchPhase::Move {
+                self.touch_routes[route_index]
+                    .velocity
+                    .observe(change.time_ns, change.x, change.y);
+            }
+            let release_velocity = if change.phase == TouchPhase::Up {
+                self.touch_routes[route_index].velocity.release_velocity(
+                    change.time_ns,
+                    change.x,
+                    change.y,
+                )
+            } else {
+                None
+            };
+            handled |= self
+                .dispatch_touch_to_path(element_tree, &path, &Event::Touch(change))
+                .0;
+            let mut completed_scroll = false;
+            for gesture in self
+                .touch_arena
+                .process_with_drag_axis(change, scrollable, drag_axis)
+            {
+                completed_scroll |= matches!(
+                    gesture,
+                    TouchGesture::Scroll {
+                        phase: GesturePhase::Ended,
+                        ..
+                    }
+                );
+                let route_path = if let TouchGesture::Pinch {
+                    first_id,
+                    second_id,
+                    ..
+                } = gesture
+                {
+                    let first = self.touch_routes.iter().find(|route| route.id == first_id);
+                    let second = self.touch_routes.iter().find(|route| route.id == second_id);
+                    match (first, second) {
+                        (Some(first), Some(second)) => {
+                            let shared = first
+                                .path
+                                .iter()
+                                .zip(&second.path)
+                                .take_while(|(a, b)| a == b)
+                                .count();
+                            first.path[..shared].to_vec()
+                        }
+                        _ => Vec::new(),
+                    }
+                } else {
+                    let Some(route) = self
+                        .touch_routes
+                        .iter()
+                        .find(|route| route.id == gesture.primary_id())
+                    else {
+                        continue;
+                    };
+                    if matches!(gesture, TouchGesture::Scroll { .. }) {
+                        if let Some(target_id) = route.scroll_target {
+                            if let Some(index) = route.path.iter().position(|id| *id == target_id) {
+                                route.path[..=index].to_vec()
+                            } else {
+                                route.path.clone()
+                            }
+                        } else {
+                            route.path.clone()
+                        }
+                    } else {
+                        route.path.clone()
+                    }
+                };
+                if route_path.is_empty() {
+                    continue;
+                }
+                if matches!(
+                    gesture,
+                    TouchGesture::Scroll {
+                        phase: GesturePhase::Ended | GesturePhase::Cancelled,
+                        ..
+                    }
+                ) && let Some(consumers) = self
+                    .touch_routes
+                    .iter()
+                    .find(|route| route.id == gesture.primary_id())
+                    .map(|route| route.scroll_consumers.clone())
+                    && !consumers.is_empty()
+                {
+                    for id in consumers {
+                        if let Some(element) = element_tree.find_element_mut(id) {
+                            handled |=
+                                element.handle_event(&Event::TouchGesture(gesture), Phase::Target);
+                            if let Some(action) = element.take_window_action() {
+                                self.emitted_events.push(Event::Window(action));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let (consumed, consumer) = self.dispatch_touch_to_path(
+                    element_tree,
+                    &route_path,
+                    &Event::TouchGesture(gesture),
+                );
+                handled |= consumed;
+                if let TouchGesture::Scroll { phase, .. } = gesture
+                    && matches!(phase, GesturePhase::Started | GesturePhase::Moved)
+                    && let Some(consumer) = consumer
+                    && let Some(route) = self
+                        .touch_routes
+                        .iter_mut()
+                        .find(|route| route.id == gesture.primary_id())
+                {
+                    if phase == GesturePhase::Started {
+                        route.scroll_target = Some(consumer);
+                    }
+                    route.scroll_last_consumer = Some(consumer);
+                    if !route.scroll_consumers.contains(&consumer) {
+                        route.scroll_consumers.push(consumer);
+                    }
+                }
+            }
+            if matches!(change.phase, TouchPhase::Up | TouchPhase::Cancel) {
+                if completed_scroll
+                    && let Some((vx, vy)) = release_velocity
+                    && let Some(target) = self.touch_routes[route_index].scroll_last_consumer
+                {
+                    handled |= self.begin_momentum(element_tree, change.id, target, vx, vy);
+                }
+                self.touch_routes.retain(|route| route.id != change.id);
+            }
+        }
+        handled
+    }
+
+    fn begin_momentum(
+        &mut self,
+        element_tree: &mut ElementTree,
+        id: u64,
+        target: ElementId,
+        vx: f32,
+        vy: f32,
+    ) -> bool {
+        self.cancel_animations(element_tree);
+        let Some(element) = element_tree.find_element_mut(target) else {
+            return false;
+        };
+        let started = element.handle_event(
+            &Event::TouchGesture(TouchGesture::ScrollMomentum {
+                id,
+                phase: GesturePhase::Started,
+                delta_x: 0,
+                delta_y: 0,
+            }),
+            Phase::Target,
+        );
+        if started {
+            self.scroll_momentum = Some(MomentumRoute {
+                id,
+                target,
+                motion: ScrollMomentum::new(vx, vy),
+            });
+        }
+        started
+    }
+
+    fn dispatch_touch_to_path(
+        &mut self,
+        element_tree: &mut ElementTree,
+        path: &[ElementId],
+        event: &Event,
+    ) -> (bool, Option<ElementId>) {
+        let origins = Self::path_origins(element_tree, path);
+        for (index, id) in path.iter().take(path.len().saturating_sub(1)).enumerate() {
+            if let Some(element) = element_tree.find_element_mut(*id)
+                && element.handle_event(
+                    &Self::localize_touch_event(event, origins[index]),
+                    Phase::Capture,
+                )
+            {
+                if let Some(action) = element.take_window_action() {
+                    self.emitted_events.push(Event::Window(action));
+                }
+                return (true, Some(*id));
+            }
+        }
+        if let Some(id) = path.last()
+            && let Some(element) = element_tree.find_element_mut(*id)
+            && element.handle_event(
+                &Self::localize_touch_event(event, *origins.last().unwrap_or(&Point::ZERO)),
+                Phase::Target,
+            )
+        {
+            if let Some(action) = element.take_window_action() {
+                self.emitted_events.push(Event::Window(action));
+            }
+            return (true, Some(*id));
+        }
+        for (index, id) in path.iter().rev().skip(1).enumerate() {
+            let origin_index = path.len().saturating_sub(2).saturating_sub(index);
+            if let Some(element) = element_tree.find_element_mut(*id)
+                && element.handle_event(
+                    &Self::localize_touch_event(event, origins[origin_index]),
+                    Phase::Bubble,
+                )
+            {
+                if let Some(action) = element.take_window_action() {
+                    self.emitted_events.push(Event::Window(action));
+                }
+                return (true, Some(*id));
+            }
+        }
+        (false, None)
+    }
+
+    fn localize_touch_event(event: &Event, origin: Point) -> Event {
+        match event {
+            Event::Touch(change) => Event::Touch(TouchChange {
+                x: change.x - origin.x as i32,
+                y: change.y - origin.y as i32,
+                ..*change
+            }),
+            Event::TouchGesture(gesture) => Event::TouchGesture(match *gesture {
+                TouchGesture::Tap { id, x, y } => TouchGesture::Tap {
+                    id,
+                    x: x - origin.x as i32,
+                    y: y - origin.y as i32,
+                },
+                TouchGesture::LongPress { id, x, y } => TouchGesture::LongPress {
+                    id,
+                    x: x - origin.x as i32,
+                    y: y - origin.y as i32,
+                },
+                TouchGesture::Drag {
+                    id,
+                    phase,
+                    x,
+                    y,
+                    delta_x,
+                    delta_y,
+                } => TouchGesture::Drag {
+                    id,
+                    phase,
+                    x: x - origin.x as i32,
+                    y: y - origin.y as i32,
+                    delta_x,
+                    delta_y,
+                },
+                TouchGesture::Pinch {
+                    first_id,
+                    second_id,
+                    phase,
+                    center_x,
+                    center_y,
+                    scale,
+                } => TouchGesture::Pinch {
+                    first_id,
+                    second_id,
+                    phase,
+                    center_x: center_x - origin.x as i32,
+                    center_y: center_y - origin.y as i32,
+                    scale,
+                },
+                other => other,
+            }),
+            _ => event.clone(),
+        }
     }
 
     /// Dispatch a mouse event with three-phase event handling

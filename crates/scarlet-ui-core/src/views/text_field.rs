@@ -686,6 +686,18 @@ pub(crate) fn handle_text_field_mouse(
     }
 }
 
+/// Place the caret, or select the word, after a resolved direct-touch gesture.
+pub(crate) fn handle_text_field_touch(
+    render_object: &mut TextFieldRenderObject,
+    x: i32,
+    y: i32,
+    select_word: bool,
+) -> bool {
+    let handled = handle_primary_click(render_object, x, y, if select_word { 2 } else { 1 });
+    render_object.dragging = false;
+    handled
+}
+
 #[derive(Clone, Copy)]
 enum CaretMove {
     Left,
@@ -1256,6 +1268,23 @@ mod tests {
         assert_eq!(render_object.selection, TextSelection::collapsed(2));
         assert!(render_object.is_focused());
         assert!(render_object.dragging);
+    }
+
+    #[test]
+    fn touch_tap_positions_caret_without_leaving_mouse_drag_active() {
+        let field = TextField::new(State::new(StateId::new(401), String::from("abcd")));
+        let mut render_object = TextFieldRenderObject::from_view(&field);
+        render_object.layout(LayoutConstraints::tight(240.0, 32.0));
+
+        assert!(handle_text_field_touch(
+            &mut render_object,
+            text_x("ab"),
+            10,
+            false,
+        ));
+        assert_eq!(render_object.selection, TextSelection::collapsed(2));
+        assert!(render_object.is_focused());
+        assert!(!render_object.dragging);
     }
 
     #[test]

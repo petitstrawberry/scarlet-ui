@@ -5,7 +5,9 @@
 
 use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, LayoutConstraints, RenderElement};
-use crate::event::{Event, MouseButton, MouseEvent, Phase};
+use crate::event::{
+    Event, GesturePhase, MouseButton, MouseEvent, Phase, TouchDragAxis, TouchGesture, TouchPhase,
+};
 use crate::geometry::{Point, Rect, Size};
 use crate::input_environment::InteractionMode;
 use crate::renderer::PaintContext;
@@ -398,6 +400,9 @@ pub struct SplitViewRenderObject<A: View, B: View> {
     hovered: bool,
     dragging: bool,
     drag_pointer_offset: f32,
+    touch_press_id: Option<u64>,
+    touch_drag_id: Option<u64>,
+    touch_drag_pointer_offset: f32,
     _marker: PhantomData<(A, B)>,
 }
 
@@ -430,6 +435,9 @@ impl<A: View, B: View> SplitViewRenderObject<A, B> {
             hovered: false,
             dragging: false,
             drag_pointer_offset: 0.0,
+            touch_press_id: None,
+            touch_drag_id: None,
+            touch_drag_pointer_offset: 0.0,
             _marker: PhantomData,
         }
     }
@@ -458,7 +466,7 @@ impl<A: View, B: View> SplitViewRenderObject<A, B> {
     ///
     /// `true` while the divider drag is active.
     pub fn is_dragging(&self) -> bool {
-        self.dragging
+        self.dragging || self.touch_drag_id.is_some()
     }
 
     /// Return whether the divider hit area is hovered.
@@ -490,14 +498,10 @@ impl<A: View, B: View> SplitViewRenderObject<A, B> {
         requested.max(self.min_first.min(max_first)).min(max_first)
     }
 
-    fn update_fraction_from_point(&mut self, point: Point) -> bool {
+    fn update_fraction_from_point(&mut self, point: Point, drag_pointer_offset: f32) -> bool {
         let requested = match self.axis {
-            SplitAxis::Horizontal => {
-                point.x - self.drag_pointer_offset - self.divider_thickness / 2.0
-            }
-            SplitAxis::Vertical => {
-                point.y - self.drag_pointer_offset - self.divider_thickness / 2.0
-            }
+            SplitAxis::Horizontal => point.x - drag_pointer_offset - self.divider_thickness / 2.0,
+            SplitAxis::Vertical => point.y - drag_pointer_offset - self.divider_thickness / 2.0,
         };
         let first_extent = self.constrained_first_extent(requested);
         let old = self.first_extent;
@@ -561,6 +565,16 @@ impl<A: View, B: View> SplitViewRenderObject<A, B> {
 impl<A: View + Clone + 'static, B: View + Clone + 'static> ElementRenderObject
     for SplitViewRenderObject<A, B>
 {
+    fn touch_drag_axis(&self, local_point: Point) -> Option<TouchDragAxis> {
+        if !self.point_in_divider(local_point) {
+            return None;
+        }
+        Some(match self.axis {
+            SplitAxis::Horizontal => TouchDragAxis::Horizontal,
+            SplitAxis::Vertical => TouchDragAxis::Vertical,
+        })
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         self.size = Size::new(
             finite_split_axis(constraints.min_width, constraints.max_width),
@@ -638,7 +652,7 @@ impl<A: View + Clone + 'static, B: View + Clone + 'static> ElementRenderObject
         self.configured_axis = split_view.split_axis();
         self.axis_policy = split_view.split_axis_policy();
         self.adaptive_stack_narrow_width = split_view.split_adaptive_stack_narrow_width();
-        if !self.dragging {
+        if !self.is_dragging() {
             self.fraction = split_view.split_fraction();
         }
         (self.min_first, self.min_second) = split_view.minimum_extents();
@@ -671,6 +685,92 @@ impl<A: View + Clone + 'static, B: View + Clone + 'static> ElementRenderObject
             return false;
         }
 
+        match event {
+            Event::Touch(change) => {
+                return match change.phase {
+                    TouchPhase::Down => {
+                        if self.touch_press_id.is_none()
+                            && self.point_in_divider(Point::new(change.x as f32, change.y as f32))
+                        {
+                            self.touch_press_id = Some(change.id);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    TouchPhase::Up | TouchPhase::Cancel => {
+                        if self.touch_press_id == Some(change.id) {
+                            self.touch_press_id = None;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    TouchPhase::Move => false,
+                };
+            }
+            Event::TouchGesture(TouchGesture::CancelPress { id }) => {
+                let changed = self.touch_press_id == Some(*id) || self.touch_drag_id == Some(*id);
+                if self.touch_press_id == Some(*id) {
+                    self.touch_press_id = None;
+                }
+                if self.touch_drag_id == Some(*id) {
+                    self.touch_drag_id = None;
+                    self.touch_drag_pointer_offset = 0.0;
+                }
+                return changed;
+            }
+            Event::TouchGesture(TouchGesture::Drag {
+                id,
+                phase,
+                x,
+                y,
+                delta_x,
+                delta_y,
+            }) => {
+                let point = Point::new(*x as f32, *y as f32);
+                return match phase {
+                    GesturePhase::Started => {
+                        let start = Point::new(
+                            x.saturating_sub(*delta_x) as f32,
+                            y.saturating_sub(*delta_y) as f32,
+                        );
+                        if self.touch_drag_id.is_none() && self.point_in_divider(start) {
+                            self.touch_drag_id = Some(*id);
+                            self.touch_drag_pointer_offset = self.point_axis_position(start)
+                                - self.divider_center_axis_position();
+                            self.update_fraction_from_point(point, self.touch_drag_pointer_offset);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    GesturePhase::Moved | GesturePhase::Ended => {
+                        if self.touch_drag_id == Some(*id) {
+                            self.update_fraction_from_point(point, self.touch_drag_pointer_offset);
+                            if *phase == GesturePhase::Ended {
+                                self.touch_drag_id = None;
+                                self.touch_drag_pointer_offset = 0.0;
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    GesturePhase::Cancelled => {
+                        if self.touch_drag_id == Some(*id) {
+                            self.touch_drag_id = None;
+                            self.touch_drag_pointer_offset = 0.0;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                };
+            }
+            _ => {}
+        }
+
         let Event::Mouse(mouse_event) = event else {
             return false;
         };
@@ -679,7 +779,7 @@ impl<A: View + Clone + 'static, B: View + Clone + 'static> ElementRenderObject
             MouseEvent::Moved { x, y } => {
                 let point = Point::new(x as f32, y as f32);
                 if self.dragging {
-                    return self.update_fraction_from_point(point);
+                    return self.update_fraction_from_point(point, self.drag_pointer_offset);
                 }
                 let hovered = self.point_in_divider(point);
                 let changed = hovered != self.hovered;
@@ -744,7 +844,7 @@ impl<A: View + Clone + 'static, B: View + Clone + 'static> ElementRenderObject
             self.divider_rect.size.width,
             self.divider_rect.size.height,
         );
-        let color = if self.hovered || self.dragging {
+        let color = if self.hovered || self.is_dragging() || self.touch_press_id.is_some() {
             self.active_divider_color
         } else {
             self.divider_color
@@ -934,6 +1034,63 @@ mod tests {
             Phase::Target,
         ));
         assert_eq!(render_object.first_extent(), 250.0);
+    }
+
+    #[test]
+    fn direct_touch_claims_the_divider_axis_and_drags_without_jumping() {
+        let mut render_object = SplitViewRenderObject::<Text, Text>::from_view(
+            &SplitView::new(Text::new("A"), Text::new("B")).divider_thickness(2.0),
+        );
+        render_object.layout(LayoutConstraints::tight(402.0, 100.0));
+
+        assert_eq!(
+            render_object.touch_drag_axis(Point::new(195.0, 20.0)),
+            Some(TouchDragAxis::Horizontal)
+        );
+        assert_eq!(render_object.touch_drag_axis(Point::new(180.0, 20.0)), None);
+        assert!(render_object.handle_event(
+            &Event::Touch(crate::event::TouchChange {
+                seat_id: 1,
+                serial: 1,
+                time_ns: 1,
+                id: 7,
+                phase: TouchPhase::Down,
+                x: 195,
+                y: 20,
+                pressure: None,
+                touch_major: None,
+            }),
+            Phase::Target,
+        ));
+        assert!(render_object.handle_event(
+            &Event::TouchGesture(TouchGesture::CancelPress { id: 7 }),
+            Phase::Target,
+        ));
+        assert!(render_object.handle_event(
+            &Event::TouchGesture(TouchGesture::Drag {
+                id: 7,
+                phase: GesturePhase::Started,
+                x: 245,
+                y: 20,
+                delta_x: 50,
+                delta_y: 0,
+            }),
+            Phase::Target,
+        ));
+        assert_eq!(render_object.first_extent(), 250.0);
+        assert!(render_object.is_dragging());
+        assert!(render_object.handle_event(
+            &Event::TouchGesture(TouchGesture::Drag {
+                id: 7,
+                phase: GesturePhase::Ended,
+                x: 245,
+                y: 20,
+                delta_x: 0,
+                delta_y: 0,
+            }),
+            Phase::Target,
+        ));
+        assert!(!render_object.is_dragging());
     }
 
     #[test]

@@ -18,6 +18,100 @@ use crate::renderer::PaintContext;
 use crate::state::{InvalidationKind, SubscriptionId};
 use crate::view::View;
 
+fn update_slider_value(
+    render_object: &mut crate::views::SliderRenderObject,
+    slider: &crate::views::Slider,
+    pipeline_id: PipelineId,
+    id: ElementId,
+    x: i32,
+) {
+    let new_value = render_object.value_from_local_x(x as f32);
+    if (render_object.get_value() - new_value).abs() > 0.001 {
+        render_object.set_value(new_value);
+        crate::pipeline::mark_element_needs_paint(pipeline_id, id);
+    }
+    if (slider.get_value().get() - new_value).abs() > 0.001 {
+        slider.get_value().set(new_value);
+        slider.invoke_on_change(new_value);
+    }
+}
+
+fn sync_slider_dragging(
+    slider: &crate::views::Slider,
+    render_object: &crate::views::SliderRenderObject,
+    pipeline_id: PipelineId,
+    id: ElementId,
+) {
+    let dragging = render_object.is_dragging();
+    if slider.get_dragging().get() != dragging {
+        slider.get_dragging().set(dragging);
+    }
+    crate::pipeline::mark_element_needs_paint(pipeline_id, id);
+}
+
+fn activate_toggle(
+    toggle: &crate::views::Toggle,
+    render_object: &mut crate::views::ToggleRenderObject,
+    pipeline_id: PipelineId,
+    id: ElementId,
+) {
+    let state = toggle.get_is_on().clone();
+    let next = !state.get();
+    render_object.set_is_on(next);
+    state.set(next);
+    crate::pipeline::mark_element_needs_paint(pipeline_id, id);
+}
+
+fn activate_select(
+    select: &crate::views::Select,
+    render_object: &mut crate::views::SelectRenderObject,
+    y: i32,
+    highlight_selection_on_open: bool,
+    pipeline_id: PipelineId,
+    id: ElementId,
+) {
+    if render_object.is_expanded() {
+        if let Some(index) = render_object.option_index_at_y(y as f32) {
+            let selected_state = select.selected_index().clone();
+            if selected_state.get() != index {
+                selected_state.set(index);
+                select.invoke_on_change(index);
+            }
+        }
+        select.expanded().set(false);
+        render_object.set_expanded(false);
+        render_object.set_hovered_index(None);
+    } else if select.option_count() > 0 {
+        select.expanded().set(true);
+        render_object.set_expanded(true);
+        render_object
+            .set_hovered_index(highlight_selection_on_open.then(|| select.selected_index().get()));
+        render_object.adjust_scroll();
+    }
+    crate::pipeline::mark_element_needs_paint(pipeline_id, id);
+}
+
+fn activate_sidebar(
+    render_object: &mut crate::views::navigation::NavigationSidebarRenderObject,
+    x: i32,
+    y: i32,
+    pipeline_id: PipelineId,
+    id: ElementId,
+) -> bool {
+    let Some(index) = render_object.index_at_point(x as f32, y as f32) else {
+        return false;
+    };
+    let selected_state = render_object.selected_index();
+    if selected_state.get() != index {
+        selected_state.set(index);
+        crate::pipeline::mark_element_needs_self_paint(pipeline_id, id);
+        if let Some(callback) = render_object.selection_callback(index) {
+            callback();
+        }
+    }
+    true
+}
+
 /// Result of syncing child positions after a scroll-like event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScrollOffsetUpdate {
@@ -250,6 +344,16 @@ pub trait RenderObject: Any {
     /// `true` when this object should become the wheel gesture target.
     fn captures_wheel_event(&self, _event: &crate::event::MouseEvent) -> bool {
         false
+    }
+
+    /// Whether a direct-touch drag can scroll this object.
+    fn accepts_touch_scroll(&self) -> bool {
+        false
+    }
+
+    /// Direction in which this control can claim a drag from `local_point`.
+    fn touch_drag_axis(&self, _local_point: Point) -> Option<crate::event::TouchDragAxis> {
+        None
     }
 
     /// Handle an input event dispatched to this render object.
@@ -1129,6 +1233,279 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             return false;
         }
 
+        if let Event::TouchGesture(gesture) = _event {
+            if matches!(_phase, Phase::Target | Phase::Bubble)
+                && let crate::event::TouchGesture::Tap { x, y, .. } = gesture
+                && self
+                    .render_object
+                    .hit_test(Point::new(*x as f32, *y as f32))
+            {
+                if let Some(click) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::modifiers::OnClickRenderObject>()
+                {
+                    click.invoke_on_click();
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                    return true;
+                }
+                if _phase == Phase::Target {
+                    if let Some(button) = self.view.as_any().downcast_ref::<crate::views::Button>()
+                    {
+                        button.invoke_on_click();
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
+                    if let Some(item) = self.view.as_any().downcast_ref::<crate::views::MenuItem>()
+                    {
+                        item.invoke_on_click();
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
+                    if let Some(toggle) = self.view.as_any().downcast_ref::<crate::views::Toggle>()
+                        && let Some(render_object) =
+                            self.render_object
+                                .as_any_mut()
+                                .downcast_mut::<crate::views::ToggleRenderObject>()
+                    {
+                        activate_toggle(toggle, render_object, self.pipeline_id, self.id);
+                        return true;
+                    }
+                    if let Some(select) = self.view.as_any().downcast_ref::<crate::views::Select>()
+                        && let Some(render_object) =
+                            self.render_object
+                                .as_any_mut()
+                                .downcast_mut::<crate::views::SelectRenderObject>()
+                    {
+                        activate_select(
+                            select,
+                            render_object,
+                            *y,
+                            false,
+                            self.pipeline_id,
+                            self.id,
+                        );
+                        return true;
+                    }
+                    if let Some(slider) = self.view.as_any().downcast_ref::<crate::views::Slider>()
+                        && let Some(render_object) =
+                            self.render_object
+                                .as_any_mut()
+                                .downcast_mut::<crate::views::SliderRenderObject>()
+                    {
+                        update_slider_value(render_object, slider, self.pipeline_id, self.id, *x);
+                        return true;
+                    }
+                    if let Some(render_object) = self
+                        .render_object
+                        .as_any_mut()
+                        .downcast_mut::<crate::views::navigation::NavigationSidebarRenderObject>()
+                    {
+                        return activate_sidebar(
+                            render_object,
+                            *x,
+                            *y,
+                            self.pipeline_id,
+                            self.id,
+                        );
+                    }
+                }
+            }
+            if _phase == Phase::Target
+                && let crate::event::TouchGesture::Tap { x, y, .. }
+                | crate::event::TouchGesture::LongPress { x, y, .. } = gesture
+                && self
+                    .render_object
+                    .hit_test(Point::new(*x as f32, *y as f32))
+            {
+                let select_word = matches!(gesture, crate::event::TouchGesture::LongPress { .. });
+                if self
+                    .view
+                    .as_any()
+                    .downcast_ref::<crate::views::TextField>()
+                    .is_some()
+                    && let Some(render_object) =
+                        self.render_object
+                            .as_any_mut()
+                            .downcast_mut::<crate::views::TextFieldRenderObject>()
+                {
+                    let handled = crate::views::text_field::handle_text_field_touch(
+                        render_object,
+                        *x,
+                        *y,
+                        select_word,
+                    );
+                    if handled {
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                    }
+                    return handled;
+                }
+                if let Some(view) = self.view.as_any().downcast_ref::<crate::views::TextView>()
+                    && let Some(render_object) =
+                        self.render_object
+                            .as_any_mut()
+                            .downcast_mut::<crate::views::TextViewRenderObject>()
+                {
+                    let handled = crate::views::text_view::handle_text_view_touch(
+                        view,
+                        render_object,
+                        *x,
+                        *y,
+                        select_word,
+                    );
+                    if handled {
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                    }
+                    return handled;
+                }
+            }
+            if let crate::event::TouchGesture::Drag { id, phase, x, .. } = gesture
+                && _phase == Phase::Target
+                && let Some(slider) = self.view.as_any().downcast_ref::<crate::views::Slider>()
+                && let Some(render_object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::SliderRenderObject>()
+            {
+                match phase {
+                    crate::event::GesturePhase::Started => {
+                        if render_object.begin_touch_drag(*id) {
+                            sync_slider_dragging(slider, render_object, self.pipeline_id, self.id);
+                            update_slider_value(
+                                render_object,
+                                slider,
+                                self.pipeline_id,
+                                self.id,
+                                *x,
+                            );
+                            return true;
+                        }
+                    }
+                    crate::event::GesturePhase::Moved | crate::event::GesturePhase::Ended => {
+                        if render_object.active_touch_id() == Some(*id) {
+                            update_slider_value(
+                                render_object,
+                                slider,
+                                self.pipeline_id,
+                                self.id,
+                                *x,
+                            );
+                            if *phase == crate::event::GesturePhase::Ended {
+                                render_object.end_touch_drag(*id);
+                                sync_slider_dragging(
+                                    slider,
+                                    render_object,
+                                    self.pipeline_id,
+                                    self.id,
+                                );
+                            }
+                            return true;
+                        }
+                    }
+                    crate::event::GesturePhase::Cancelled => {
+                        if render_object.end_touch_drag(*id) {
+                            sync_slider_dragging(slider, render_object, self.pipeline_id, self.id);
+                            return true;
+                        }
+                    }
+                }
+            }
+            if let crate::event::TouchGesture::CancelPress { id } = gesture {
+                if let Some(button) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::ButtonRenderObject>()
+                {
+                    button.set_touch_pressed(*id, false);
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                }
+                if let Some(item) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::menu::MenuItemRenderObject>()
+                {
+                    item.set_touch_pressed(*id, false);
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                }
+                if let Some(toggle) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::ToggleRenderObject>()
+                {
+                    toggle.set_touch_pressed(*id, false);
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                }
+                if let Some(slider) = self.view.as_any().downcast_ref::<crate::views::Slider>()
+                    && let Some(render_object) = self
+                        .render_object
+                        .as_any_mut()
+                        .downcast_mut::<crate::views::SliderRenderObject>()
+                    && render_object.end_touch_drag(*id)
+                {
+                    sync_slider_dragging(slider, render_object, self.pipeline_id, self.id);
+                }
+            }
+            if self.render_object.handle_event(_event, _phase) {
+                match self.render_object.apply_scroll_offset(&mut self.children) {
+                    ScrollOffsetUpdate::NeedsPaint => {
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id)
+                    }
+                    ScrollOffsetUpdate::NeedsComposite => {
+                        crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id)
+                    }
+                    ScrollOffsetUpdate::None => {
+                        if self.render_object.update_needs_layout() {
+                            crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
+                        } else {
+                            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        }
+                    }
+                }
+                return true;
+            }
+            return false;
+        }
+
+        if let Event::Touch(change) = _event {
+            if _phase == Phase::Target {
+                let pressed = match change.phase {
+                    crate::event::TouchPhase::Down => Some(true),
+                    crate::event::TouchPhase::Up | crate::event::TouchPhase::Cancel => Some(false),
+                    crate::event::TouchPhase::Move => None,
+                };
+                if let Some(pressed) = pressed {
+                    if let Some(button) = self
+                        .render_object
+                        .as_any_mut()
+                        .downcast_mut::<crate::views::ButtonRenderObject>()
+                    {
+                        button.set_touch_pressed(change.id, pressed);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
+                    if let Some(item) = self
+                        .render_object
+                        .as_any_mut()
+                        .downcast_mut::<crate::views::menu::MenuItemRenderObject>()
+                    {
+                        item.set_touch_pressed(change.id, pressed);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
+                    if let Some(toggle) = self
+                        .render_object
+                        .as_any_mut()
+                        .downcast_mut::<crate::views::ToggleRenderObject>()
+                    {
+                        toggle.set_touch_pressed(change.id, pressed);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
+                }
+            }
+            return self.render_object.handle_event(_event, _phase);
+        }
+
         let Event::Mouse(mouse_event) = _event else {
             return false;
         };
@@ -1264,7 +1641,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         button: MouseButton::Left,
                         ..
                     } => {
-                        if render_object.is_pressed() {
+                        if render_object.is_mouse_pressed() {
                             button.invoke_on_click();
                         }
                         render_object.set_pressed(false);
@@ -1315,7 +1692,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         button: MouseButton::Left,
                         ..
                     } => {
-                        if render_object.is_pressed() {
+                        if render_object.is_mouse_pressed() {
                             menu_item.invoke_on_click();
                         }
                         render_object.set_pressed(false);
@@ -1410,17 +1787,8 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         if crate::debug::is_enabled() {
                             crate::logln!("[RenderElement] Toggle click id={:?}", self.id);
                         }
-                        let state = toggle.get_is_on().clone();
-                        let next = !state.get();
                         render_object.set_pressed(false);
-
-                        // Keep interaction feedback synchronous. The State
-                        // notification still rebuilds declarative dependants, but
-                        // this control must not need an unrelated event before its
-                        // own RenderObject reflects the click.
-                        render_object.set_is_on(next);
-                        state.set(next);
-                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        activate_toggle(toggle, render_object, self.pipeline_id, self.id);
                         return true;
                     }
                     _ => {}
@@ -1451,24 +1819,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         y,
                         ..
                     } => {
-                        if render_object.is_expanded() {
-                            if let Some(index) = render_object.option_index_at_y(*y as f32) {
-                                let selected_state = select.selected_index().clone();
-                                if selected_state.get() != index {
-                                    selected_state.set(index);
-                                    select.invoke_on_change(index);
-                                }
-                            }
-                            select.expanded().set(false);
-                            render_object.set_expanded(false);
-                        } else if select.option_count() > 0 {
-                            select.expanded().set(true);
-                            render_object.set_expanded(true);
-                            let current = select.selected_index().get();
-                            render_object.set_hovered_index(Some(current));
-                            render_object.adjust_scroll();
-                        }
-                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        activate_select(select, render_object, *y, true, self.pipeline_id, self.id);
                         return true;
                     }
                     _ => {}
@@ -1482,7 +1833,6 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 .as_any_mut()
                 .downcast_mut::<crate::views::SliderRenderObject>()
             {
-                let dragging_state = slider.get_dragging().clone();
                 if crate::debug::is_enabled() {
                     crate::logln!(
                         "[RenderElement] Slider event id={:?}: {:?} dragging={} size=({:.1},{:.1}) pos=({:.1},{:.1})",
@@ -1495,39 +1845,6 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         self.position.y
                     );
                 }
-                fn update_slider_value(
-                    render_object: &mut crate::views::SliderRenderObject,
-                    slider: &crate::views::Slider,
-                    pipeline_id: PipelineId,
-                    id: ElementId,
-                    x: i32,
-                    commit: bool,
-                ) -> bool {
-                    let local_x = x as f32;
-                    let new_value = render_object.value_from_local_x(local_x);
-                    let state_value = slider.get_value().get();
-                    if crate::debug::is_enabled() {
-                        crate::logln!(
-                            "[RenderElement] Slider update: local_x={:.1} new_value={:.3} state={:.3}",
-                            local_x,
-                            new_value,
-                            state_value
-                        );
-                    }
-                    let mut changed = false;
-                    if (render_object.get_value() - new_value).abs() > 0.001 {
-                        render_object.set_value(new_value);
-                        crate::pipeline::mark_element_needs_paint(pipeline_id, id);
-                        changed = true;
-                    }
-                    if commit && (state_value - new_value).abs() > 0.001 {
-                        slider.get_value().set(new_value);
-                        slider.invoke_on_change(new_value);
-                        changed = true;
-                    }
-                    changed
-                }
-
                 match mouse_event {
                     MouseEvent::ButtonPressed {
                         button: MouseButton::Left,
@@ -1535,29 +1852,18 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         ..
                     } => {
                         render_object.set_dragging(true);
-                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
-                        if !dragging_state.get() {
-                            dragging_state.set(true);
-                        }
-                        update_slider_value(
-                            render_object,
-                            slider,
-                            self.pipeline_id,
-                            self.id,
-                            *x,
-                            true,
-                        );
+                        sync_slider_dragging(slider, render_object, self.pipeline_id, self.id);
+                        update_slider_value(render_object, slider, self.pipeline_id, self.id, *x);
                         return true;
                     }
                     MouseEvent::Moved { x, .. } => {
-                        if render_object.is_dragging() {
+                        if render_object.is_mouse_dragging() {
                             update_slider_value(
                                 render_object,
                                 slider,
                                 self.pipeline_id,
                                 self.id,
                                 *x,
-                                true,
                             );
                             return true;
                         }
@@ -1566,12 +1872,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         button: MouseButton::Left,
                         ..
                     } => {
-                        if render_object.is_dragging() {
+                        if render_object.is_mouse_dragging() {
                             render_object.set_dragging(false);
-                            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
-                            if dragging_state.get() {
-                                dragging_state.set(false);
-                            }
+                            sync_slider_dragging(slider, render_object, self.pipeline_id, self.id);
                             return true;
                         }
                     }
@@ -1580,20 +1883,16 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         x,
                         ..
                     } => {
-                        if render_object.is_dragging() {
+                        if render_object.is_mouse_dragging() {
                             update_slider_value(
                                 render_object,
                                 slider,
                                 self.pipeline_id,
                                 self.id,
                                 *x,
-                                true,
                             );
                             render_object.set_dragging(false);
-                            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
-                            if dragging_state.get() {
-                                dragging_state.set(false);
-                            }
+                            sync_slider_dragging(slider, render_object, self.pipeline_id, self.id);
                             return true;
                         }
                     }
@@ -1655,21 +1954,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     y,
                     ..
                 } => {
-                    if let Some(index) = render_object.index_at_point(*x as f32, *y as f32) {
-                        let selected_state = render_object.selected_index();
-                        if selected_state.get() != index {
-                            selected_state.set(index);
-                            crate::pipeline::mark_element_needs_self_paint(
-                                self.pipeline_id,
-                                self.id,
-                            );
-                            if let Some(callback) = render_object.selection_callback(index) {
-                                callback();
-                            }
-                        }
-                        return true;
-                    }
-                    return false;
+                    return activate_sidebar(render_object, *x, *y, self.pipeline_id, self.id);
                 }
                 _ => {}
             }

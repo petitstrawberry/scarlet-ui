@@ -283,6 +283,19 @@ pub(crate) fn handle_text_view_mouse(
     }
 }
 
+/// Place the caret, or select the word, after a resolved direct-touch gesture.
+pub(crate) fn handle_text_view_touch(
+    view: &TextView,
+    render_object: &mut TextViewRenderObject,
+    x: i32,
+    y: i32,
+    select_word: bool,
+) -> bool {
+    let handled = handle_primary_click(view, render_object, x, y, if select_word { 2 } else { 1 });
+    render_object.dragging = false;
+    handled
+}
+
 /// Handle focus changes for a text view.
 ///
 /// # Arguments

@@ -1,16 +1,18 @@
 # Gamepad input
 
-The SWS backend subscribes ordinary ScarletUI windows to native gamepad
-snapshots when SWS advertises `GAMEPAD_INPUT`. Standard menu navigation is
-enabled by default and follows SWS distribution configuration. Other backends
-do not yet provide physical gamepad acquisition.
+The SWS backend selects standard menu navigation for ordinary ScarletUI
+windows when SWS advertises `GAMEPAD_INPUT`. Raw snapshots are opt-in, so a
+confirm button does not arrive as both a keyboard action and gamepad event.
+Menu navigation follows SWS distribution configuration. Other backends do not
+yet provide physical gamepad acquisition.
 
 `Event::Gamepad(GamepadEvent)` routes through capture, target, and bubble to
 the focused element, falling back to the window root. Unconsumed events reach
 `Application::on_gamepad(&WindowContext, GamepadEvent)`. `GamepadButton` names
 physical positions rather than Nintendo/Xbox labels. X/Y sticks use
 −32767…32767, positive Y down; triggers use 0…32767 and hats −1…1.
-`device_id` separates gamepads, `time_ns` is monotonic nanoseconds, and `reset`
+`device_id` identifies one reader instance, including across `/dev/gamepadN`
+reconnects; `time_ns` is monotonic nanoseconds, and `reset`
 invalidates cached state. Each event is a complete snapshot rather than a
 button transition. Detect presses by comparing with the previous snapshot.
 
