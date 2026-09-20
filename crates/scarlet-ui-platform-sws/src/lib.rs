@@ -1838,7 +1838,13 @@ impl PlatformWindow for SWSPlatformWindow {
         // The runner waits through its first window, but all SWS backend
         // windows share this connection. Include every window's mailbox so a
         // frame grant routed while another window was rendering is not lost.
-        if self.conn.wait_for_window_events(timeout).is_err() {
+        // This backend drains subscriptions, not the unclaimed queue. A late
+        // event for a closed window must not keep surviving windows spinning.
+        if self
+            .conn
+            .wait_for_subscribed_window_events(timeout)
+            .is_err()
+        {
             self.mark_transport_failed();
         }
     }

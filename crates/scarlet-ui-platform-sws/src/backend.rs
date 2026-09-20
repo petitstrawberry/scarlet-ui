@@ -3,6 +3,8 @@
 use alloc::format;
 use alloc::vec::Vec;
 use core::fmt;
+#[cfg(feature = "std")]
+use std::time::Instant;
 
 use scarlet_ui_core::color::Color;
 use scarlet_ui_core::compositor::DamageRect;
@@ -92,6 +94,8 @@ struct SlotState {
     registered: Option<SgfxBufferIdentity>,
     retained: Option<SgfxCommitToken>,
     needs_full_commit: bool,
+    content_valid: bool,
+    stale_damage: Option<DamageRect>,
 }
 
 impl SlotState {
@@ -100,7 +104,17 @@ impl SlotState {
             registered: None,
             retained: None,
             needs_full_commit: true,
+            content_valid: false,
+            stale_damage: None,
         }
+    }
+
+    fn can_redraw_without_copy(&self, areas: &[DamageRect], full: DamageRect) -> bool {
+        areas.contains(&full)
+            || (self.content_valid
+                && self
+                    .stale_damage
+                    .is_none_or(|stale| areas.iter().any(|area| damage_contains(*area, stale))))
     }
 }
 
@@ -138,6 +152,8 @@ pub struct SgfxPaintBackend<S> {
     backend_kind: BackendKind,
     render_failed: bool,
     full_redraw_required: bool,
+    #[cfg(feature = "std")]
+    profiling: bool,
 }
 
 impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
@@ -202,6 +218,8 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             backend_kind,
             render_failed: false,
             full_redraw_required: false,
+            #[cfg(feature = "std")]
+            profiling: std::env::var("SCARLET_UI_PROFILE").as_deref() == Ok("1"),
         };
         backend.initialize_shared_images()?;
         Ok(backend)
@@ -335,6 +353,8 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         background: Color,
         physical_damage: Option<&[DamageRect]>,
     ) -> Result<()> {
+        #[cfg(feature = "std")]
+        let profile_started = self.profiling.then(Instant::now);
         if self.render_failed {
             return Err(Error::FrameNotPresented(RenderFailure {
                 kind: RenderFailureKind::RecoveryRequired,
@@ -354,6 +374,9 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         self.ensure_session()?;
         self.import_external_textures(paint)?;
 
+        #[cfg(feature = "std")]
+        let profile_prepared = self.profiling.then(Instant::now);
+
         let slot = self.next_slot;
         let identity = self.identity(slot)?;
         if let Some(retained) = self.slots[slot].retained {
@@ -365,17 +388,27 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                 })?;
             self.slots[slot].retained = None;
         }
-        let copy_from = if physical_damage.is_some() {
-            match self.front_slot {
-                Some(front) if front != slot => Some(front),
-                Some(_) => return Err(Error::InvalidFrame),
-                None if render_areas == [self.full_bounds()] => None,
-                None => return Err(Error::InvalidFrame),
-            }
-        } else {
-            None
-        };
+        #[cfg(feature = "std")]
+        let profile_released = self.profiling.then(Instant::now);
+        // A released image can already be current outside this frame's damage.
+        // Track changes since each slot's last commit and skip the whole-image
+        // copy when this repaint covers every stale pixel. Do not expand the
+        // repaint: the caller's paint list may cover only its supplied damage.
+        let copy_from =
+            if self.slots[slot].can_redraw_without_copy(&render_areas, self.full_bounds()) {
+                None
+            } else {
+                match self.front_slot {
+                    Some(front) if front != slot => Some(front),
+                    _ => return Err(Error::InvalidFrame),
+                }
+            };
+        // An accepted prefix may modify this image even if encoding, waiting,
+        // or publication later fails. Only a successful commit validates it.
+        self.slots[slot].content_valid = false;
 
+        #[cfg(feature = "std")]
+        let profile_encoded;
         {
             let encoder = self.encoder.as_mut().ok_or(Error::InvalidFrame)?;
             let session = self.session.as_mut().ok_or(Error::InvalidFrame)?;
@@ -420,6 +453,10 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                         reason: format!("{error}; discarded-prefix retirement: {retirement:?}"),
                     }));
                 }
+                #[cfg(feature = "std")]
+                {
+                    profile_encoded = self.profiling.then(Instant::now);
+                }
                 match executor.wait() {
                     Ok(CompletionStatus::Complete) => {}
                     result => {
@@ -451,8 +488,15 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                             reason: format!("untracked frame failed: {error}"),
                         })
                     })?;
+                #[cfg(feature = "std")]
+                {
+                    // Synchronous backends include GPU completion in encoding.
+                    profile_encoded = self.profiling.then(Instant::now);
+                }
             }
         }
+        #[cfg(feature = "std")]
+        let profile_completed = self.profiling.then(Instant::now);
 
         if self.slots[slot].registered != Some(identity) {
             let target = self
@@ -484,10 +528,44 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             })?;
         self.slots[slot].retained = Some(retained);
         self.slots[slot].needs_full_commit = false;
+        let logical_damage = render_areas.iter().copied().reduce(union_damage).unwrap();
+        for (index, state) in self.slots.iter_mut().enumerate() {
+            if index == slot {
+                state.content_valid = true;
+                state.stale_damage = None;
+            } else if state.content_valid {
+                state.stale_damage = Some(match state.stale_damage {
+                    Some(stale) => union_damage(stale, logical_damage),
+                    None => logical_damage,
+                });
+            }
+        }
         self.front_slot = Some(slot);
         self.next_slot = (slot + 1) % PRESENTATION_SLOT_COUNT;
         self.full_redraw_required = false;
         self.cleanup_retired()?;
+        #[cfg(feature = "std")]
+        if let (Some(start), Some(prepared), Some(released), Some(encoded), Some(completed)) = (
+            profile_started,
+            profile_prepared,
+            profile_released,
+            profile_encoded,
+            profile_completed,
+        ) {
+            // Opt-in wall times: encoding may include submission backpressure,
+            // and waiting includes dispatch/scheduling as well as GPU execution.
+            // Redirect stdout to a file during measurement to avoid UART cost.
+            std::println!(
+                "[UI_PROFILE] window={} prepare_us={} release_us={} encode_submit_us={} wait_us={} commit_us={} copy_previous={}",
+                self.sink.window_id(),
+                prepared.duration_since(start).as_micros(),
+                released.duration_since(prepared).as_micros(),
+                encoded.duration_since(released).as_micros(),
+                completed.duration_since(encoded).as_micros(),
+                completed.elapsed().as_micros(),
+                copy_from.is_some(),
+            );
+        }
         Ok(())
     }
 
@@ -746,6 +824,21 @@ fn clamp_damage(damage: DamageRect, width: u32, height: u32) -> Option<DamageRec
     let right = x.saturating_add(rect_width).min(width);
     let bottom = y.saturating_add(rect_height).min(height);
     (right > x && bottom > y).then_some((x, y, right - x, bottom - y))
+}
+
+fn damage_contains(outer: DamageRect, inner: DamageRect) -> bool {
+    outer.0 <= inner.0
+        && outer.1 <= inner.1
+        && outer.0.saturating_add(outer.2) >= inner.0.saturating_add(inner.2)
+        && outer.1.saturating_add(outer.3) >= inner.1.saturating_add(inner.3)
+}
+
+fn union_damage(a: DamageRect, b: DamageRect) -> DamageRect {
+    let x = a.0.min(b.0);
+    let y = a.1.min(b.1);
+    let right = a.0.saturating_add(a.2).max(b.0.saturating_add(b.2));
+    let bottom = a.1.saturating_add(a.3).max(b.1.saturating_add(b.3));
+    (x, y, right - x, bottom - y)
 }
 
 #[cfg(test)]
