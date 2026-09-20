@@ -40,10 +40,11 @@ pub use scarlet_ui_core::*;
 
 #[cfg(all(feature = "platform-sws", target_os = "scarlet"))]
 pub use scarlet_ui_platform_sws::{
-    ExternalGpuSurface, ExternalGpuSurfaceRenderObject, SWSPlatformWindow, SgfxCanvas,
-    SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject, SgfxCanvasVertex,
-    SgfxMesh, SgfxMeshHandle, SgfxTexture, SharedImageError, SwsBackend, shared_bgra8_texture,
-    shared_bgra8_texture_from_raw,
+    ChromaLocation, ExternalGpuSurface, ExternalGpuSurfaceRenderObject, SWSPlatformWindow,
+    SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
+    SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture, SharedImageError, SwsBackend,
+    YcbcrConversion, YcbcrMatrix, YcbcrRange, shared_bgra8_texture, shared_bgra8_texture_from_raw,
+    shared_nv12_texture,
 };
 #[cfg(all(feature = "platform-winit", not(target_os = "scarlet")))]
 pub use scarlet_ui_platform_winit::{

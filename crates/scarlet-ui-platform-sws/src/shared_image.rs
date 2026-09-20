@@ -9,6 +9,7 @@ use sgfx::Handle;
 
 pub(crate) struct SharedImageSource {
     handle: Handle,
+    pub(crate) conversion: Option<sgfx::ir::YcbcrConversion>,
 }
 
 impl SharedImageSource {
@@ -58,7 +59,10 @@ pub fn shared_bgra8_texture(
         return Err(SharedImageError::InvalidExtent);
     }
 
-    let source = Arc::new(SharedImageSource { handle });
+    let source = Arc::new(SharedImageSource {
+        handle,
+        conversion: None,
+    });
     let payload: Arc<dyn PaintExtension> = source;
     Ok(SgfxTexture::external_bgra8(width, height, payload))
 }
@@ -81,3 +85,22 @@ pub unsafe fn shared_bgra8_texture_from_raw(
     let handle = unsafe { Handle::from_raw(raw) }.map_err(|_| SharedImageError::InvalidHandle)?;
     shared_bgra8_texture(handle, width, height)
 }
+
+/// Adopt a ready immutable shared NV12 image. Each frame owns its lease; the
+/// renderer releases it after GPU sampling completes. No CPU image copy occurs.
+pub fn shared_nv12_texture(
+    handle: Handle,
+    width: u32,
+    height: u32,
+    conversion: sgfx::ir::YcbcrConversion,
+) -> core::result::Result<Arc<SgfxTexture>, SharedImageError> {
+    if width == 0 || height == 0 {
+        return Err(SharedImageError::InvalidExtent);
+    }
+    let payload: Arc<dyn PaintExtension> = Arc::new(SharedImageSource {
+        handle,
+        conversion: Some(conversion),
+    });
+    Ok(SgfxTexture::external_nv12(width, height, payload))
+}
+pub use sgfx::ir::{ChromaLocation, YcbcrConversion, YcbcrMatrix, YcbcrRange};

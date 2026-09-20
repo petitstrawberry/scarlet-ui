@@ -22,3 +22,7 @@ target
 
 # direnv
 .direnv/
+
+# Local OS state and validation artifacts
+.DS_Store
+/.omo/

@@ -45,7 +45,10 @@ pub use scarlet_ui_renderer_sgfx::{
     SgfxMeshHandle, SgfxTexture,
 };
 use sgfx::ImageRef;
-pub use shared_image::{SharedImageError, shared_bgra8_texture, shared_bgra8_texture_from_raw};
+pub use shared_image::{
+    ChromaLocation, SharedImageError, YcbcrConversion, YcbcrMatrix, YcbcrRange,
+    shared_bgra8_texture, shared_bgra8_texture_from_raw, shared_nv12_texture,
+};
 pub use sink::{
     SgfxBufferIdentity, SgfxCommitToken, SgfxFrameSink, SgfxSinkError, SgfxSinkResult,
     SgfxSinkStatus,
