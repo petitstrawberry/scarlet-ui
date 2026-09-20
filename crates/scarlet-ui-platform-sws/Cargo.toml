@@ -26,10 +26,10 @@ scarlet-ui-core = { path = "../scarlet-ui-core", default-features = false }
 scarlet-ui-renderer-sgfx = { path = "../scarlet-ui-renderer-sgfx", default-features = false }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
-scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", rev = "af2bb5e8d062fef5558f106bc55c21c1f512b7f4", package = "scarlet-std", optional = true }
-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "d53d9b0062e18a7219fc04138cb9655cc9148e27", package = "sgfx", default-features = false, features = ["backend-scarlet-virgl", "backend-scarlet-adreno", "backend-scarlet-maxwell"] }
-sws-client = { git = "https://github.com/petitstrawberry/Scarlet", rev = "af2bb5e8d062fef5558f106bc55c21c1f512b7f4", package = "sws-client", default-features = false }
-sws-protocol = { git = "https://github.com/petitstrawberry/Scarlet", rev = "af2bb5e8d062fef5558f106bc55c21c1f512b7f4", package = "sws-protocol", default-features = false }
+scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", rev = "4ea47edf7e37f50f3c286e2fe51c784f6d282cfe", package = "scarlet-std", optional = true }
+sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "ddf00563c617a30bbf64fa5dbe8152c852d493f9", package = "sgfx", default-features = false, features = ["backend-scarlet-virgl", "backend-scarlet-adreno", "backend-scarlet-maxwell"] }
+sws-client = { git = "https://github.com/petitstrawberry/Scarlet", rev = "4ea47edf7e37f50f3c286e2fe51c784f6d282cfe", package = "sws-client", default-features = false }
+sws-protocol = { git = "https://github.com/petitstrawberry/Scarlet", rev = "4ea47edf7e37f50f3c286e2fe51c784f6d282cfe", package = "sws-protocol", default-features = false }
 
 [lib]
 name = "scarlet_ui_platform_sws"
