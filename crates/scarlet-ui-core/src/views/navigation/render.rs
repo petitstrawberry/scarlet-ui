@@ -514,9 +514,9 @@ impl NavigationSidebarRenderObject {
             } else {
                 palette.text()
             };
+            let (text_width, text_height) =
+                graphics::measure_text_sized(&self.labels[index], self.font_size);
             let bottom_content = is_bottom_bar.then(|| {
-                let (text_width, _) =
-                    graphics::measure_text_sized(&self.labels[index], self.font_size);
                 bottom_bar_content_geometry(
                     Rect::from_xywh(origin.x + x, origin.y + y, item_width, item_height),
                     self.shows_icons && self.icons.get(index).is_some_and(Option::is_some),
@@ -568,7 +568,7 @@ impl NavigationSidebarRenderObject {
             let text_y = if let Some(content) = bottom_content {
                 content.text_origin.y
             } else {
-                origin.y + y + (self.item_height - self.font_size * TEXT_LINE_HEIGHT_FACTOR) / 2.0
+                origin.y + y + (self.item_height - text_height as f32) * 0.5
             };
             ctx.draw_text(
                 Point::new(text_x, text_y),
@@ -732,7 +732,7 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
                     } else {
                         palette.text()
                     };
-                    let (text_width, _) =
+                    let (text_width, text_height) =
                         graphics::measure_text_sized(&self.labels[index], self.font_size);
                     let bottom_content = is_bottom_bar.then(|| {
                         bottom_bar_content_geometry(
@@ -747,9 +747,7 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
                         || {
                             Point::new(
                                 self.item_padding + 8.0,
-                                item_y
-                                    + (self.item_height - self.font_size * TEXT_LINE_HEIGHT_FACTOR)
-                                        / 2.0,
+                                item_y + (self.item_height - text_height as f32) * 0.5,
                             )
                         },
                         |content| content.text_origin,

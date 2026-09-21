@@ -184,7 +184,20 @@ fn register_scarlet_generic_families(collection: &mut Collection) {
         GenericFamily::Emoji,
         GenericFamily::Math,
     ] {
-        collection.append_generic_families(generic, family_ids.iter().copied());
+        // Preserve Scarlet's UI font even when discovery finds a monospace face first.
+        let preferred = match generic {
+            GenericFamily::SystemUi | GenericFamily::SansSerif => collection.family_id("M PLUS 1"),
+            _ => None,
+        };
+        collection.append_generic_families(
+            generic,
+            preferred.into_iter().chain(
+                family_ids
+                    .iter()
+                    .copied()
+                    .filter(|family| Some(*family) != preferred),
+            ),
+        );
     }
 }
 
