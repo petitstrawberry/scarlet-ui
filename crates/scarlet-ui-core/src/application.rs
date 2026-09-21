@@ -435,6 +435,7 @@ impl ApplicationRunner {
             frame_request_outstanding: frame_pacing_enabled,
             suspended: false,
             retry_render: false,
+            animation_tick: Instant::now(),
             _app: PhantomData,
         })
     }
@@ -519,6 +520,22 @@ impl ApplicationRunner {
             for slot in slots.iter_mut() {
                 sync_application_window(app, slot);
                 sync_text_input(slot.window.as_mut(), &slot.pipeline);
+                let elapsed = slot.animation_tick.elapsed();
+                slot.animation_tick = Instant::now();
+                if !slot.suspended && slot.pipeline.has_active_animation() {
+                    // Legacy no-std builds have no Instant; their render loop is
+                    // already paced by frame grants or the fallback timer.
+                    let elapsed = if elapsed.is_zero() && cfg!(not(feature = "std")) {
+                        if slot.frame_ready {
+                            PRESENT_INTERVAL
+                        } else {
+                            Duration::ZERO
+                        }
+                    } else {
+                        elapsed
+                    };
+                    slot.pipeline.advance_animations(elapsed);
+                }
                 let frame_granted = !slot.frame_pacing_enabled || slot.frame_ready;
                 if (slot.pipeline.has_dirty() || slot.retry_render)
                     && !slot.presented_this_cycle
@@ -639,6 +656,7 @@ struct WindowSlot<A: Application> {
     frame_request_outstanding: bool,
     suspended: bool,
     retry_render: bool,
+    animation_tick: Instant,
     _app: PhantomData<A>,
 }
 
@@ -897,6 +915,9 @@ fn handle_window_event<A: Application>(
         Event::WindowSuspendedChanged { suspended } => {
             if slot.suspended != suspended {
                 slot.suspended = suspended;
+                if suspended {
+                    slot.pipeline.cancel_animations();
+                }
                 if !suspended {
                     slot.pipeline.request_redraw();
                 }

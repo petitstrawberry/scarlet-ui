@@ -1107,25 +1107,69 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
             || (scaled_y.abs() > 0.01 && self.max_offset_y() > 0.0)
     }
 
+    fn accepts_touch_scroll(&self) -> bool {
+        (self.axes.allows_x() && self.max_offset_x() > 0.0)
+            || (self.axes.allows_y() && self.max_offset_y() > 0.0)
+    }
+
     fn handle_event(&mut self, event: &Event, phase: Phase) -> bool {
         if !matches!(phase, Phase::Target | Phase::Bubble) {
             return false;
         }
 
-        let Event::Mouse(MouseEvent::Wheel {
-            delta_x,
-            delta_y,
-            phase: wheel_phase,
-            ..
-        }) = event
-        else {
-            return false;
+        let (delta_x, delta_y, gesture_active, direct_touch, momentum_start) = match event {
+            Event::Mouse(MouseEvent::Wheel {
+                delta_x,
+                delta_y,
+                phase,
+                ..
+            }) => (
+                *delta_x,
+                *delta_y,
+                matches!(phase, WheelPhase::Started | WheelPhase::Moved),
+                false,
+                false,
+            ),
+            Event::TouchGesture(crate::event::TouchGesture::Scroll {
+                delta_x,
+                delta_y,
+                phase,
+                ..
+            }) => (
+                *delta_x,
+                *delta_y,
+                matches!(
+                    phase,
+                    crate::event::GesturePhase::Started | crate::event::GesturePhase::Moved
+                ),
+                true,
+                false,
+            ),
+            Event::TouchGesture(crate::event::TouchGesture::ScrollMomentum {
+                delta_x,
+                delta_y,
+                phase,
+                ..
+            }) => (
+                *delta_x,
+                *delta_y,
+                matches!(
+                    phase,
+                    crate::event::GesturePhase::Started | crate::event::GesturePhase::Moved
+                ),
+                true,
+                matches!(phase, crate::event::GesturePhase::Started),
+            ),
+            _ => return false,
         };
 
         let old_scrollbar_active = self.scrollbar_active;
-        let gesture_active = matches!(wheel_phase, WheelPhase::Started | WheelPhase::Moved);
 
-        let (scaled_x, scaled_y) = self.normalized_wheel_delta(*delta_x, *delta_y);
+        let (scaled_x, scaled_y) = if direct_touch {
+            (delta_x as f32, delta_y as f32)
+        } else {
+            self.normalized_wheel_delta(delta_x, delta_y)
+        };
         let scrollable = (self.axes.allows_x() && self.max_offset_x() > 0.0)
             || (self.axes.allows_y() && self.max_offset_y() > 0.0);
         self.scrollbar_active = gesture_active && scrollable;
@@ -1145,7 +1189,9 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
             self.selection_scroll_pending = false;
         }
         let scrollbar_deactivated = old_scrollbar_active && !self.scrollbar_active;
-        offset_changed || scrollbar_deactivated
+        offset_changed
+            || scrollbar_deactivated
+            || (momentum_start && !old_scrollbar_active && self.scrollbar_active)
     }
 
     fn paint_overlay(&self, ctx: &mut PaintContext<'_>, origin: Point) -> bool {

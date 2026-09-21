@@ -240,7 +240,7 @@ pub struct MenuItemRenderObject {
     hover_background_color: Option<Color>,
     active_background_color: Option<Color>,
     hovered: bool,
-    pressed: bool,
+    pressed: crate::views::press::PressSources,
     size: Size,
     buffer: Option<Buffer>,
 }
@@ -259,7 +259,7 @@ impl MenuItemRenderObject {
             hover_background_color: None,
             active_background_color: None,
             hovered: false,
-            pressed: false,
+            pressed: crate::views::press::PressSources::default(),
             size: Size::ZERO,
             buffer: None,
         }
@@ -313,7 +313,11 @@ impl MenuItemRenderObject {
     }
 
     pub fn set_pressed(&mut self, pressed: bool) {
-        self.pressed = pressed;
+        self.pressed.set_mouse(pressed);
+    }
+
+    pub fn set_touch_pressed(&mut self, id: u64, pressed: bool) {
+        self.pressed.set_touch(id, pressed);
     }
 
     pub fn set_selected(&mut self, selected: bool) {
@@ -321,7 +325,11 @@ impl MenuItemRenderObject {
     }
 
     pub fn is_pressed(&self) -> bool {
-        self.pressed
+        self.pressed.is_pressed()
+    }
+
+    pub fn is_mouse_pressed(&self) -> bool {
+        self.pressed.is_mouse_pressed()
     }
 
     pub fn is_hovered(&self) -> bool {
@@ -330,7 +338,7 @@ impl MenuItemRenderObject {
 
     fn current_background(&self) -> Color {
         let palette = ColorPalette::default();
-        if self.pressed || self.selected {
+        if self.pressed.is_pressed() || self.selected {
             self.active_background_color
                 .unwrap_or_else(|| palette.menu_active())
         } else if self.hovered {
@@ -454,7 +462,7 @@ impl ElementRenderObject for MenuItemRenderObject {
             canvas.fill_rect(0, 0, width, height, Color::TRANSPARENT);
 
             // Fill background (only if hovered or pressed)
-            if self.hovered || self.pressed || self.selected {
+            if self.hovered || self.pressed.is_pressed() || self.selected {
                 canvas.fill_rect(0, 0, width, height, background);
             }
 
@@ -482,7 +490,7 @@ impl ElementRenderObject for MenuItemRenderObject {
             .foreground_color
             .unwrap_or_else(|| palette.text_primary());
 
-        if self.hovered || self.pressed || self.selected {
+        if self.hovered || self.pressed.is_pressed() || self.selected {
             style::item_highlight(
                 ctx,
                 Rect::from_xywh(

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/scarlet-scroll-motion",
     "crates/scarlet-ui",
     "crates/scarlet-ui-core",
     "crates/scarlet-ui-macros",

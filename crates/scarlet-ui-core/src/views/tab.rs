@@ -7,7 +7,7 @@ use crate::color::{Color, ColorPalette};
 use crate::element::{
     ComponentElement, Element, ElementRenderObject, LayoutConstraints, RenderElement,
 };
-use crate::event::{Event, MouseButton, MouseEvent, Phase};
+use crate::event::{Event, MouseButton, MouseEvent, Phase, TouchGesture, TouchPhase};
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 use crate::input_environment::InteractionMode;
@@ -373,6 +373,7 @@ pub struct TabViewRenderObject {
     selected_index: State<usize>,
     hovered_index: Option<usize>,
     pressed_index: Option<usize>,
+    touch_pressed: Option<(u64, usize)>,
     tab_bar_height: f32,
     tab_bar_placement: TabBarPlacement,
     tab_bar_position: TabBarPosition,
@@ -481,6 +482,7 @@ impl TabViewRenderObject {
             selected_index,
             hovered_index: None,
             pressed_index: None,
+            touch_pressed: None,
             tab_bar_height,
             tab_bar_placement,
             tab_bar_position: tab_bar_placement.resolve(InteractionMode::Pointer),
@@ -511,7 +513,9 @@ impl TabViewRenderObject {
     ///
     /// Pressed index if a tab is currently held down.
     pub fn pressed_index(&self) -> Option<usize> {
-        self.pressed_index
+        self.touch_pressed
+            .map(|(_, index)| index)
+            .or(self.pressed_index)
     }
 
     /// Return the concrete tab-bar position from the latest layout.
@@ -604,6 +608,53 @@ impl ElementRenderObject for TabViewRenderObject {
             return false;
         }
 
+        match event {
+            Event::Touch(change) if phase == Phase::Target => {
+                return match change.phase {
+                    TouchPhase::Down => {
+                        let pressed =
+                            self.tab_index_at(Point::new(change.x as f32, change.y as f32));
+                        let next = pressed.map(|index| (change.id, index));
+                        if self.touch_pressed.is_none() {
+                            self.touch_pressed = next;
+                            next.is_some()
+                        } else {
+                            false
+                        }
+                    }
+                    TouchPhase::Up | TouchPhase::Cancel => {
+                        if self.touch_pressed.is_some_and(|(id, _)| id == change.id) {
+                            self.touch_pressed = None;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    TouchPhase::Move => false,
+                };
+            }
+            Event::TouchGesture(TouchGesture::CancelPress { id }) => {
+                if self
+                    .touch_pressed
+                    .is_some_and(|(pressed_id, _)| pressed_id == *id)
+                {
+                    self.touch_pressed = None;
+                    return true;
+                }
+                return false;
+            }
+            Event::TouchGesture(TouchGesture::Tap { x, y, .. }) => {
+                if let Some(index) = self.tab_index_at(Point::new(*x as f32, *y as f32)) {
+                    if self.selected_index.get() != index {
+                        self.selected_index.set(index);
+                    }
+                    return true;
+                }
+                return false;
+            }
+            _ => {}
+        }
+
         let Event::Mouse(mouse_event) = event else {
             return false;
         };
@@ -672,7 +723,7 @@ impl ElementRenderObject for TabViewRenderObject {
                 rect.size.width,
                 rect.size.height,
             );
-            if self.pressed_index == Some(index) {
+            if self.pressed_index() == Some(index) {
                 ctx.fill_rect(rect, self.hover_color);
             } else if index == selected {
                 ctx.fill_rect(rect, self.selected_color);
@@ -764,6 +815,9 @@ impl ElementRenderObject for TabViewRenderObject {
         self.pressed_index = self
             .pressed_index
             .filter(|index| *index < self.labels.len());
+        self.touch_pressed = self
+            .touch_pressed
+            .filter(|(_, index)| *index < self.labels.len());
         crate::element::UpdateResult::Updated
     }
 
@@ -877,6 +931,59 @@ mod tests {
                 x: 80,
                 y: 12,
                 click_count: 1,
+            }),
+            Phase::Target,
+        ));
+        assert_eq!(selected.get(), 1);
+    }
+
+    #[test]
+    fn touch_tab_selection_commits_on_tap_and_cancels_pressed_feedback() {
+        let selected = State::initial(crate::state::generate_state_id());
+        let palette = ColorPalette::default();
+        let mut tabs = TabViewRenderObject::new(
+            vec![String::from("Mixer"), String::from("Editor")],
+            selected.clone(),
+            30.0,
+            12.0,
+            13.0,
+            palette.background_secondary(),
+            palette.surface(),
+            palette.menu_hover(),
+            palette.border(),
+            palette.text_secondary(),
+            palette.text(),
+        );
+        tabs.layout(LayoutConstraints::tight(300.0, 180.0));
+        let touch = |phase| {
+            Event::Touch(crate::event::TouchChange {
+                seat_id: 0,
+                serial: 1,
+                time_ns: 1,
+                id: 1,
+                phase,
+                x: 80,
+                y: 12,
+                pressure: None,
+                touch_major: None,
+            })
+        };
+        tabs.handle_event(&touch(TouchPhase::Down), Phase::Target);
+        assert_eq!(tabs.pressed_index(), Some(1));
+        tabs.handle_event(
+            &Event::TouchGesture(TouchGesture::CancelPress { id: 1 }),
+            Phase::Target,
+        );
+        assert_eq!(tabs.pressed_index(), None);
+        assert_eq!(selected.get(), 0);
+        tabs.handle_event(&touch(TouchPhase::Down), Phase::Target);
+        tabs.handle_event(&touch(TouchPhase::Up), Phase::Target);
+        assert_eq!(selected.get(), 0);
+        assert!(tabs.handle_event(
+            &Event::TouchGesture(TouchGesture::Tap {
+                id: 1,
+                x: 80,
+                y: 12,
             }),
             Phase::Target,
         ));

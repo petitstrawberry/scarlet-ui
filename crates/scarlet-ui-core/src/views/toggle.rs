@@ -56,7 +56,7 @@ impl View for Toggle {
 pub struct ToggleRenderObject {
     is_on: bool,
     hovered: bool,
-    pressed: bool,
+    pressed: crate::views::press::PressSources,
     size: Size,
     buffer: Option<Buffer>,
 }
@@ -68,7 +68,7 @@ impl ToggleRenderObject {
         } else {
             style::surface_color(palette, SurfaceRole::Section)
         };
-        let track = if self.pressed {
+        let track = if self.pressed.is_pressed() {
             base_track.darken(0.035)
         } else if self.hovered {
             base_track.lighten(0.018)
@@ -219,7 +219,7 @@ impl ToggleRenderObject {
         Self {
             is_on,
             hovered: false,
-            pressed: false,
+            pressed: crate::views::press::PressSources::default(),
             size: Size::new(metrics.toggle_width, metrics.toggle_height),
             buffer: None,
         }
@@ -240,7 +240,11 @@ impl ToggleRenderObject {
     }
 
     pub fn set_pressed(&mut self, pressed: bool) {
-        self.pressed = pressed;
+        self.pressed.set_mouse(pressed);
+    }
+
+    pub fn set_touch_pressed(&mut self, id: u64, pressed: bool) {
+        self.pressed.set_touch(id, pressed);
     }
 
     /// Draw toggle using Canvas API.

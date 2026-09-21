@@ -1151,6 +1151,7 @@ pub struct WindowRenderElement<C: View + Clone + WindowViewInfo> {
     pending_window_action: Option<crate::event::WindowEvent>,
     // Track which button is currently pressed (0=none, 1=close, 2=maximize, 3=minimize, 4=titlebar)
     pressed_button: u8,
+    touch_pressed_button: Option<(u64, u8, i32, i32)>,
     // Track last mouse position to detect changes
     last_mouse_x: i32,
     last_mouse_y: i32,
@@ -1176,6 +1177,7 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
             position: Point::ZERO,
             pending_window_action: None,
             pressed_button: 0,
+            touch_pressed_button: None,
             last_mouse_x: -1,
             last_mouse_y: -1,
             last_mouse_pressed: false,
@@ -1235,8 +1237,161 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
         mouse_y: i32,
         mouse_pressed: bool,
     ) -> bool {
+        let (mouse_x, mouse_y, mouse_pressed) = self
+            .touch_pressed_button
+            .map(|(_, _, x, y)| (x, y, true))
+            .unwrap_or((mouse_x, mouse_y, mouse_pressed));
         self.titlebar_render_object_mut()
             .is_some_and(|titlebar| titlebar.update_button_states(mouse_x, mouse_y, mouse_pressed))
+    }
+
+    fn titlebar_button_at(&self, x: i32, y: i32) -> Option<u8> {
+        if y < 0 || y >= titlebar_height() as i32 {
+            return None;
+        }
+        let width = self.render_object.window_geometry_size().width as u32;
+        let point = Point::new(x as f32, y as f32);
+        [
+            self.render_object.close_button_rect(width),
+            self.render_object.maximize_button_rect(width),
+            self.render_object.minimize_button_rect(width),
+        ]
+        .iter()
+        .position(|rect| rect.contains(point))
+        .map(|index| index as u8 + 1)
+    }
+
+    fn activate_titlebar_button(&mut self, button: u8) {
+        self.pending_window_action = match button {
+            1 => Some(crate::event::WindowEvent::CloseRequested),
+            2 => {
+                let action = if self.maximized {
+                    crate::event::WindowEvent::RestoreRequested
+                } else {
+                    crate::event::WindowEvent::MaximizeRequested
+                };
+                self.maximized = !self.maximized;
+                Some(action)
+            }
+            3 => Some(crate::event::WindowEvent::MinimizeRequested),
+            _ => None,
+        };
+    }
+
+    fn clear_touch_titlebar_press(&mut self) {
+        self.touch_pressed_button = None;
+        if self.update_titlebar_button_states(
+            self.last_mouse_x,
+            self.last_mouse_y,
+            self.last_mouse_pressed,
+        ) {
+            self.mark_titlebar_needs_paint();
+        }
+    }
+
+    fn handle_touch_titlebar_event(
+        &mut self,
+        event: &crate::event::Event,
+        phase: crate::event::Phase,
+    ) -> Option<bool> {
+        if !matches!(
+            phase,
+            crate::event::Phase::Target | crate::event::Phase::Capture
+        ) || !self.render_object.decoration.title_bar.is_custom()
+        {
+            return None;
+        }
+        match event {
+            crate::event::Event::Touch(change) => {
+                let (x, y) = self.managed_event_position(change.x, change.y);
+                match change.phase {
+                    crate::event::TouchPhase::Down if self.touch_pressed_button.is_none() => {
+                        let Some(button) = self.titlebar_button_at(x, y) else {
+                            return None;
+                        };
+                        self.touch_pressed_button = Some((change.id, button, x, y));
+                        if self.update_titlebar_button_states(x, y, true) {
+                            self.mark_titlebar_needs_paint();
+                        }
+                        Some(true)
+                    }
+                    crate::event::TouchPhase::Move | crate::event::TouchPhase::Up => {
+                        let Some((id, button, _, _)) = self.touch_pressed_button else {
+                            return None;
+                        };
+                        if id != change.id {
+                            return None;
+                        }
+                        self.touch_pressed_button = Some((id, button, x, y));
+                        if self.update_titlebar_button_states(x, y, true) {
+                            self.mark_titlebar_needs_paint();
+                        }
+                        Some(true)
+                    }
+                    crate::event::TouchPhase::Cancel => {
+                        if self
+                            .touch_pressed_button
+                            .is_some_and(|(id, ..)| id == change.id)
+                        {
+                            self.clear_touch_titlebar_press();
+                            Some(true)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            crate::event::Event::TouchGesture(crate::event::TouchGesture::Tap { id, x, y }) => {
+                let Some((pressed_id, button, _, _)) = self.touch_pressed_button else {
+                    return None;
+                };
+                if pressed_id != *id {
+                    return None;
+                }
+                let (x, y) = self.managed_event_position(*x, *y);
+                if self.titlebar_button_at(x, y) == Some(button) {
+                    self.activate_titlebar_button(button);
+                }
+                self.clear_touch_titlebar_press();
+                Some(true)
+            }
+            crate::event::Event::TouchGesture(
+                crate::event::TouchGesture::CancelPress { id }
+                | crate::event::TouchGesture::LongPress { id, .. },
+            ) => {
+                if self
+                    .touch_pressed_button
+                    .is_some_and(|(pressed_id, ..)| pressed_id == *id)
+                {
+                    self.clear_touch_titlebar_press();
+                    Some(true)
+                } else {
+                    None
+                }
+            }
+            crate::event::Event::TouchGesture(crate::event::TouchGesture::Drag {
+                phase: crate::event::GesturePhase::Started,
+                x,
+                y,
+                delta_x,
+                delta_y,
+                ..
+            }) => {
+                let (start_x, start_y) = self
+                    .managed_event_position(x.saturating_sub(*delta_x), y.saturating_sub(*delta_y));
+                if start_y >= 0
+                    && start_y < titlebar_height() as i32
+                    && self.titlebar_button_at(start_x, start_y).is_none()
+                {
+                    self.pending_window_action = Some(crate::event::WindowEvent::MoveRequested);
+                    Some(true)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     fn mark_titlebar_needs_paint(&self) {
@@ -1394,6 +1549,9 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
     }
 
     fn handle_event(&mut self, event: &crate::event::Event, phase: crate::event::Phase) -> bool {
+        if let Some(handled) = self.handle_touch_titlebar_event(event, phase) {
+            return handled;
+        }
         if !matches!(event, crate::event::Event::Mouse(_)) {
             for child in self.children.iter_mut() {
                 if child.handle_event(event, phase) {
@@ -1446,30 +1604,12 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                 let (local_x, local_y) = self.managed_event_position(*x, *y);
 
                 // Check if click is in titlebar
-                let width = self.render_object.window_geometry_size().width as u32;
                 let titlebar_height = titlebar_height() as i32;
 
                 if local_y >= 0 && local_y < titlebar_height {
                     // Determine which button was pressed
-                    let close_rect = self.render_object.close_button_rect(width);
-                    let maximize_rect = self.render_object.maximize_button_rect(width);
-                    let minimize_rect = self.render_object.minimize_button_rect(width);
-
-                    if close_rect.contains(crate::geometry::Point {
-                        x: local_x as f32,
-                        y: local_y as f32,
-                    }) {
-                        self.pressed_button = 1; // close
-                    } else if maximize_rect.contains(crate::geometry::Point {
-                        x: local_x as f32,
-                        y: local_y as f32,
-                    }) {
-                        self.pressed_button = 2; // maximize
-                    } else if minimize_rect.contains(crate::geometry::Point {
-                        x: local_x as f32,
-                        y: local_y as f32,
-                    }) {
-                        self.pressed_button = 3; // minimize
+                    if let Some(button) = self.titlebar_button_at(local_x, local_y) {
+                        self.pressed_button = button;
                     } else {
                         // Clicked on titlebar (not buttons) - request interactive move immediately
                         self.pressed_button = 0;
@@ -1505,52 +1645,8 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
                 // Only handle if we had a button pressed
                 if self.pressed_button != 0 {
                     let (local_x, local_y) = self.managed_event_position(*x, *y);
-
-                    // Check which button we're releasing on
-                    let width = self.render_object.window_geometry_size().width as u32;
-                    let titlebar_height = titlebar_height() as i32;
-
-                    if local_y >= 0 && local_y < titlebar_height {
-                        let close_rect = self.render_object.close_button_rect(width);
-                        let maximize_rect = self.render_object.maximize_button_rect(width);
-                        let minimize_rect = self.render_object.minimize_button_rect(width);
-
-                        let released_on_close = close_rect.contains(crate::geometry::Point {
-                            x: local_x as f32,
-                            y: local_y as f32,
-                        });
-                        let released_on_maximize = maximize_rect.contains(crate::geometry::Point {
-                            x: local_x as f32,
-                            y: local_y as f32,
-                        });
-                        let released_on_minimize = minimize_rect.contains(crate::geometry::Point {
-                            x: local_x as f32,
-                            y: local_y as f32,
-                        });
-
-                        // Only trigger action if released on the same button that was pressed
-                        match self.pressed_button {
-                            1 if released_on_close => {
-                                self.pending_window_action =
-                                    Some(crate::event::WindowEvent::CloseRequested);
-                            }
-                            2 if released_on_maximize => {
-                                // Toggle maximize/restore
-                                if self.maximized {
-                                    self.pending_window_action =
-                                        Some(crate::event::WindowEvent::RestoreRequested);
-                                } else {
-                                    self.pending_window_action =
-                                        Some(crate::event::WindowEvent::MaximizeRequested);
-                                }
-                                self.maximized = !self.maximized;
-                            }
-                            3 if released_on_minimize => {
-                                self.pending_window_action =
-                                    Some(crate::event::WindowEvent::MinimizeRequested);
-                            }
-                            _ => {}
-                        }
+                    if self.titlebar_button_at(local_x, local_y) == Some(self.pressed_button) {
+                        self.activate_titlebar_button(self.pressed_button);
                     }
 
                     // Reset pressed state
@@ -2354,6 +2450,9 @@ impl ElementRenderObject for WindowRenderObject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{
+        Event, GesturePhase, Phase, TouchChange, TouchGesture, TouchPhase, WindowEvent,
+    };
     use crate::input_environment::{InputEnvironment, install_test_input_environment};
     use crate::views::Text;
 
@@ -2497,6 +2596,89 @@ mod tests {
         assert_eq!(touch_offset, desktop_offset);
         assert_eq!(touch_title_top, desktop_title_top);
         assert_eq!(touch_control, desktop_control);
+    }
+
+    #[test]
+    fn titlebar_touch_tap_activates_only_the_button_pressed() {
+        let window = Window::new("Touch", Text::new("Content"))
+            .size(Size::new(400.0, 300.0))
+            .shadow(false);
+        let mut element = window.create_element();
+        element.layout(LayoutConstraints::tight(400.0, 300.0));
+        let close = element
+            .render_object()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<WindowRenderObject>()
+            .unwrap()
+            .close_button_rect(400);
+        let x = (close.origin.x + close.size.width / 2.0) as i32;
+        let y = (close.origin.y + close.size.height / 2.0) as i32;
+        let change = TouchChange {
+            seat_id: 1,
+            serial: 1,
+            time_ns: 1,
+            id: 9,
+            phase: TouchPhase::Down,
+            x,
+            y,
+            pressure: None,
+            touch_major: None,
+        };
+
+        assert!(element.handle_event(&Event::Touch(change), Phase::Capture));
+        assert!(element.handle_event(
+            &Event::Touch(TouchChange {
+                phase: TouchPhase::Up,
+                ..change
+            }),
+            Phase::Capture,
+        ));
+        assert_eq!(element.take_window_action(), None);
+        assert!(element.handle_event(
+            &Event::TouchGesture(TouchGesture::Tap { id: 9, x, y }),
+            Phase::Capture,
+        ));
+        assert_eq!(
+            element.take_window_action(),
+            Some(WindowEvent::CloseRequested)
+        );
+
+        assert!(element.handle_event(&Event::Touch(change), Phase::Capture));
+        assert!(element.handle_event(
+            &Event::TouchGesture(TouchGesture::CancelPress { id: 9 }),
+            Phase::Capture,
+        ));
+        assert!(!element.handle_event(
+            &Event::TouchGesture(TouchGesture::Tap { id: 9, x, y }),
+            Phase::Capture,
+        ));
+        assert_eq!(element.take_window_action(), None);
+    }
+
+    #[test]
+    fn dragging_the_titlebar_by_touch_requests_a_window_move() {
+        let window = Window::new("Touch", Text::new("Content"))
+            .size(Size::new(400.0, 300.0))
+            .shadow(false);
+        let mut element = window.create_element();
+        element.layout(LayoutConstraints::tight(400.0, 300.0));
+
+        assert!(element.handle_event(
+            &Event::TouchGesture(TouchGesture::Drag {
+                id: 7,
+                phase: GesturePhase::Started,
+                x: 150,
+                y: 16,
+                delta_x: 30,
+                delta_y: 0,
+            }),
+            Phase::Capture,
+        ));
+        assert_eq!(
+            element.take_window_action(),
+            Some(WindowEvent::MoveRequested)
+        );
     }
 
     #[test]

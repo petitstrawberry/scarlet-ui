@@ -1868,6 +1868,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-scroll-motion"
+version = "0.1.0"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "scarlet-std"
 version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?rev=4ea47edf7e37f50f3c286e2fe51c784f6d282cfe#4ea47edf7e37f50f3c286e2fe51c784f6d282cfe"
@@ -1914,6 +1921,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "raw-window-handle",
+ "scarlet-scroll-motion",
  "scarlet-std",
  "scarlet-ui-icons-tabler",
  "scarlet-ui-macros",

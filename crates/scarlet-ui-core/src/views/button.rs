@@ -355,7 +355,7 @@ pub struct ButtonRenderObject {
     padding: f32,
     appearance: ButtonAppearance,
     hovered: bool,
-    pressed: bool,
+    pressed: crate::views::press::PressSources,
     size: Size,
     buffer: Option<Buffer>,
 }
@@ -404,7 +404,7 @@ impl ButtonRenderObject {
             padding,
             appearance: ButtonAppearance::Raised,
             hovered: false,
-            pressed: false,
+            pressed: crate::views::press::PressSources::default(),
             size: Size::ZERO,
             buffer: None,
         }
@@ -442,11 +442,19 @@ impl ButtonRenderObject {
     }
 
     pub fn set_pressed(&mut self, pressed: bool) {
-        self.pressed = pressed;
+        self.pressed.set_mouse(pressed);
+    }
+
+    pub fn set_touch_pressed(&mut self, id: u64, pressed: bool) {
+        self.pressed.set_touch(id, pressed);
     }
 
     pub fn is_pressed(&self) -> bool {
-        self.pressed
+        self.pressed.is_pressed()
+    }
+
+    pub fn is_mouse_pressed(&self) -> bool {
+        self.pressed.is_mouse_pressed()
     }
 
     fn shade_color(color: Color, factor: f32) -> Color {
@@ -460,7 +468,7 @@ impl ButtonRenderObject {
     }
 
     fn current_background(&self) -> Color {
-        if self.pressed {
+        if self.pressed.is_pressed() {
             self.pressed_background_color
                 .unwrap_or_else(|| Self::shade_color(self.background_color, 0.92))
         } else if self.hovered {
@@ -472,7 +480,7 @@ impl ButtonRenderObject {
     }
 
     fn current_border(&self) -> Color {
-        if self.pressed {
+        if self.pressed.is_pressed() {
             Self::shade_color(self.border_color, 0.90)
         } else if self.hovered {
             Self::shade_color(self.border_color, 0.96)
@@ -619,7 +627,13 @@ impl ElementRenderObject for ButtonRenderObject {
 
         match self.appearance {
             ButtonAppearance::Raised => {
-                style::raised_control_surface(ctx, rect, background, border, self.pressed);
+                style::raised_control_surface(
+                    ctx,
+                    rect,
+                    background,
+                    border,
+                    self.pressed.is_pressed(),
+                );
             }
             ButtonAppearance::Header => style::fill_control(ctx, rect, background),
         }

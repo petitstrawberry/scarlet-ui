@@ -7,12 +7,16 @@ use alloc::vec::Vec;
 mod dispatcher;
 mod gamepad;
 mod gesture;
+mod touch;
 pub use gamepad::{GamepadButton, GamepadEvent};
 
 pub use dispatcher::{EventDispatcher, HitResult, Phase};
 pub use gesture::{
     DragGestureRecognizer, Gesture, GestureManager, GestureRecognizer, LongPressGestureRecognizer,
     TapGestureRecognizer,
+};
+pub use touch::{
+    GesturePhase, TouchArena, TouchChange, TouchDragAxis, TouchFrame, TouchGesture, TouchPhase,
 };
 
 /// UI Events
@@ -50,6 +54,13 @@ pub enum Event {
 
     /// Mouse event
     Mouse(MouseEvent),
+
+    /// One target-local native direct-touch report.
+    TouchFrame(TouchFrame),
+    /// One contact routed to its captured widget path.
+    Touch(TouchChange),
+    /// A gesture accepted by the touch arena for that widget path.
+    TouchGesture(TouchGesture),
 
     /// Keyboard event
     Keyboard(KeyEvent),

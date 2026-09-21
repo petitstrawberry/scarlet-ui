@@ -15,7 +15,9 @@ use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::element::TextInputElementState;
 use scarlet_ui_core::error::{Error, Result};
 use scarlet_ui_core::event::{
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource,
+    TouchChange as UiTouchChange, TouchFrame as UiTouchFrame, TouchPhase as UiTouchPhase,
+    WheelPhase,
 };
 use scarlet_ui_core::geometry::{Point, Size};
 use scarlet_ui_core::input_environment::{
@@ -38,7 +40,7 @@ use std::time::{Duration, Instant};
 use ::winit::application::ApplicationHandler;
 use ::winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, Position};
 use ::winit::event::{
-    DeviceEvent, ElementState as WinitElementState, Ime, MouseButton as WinitMouseButton,
+    DeviceEvent, DeviceId, ElementState as WinitElementState, Ime, MouseButton as WinitMouseButton,
     MouseScrollDelta, TouchPhase, WindowEvent,
 };
 use ::winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -248,49 +250,11 @@ struct WinitEventState {
     last_trackpad_moved_emit_at: Option<Instant>,
     wheel_coalesce_enabled: bool,
     direct_touch_advertised: bool,
-    direct_touch_activation: DirectTouchActivationState,
+    native_touch_contacts: Vec<(DeviceId, u64, u64, i32, i32)>,
+    next_native_touch_id: u64,
+    next_native_touch_serial: u64,
+    native_touch_clock: Instant,
     queue: VecDeque<Event>,
-}
-
-/// Tracks the one touch contact represented by the mouse compatibility stream.
-///
-/// ScarletUI's core event API currently exposes pointer activation through
-/// `MouseEvent`. Keep the first active contact as the primary contact until it
-/// ends so extra fingers cannot produce a second press or release.
-#[derive(Default)]
-struct DirectTouchActivationState {
-    primary_touch_id: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DirectTouchActivation {
-    Pressed,
-    Moved,
-    Released,
-    Cancelled,
-}
-
-impl DirectTouchActivationState {
-    fn map(&mut self, touch_id: u64, phase: TouchPhase) -> Option<DirectTouchActivation> {
-        match phase {
-            TouchPhase::Started if self.primary_touch_id.is_none() => {
-                self.primary_touch_id = Some(touch_id);
-                Some(DirectTouchActivation::Pressed)
-            }
-            TouchPhase::Moved if self.primary_touch_id == Some(touch_id) => {
-                Some(DirectTouchActivation::Moved)
-            }
-            TouchPhase::Ended if self.primary_touch_id == Some(touch_id) => {
-                self.primary_touch_id = None;
-                Some(DirectTouchActivation::Released)
-            }
-            TouchPhase::Cancelled if self.primary_touch_id == Some(touch_id) => {
-                self.primary_touch_id = None;
-                Some(DirectTouchActivation::Cancelled)
-            }
-            _ => None,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -408,78 +372,110 @@ impl WinitEventState {
             last_trackpad_moved_emit_at: None,
             wheel_coalesce_enabled,
             direct_touch_advertised: false,
-            direct_touch_activation: DirectTouchActivationState::default(),
+            native_touch_contacts: Vec::new(),
+            next_native_touch_id: 1,
+            next_native_touch_serial: 1,
+            native_touch_clock: Instant::now(),
             queue: VecDeque::new(),
         }
     }
 
-    fn update_cursor_from_physical(&mut self, position: PhysicalPosition<f64>) -> (i32, i32) {
-        self.cursor_physical_x = position.x;
-        self.cursor_physical_y = position.y;
-        self.cursor_x = physical_to_logical_pos(position.x, self.scale_factor);
-        self.cursor_y = physical_to_logical_pos(position.y, self.scale_factor);
-        (self.cursor_x, self.cursor_y)
-    }
-
-    fn map_direct_touch_events(
+    fn push_native_touch_event(
         &mut self,
-        touch_id: u64,
-        phase: TouchPhase,
-        location: PhysicalPosition<f64>,
-    ) -> Vec<Event> {
-        let Some(activation) = self.direct_touch_activation.map(touch_id, phase) else {
-            return Vec::new();
-        };
-        let (x, y) = self.update_cursor_from_physical(location);
-        let event = match activation {
-            DirectTouchActivation::Pressed => {
-                let click_count = self.click_state.press_count(MouseButton::Left, x, y);
-                MouseEvent::ButtonPressed {
-                    button: MouseButton::Left,
-                    x,
-                    y,
-                    click_count,
-                }
-            }
-            DirectTouchActivation::Moved => MouseEvent::Moved { x, y },
-            DirectTouchActivation::Released => {
-                let click_count = self.click_state.release_count(MouseButton::Left);
-                MouseEvent::ButtonReleased {
-                    button: MouseButton::Left,
-                    x,
-                    y,
-                    click_count,
-                }
-            }
-            DirectTouchActivation::Cancelled => {
-                self.click_state.cancel(MouseButton::Left);
-                MouseEvent::ButtonCancelled {
-                    button: MouseButton::Left,
-                    x,
-                    y,
-                }
-            }
-        };
-        let mut events = Vec::with_capacity(2);
-        events.push(Event::Mouse(event));
-        if matches!(
-            activation,
-            DirectTouchActivation::Released | DirectTouchActivation::Cancelled
-        ) {
-            events.push(Event::Mouse(MouseEvent::Exited { x, y }));
-        }
-        events
-    }
-
-    fn push_direct_touch_events(
-        &mut self,
+        device_id: DeviceId,
         touch_id: u64,
         phase: TouchPhase,
         location: PhysicalPosition<f64>,
     ) {
-        for event in self.map_direct_touch_events(touch_id, phase, location) {
-            self.push(event);
+        let x = physical_to_logical_pos(location.x, self.scale_factor);
+        let y = physical_to_logical_pos(location.y, self.scale_factor);
+        let id = if phase == TouchPhase::Started {
+            let id = self.next_native_touch_id;
+            self.next_native_touch_id = self
+                .next_native_touch_id
+                .checked_add(1)
+                .expect("touch ID exhausted");
+            self.native_touch_contacts
+                .push((device_id, touch_id, id, x, y));
+            id
+        } else {
+            let Some((_, _, id, old_x, old_y)) = self
+                .native_touch_contacts
+                .iter_mut()
+                .find(|(device, raw_id, _, _, _)| *device == device_id && *raw_id == touch_id)
+            else {
+                return;
+            };
+            *old_x = x;
+            *old_y = y;
+            *id
+        };
+        let serial = self.next_native_touch_serial;
+        self.next_native_touch_serial = self.next_native_touch_serial.wrapping_add(1);
+        let change = UiTouchChange {
+            seat_id: 0,
+            serial,
+            time_ns: self
+                .native_touch_clock
+                .elapsed()
+                .as_nanos()
+                .min(u64::MAX as u128) as u64,
+            id,
+            phase: match phase {
+                TouchPhase::Started => UiTouchPhase::Down,
+                TouchPhase::Moved => UiTouchPhase::Move,
+                TouchPhase::Ended => UiTouchPhase::Up,
+                TouchPhase::Cancelled => UiTouchPhase::Cancel,
+            },
+            x,
+            y,
+            pressure: None,
+            touch_major: None,
+        };
+        self.push(Event::TouchFrame(UiTouchFrame {
+            seat_id: 0,
+            serial,
+            time_ns: change.time_ns,
+            changes: alloc::vec![change],
+        }));
+        if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+            self.native_touch_contacts
+                .retain(|(device, raw_id, _, _, _)| *device != device_id || *raw_id != touch_id);
         }
+    }
+
+    fn cancel_native_touches(&mut self) {
+        if self.native_touch_contacts.is_empty() {
+            return;
+        }
+        let serial = self.next_native_touch_serial;
+        self.next_native_touch_serial = self.next_native_touch_serial.wrapping_add(1);
+        let time_ns = self
+            .native_touch_clock
+            .elapsed()
+            .as_nanos()
+            .min(u64::MAX as u128) as u64;
+        let changes = self
+            .native_touch_contacts
+            .drain(..)
+            .map(|(_, _, id, x, y)| UiTouchChange {
+                seat_id: 0,
+                serial,
+                time_ns,
+                id,
+                phase: UiTouchPhase::Cancel,
+                x,
+                y,
+                pressure: None,
+                touch_major: None,
+            })
+            .collect();
+        self.push(Event::TouchFrame(UiTouchFrame {
+            seat_id: 0,
+            serial,
+            time_ns,
+            changes,
+        }));
     }
 
     fn push(&mut self, mut event: Event) {
@@ -811,6 +807,7 @@ impl ApplicationHandler for WinitPumpHandler {
             WindowEvent::Focused(focused) => {
                 state.window_focused = focused;
                 if !focused {
+                    state.cancel_native_touches();
                     self.shared.clear_pointer_lock_owner(window_id);
                     release_native_pointer_lock(&window, &mut state);
                     state.manual_move_active = false;
@@ -955,7 +952,12 @@ impl ApplicationHandler for WinitPumpHandler {
                     }
                 }
 
-                state.push_direct_touch_events(touch.id, touch.phase, touch.location);
+                state.push_native_touch_event(
+                    touch.device_id,
+                    touch.id,
+                    touch.phase,
+                    touch.location,
+                );
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let keycode = map_key(&event.logical_key);
@@ -1765,20 +1767,6 @@ mod tests {
         })
     }
 
-    fn single_direct_touch_event(
-        state: &mut WinitEventState,
-        touch_id: u64,
-        phase: TouchPhase,
-        location: PhysicalPosition<f64>,
-    ) -> Option<Event> {
-        let events = state.map_direct_touch_events(touch_id, phase, location);
-        assert!(
-            events.len() <= 1,
-            "non-terminal touch phases must produce at most one event"
-        );
-        events.into_iter().next()
-    }
-
     #[test]
     fn device_motion_routes_only_to_exclusive_pointer_lock_owner() {
         let mut owner_state = WinitEventState::new_with_wheel_coalesce(1.0, false);
@@ -1826,183 +1814,49 @@ mod tests {
     }
 
     #[test]
-    fn direct_touch_state_keeps_the_first_contact_primary_until_release() {
-        let mut touch = DirectTouchActivationState::default();
-
-        assert_eq!(
-            touch.map(10, TouchPhase::Started),
-            Some(DirectTouchActivation::Pressed)
-        );
-        assert_eq!(touch.map(11, TouchPhase::Started), None);
-        assert_eq!(touch.map(11, TouchPhase::Moved), None);
-        assert_eq!(
-            touch.map(10, TouchPhase::Moved),
-            Some(DirectTouchActivation::Moved)
-        );
-        assert_eq!(touch.map(11, TouchPhase::Ended), None);
-        assert_eq!(
-            touch.map(10, TouchPhase::Cancelled),
-            Some(DirectTouchActivation::Cancelled)
-        );
-        assert_eq!(touch.map(10, TouchPhase::Ended), None);
-        assert_eq!(
-            touch.map(11, TouchPhase::Started),
-            Some(DirectTouchActivation::Pressed)
-        );
-    }
-
-    #[test]
-    fn direct_touch_maps_primary_contact_to_scaled_mouse_events() {
+    fn native_touch_keeps_each_contact_and_does_not_move_the_mouse_cursor() {
         let mut state = WinitEventState::new_with_wheel_coalesce(2.0, false);
-
-        assert!(matches!(
-            single_direct_touch_event(
-                &mut state,
-                7,
-                TouchPhase::Started,
-                PhysicalPosition::new(20.0, 12.0),
-            ),
-            Some(Event::Mouse(MouseEvent::ButtonPressed {
-                button: MouseButton::Left,
-                x: 10,
-                y: 6,
-                click_count: 1,
-            }))
-        ));
-        assert_eq!(state.cursor_physical_x, 20.0);
-        assert_eq!(state.cursor_physical_y, 12.0);
-        assert_eq!((state.cursor_x, state.cursor_y), (10, 6));
-
-        assert!(matches!(
-            single_direct_touch_event(
-                &mut state,
-                7,
-                TouchPhase::Moved,
-                PhysicalPosition::new(30.0, 16.0),
-            ),
-            Some(Event::Mouse(MouseEvent::Moved { x: 15, y: 8 }))
-        ));
-        assert!(
-            state
-                .map_direct_touch_events(8, TouchPhase::Started, PhysicalPosition::new(80.0, 80.0))
-                .is_empty()
+        let device = DeviceId::dummy();
+        state.push_native_touch_event(
+            device,
+            7,
+            TouchPhase::Started,
+            PhysicalPosition::new(20.0, 12.0),
         );
-        assert_eq!(state.cursor_physical_x, 30.0);
-        assert_eq!(state.cursor_physical_y, 16.0);
-
-        assert!(matches!(
-            state
-                .map_direct_touch_events(7, TouchPhase::Ended, PhysicalPosition::new(40.0, 24.0))
-                .as_slice(),
-            [
-                Event::Mouse(MouseEvent::ButtonReleased {
-                    button: MouseButton::Left,
-                    x: 20,
-                    y: 12,
-                    click_count: 1,
-                }),
-                Event::Mouse(MouseEvent::Exited { x: 20, y: 12 }),
-            ]
-        ));
-        assert!(
-            state
-                .map_direct_touch_events(7, TouchPhase::Ended, PhysicalPosition::new(40.0, 24.0))
-                .is_empty()
+        state.push_native_touch_event(
+            device,
+            8,
+            TouchPhase::Started,
+            PhysicalPosition::new(40.0, 24.0),
         );
-    }
+        let Some(Event::TouchFrame(first)) = state.pop() else {
+            panic!("first native touch frame missing")
+        };
+        let Some(Event::TouchFrame(second)) = state.pop() else {
+            panic!("second native touch frame missing")
+        };
+        assert_eq!((first.changes[0].x, first.changes[0].y), (10, 6));
+        assert_ne!(first.changes[0].id, second.changes[0].id);
+        assert_eq!((state.cursor_x, state.cursor_y), (0, 0));
 
-    #[test]
-    fn cancelled_direct_touch_never_maps_to_a_release_or_click() {
-        let mut state = WinitEventState::new_with_wheel_coalesce(1.0, false);
-
-        assert!(matches!(
-            single_direct_touch_event(
-                &mut state,
-                7,
-                TouchPhase::Started,
-                PhysicalPosition::new(10.0, 12.0),
-            ),
-            Some(Event::Mouse(MouseEvent::ButtonPressed {
-                click_count: 1,
-                ..
-            }))
-        ));
-        assert!(matches!(
-            state
-                .map_direct_touch_events(
-                    7,
-                    TouchPhase::Cancelled,
-                    PhysicalPosition::new(20.0, 24.0)
-                )
-                .as_slice(),
-            [
-                Event::Mouse(MouseEvent::ButtonCancelled {
-                    button: MouseButton::Left,
-                    x: 20,
-                    y: 24,
-                }),
-                Event::Mouse(MouseEvent::Exited { x: 20, y: 24 }),
-            ]
-        ));
-        assert!(
-            state
-                .map_direct_touch_events(7, TouchPhase::Ended, PhysicalPosition::new(20.0, 24.0))
-                .is_empty()
+        state.push_native_touch_event(
+            device,
+            7,
+            TouchPhase::Ended,
+            PhysicalPosition::new(24.0, 16.0),
         );
-        assert!(matches!(
-            single_direct_touch_event(
-                &mut state,
-                8,
-                TouchPhase::Started,
-                PhysicalPosition::new(10.0, 12.0),
-            ),
-            Some(Event::Mouse(MouseEvent::ButtonPressed {
-                click_count: 1,
-                ..
-            }))
-        ));
-    }
-
-    #[test]
-    fn direct_touch_terminal_events_keep_exit_after_the_terminal_event_in_queue() {
-        let mut state = WinitEventState::new_with_wheel_coalesce(1.0, false);
-        state.push_direct_touch_events(7, TouchPhase::Started, PhysicalPosition::new(10.0, 12.0));
-        assert!(matches!(
-            state.pop(),
-            Some(Event::Mouse(MouseEvent::ButtonPressed { .. }))
-        ));
-
-        state.push_direct_touch_events(7, TouchPhase::Ended, PhysicalPosition::new(20.0, 24.0));
-        assert!(matches!(
-            state.pop(),
-            Some(Event::Mouse(MouseEvent::ButtonReleased {
-                x: 20,
-                y: 24,
-                ..
-            }))
-        ));
-        assert!(matches!(
-            state.pop(),
-            Some(Event::Mouse(MouseEvent::Exited { x: 20, y: 24 }))
-        ));
-        assert!(state.pop().is_none());
-
-        state.push_direct_touch_events(8, TouchPhase::Started, PhysicalPosition::new(30.0, 36.0));
-        let _ = state.pop();
-        state.push_direct_touch_events(8, TouchPhase::Cancelled, PhysicalPosition::new(40.0, 48.0));
-        assert!(matches!(
-            state.pop(),
-            Some(Event::Mouse(MouseEvent::ButtonCancelled {
-                x: 40,
-                y: 48,
-                ..
-            }))
-        ));
-        assert!(matches!(
-            state.pop(),
-            Some(Event::Mouse(MouseEvent::Exited { x: 40, y: 48 }))
-        ));
-        assert!(state.pop().is_none());
+        let Some(Event::TouchFrame(up)) = state.pop() else {
+            panic!("touch up missing")
+        };
+        assert_eq!(up.changes[0].id, first.changes[0].id);
+        assert_eq!(up.changes[0].phase, UiTouchPhase::Up);
+        state.cancel_native_touches();
+        let Some(Event::TouchFrame(cancel)) = state.pop() else {
+            panic!("touch cancel missing")
+        };
+        assert_eq!(cancel.changes.len(), 1);
+        assert_eq!(cancel.changes[0].id, second.changes[0].id);
+        assert_eq!(cancel.changes[0].phase, UiTouchPhase::Cancel);
     }
 
     #[test]

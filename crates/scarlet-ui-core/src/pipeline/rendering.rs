@@ -190,6 +190,7 @@ impl RenderingPipeline {
 
     /// Unmount the element tree and discard pending global dirty work.
     pub fn teardown(&mut self) {
+        self.cancel_animations();
         self.element_tree.clear_root();
         crate::pipeline::clear_global_dirty(self.pipeline_id());
         self.renderer = None;
@@ -436,6 +437,7 @@ impl RenderingPipeline {
                 &backdrop_ctx,
                 Some(&shadow_damage),
             );
+            Self::prepare_cached_buffer_for_composite(&mut buffer);
             *cache = Some(WindowBackdropCache {
                 backdrop,
                 origin,
@@ -768,13 +770,26 @@ impl RenderingPipeline {
         };
         if walk_damage.is_none() {
             if let Some(root) = self.element_tree.root() {
-                Self::rebuild_root_layer_refs(
-                    root,
-                    self.window_size,
-                    self.scale_milli,
-                    layer_generation,
-                    &mut self.layer_store,
-                );
+                if has_paint_extensions {
+                    Self::rebuild_root_layer_refs(
+                        root,
+                        self.window_size,
+                        self.scale_milli,
+                        layer_generation,
+                        &mut self.layer_store,
+                    );
+                } else if let Some(paint_renderer) = self.paint_renderer.as_mut() {
+                    Self::rebuild_root_layer_graph(
+                        root,
+                        self.window_size,
+                        self.scale_milli,
+                        layer_generation,
+                        &mut self.layer_store,
+                        paint_renderer,
+                        #[cfg(test)]
+                        &mut self.paint_test_counters,
+                    );
+                }
             }
             self.layer_store.prune_unmarked(layer_generation);
         }
@@ -1550,6 +1565,7 @@ impl RenderingPipeline {
                 chunk_ctx,
                 None,
             );
+            Self::prepare_cached_buffer_for_composite(buffer);
             chunk.logical_bounds = Self::compact_picture_chunk(buffer);
             chunk.generation = layer_generation;
             layer_store.mark_chunk(chunk_id, layer_generation);
@@ -1577,6 +1593,7 @@ impl RenderingPipeline {
             chunk_ctx,
             None,
         );
+        Self::prepare_cached_buffer_for_composite(&mut buffer);
         let logical_bounds = Self::compact_picture_chunk(&mut buffer);
         if let Some(chunk) = layer_store.chunk_mut(chunk_id) {
             chunk.buffer = Arc::new(buffer);
@@ -1603,6 +1620,28 @@ impl RenderingPipeline {
         );
         chunk_ctx.clear();
         true
+    }
+
+    /// CPU painting produces premultiplied pixels. DrawBufferRect consumes
+    /// straight-alpha pixels, so cached pictures must be converted before they
+    /// become sources for another composite pass.
+    fn prepare_cached_buffer_for_composite(buffer: &mut Buffer) {
+        for pixel in buffer.as_mut_slice() {
+            let [blue, green, red, alpha] = pixel.to_le_bytes();
+            if alpha == 0 || alpha == 255 {
+                continue;
+            }
+            let unpremultiply = |component: u8| {
+                ((u32::from(component) * 255 + u32::from(alpha) / 2) / u32::from(alpha)).min(255)
+                    as u8
+            };
+            *pixel = u32::from_le_bytes([
+                unpremultiply(blue),
+                unpremultiply(green),
+                unpremultiply(red),
+                alpha,
+            ]);
+        }
     }
 
     // A picture chunk covers only the paint before/between/after nested layers.
@@ -1744,6 +1783,58 @@ impl RenderingPipeline {
             }
         }
         painted
+    }
+
+    fn rebuild_root_layer_graph(
+        root: &dyn Element,
+        window_size: Size,
+        scale_milli: u32,
+        layer_generation: u64,
+        layer_store: &mut LayerStore,
+        paint_renderer: &mut CpuPaintRenderer,
+        #[cfg(test)] paint_test_counters: &mut PaintTestCounters,
+    ) {
+        layer_store.begin_container_rebuild(
+            LayerId::Root,
+            None,
+            window_size,
+            scale_milli,
+            layer_generation,
+        );
+        let mut chunk_ctx = PaintContext::new();
+        #[cfg(test)]
+        {
+            paint_test_counters.paint_context_news += 1;
+        }
+        let mut next_ordinal = 0u16;
+        Self::build_boundary_walk(
+            &mut chunk_ctx,
+            root,
+            Point::ZERO,
+            None,
+            root.id(),
+            LayerId::Root,
+            window_size,
+            layer_store,
+            paint_renderer,
+            scale_milli,
+            layer_generation,
+            &mut next_ordinal,
+            #[cfg(test)]
+            paint_test_counters,
+        );
+        Self::flush_picture_chunk(
+            &mut chunk_ctx,
+            root.id(),
+            LayerId::Root,
+            window_size,
+            layer_store,
+            paint_renderer,
+            scale_milli,
+            layer_generation,
+            &mut next_ordinal,
+        );
+        layer_store.finish_container_rebuild(LayerId::Root);
     }
 
     fn rebuild_root_layer_refs(
@@ -2848,6 +2939,23 @@ impl RenderingPipeline {
             .dispatch(&mut self.element_tree, _event)
     }
 
+    /// Whether a scroll owner needs another animation tick.
+    pub fn has_active_animation(&self) -> bool {
+        self.event_dispatcher.has_active_animation()
+    }
+
+    /// Advance animations using elapsed monotonic time from the application loop.
+    pub fn advance_animations(&mut self, elapsed: core::time::Duration) -> bool {
+        self.event_dispatcher
+            .advance_animations(&mut self.element_tree, elapsed)
+    }
+
+    /// Cancel animations when the window stops presenting.
+    pub fn cancel_animations(&mut self) {
+        self.event_dispatcher
+            .cancel_animations(&mut self.element_tree);
+    }
+
     /// Take emitted events from the event dispatcher
     pub fn take_emitted_events(&mut self) -> Vec<crate::event::Event> {
         self.event_dispatcher.take_emitted_events()
@@ -2879,7 +2987,8 @@ mod tests {
     use super::*;
     use crate::element::ComponentElement;
     use crate::event::{
-        Event, KeyCode, KeyEvent, MouseButton, MouseEvent, ScrollSource, WheelPhase,
+        Event, KeyCode, KeyEvent, MouseButton, MouseEvent, ScrollSource, TouchChange, TouchFrame,
+        TouchPhase, WheelPhase,
     };
     use crate::state::{State, StateId};
     use crate::testing::alloc_counter::{
@@ -2887,11 +2996,332 @@ mod tests {
     };
     use crate::view::{View, ViewExt};
     use crate::views::{
-        Button, Either, GridView, LazyVStack, MenuItem, NavigationLink, NavigationView, Rectangle,
-        ScrollView, ScrollbarVisibility, Select, Text, TextField, Toggle, Window,
+        Button, Either, GridView, LazyVStack, MenuBar, MenuItem, NavigationLink, NavigationView,
+        Rectangle, ScrollView, ScrollViewRenderObject, ScrollbarVisibility, Select, Slider, Text,
+        TextField, Toggle, Window,
     };
     use core::cell::Cell;
     use std::rc::Rc;
+
+    fn touch_frame(serial: u64, id: u64, phase: TouchPhase, x: i32, y: i32) -> Event {
+        Event::TouchFrame(TouchFrame {
+            seat_id: 0,
+            serial,
+            time_ns: serial * 16_000_000,
+            changes: alloc::vec![TouchChange {
+                seat_id: 0,
+                serial,
+                time_ns: serial * 16_000_000,
+                id,
+                phase,
+                x,
+                y,
+                pressure: None,
+                touch_major: None,
+            }],
+        })
+    }
+
+    #[test]
+    fn slider_claims_horizontal_touch_drag_but_leaves_vertical_scroll_to_parent() {
+        let value = State::new(crate::state::generate_state_id(), 0.2_f32);
+        let slider = Slider::new(value.clone());
+        let dragging = slider.get_dragging().clone();
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            ScrollView::new(slider)
+                .content_size(800.0, 1_200.0)
+                .create_element(),
+        );
+        pipeline.layout_initial();
+
+        for event in [
+            touch_frame(1, 1, TouchPhase::Down, 50, 10),
+            touch_frame(2, 1, TouchPhase::Move, 250, 11),
+        ] {
+            pipeline.handle_event(&event);
+        }
+        assert!(dragging.get());
+        assert!(value.get() > 0.25);
+        let offset = |pipeline: &RenderingPipeline| {
+            pipeline
+                .element_tree()
+                .root()
+                .unwrap()
+                .render_object()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<ScrollViewRenderObject<Slider>>()
+                .unwrap()
+                .offset()
+                .1
+        };
+        assert_eq!(offset(&pipeline), 0.0);
+        pipeline.handle_event(&touch_frame(3, 1, TouchPhase::Up, 300, 11));
+        assert!(!dragging.get());
+        let committed = value.get();
+
+        for event in [
+            touch_frame(4, 2, TouchPhase::Down, 50, 10),
+            touch_frame(5, 2, TouchPhase::Move, 51, -30),
+            touch_frame(6, 2, TouchPhase::Up, 51, -30),
+        ] {
+            pipeline.handle_event(&event);
+        }
+        assert_eq!(value.get(), committed);
+        assert!(!dragging.get());
+        assert!(offset(&pipeline) > 0.0);
+    }
+
+    #[test]
+    fn touch_toggles_and_selects_only_after_a_tap() {
+        let is_on = State::new(crate::state::generate_state_id(), false);
+        let mut toggle_pipeline = RenderingPipeline::new();
+        toggle_pipeline.set_root(Toggle::new(is_on.clone()).create_element());
+        toggle_pipeline.layout_initial();
+        for event in [
+            touch_frame(1, 1, TouchPhase::Down, 10, 10),
+            touch_frame(2, 1, TouchPhase::Move, 10, 30),
+            touch_frame(3, 1, TouchPhase::Up, 10, 30),
+        ] {
+            toggle_pipeline.handle_event(&event);
+        }
+        assert!(!is_on.get());
+        toggle_pipeline.handle_event(&touch_frame(4, 2, TouchPhase::Down, 10, 10));
+        assert!(!is_on.get());
+        toggle_pipeline.handle_event(&touch_frame(5, 2, TouchPhase::Up, 10, 10));
+        assert!(is_on.get());
+
+        let selected = State::new(crate::state::generate_state_id(), 0);
+        let select = Select::new(
+            alloc::vec![String::from("First"), String::from("Second")],
+            selected.clone(),
+        );
+        let expanded = select.expanded().clone();
+        let mut select_pipeline = RenderingPipeline::new();
+        select_pipeline.set_root(select.create_element());
+        select_pipeline.layout_initial();
+        select_pipeline.handle_event(&touch_frame(6, 3, TouchPhase::Down, 10, 10));
+        select_pipeline.handle_event(&touch_frame(7, 3, TouchPhase::Up, 10, 10));
+        assert!(expanded.get());
+        select_pipeline.handle_event(&touch_frame(8, 4, TouchPhase::Down, 10, 80));
+        select_pipeline.handle_event(&touch_frame(9, 4, TouchPhase::Up, 10, 80));
+        assert_eq!(selected.get(), 1);
+        assert!(!expanded.get());
+    }
+
+    #[test]
+    fn direct_touch_selects_navigation_sidebar_without_mouse_hover() {
+        let callback_count = Rc::new(Cell::new(0));
+        let count = callback_count.clone();
+        let navigation = NavigationView::new((
+            NavigationLink::new("First", || Text::new("first page")),
+            NavigationLink::new("Second", || Text::new("second page")).on_select(move || {
+                count.set(count.get() + 1);
+            }),
+        ))
+        .sidebar_width(150.0);
+        let selected = navigation.selected_index_state().clone();
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(navigation.create_element());
+        pipeline.layout_initial();
+        pipeline.handle_event(&touch_frame(1, 1, TouchPhase::Down, 10, 50));
+        assert_eq!(selected.get(), 0);
+        pipeline.handle_event(&touch_frame(2, 1, TouchPhase::Up, 10, 50));
+        assert_eq!(selected.get(), 1);
+        assert_eq!(callback_count.get(), 1);
+    }
+
+    #[test]
+    fn menu_touch_tap_activates_once_on_release_without_hover() {
+        let clicks = Rc::new(Cell::new(0));
+        let hovers = Rc::new(Cell::new(0));
+        let on_click = clicks.clone();
+        let on_hover = hovers.clone();
+        let bar = MenuBar::new(alloc::vec![
+            MenuItem::new("File")
+                .on_click(move || on_click.set(on_click.get() + 1))
+                .on_hover(move || on_hover.set(on_hover.get() + 1)),
+        ]);
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(bar.create_element());
+        pipeline.layout_initial();
+        let frame = |serial, id, phase, x, y| {
+            Event::TouchFrame(TouchFrame {
+                seat_id: 0,
+                serial,
+                time_ns: serial * 1_000_000,
+                changes: alloc::vec![TouchChange {
+                    seat_id: 0,
+                    serial,
+                    time_ns: serial * 1_000_000,
+                    id,
+                    phase,
+                    x,
+                    y,
+                    pressure: None,
+                    touch_major: None,
+                }],
+            })
+        };
+        let down = frame(1, 7, TouchPhase::Down, 10, 10);
+        let up = frame(2, 7, TouchPhase::Up, 10, 10);
+        pipeline.handle_event(&down);
+        pipeline.handle_event(&up);
+        assert_eq!(clicks.get(), 1);
+        assert_eq!(hovers.get(), 0);
+
+        let down = frame(3, 8, TouchPhase::Down, 10, 10);
+        let moved = frame(4, 8, TouchPhase::Move, 10, 30);
+        let up = frame(5, 8, TouchPhase::Up, 10, 30);
+        for event in [&down, &moved, &up] {
+            pipeline.handle_event(event);
+        }
+        assert_eq!(clicks.get(), 1);
+        assert_eq!(hovers.get(), 0);
+    }
+
+    #[test]
+    fn direct_touch_fling_animates_the_scroll_owner_and_stops_on_new_touch_or_edge() {
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            ScrollView::new(Text::new("content"))
+                .content_size(100.0, 2_000.0)
+                .create_element(),
+        );
+        pipeline.layout_initial();
+
+        let frame = |serial, phase, y| {
+            Event::TouchFrame(TouchFrame {
+                seat_id: 0,
+                serial,
+                time_ns: serial * 16_000_000,
+                changes: alloc::vec![TouchChange {
+                    seat_id: 0,
+                    serial,
+                    time_ns: serial * 16_000_000,
+                    id: 7,
+                    phase,
+                    x: 50,
+                    y,
+                    pressure: None,
+                    touch_major: None,
+                }],
+            })
+        };
+        for event in [
+            frame(1, TouchPhase::Down, 80),
+            frame(2, TouchPhase::Move, 60),
+            frame(3, TouchPhase::Move, 40),
+            frame(4, TouchPhase::Move, 20),
+            frame(5, TouchPhase::Up, 20),
+        ] {
+            pipeline.handle_event(&event);
+        }
+        let offset = |pipeline: &RenderingPipeline| {
+            pipeline
+                .element_tree()
+                .root()
+                .unwrap()
+                .render_object()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<ScrollViewRenderObject<Text>>()
+                .unwrap()
+                .offset()
+                .1
+        };
+        let released_offset = offset(&pipeline);
+        assert!(released_offset > 0.0);
+        assert!(pipeline.has_active_animation());
+        pipeline.advance_animations(core::time::Duration::from_millis(16));
+        assert!(offset(&pipeline) > released_offset);
+        assert!(pipeline.has_dirty());
+
+        pipeline.handle_event(&frame(6, TouchPhase::Down, 50));
+        let interrupted_offset = offset(&pipeline);
+        assert!(!pipeline.has_active_animation());
+        pipeline.advance_animations(core::time::Duration::from_millis(100));
+        assert_eq!(offset(&pipeline), interrupted_offset);
+
+        pipeline.set_root(
+            ScrollView::new(Text::new("short content"))
+                .content_size(800.0, 640.0)
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        for event in [
+            frame(7, TouchPhase::Down, 80),
+            frame(8, TouchPhase::Move, 60),
+            frame(9, TouchPhase::Move, 40),
+            frame(10, TouchPhase::Up, 40),
+        ] {
+            pipeline.handle_event(&event);
+        }
+        assert_eq!(offset(&pipeline), 40.0);
+        assert!(pipeline.has_active_animation());
+        pipeline.advance_animations(core::time::Duration::from_millis(16));
+        assert_eq!(offset(&pipeline), 40.0);
+        assert!(!pipeline.has_active_animation());
+    }
+
+    #[test]
+    fn direct_touch_momentum_hands_off_from_inner_scroll_to_parent() {
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            ScrollView::new(
+                ScrollView::new(Text::new("inner content"))
+                    .content_size(800.0, 640.0)
+                    .frame(800.0, 600.0),
+            )
+            .content_size(800.0, 1_200.0)
+            .create_element(),
+        );
+        pipeline.layout_initial();
+
+        for (serial, phase, y) in [
+            (1, TouchPhase::Down, 80),
+            (2, TouchPhase::Move, 60),
+            (3, TouchPhase::Move, 40),
+            (4, TouchPhase::Up, 40),
+        ] {
+            pipeline.handle_event(&Event::TouchFrame(TouchFrame {
+                seat_id: 0,
+                serial,
+                time_ns: serial * 16_000_000,
+                changes: alloc::vec![TouchChange {
+                    seat_id: 0,
+                    serial,
+                    time_ns: serial * 16_000_000,
+                    id: 9,
+                    phase,
+                    x: 50,
+                    y,
+                    pressure: None,
+                    touch_major: None,
+                }],
+            }));
+        }
+
+        let parent_offset = |pipeline: &RenderingPipeline| {
+            pipeline
+                .element_tree()
+                .root()
+                .unwrap()
+                .render_object()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<ScrollViewRenderObject<crate::views::Frame<ScrollView<Text>>>>()
+                .unwrap()
+                .offset()
+                .1
+        };
+        assert_eq!(parent_offset(&pipeline), 0.0);
+        assert!(pipeline.has_active_animation());
+        pipeline.advance_animations(core::time::Duration::from_millis(16));
+        assert!(parent_offset(&pipeline) > 0.0);
+        assert!(pipeline.has_active_animation());
+    }
 
     #[derive(Clone)]
     struct PaintExtensionProbe;
@@ -3570,6 +4000,51 @@ mod tests {
             ));
             assert_eq!(buffer.get_pixel(60, 80), Some(background.to_bgra()));
         }
+        assert!(pipeline.paint_test_counters().retained_composites > 0);
+    }
+
+    #[test]
+    fn warm_scroll_preserves_background_painted_behind_scroll_view() {
+        let background = crate::color::Color::rgba_f32(0.30, 0.34, 0.41, 0.78);
+        let scroll = ScrollView::new(
+            Rectangle::new()
+                .fill(crate::color::Color::TRANSPARENT)
+                .frame(100.0, 600.0),
+        )
+        .content_size(100.0, 600.0)
+        .wheel_sensitivity(1.0)
+        .scrollbar_visibility(ScrollbarVisibility::Never)
+        .frame(100.0, 100.0)
+        .background(background);
+        let window = Window::new("Painted ancestor behind scroll", scroll)
+            .background_color(crate::color::Color::TRANSPARENT)
+            .opaque(false)
+            .shadow(false)
+            .size(Size::new(120.0, 160.0));
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(window.create_element());
+        pipeline.layout_initial();
+        let (initial, _) = pipeline
+            .render_with_damage()
+            .expect("initial background frame should render");
+        let initial_pixel = initial.get_pixel(60, 80);
+        assert_ne!(
+            initial_pixel,
+            Some(crate::color::Color::TRANSPARENT.to_bgra())
+        );
+
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: -40,
+            x: 60,
+            y: 80,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Wheel,
+        })));
+        let (during_scroll, _) = pipeline
+            .render_with_damage()
+            .expect("moving scroll frame should render");
+        assert_eq!(during_scroll.get_pixel(60, 80), initial_pixel);
         assert!(pipeline.paint_test_counters().retained_composites > 0);
     }
 

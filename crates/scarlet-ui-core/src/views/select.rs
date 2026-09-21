@@ -329,7 +329,7 @@ impl SelectRenderObject {
     /// Option index under the coordinate, or `None` outside option rows.
     pub fn option_index_at_y(&self, y: f32) -> Option<usize> {
         let row_height = self.effective_row_height();
-        if !self.expanded || y < row_height {
+        if !self.expanded || y < row_height || y >= self.popup_height() {
             return None;
         }
         let index = ((y - row_height) / row_height) as usize + self.scroll_offset;

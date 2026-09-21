@@ -1216,6 +1216,24 @@ fn mouse_single_click_positions_caret_and_collapses_selection() {
 }
 
 #[test]
+fn touch_tap_positions_caret_without_starting_mouse_selection() {
+    let text = State::new(StateId::new(434), String::from("abcd"));
+    let selection = State::new(StateId::new(435), TextSelection::collapsed(4));
+    let view = TextView::new(text, selection.clone());
+    let mut render_object = render_object_with_size(&view, 240.0, 120.0);
+
+    assert!(handle_text_view_touch(
+        &view,
+        &mut render_object,
+        text_x("ab"),
+        10,
+        false,
+    ));
+    assert_eq!(selection.get(), TextSelection::collapsed(2));
+    assert!(!render_object.dragging);
+}
+
+#[test]
 fn mouse_double_click_selects_word_under_cursor() {
     let text = State::new(StateId::new(234), String::from("hello world"));
     let selection = State::new(StateId::new(235), TextSelection::collapsed(0));
