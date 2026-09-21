@@ -1962,4 +1962,22 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
         false
     }
+
+    fn press_repeat_timing(&self) -> Option<(core::time::Duration, core::time::Duration)> {
+        self.view
+            .as_any()
+            .downcast_ref::<crate::views::Button>()
+            .and_then(crate::views::Button::press_repeat_timing)
+    }
+
+    fn invoke_press_repeat(&self) -> bool {
+        let Some(button) = self.view.as_any().downcast_ref::<crate::views::Button>() else {
+            return false;
+        };
+        if button.press_repeat_timing().is_none() {
+            return false;
+        }
+        button.invoke_on_click();
+        true
+    }
 }

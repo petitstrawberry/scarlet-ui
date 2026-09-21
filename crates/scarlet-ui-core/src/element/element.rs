@@ -308,6 +308,16 @@ pub trait Element {
         false
     }
 
+    /// Timing requested by a press-activated repeating control.
+    fn press_repeat_timing(&self) -> Option<(core::time::Duration, core::time::Duration)> {
+        None
+    }
+
+    /// Invoke the action owned by a press-activated repeating control.
+    fn invoke_press_repeat(&self) -> bool {
+        false
+    }
+
     /// Take window action if available
     ///
     /// Called after handle_event if it returned true.
