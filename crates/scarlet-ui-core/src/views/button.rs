@@ -15,6 +15,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use core::any::Any;
+use core::time::Duration;
 
 /// Button click callback type
 pub type ButtonCallback = Box<dyn Fn() + 'static>;
@@ -35,6 +36,7 @@ pub struct Button {
     text_color: Color,
     font_size: f32,
     padding: f32,
+    press_repeat: Option<(Duration, Duration)>,
     appearance: ButtonAppearance,
 }
 
@@ -63,6 +65,7 @@ impl Button {
             text_color: palette.text_primary(),
             font_size: 15.0,
             padding: 4.0,
+            press_repeat: None,
             appearance: ButtonAppearance::Raised,
         }
     }
@@ -92,6 +95,7 @@ impl Button {
             text_color: palette.text_primary(),
             font_size: 15.0,
             padding: 7.0,
+            press_repeat: None,
             appearance: ButtonAppearance::Raised,
         }
     }
@@ -258,6 +262,18 @@ impl Button {
         self
     }
 
+    /// Opt in to press activation and repeat while a touch remains held.
+    ///
+    /// Touch input invokes the normal click action immediately, waits for
+    /// `initial_delay`, then invokes it at `interval` until release or gesture
+    /// cancellation. The final tap is suppressed so a press never activates
+    /// twice on release.
+    /// Mouse and keyboard input retain their normal click behavior.
+    pub fn repeat_while_pressed(mut self, initial_delay: Duration, interval: Duration) -> Self {
+        self.press_repeat = Some((initial_delay, interval.max(Duration::from_millis(1))));
+        self
+    }
+
     /// Get the button label
     pub fn label(&self) -> &str {
         &self.label
@@ -303,6 +319,11 @@ impl Button {
         if let Some(callback) = self.on_click.as_ref() {
             callback();
         }
+    }
+
+    pub(crate) fn press_repeat_timing(&self) -> Option<(Duration, Duration)> {
+        self.on_click.as_ref()?;
+        self.press_repeat
     }
 
     fn build_render_object(&self) -> ButtonRenderObject {
@@ -503,8 +524,8 @@ impl ElementRenderObject for ButtonRenderObject {
             );
         }
 
-        // For buttons, use the intrinsic size, but constrain within bounds
-        // Buttons should NOT expand to fill min_width/min_height
+        // Honor tight sizing from a Frame or parent so the button's layout,
+        // painted bounds, and hit area agree. Loose sizing remains intrinsic.
         let mut width = intrinsic.width;
         let mut height = intrinsic
             .height
@@ -518,7 +539,12 @@ impl ElementRenderObject for ButtonRenderObject {
             height = height.min(constraints.max_height);
         }
 
-        // Don't expand to min - buttons should stay at their intrinsic size
+        if constraints.is_tight_width() {
+            width = constraints.max_width;
+        }
+        if constraints.is_tight_height() {
+            height = constraints.max_height;
+        }
 
         self.size = Size { width, height };
 
@@ -836,6 +862,15 @@ mod tests {
             render_object.current_background(),
             ButtonRenderObject::shade_color(base, 0.92)
         );
+    }
+
+    #[test]
+    fn explicit_frame_constraints_expand_the_button_and_hit_area() {
+        let mut render_object = Button::new("q").build_render_object();
+        let size = render_object.layout(LayoutConstraints::tight(64.0, 52.0));
+
+        assert_eq!(size, Size::new(64.0, 52.0));
+        assert!(render_object.hit_test(Point::new(63.0, 51.0)));
     }
 
     #[test]

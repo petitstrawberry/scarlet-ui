@@ -3654,7 +3654,9 @@ mod tests {
     fn button_release_outside_capture_cancels_click() {
         let clicked = State::new(crate::state::generate_state_id(), false);
         let clicked_callback = clicked.clone();
-        let button = Button::new("Task").on_click(move || clicked_callback.set(true));
+        let button = Button::new("Task")
+            .on_click(move || clicked_callback.set(true))
+            .frame(100.0, 50.0);
 
         let mut pipeline = RenderingPipeline::new();
         pipeline.set_root(button.create_element());

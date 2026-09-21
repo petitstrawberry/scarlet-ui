@@ -737,6 +737,7 @@ pub struct SWSPlatformWindow {
     right_super_pressed: bool,
     click_state: ClickState,
     text_input: Option<TextInputContext>,
+    input_panel_show_pending: bool,
     pending_wheel: PendingWheelDelta,
     pending_relative: PendingRelativeMotion,
     needs_full_present: bool,
@@ -1299,6 +1300,7 @@ impl SWSPlatformWindow {
             right_super_pressed: false,
             click_state: ClickState::default(),
             text_input: None,
+            input_panel_show_pending: false,
             pending_wheel: PendingWheelDelta::default(),
             pending_relative: PendingRelativeMotion::default(),
             needs_full_present: false,
@@ -1397,6 +1399,7 @@ impl SWSPlatformWindow {
         }
 
         let Some(state) = state else {
+            self.input_panel_show_pending = false;
             if let Some(context) = self.text_input.as_mut()
                 && context.enabled
             {
@@ -1457,6 +1460,10 @@ impl SWSPlatformWindow {
             if let Some(context) = self.text_input.as_mut() {
                 context.enabled = true;
             }
+        }
+        if self.input_panel_show_pending {
+            self.input_panel_show_pending = false;
+            let _ = self.conn.show_text_input_panel(context_id);
         }
     }
 
@@ -2620,6 +2627,13 @@ impl SWSPlatformWindow {
                 }));
             }
             SwsEvent::TouchFrame { surface_id, frame } if surface_id == self.surface_id => {
+                if frame
+                    .changes
+                    .iter()
+                    .any(|change| change.phase == sws_protocol::touch::Phase::Down)
+                {
+                    self.input_panel_show_pending = true;
+                }
                 use scarlet_ui_core::event::{TouchChange, TouchFrame, TouchPhase};
                 let changes = frame
                     .changes
@@ -2656,6 +2670,8 @@ impl SWSPlatformWindow {
                 if surface_id == self.surface_id {
                     let logical_width = self.physical_to_logical_len(width);
                     let logical_height = self.physical_to_logical_len(height);
+                    self.current_size = Size::new(logical_width as f32, logical_height as f32);
+                    self.needs_full_present = true;
                     self.push_event(Event::Resize {
                         width: logical_width,
                         height: logical_height,

@@ -113,6 +113,16 @@ struct TouchRoute {
     scroll_last_consumer: Option<ElementId>,
     scroll_consumers: Vec<ElementId>,
     velocity: ScrollVelocityTracker,
+    press_repeat: Option<PressRepeatRoute>,
+    press_activated: bool,
+}
+
+#[derive(Clone, Copy)]
+struct PressRepeatRoute {
+    target: ElementId,
+    elapsed: Duration,
+    next_fire: Duration,
+    interval: Duration,
 }
 
 struct MomentumRoute {
@@ -156,13 +166,44 @@ impl EventDispatcher {
         self.touch_arena = TouchArena::default();
     }
 
-    /// Whether this window still has UI-owned scrolling motion to animate.
+    /// Whether this window has scrolling motion or held-button repeats to advance.
     pub fn has_active_animation(&self) -> bool {
         self.scroll_momentum.is_some()
+            || self
+                .touch_routes
+                .iter()
+                .any(|route| route.press_repeat.is_some())
     }
 
     /// Advance UI-owned motion using the elapsed time since the previous tick.
     pub fn advance_animations(
+        &mut self,
+        element_tree: &mut ElementTree,
+        elapsed: Duration,
+    ) -> bool {
+        let mut advanced = self.advance_scroll_momentum(element_tree, elapsed);
+        let mut repeat_targets = Vec::new();
+        for route in &mut self.touch_routes {
+            let Some(repeat) = route.press_repeat.as_mut() else {
+                continue;
+            };
+            repeat.elapsed = repeat.elapsed.saturating_add(elapsed);
+            if repeat.elapsed >= repeat.next_fire {
+                repeat_targets.push(repeat.target);
+                // Do not dump a burst of stale repeats after a delayed frame.
+                repeat.next_fire = repeat.elapsed.saturating_add(repeat.interval);
+            }
+        }
+        for target in repeat_targets {
+            let Some(element) = element_tree.find_element_mut(target) else {
+                continue;
+            };
+            advanced |= element.invoke_press_repeat();
+        }
+        advanced
+    }
+
+    fn advance_scroll_momentum(
         &mut self,
         element_tree: &mut ElementTree,
         elapsed: Duration,
@@ -206,6 +247,9 @@ impl EventDispatcher {
     pub fn cancel_animations(&mut self, element_tree: &mut ElementTree) {
         if let Some(route) = self.scroll_momentum.take() {
             Self::send_momentum_terminal(element_tree, &route, GesturePhase::Cancelled);
+        }
+        for route in &mut self.touch_routes {
+            route.press_repeat = None;
         }
     }
 
@@ -376,6 +420,18 @@ impl EventDispatcher {
                     self.set_focused_element(element_tree, focus_id, &focus_path);
                 }
                 self.touch_routes.retain(|route| route.id != change.id);
+                let press_repeat = path.iter().rev().find_map(|id| {
+                    element_tree.find_element_mut(*id).and_then(|element| {
+                        element
+                            .press_repeat_timing()
+                            .map(|(delay, interval)| PressRepeatRoute {
+                                target: *id,
+                                elapsed: Duration::ZERO,
+                                next_fire: delay,
+                                interval,
+                            })
+                    })
+                });
                 self.touch_routes.push(TouchRoute {
                     id: change.id,
                     path,
@@ -385,6 +441,8 @@ impl EventDispatcher {
                     scroll_last_consumer: None,
                     scroll_consumers: Vec::new(),
                     velocity: ScrollVelocityTracker::new(change.time_ns, change.x, change.y),
+                    press_repeat,
+                    press_activated: false,
                 });
             }
             let Some(route_index) = self
@@ -424,11 +482,39 @@ impl EventDispatcher {
             handled |= self
                 .dispatch_touch_to_path(element_tree, &path, &Event::Touch(change))
                 .0;
+            if change.phase == TouchPhase::Down
+                && let Some(target) = self.touch_routes[route_index]
+                    .press_repeat
+                    .map(|repeat| repeat.target)
+                && let Some(element) = element_tree.find_element_mut(target)
+            {
+                let activated = element.invoke_press_repeat();
+                self.touch_routes[route_index].press_activated = activated;
+                handled |= activated;
+            }
             let mut completed_scroll = false;
             for gesture in self
                 .touch_arena
                 .process_with_drag_axis(change, scrollable, drag_axis)
             {
+                let primary_id = gesture.primary_id();
+                if matches!(gesture, TouchGesture::CancelPress { .. })
+                    && let Some(route) = self
+                        .touch_routes
+                        .iter_mut()
+                        .find(|route| route.id == primary_id)
+                {
+                    route.press_repeat = None;
+                }
+                if matches!(gesture, TouchGesture::Tap { .. })
+                    && self
+                        .touch_routes
+                        .iter()
+                        .find(|route| route.id == primary_id)
+                        .is_some_and(|route| route.press_activated)
+                {
+                    continue;
+                }
                 completed_scroll |= matches!(
                     gesture,
                     TouchGesture::Scroll {
@@ -1863,7 +1949,7 @@ mod tests {
     use crate::event::{MouseEvent, ScrollSource, WheelPhase};
     use crate::geometry::{Rect, Size};
     use crate::view::{View, ViewExt};
-    use crate::views::{HStack, Rectangle};
+    use crate::views::{Button, HStack, Rectangle};
     use alloc::boxed::Box;
     use alloc::rc::Rc;
     use core::any::Any;
@@ -2429,5 +2515,89 @@ mod tests {
         assert!(dispatcher.dispatch(&mut tree, &wheel_event(60, WheelPhase::Started)));
         assert_eq!(outer_count.get(), 0);
         assert_eq!(inner_count.get(), 0);
+    }
+
+    fn repeating_button_fixture() -> (ElementTree, EventDispatcher, Rc<Cell<u32>>) {
+        let activations = Rc::new(Cell::new(0));
+        let callback_activations = activations.clone();
+        let root = Button::new("delete")
+            .on_click(move || callback_activations.set(callback_activations.get() + 1))
+            .repeat_while_pressed(Duration::from_millis(420), Duration::from_millis(55))
+            .frame(100.0, 50.0);
+        let mut tree = ElementTree::new();
+        tree.set_root(root.create_element());
+        tree.layout(LayoutConstraints::tight(100.0, 50.0));
+        let root_id = tree.root().unwrap().id();
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.set_root(root_id);
+
+        (tree, dispatcher, activations)
+    }
+
+    fn button_touch(phase: TouchPhase, time_ns: u64) -> Event {
+        Event::TouchFrame(TouchFrame {
+            seat_id: 1,
+            serial: time_ns,
+            time_ns,
+            changes: alloc::vec![TouchChange {
+                seat_id: 1,
+                serial: time_ns,
+                time_ns,
+                id: 7,
+                phase,
+                x: 25,
+                y: 25,
+                pressure: None,
+                touch_major: None,
+            }],
+        })
+    }
+
+    #[test]
+    fn touch_button_activates_on_press_repeats_and_suppresses_release_tap() {
+        let (mut tree, mut dispatcher, activations) = repeating_button_fixture();
+
+        assert!(dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Down, 1)));
+        assert_eq!(activations.get(), 1);
+        assert!(dispatcher.has_active_animation());
+        assert!(!dispatcher.advance_animations(&mut tree, Duration::from_millis(419)));
+        assert_eq!(activations.get(), 1);
+        assert!(dispatcher.advance_animations(&mut tree, Duration::from_millis(1)));
+        assert_eq!(activations.get(), 2);
+        assert!(dispatcher.advance_animations(&mut tree, Duration::from_millis(55)));
+        assert_eq!(activations.get(), 3);
+
+        assert!(dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Up, 500_000_000)));
+        assert_eq!(activations.get(), 3);
+        assert!(!dispatcher.has_active_animation());
+    }
+
+    #[test]
+    fn touch_button_repeat_cancellation_never_reactivates_on_release() {
+        for cancellation in [
+            button_touch(TouchPhase::Cancel, 100_000_000),
+            Event::Focus(crate::event::FocusEvent::Lost),
+        ] {
+            let (mut tree, mut dispatcher, activations) = repeating_button_fixture();
+            dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Down, 1));
+            assert_eq!(activations.get(), 1);
+
+            dispatcher.dispatch(&mut tree, &cancellation);
+            assert!(!dispatcher.has_active_animation());
+            assert!(!dispatcher.advance_animations(&mut tree, Duration::from_secs(1)));
+            dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Up, 200_000_000));
+            assert_eq!(activations.get(), 1);
+        }
+    }
+
+    #[test]
+    fn touch_button_repeat_does_not_burst_after_a_delayed_frame() {
+        let (mut tree, mut dispatcher, activations) = repeating_button_fixture();
+        dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Down, 1));
+        assert!(dispatcher.advance_animations(&mut tree, Duration::from_secs(2)));
+        assert_eq!(activations.get(), 2);
+        assert!(!dispatcher.advance_animations(&mut tree, Duration::from_millis(54)));
+        assert!(dispatcher.advance_animations(&mut tree, Duration::from_millis(1)));
+        assert_eq!(activations.get(), 3);
     }
 }
