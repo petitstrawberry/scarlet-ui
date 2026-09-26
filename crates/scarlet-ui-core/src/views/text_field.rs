@@ -505,14 +505,6 @@ pub(crate) fn handle_text_field_keyboard(
             true
         }
         KeyEvent::Pressed {
-            keycode: KeyCode::Space,
-            ..
-        } => {
-            render_object.clear_preedit();
-            insert_text(field, render_object, " ");
-            true
-        }
-        KeyEvent::Pressed {
             keycode: KeyCode::Backspace,
             ..
         } => {
@@ -1016,6 +1008,32 @@ mod tests {
     use crate::event::{Event, KeyEvent, MouseButton, MouseEvent};
     use crate::renderer::PaintCommand;
     use crate::state::StateId;
+
+    #[test]
+    fn physical_space_and_text_insert_one_space() {
+        let text = State::new(crate::state::generate_state_id(), String::from("ab"));
+        let field = TextField::new(text.clone()).autofocus(true);
+        let mut render_object = TextFieldRenderObject::from_view(&field);
+        for event in [
+            KeyEvent::Pressed {
+                keycode: KeyCode::Left,
+                modifiers: KeyModifiers::default(),
+            },
+            KeyEvent::Pressed {
+                keycode: KeyCode::Space,
+                modifiers: KeyModifiers::default(),
+            },
+            KeyEvent::Char { c: ' ' },
+            KeyEvent::Released {
+                keycode: KeyCode::Space,
+                modifiers: KeyModifiers::default(),
+            },
+        ] {
+            handle_text_field_keyboard(&field, &mut render_object, event);
+        }
+        assert_eq!(text.get(), "a b");
+        assert_eq!(render_object.selection.caret.byte, 2);
+    }
 
     #[test]
     fn autofocus_changes_are_applied_without_losing_interactive_focus() {

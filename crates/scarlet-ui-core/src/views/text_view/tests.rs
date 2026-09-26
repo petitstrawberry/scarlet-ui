@@ -731,6 +731,29 @@ fn keyboard_character_insertion_updates_document_and_caret() {
 }
 
 #[test]
+fn physical_space_and_text_insert_one_space() {
+    let text = State::new(crate::state::generate_state_id(), String::from("ab"));
+    let selection = State::new(
+        crate::state::generate_state_id(),
+        TextSelection::collapsed(1),
+    );
+    let view = TextView::new(text.clone(), selection.clone());
+    let mut render_object = focused_render_object(&view);
+    for event in [
+        key(KeyCode::Space),
+        KeyEvent::Char { c: ' ' },
+        KeyEvent::Released {
+            keycode: KeyCode::Space,
+            modifiers: KeyModifiers::default(),
+        },
+    ] {
+        handle_text_view_keyboard(&view, &mut render_object, event);
+    }
+    assert_eq!(text.get(), "a b");
+    assert_eq!(selection.get(), TextSelection::collapsed(2));
+}
+
+#[test]
 fn keyboard_multibyte_insertion_tracks_byte_caret() {
     let text = State::new(StateId::new(202), String::new());
     let selection = State::new(StateId::new(203), TextSelection::collapsed(0));

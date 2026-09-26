@@ -98,14 +98,6 @@ pub(crate) fn handle_text_view_keyboard(
             true
         }
         KeyEvent::Pressed {
-            keycode: KeyCode::Space,
-            ..
-        } => {
-            render_object.clear_preedit();
-            insert_text(view, render_object, " ");
-            true
-        }
-        KeyEvent::Pressed {
             keycode: KeyCode::Left,
             modifiers,
         } => {

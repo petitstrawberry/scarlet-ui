@@ -503,6 +503,30 @@ impl WinitEventState {
         }));
     }
 
+    fn push_keyboard_input(&mut self, key: &Key, state: WinitElementState) {
+        let keycode = map_key(key);
+        let modifiers = self.modifiers;
+        if state == WinitElementState::Pressed {
+            self.push(Event::Keyboard(KeyEvent::Pressed { keycode, modifiers }));
+            if !self.ime_preedit_active {
+                // Winit represents a normal space as a named key. Emit the
+                // same text event as SWS, separately from the physical press.
+                let text = match key {
+                    Key::Character(text) => Some(text.as_str()),
+                    Key::Named(NamedKey::Space) => Some(" "),
+                    _ => None,
+                };
+                for c in text.into_iter().flat_map(str::chars) {
+                    if !c.is_control() {
+                        self.push(Event::Keyboard(KeyEvent::Char { c }));
+                    }
+                }
+            }
+        } else {
+            self.push(Event::Keyboard(KeyEvent::Released { keycode, modifiers }));
+        }
+    }
+
     fn push(&mut self, mut event: Event) {
         self.flush_expired_trackpad_end();
 
@@ -983,22 +1007,7 @@ impl ApplicationHandler for WinitPumpHandler {
                 );
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                let keycode = map_key(&event.logical_key);
-                let modifiers = state.modifiers;
-                if event.state == WinitElementState::Pressed {
-                    state.push(Event::Keyboard(KeyEvent::Pressed { keycode, modifiers }));
-                    if !state.ime_preedit_active
-                        && let Key::Character(text) = &event.logical_key
-                    {
-                        for c in text.chars() {
-                            if !c.is_control() {
-                                state.push(Event::Keyboard(KeyEvent::Char { c }));
-                            }
-                        }
-                    }
-                } else {
-                    state.push(Event::Keyboard(KeyEvent::Released { keycode, modifiers }));
-                }
+                state.push_keyboard_input(&event.logical_key, event.state);
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 state.discard_pending_empty_preedit();
@@ -1728,6 +1737,54 @@ fn map_wheel_phase(phase: TouchPhase) -> WheelPhase {
 mod tests {
     use super::*;
     use scarlet_ui_core::platform::{WindowFrame, WindowTitleBar};
+
+    #[test]
+    fn space_emits_one_text_event_per_press_and_repeat() {
+        for key in [Key::Named(NamedKey::Space), Key::Character(" ".into())] {
+            let mut state = WinitEventState::new_with_wheel_coalesce(1.0, false);
+            state.push_keyboard_input(&key, WinitElementState::Pressed);
+            state.push_keyboard_input(&key, WinitElementState::Pressed);
+            state.push_keyboard_input(&key, WinitElementState::Released);
+            assert!(matches!(
+                state.pop(),
+                Some(Event::Keyboard(KeyEvent::Pressed { .. }))
+            ));
+            assert!(matches!(
+                state.pop(),
+                Some(Event::Keyboard(KeyEvent::Char { c: ' ' }))
+            ));
+            assert!(matches!(
+                state.pop(),
+                Some(Event::Keyboard(KeyEvent::Pressed { .. }))
+            ));
+            assert!(matches!(
+                state.pop(),
+                Some(Event::Keyboard(KeyEvent::Char { c: ' ' }))
+            ));
+            assert!(matches!(
+                state.pop(),
+                Some(Event::Keyboard(KeyEvent::Released { .. }))
+            ));
+            assert!(state.pop().is_none());
+        }
+    }
+
+    #[test]
+    fn space_during_ime_preedit_does_not_insert_raw_text() {
+        let mut state = WinitEventState::new_with_wheel_coalesce(1.0, false);
+        state.ime_preedit_active = true;
+        state.push_keyboard_input(&Key::Named(NamedKey::Space), WinitElementState::Pressed);
+        state.push_keyboard_input(&Key::Named(NamedKey::Space), WinitElementState::Released);
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Keyboard(KeyEvent::Pressed { .. }))
+        ));
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Keyboard(KeyEvent::Released { .. }))
+        ));
+        assert!(state.pop().is_none());
+    }
 
     #[test]
     fn system_owned_frame_or_titlebar_enables_platform_window_decorations() {
