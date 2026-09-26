@@ -231,6 +231,7 @@ struct WinitEventState {
     cursor_physical_y: f64,
     cursor_x: i32,
     cursor_y: i32,
+    cursor_position_known: bool,
     cursor_inside: bool,
     window_focused: bool,
     fullscreen: bool,
@@ -354,6 +355,7 @@ impl WinitEventState {
             cursor_physical_y: 0.0,
             cursor_x: 0,
             cursor_y: 0,
+            cursor_position_known: false,
             cursor_inside: false,
             window_focused: true,
             fullscreen: false,
@@ -389,6 +391,18 @@ impl WinitEventState {
             self.cursor_inside = inside;
             true
         }
+    }
+
+    fn update_cursor_position(&mut self, physical_x: f64, physical_y: f64) -> bool {
+        let x = physical_to_logical_pos(physical_x, self.scale_factor);
+        let y = physical_to_logical_pos(physical_y, self.scale_factor);
+        let changed = !self.cursor_position_known || self.cursor_x != x || self.cursor_y != y;
+        self.cursor_physical_x = physical_x;
+        self.cursor_physical_y = physical_y;
+        self.cursor_x = x;
+        self.cursor_y = y;
+        self.cursor_position_known = true;
+        changed
     }
 
     fn push_native_touch_event(
@@ -831,8 +845,6 @@ impl ApplicationHandler for WinitPumpHandler {
                 state.modifiers = map_modifiers(modifiers.state());
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let new_x = physical_to_logical_pos(position.x, state.scale_factor);
-                let new_y = physical_to_logical_pos(position.y, state.scale_factor);
                 if state.manual_move_active {
                     if let Ok(outer) = window.outer_position() {
                         let global_x = outer.x as f64 + position.x;
@@ -846,17 +858,11 @@ impl ApplicationHandler for WinitPumpHandler {
                             f64_to_i32_saturated(new_outer_y.round()),
                         ));
                     }
-                    state.cursor_physical_x = position.x;
-                    state.cursor_physical_y = position.y;
-                    state.cursor_x = new_x;
-                    state.cursor_y = new_y;
+                    state.update_cursor_position(position.x, position.y);
                     return;
                 }
-                state.cursor_physical_x = position.x;
-                state.cursor_physical_y = position.y;
-                state.cursor_x = new_x;
-                state.cursor_y = new_y;
-                if state.pointer_locked {
+                let logical_position_changed = state.update_cursor_position(position.x, position.y);
+                if state.pointer_locked || !logical_position_changed {
                     return;
                 }
                 let x = state.cursor_x;
@@ -1752,6 +1758,19 @@ mod tests {
         assert!(!state.set_cursor_inside(true));
         assert!(state.set_cursor_inside(false));
         assert!(!state.set_cursor_inside(false));
+    }
+
+    #[test]
+    fn cursor_position_changes_emit_once_per_logical_coordinate() {
+        let mut state = WinitEventState::new_with_wheel_coalesce(2.0, false);
+        assert!(state.update_cursor_position(10.0, 12.0));
+        assert!(!state.update_cursor_position(10.4, 12.4));
+        assert!(state.update_cursor_position(12.0, 12.0));
+        assert_eq!((state.cursor_x, state.cursor_y), (6, 6));
+        assert_eq!(
+            (state.cursor_physical_x, state.cursor_physical_y),
+            (12.0, 12.0)
+        );
     }
 
     #[test]
