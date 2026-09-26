@@ -344,6 +344,20 @@ pub trait ViewExt: View {
         crate::views::modifiers::OnKey::new(self, callback)
     }
 
+    /// Handle any input event localized to this view.
+    ///
+    /// The callback runs during target or bubble dispatch and may consume the
+    /// event by returning `true`.
+    fn on_event<F: Fn(&crate::event::Event) -> bool + Clone + 'static>(
+        self,
+        callback: F,
+    ) -> crate::views::modifiers::OnEvent<Self, F>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::OnEvent::new(self, callback)
+    }
+
     /// Make this view accept keyboard focus.
     ///
     /// # Arguments

@@ -914,6 +914,103 @@ pub struct OnKey<V: View, F: Clone + 'static> {
     callback: F,
 }
 
+/// Raw event modifier for views that provide their own input model.
+#[derive(Clone)]
+pub struct OnEvent<V: View, F: Clone + 'static> {
+    inner: V,
+    callback: F,
+}
+
+impl<V: View, F: Fn(&Event) -> bool + Clone + 'static> OnEvent<V, F> {
+    /// Create a raw event modifier.
+    pub fn new(inner: V, callback: F) -> Self {
+        Self { inner, callback }
+    }
+}
+
+impl<V: View + Clone, F: Fn(&Event) -> bool + Clone + 'static> View for OnEvent<V, F> {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(RenderElement::with_view_children_and_updater(
+            self.clone(),
+            |view| OnEventRenderObject {
+                callback: Box::new(view.callback.clone()),
+                size: Size::ZERO,
+            },
+            update_on_event_render_object::<V, F>,
+            |view| vec![view.inner.clone_view()],
+        ))
+    }
+
+    fn listenables(&self) -> alloc::vec::Vec<&dyn Listenable> {
+        self.inner.listenables()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+fn update_on_event_render_object<V, F>(
+    render_object: &mut OnEventRenderObject,
+    view: &OnEvent<V, F>,
+) -> UpdateResult
+where
+    V: View,
+    F: Fn(&Event) -> bool + Clone + 'static,
+{
+    render_object.callback = Box::new(view.callback.clone());
+    UpdateResult::Updated
+}
+
+/// Render object for [`OnEvent`].
+pub struct OnEventRenderObject {
+    callback: Box<dyn Fn(&Event) -> bool>,
+    size: Size,
+}
+
+impl ElementRenderObject for OnEventRenderObject {
+    fn layout(&mut self, _constraints: crate::element::LayoutConstraints) -> Size {
+        Size::ZERO
+    }
+
+    fn layout_with_children(
+        &mut self,
+        constraints: crate::element::LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
+        self.size = children
+            .first_mut()
+            .map_or(Size::ZERO, |child| child.layout(constraints));
+        self.size
+    }
+
+    fn size(&self) -> Size {
+        self.size
+    }
+
+    fn hit_test(&self, point: crate::geometry::Point) -> bool {
+        point.x >= 0.0 && point.x < self.size.width && point.y >= 0.0 && point.y < self.size.height
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn handle_event(&mut self, event: &Event, phase: Phase) -> bool {
+        if matches!(phase, Phase::Target | Phase::Bubble) {
+            (self.callback)(event)
+        } else {
+            false
+        }
+    }
+
+    fn render(&mut self) {}
+}
+
 impl<V: View, F: Fn(KeyEvent) -> bool + Clone + 'static> OnKey<V, F> {
     /// Create a new OnKey modifier.
     ///
