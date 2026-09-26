@@ -67,6 +67,30 @@ impl Default for SgfxMeshHandle {
     }
 }
 
+/// Stable identity for a dynamically updated SGFX texture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SgfxTextureHandle(u64);
+
+impl SgfxTextureHandle {
+    /// Allocate a stable texture identity.
+    ///
+    /// Reuse this handle with increasing revisions to update one retained GPU
+    /// texture without allocating a new resource for every snapshot.
+    pub fn new() -> Self {
+        Self(NEXT_TEXTURE_ID.allocate())
+    }
+
+    pub(crate) const fn id(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for SgfxTextureHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// One vertex consumed by the SGFX canvas vertex-color pipeline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SgfxCanvasVertex {
@@ -109,10 +133,11 @@ impl SgfxCanvasVertex {
     }
 }
 
-/// Immutable straight-alpha RGBA texture retained by the SGFX renderer.
+/// One retained SGFX texture snapshot.
 #[derive(Debug)]
 pub struct SgfxTexture {
-    pub(crate) id: u64,
+    pub(crate) handle: SgfxTextureHandle,
+    pub(crate) revision: u64,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) source: SgfxTextureSource,
@@ -138,8 +163,23 @@ impl SgfxTexture {
     ///
     /// A retained texture. Dimensions and byte length are validated when used.
     pub fn rgba8(width: u32, height: u32, pixels: Vec<u8>) -> Arc<Self> {
+        Self::rgba8_with_handle(SgfxTextureHandle::new(), 0, width, height, pixels)
+    }
+
+    /// Create one revision of a dynamically updated RGBA8 texture.
+    ///
+    /// Dimensions must remain stable for every revision of `handle`. A frame
+    /// must not contain different revisions of the same handle.
+    pub fn rgba8_with_handle(
+        handle: SgfxTextureHandle,
+        revision: u64,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            id: NEXT_TEXTURE_ID.allocate(),
+            handle,
+            revision,
             width,
             height,
             source: SgfxTextureSource::Rgba8(pixels.into()),
@@ -154,7 +194,8 @@ impl SgfxTexture {
     /// other backends reject the frame explicitly.
     pub fn external_bgra8(width: u32, height: u32, source: Arc<dyn PaintExtension>) -> Arc<Self> {
         Arc::new(Self {
-            id: NEXT_TEXTURE_ID.allocate(),
+            handle: SgfxTextureHandle::new(),
+            revision: 0,
             width,
             height,
             source: SgfxTextureSource::ExternalBgra8(source),
@@ -166,6 +207,16 @@ impl SgfxTexture {
         let mut texture = Self::external_bgra8(width, height, source.clone());
         Arc::get_mut(&mut texture).unwrap().source = SgfxTextureSource::ExternalNv12(source);
         texture
+    }
+
+    /// Return the stable identity used by the renderer texture cache.
+    pub const fn handle(&self) -> SgfxTextureHandle {
+        self.handle
+    }
+
+    /// Return the application-controlled content revision.
+    pub const fn revision(&self) -> u64 {
+        self.revision
     }
     /// Append this external image directly to the paint order, without an
     /// intermediate canvas target or CPU pixel upload.
@@ -752,6 +803,17 @@ mod tests {
         assert_eq!(first.revision(), 7);
         assert_eq!(second.revision(), 8);
         assert_eq!(first.triangle_count(), 1);
+    }
+
+    #[test]
+    fn dynamic_texture_preserves_handle_and_revision() {
+        let handle = SgfxTextureHandle::new();
+        let first = SgfxTexture::rgba8_with_handle(handle, 7, 1, 1, vec![0, 0, 0, 0]);
+        let second = SgfxTexture::rgba8_with_handle(handle, 8, 1, 1, vec![255, 255, 255, 255]);
+        assert_eq!(first.handle(), handle);
+        assert_eq!(second.handle(), handle);
+        assert_eq!(first.revision(), 7);
+        assert_eq!(second.revision(), 8);
     }
 
     #[test]

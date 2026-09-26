@@ -328,7 +328,14 @@ fn canvas_mesh_cache_action(
 fn canvas_frame_has_revision_conflict(frame: &SgfxCanvasFrame) -> bool {
     frame.draws.iter().enumerate().any(|(index, draw)| {
         frame.draws[..index].iter().any(|previous| {
-            previous.mesh.handle == draw.mesh.handle && previous.mesh.revision != draw.mesh.revision
+            (previous.mesh.handle == draw.mesh.handle
+                && previous.mesh.revision != draw.mesh.revision)
+                || match (&previous.texture, &draw.texture) {
+                    (Some(previous), Some(current)) => {
+                        previous.handle == current.handle && previous.revision != current.revision
+                    }
+                    _ => false,
+                }
         })
     })
 }
@@ -361,7 +368,8 @@ fn canvas_pass_reaches_frame_end(
 }
 
 struct CanvasTexture {
-    texture_id: u64,
+    handle_id: u64,
+    revision: u64,
     texture: TextureId,
     source: Arc<SgfxTexture>,
     uploaded: bool,
@@ -590,19 +598,19 @@ impl SgfxPaintEncoder {
                 .as_any()
                 .downcast_ref::<ExternalGpuSurfacePaint>()
             {
-                active.push(surface.texture.id);
+                active.push(surface.texture.handle.id());
             } else if let Some(canvas) = payload.as_ref().as_any().downcast_ref::<SgfxCanvasPaint>()
             {
                 for draw in &canvas.frame.draws {
                     if let Some(texture) = &draw.texture {
-                        active.push(texture.id);
+                        active.push(texture.handle.id());
                     }
                 }
             }
         }
         self.canvas_textures
             .iter()
-            .filter(|t| t.source.external_source().is_some() && !active.contains(&t.texture_id))
+            .filter(|t| t.source.external_source().is_some() && !active.contains(&t.handle_id))
             .map(|t| (t.texture, t.external_bound))
             .collect()
     }
@@ -1541,17 +1549,7 @@ impl SgfxPaintEncoder {
     }
 
     fn canvas_texture(&mut self, texture: &Arc<SgfxTexture>) -> Result<usize> {
-        if let Some(index) = self
-            .canvas_textures
-            .iter()
-            .position(|cached| cached.texture_id == texture.id)
-        {
-            return Ok(index);
-        }
-        if self.canvas_textures.len() >= MAX_CANVAS_TEXTURES
-            || texture.width == 0
-            || texture.height == 0
-        {
+        if texture.width == 0 || texture.height == 0 {
             return Err(Error::InvalidFrame);
         }
         let (format, external_bound) = if let Some(pixels) = texture.rgba8_pixels() {
@@ -1578,6 +1576,39 @@ impl SgfxPaintEncoder {
                 false,
             )
         };
+        if let Some(index) = self
+            .canvas_textures
+            .iter()
+            .position(|cached| cached.handle_id == texture.handle.id())
+        {
+            let cached = &mut self.canvas_textures[index];
+            let cached_format = if cached.source.rgba8_pixels().is_some() {
+                TextureFormat::Rgba8Unorm
+            } else if cached.source.is_nv12() {
+                TextureFormat::Nv12
+            } else {
+                TextureFormat::Bgra8Unorm
+            };
+            if cached.source.width != texture.width
+                || cached.source.height != texture.height
+                || cached_format != format
+            {
+                return Err(Error::InvalidFrame);
+            }
+            if cached.revision == texture.revision {
+                return Ok(index);
+            }
+            if texture.rgba8_pixels().is_none() {
+                return Err(Error::InvalidFrame);
+            }
+            cached.revision = texture.revision;
+            cached.source = Arc::clone(texture);
+            cached.uploaded = false;
+            return Ok(index);
+        }
+        if self.canvas_textures.len() >= MAX_CANVAS_TEXTURES {
+            return Err(Error::InvalidFrame);
+        }
         let reusable = self
             .free_external_textures
             .iter()
@@ -1590,7 +1621,8 @@ impl SgfxPaintEncoder {
             define_sampled_texture(&self.table, format, texture.width, texture.height)?
         };
         self.canvas_textures.push(CanvasTexture {
-            texture_id: texture.id,
+            handle_id: texture.handle.id(),
+            revision: texture.revision,
             texture: texture_id,
             source: Arc::clone(texture),
             uploaded: false,
@@ -2737,7 +2769,7 @@ fn truncated(value: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canvas::{SgfxCanvasDraw, SgfxCanvasVertex, SgfxMeshHandle};
+    use crate::canvas::{SgfxCanvasDraw, SgfxCanvasVertex, SgfxMeshHandle, SgfxTextureHandle};
     use scarlet_ui_core::geometry::{Offset, Point, Rect, Size};
     use scarlet_ui_core::icon::{ALL_ICONS, IconStyle};
     use sgfx::ir::{Command, CommandBuffer};
@@ -3366,6 +3398,45 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_canvas_texture_reuploads_one_retained_gpu_texture() {
+        let mut encoder = SgfxPaintEncoder::new(32, 32, false).unwrap();
+        let mut executor = RecordingExecutor::default();
+        let handle = SgfxTextureHandle::new();
+        let mesh = SgfxMesh::new(triangle(0.0));
+        let make_frame = |revision, value| {
+            SgfxCanvasFrame::new(revision, UiColor::BLACK).draw(
+                SgfxCanvasDraw::new(Arc::clone(&mesh), Transform::identity().columns()).texture(
+                    SgfxTexture::rgba8_with_handle(handle, revision, 2, 2, vec![value; 16]),
+                ),
+            )
+        };
+        let target = encoder.canvas_target(1, 32, 32, false).unwrap();
+        let first = make_frame(1, 0);
+        encoder
+            .render_canvas(&mut executor, target, &first)
+            .unwrap();
+        encoder
+            .render_canvas(&mut executor, target, &first)
+            .unwrap();
+        let second = make_frame(2, 255);
+        encoder
+            .render_canvas(&mut executor, target, &second)
+            .unwrap();
+
+        assert_eq!(encoder.canvas_textures.len(), 1);
+        assert_eq!(encoder.canvas_textures[0].revision, 2);
+        assert_eq!(
+            executor
+                .command_kinds
+                .iter()
+                .flatten()
+                .filter(|kind| **kind == "write-texture")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn discarded_canvas_contents_are_invalidated_without_reuploading_retired_meshes() {
         let mut encoder = SgfxPaintEncoder::new(32, 32, false).unwrap();
         let mut executor = RecordingExecutor::default();
@@ -3727,6 +3798,22 @@ mod tests {
             SgfxMesh::with_handle(handle, 5, triangle(1.0)),
             transform,
         ));
+        assert!(canvas_frame_has_revision_conflict(&invalid));
+    }
+
+    #[test]
+    fn one_canvas_frame_rejects_mixed_texture_revisions_of_a_handle() {
+        let handle = SgfxTextureHandle::new();
+        let transform = Transform::identity().columns();
+        let mesh = SgfxMesh::new(triangle(0.0));
+        let texture =
+            |revision| SgfxTexture::rgba8_with_handle(handle, revision, 1, 1, vec![255; 4]);
+        let valid = SgfxCanvasFrame::new(1, UiColor::BLACK)
+            .draw(SgfxCanvasDraw::new(Arc::clone(&mesh), transform).texture(texture(4)))
+            .draw(SgfxCanvasDraw::new(Arc::clone(&mesh), transform).texture(texture(4)));
+        assert!(!canvas_frame_has_revision_conflict(&valid));
+
+        let invalid = valid.draw(SgfxCanvasDraw::new(mesh, transform).texture(texture(5)));
         assert!(canvas_frame_has_revision_conflict(&invalid));
     }
 

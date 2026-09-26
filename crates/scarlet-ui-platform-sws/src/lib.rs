@@ -42,7 +42,7 @@ use scarlet_ui_core::renderer::{
 pub use scarlet_ui_renderer_sgfx::{
     ExternalGpuSurface, ExternalGpuSurfaceRenderObject, SgfxCanvas, SgfxCanvasDraw,
     SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject, SgfxCanvasVertex, SgfxMesh,
-    SgfxMeshHandle, SgfxTexture,
+    SgfxMeshHandle, SgfxTexture, SgfxTextureHandle,
 };
 use sgfx::ImageRef;
 pub use shared_image::{

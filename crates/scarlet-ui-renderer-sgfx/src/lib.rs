@@ -24,7 +24,7 @@ mod upload;
 
 pub use canvas::{
     SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
-    SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
+    SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture, SgfxTextureHandle,
 };
 pub use error::{Error, FrameError, Result, Stage};
 pub use external_surface::{ExternalGpuSurface, ExternalGpuSurfaceRenderObject};

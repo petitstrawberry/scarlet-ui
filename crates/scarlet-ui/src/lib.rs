@@ -42,15 +42,15 @@ pub use scarlet_ui_core::*;
 pub use scarlet_ui_platform_sws::{
     ChromaLocation, ExternalGpuSurface, ExternalGpuSurfaceRenderObject, SWSPlatformWindow,
     SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
-    SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture, SharedImageError, SwsBackend,
-    YcbcrConversion, YcbcrMatrix, YcbcrRange, shared_bgra8_texture, shared_bgra8_texture_from_raw,
-    shared_nv12_texture,
+    SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture, SgfxTextureHandle, SharedImageError,
+    SwsBackend, YcbcrConversion, YcbcrMatrix, YcbcrRange, shared_bgra8_texture,
+    shared_bgra8_texture_from_raw, shared_nv12_texture,
 };
 #[cfg(all(feature = "platform-winit", not(target_os = "scarlet")))]
 pub use scarlet_ui_platform_winit::{
     ExternalGpuSurface, ExternalGpuSurfaceRenderObject, SgfxCanvas, SgfxCanvasDraw,
     SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject, SgfxCanvasVertex, SgfxMesh,
-    SgfxMeshHandle, SgfxTexture, WinitBackend, WinitPlatformWindow,
+    SgfxMeshHandle, SgfxTexture, SgfxTextureHandle, WinitBackend, WinitPlatformWindow,
 };
 
 /// Extension methods for running applications with the selected backend.
@@ -109,12 +109,12 @@ pub mod prelude {
     #[cfg(all(feature = "platform-winit", not(target_os = "scarlet")))]
     pub use crate::{
         ExternalGpuSurface, SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle,
-        SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
+        SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture, SgfxTextureHandle,
     };
     #[cfg(all(feature = "platform-sws", target_os = "scarlet"))]
     pub use crate::{
         ExternalGpuSurface, SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle,
-        SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture, SharedImageError,
-        shared_bgra8_texture, shared_bgra8_texture_from_raw,
+        SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture, SgfxTextureHandle,
+        SharedImageError, shared_bgra8_texture, shared_bgra8_texture_from_raw,
     };
 }
