@@ -1313,8 +1313,16 @@ impl SgfxPaintEncoder {
                     else {
                         continue;
                     };
-                    let canvas_width = physical_canvas_extent(rect.size.width, scale)?;
-                    let canvas_height = physical_canvas_extent(rect.size.height, scale)?;
+                    let canvas_width = rasterized_canvas_extent(
+                        rect.size.width,
+                        scale,
+                        canvas.frame.raster_scale,
+                    )?;
+                    let canvas_height = rasterized_canvas_extent(
+                        rect.size.height,
+                        scale,
+                        canvas.frame.raster_scale,
+                    )?;
                     let Some(texture) = self.canvas_targets.iter().find(|target| {
                         target.handle_id == canvas.handle.id()
                             && target.width == canvas_width
@@ -1378,8 +1386,10 @@ impl SgfxPaintEncoder {
             let Some(canvas) = payload.as_ref().as_any().downcast_ref::<SgfxCanvasPaint>() else {
                 continue;
             };
-            let width = physical_canvas_extent(rect.size.width, scale)?;
-            let height = physical_canvas_extent(rect.size.height, scale)?;
+            let width =
+                rasterized_canvas_extent(rect.size.width, scale, canvas.frame.raster_scale)?;
+            let height =
+                rasterized_canvas_extent(rect.size.height, scale, canvas.frame.raster_scale)?;
             let target_index =
                 self.canvas_target(canvas.handle.id(), width, height, canvas.frame.depth_test)?;
             let unchanged = {
@@ -2618,6 +2628,13 @@ fn physical_canvas_extent(logical: f32, scale: f32) -> Result<u32> {
     Ok(physical as u32)
 }
 
+fn rasterized_canvas_extent(logical: f32, scale: f32, raster_scale: f32) -> Result<u32> {
+    if !raster_scale.is_finite() || raster_scale < 1.0 {
+        return Err(Error::InvalidFrame);
+    }
+    physical_canvas_extent(logical, scale * raster_scale)
+}
+
 fn canvas_transform(
     mut transform: [f32; 16],
     reference_aspect: f32,
@@ -3192,6 +3209,36 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn canvas_raster_scale_expands_the_offscreen_target() {
+        let frame = Arc::new(
+            SgfxCanvasFrame::new(1, UiColor::BLACK)
+                .raster_scale(2.0)
+                .draw(SgfxCanvasDraw::new(
+                    SgfxMesh::new(triangle(0.0)),
+                    Transform::identity().columns(),
+                )),
+        );
+        let mut paint = PaintContext::new();
+        paint.draw_extension(
+            Rect::from_xywh(0.0, 0.0, 16.0, 12.0),
+            Arc::new(SgfxCanvasPaint {
+                handle: crate::canvas::SgfxCanvasHandle::new(),
+                frame,
+            }),
+        );
+        let mut encoder = SgfxPaintEncoder::new(32, 24, false).unwrap();
+        let mut executor = RecordingExecutor::default();
+
+        encoder
+            .prepare_canvases(&mut executor, &paint, 2_000)
+            .unwrap();
+
+        assert_eq!(encoder.canvas_targets.len(), 1);
+        assert_eq!(encoder.canvas_targets[0].width, 64);
+        assert_eq!(encoder.canvas_targets[0].height, 48);
     }
 
     #[test]

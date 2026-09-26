@@ -364,6 +364,7 @@ pub struct SgfxCanvasFrame {
     pub(crate) revision: u64,
     pub(crate) clear_color: Color,
     pub(crate) reference_aspect: f32,
+    pub(crate) raster_scale: f32,
     pub(crate) depth_test: bool,
     pub(crate) draws: Vec<SgfxCanvasDraw>,
 }
@@ -384,6 +385,7 @@ impl SgfxCanvasFrame {
             revision,
             clear_color,
             reference_aspect: 1.0,
+            raster_scale: 1.0,
             depth_test: false,
             draws: Vec::new(),
         }
@@ -441,6 +443,34 @@ impl SgfxCanvasFrame {
     pub fn reference_aspect(mut self, aspect: f32) -> Self {
         self.reference_aspect = aspect;
         self
+    }
+
+    /// Set an additional scale for the offscreen canvas target.
+    ///
+    /// Values above `1.0` render the canvas at a higher resolution before it
+    /// is linearly sampled into the view. This provides supersampling for
+    /// vector content without changing its logical size.
+    ///
+    /// # Arguments
+    ///
+    /// * `scale` - Finite multiplier of at least `1.0`, applied after the display scale.
+    ///
+    /// # Returns
+    ///
+    /// This frame with the requested raster scale. Invalid values are rejected
+    /// when the frame is rendered.
+    pub fn raster_scale(mut self, scale: f32) -> Self {
+        self.raster_scale = scale;
+        self
+    }
+
+    /// Return the additional offscreen raster scale.
+    ///
+    /// # Returns
+    ///
+    /// The multiplier applied after the display scale.
+    pub const fn raster_scale_factor(&self) -> f32 {
+        self.raster_scale
     }
 
     /// Append a retained mesh draw.
@@ -695,6 +725,20 @@ mod tests {
                 .depth_tested()
                 .with_depth(false)
                 .uses_depth()
+        );
+    }
+
+    #[test]
+    fn canvas_raster_scale_defaults_to_one_and_is_configurable() {
+        assert_eq!(
+            SgfxCanvasFrame::new(1, Color::BLACK).raster_scale_factor(),
+            1.0
+        );
+        assert_eq!(
+            SgfxCanvasFrame::new(1, Color::BLACK)
+                .raster_scale(2.0)
+                .raster_scale_factor(),
+            2.0
         );
     }
 
