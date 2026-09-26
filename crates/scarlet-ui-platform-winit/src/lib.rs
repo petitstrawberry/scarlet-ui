@@ -1092,6 +1092,7 @@ pub struct WinitPlatformWindow {
     current_size: Size,
     ime_allowed: bool,
     surface_id: u32,
+    event_batch_open: bool,
 }
 
 fn validate_window_decoration(decoration: WindowDecoration) -> Result<()> {
@@ -1236,6 +1237,7 @@ impl WinitPlatformWindow {
             ),
             ime_allowed: false,
             surface_id,
+            event_batch_open: false,
         })
     }
 
@@ -1297,8 +1299,19 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn poll_event(&mut self) -> Option<Event> {
-        self.pump_events();
-        let event = self.state.borrow_mut().pop();
+        let mut event = self.state.borrow_mut().pop();
+        if event.is_none() {
+            if self.event_batch_open {
+                self.event_batch_open = false;
+                return None;
+            }
+            self.pump_events();
+            self.event_batch_open = true;
+            event = self.state.borrow_mut().pop();
+            if event.is_none() {
+                self.event_batch_open = false;
+            }
+        }
         if let Some(Event::Resize { width, height }) = event {
             let size = Size::new(width as f32, height as f32);
             self.set_observed_logical_size(size);
@@ -1317,6 +1330,7 @@ impl PlatformWindow for WinitPlatformWindow {
             .event_loop
             .borrow_mut()
             .pump_app_events(Some(timeout), &mut handler);
+        self.event_batch_open = true;
         let mut state = self.state.borrow_mut();
         state.flush_pending_empty_preedit();
         state.flush_expired_trackpad_end();
