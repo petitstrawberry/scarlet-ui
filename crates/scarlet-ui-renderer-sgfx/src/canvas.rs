@@ -170,12 +170,14 @@ impl SgfxTexture {
     ///
     /// Dimensions must remain stable for every revision of `handle`. A frame
     /// must not contain different revisions of the same handle.
+    /// Shared pixel storage can be prepared on a worker and passed as an
+    /// `Arc<[u8]>` without copying the pixels on the presentation thread.
     pub fn rgba8_with_handle(
         handle: SgfxTextureHandle,
         revision: u64,
         width: u32,
         height: u32,
-        pixels: Vec<u8>,
+        pixels: impl Into<Arc<[u8]>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             handle,
@@ -814,6 +816,22 @@ mod tests {
         assert_eq!(second.handle(), handle);
         assert_eq!(first.revision(), 7);
         assert_eq!(second.revision(), 8);
+    }
+
+    #[test]
+    fn shared_texture_pixels_are_not_copied() {
+        let pixels: Arc<[u8]> = vec![255; 16].into();
+        let texture = SgfxTexture::rgba8_with_handle(
+            SgfxTextureHandle::new(),
+            1,
+            2,
+            2,
+            Arc::clone(&pixels),
+        );
+        let SgfxTextureSource::Rgba8(stored) = &texture.source else {
+            panic!("expected RGBA pixels");
+        };
+        assert!(Arc::ptr_eq(stored, &pixels));
     }
 
     #[test]
