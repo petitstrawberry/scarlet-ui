@@ -121,7 +121,7 @@ pub use event::{
     Event, EventDispatcher, FocusEvent, GamepadButton, GamepadEvent, InputEvent, KeyCode, KeyEvent,
     LifecycleEvent, MouseButton, MouseEvent, ScrollSource, WheelPhase,
 };
-pub use geometry::{Alignment, EdgeInsets, Offset, Point, Rect, Size};
+pub use geometry::{Alignment, EdgeInsets, GeometryProxy, Offset, Point, Rect, Size};
 pub use graphics::{
     Canvas, FontStack, GlyphRasterKey, RasterizedGlyph, add_default_font_fallback,
     clear_default_font_fallbacks, default_font_stack, measure_text_sized,

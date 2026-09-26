@@ -416,6 +416,10 @@ impl PipelineOwner {
             if let Some(root) = element_tree.root() {
                 self.dirty_paint.insert(root.id());
             }
+        } else {
+            for id in layout_roots {
+                element_tree.flush_layout_notifications_for(id);
+            }
         }
     }
 

@@ -136,6 +136,12 @@ pub trait RenderObject: Any {
     /// Get the current size
     fn size(&self) -> Size;
 
+    /// Deliver notifications collected during the most recent layout pass.
+    ///
+    /// Called after the element tree has finished layout so callbacks can
+    /// update state without interrupting the layout traversal.
+    fn flush_layout_notifications(&mut self) {}
+
     /// Render to buffer.
     ///
     /// For leaf nodes, this renders content to the buffer.

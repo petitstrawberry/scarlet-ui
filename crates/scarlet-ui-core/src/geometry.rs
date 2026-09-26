@@ -41,6 +41,23 @@ impl Size {
     }
 }
 
+/// Geometry available after a view has been laid out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GeometryProxy {
+    size: Size,
+}
+
+impl GeometryProxy {
+    pub(crate) const fn new(size: Size) -> Self {
+        Self { size }
+    }
+
+    /// Return the view's laid-out size in logical units.
+    pub const fn size(self) -> Size {
+        self.size
+    }
+}
+
 /// 2D point with x and y coordinates
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Point {

@@ -95,9 +95,34 @@ impl ElementTree {
     /// This performs a layout pass starting from the root.
     pub fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
         if let Some(ref mut root) = self.root {
-            root.layout(constraints)
+            let size = root.layout(constraints);
+            self.flush_layout_notifications();
+            size
         } else {
             Size::ZERO
+        }
+    }
+
+    /// Deliver geometry changes after all elements have finished layout.
+    pub(crate) fn flush_layout_notifications(&mut self) {
+        if let Some(root) = self.root.as_deref_mut() {
+            Self::flush_layout_notifications_in(root);
+        }
+    }
+
+    /// Deliver pending changes only in a subtree that was laid out.
+    pub(crate) fn flush_layout_notifications_for(&mut self, id: ElementId) {
+        if let Some(element) = self.find_element_mut(id) {
+            Self::flush_layout_notifications_in(element.as_mut());
+        }
+    }
+
+    fn flush_layout_notifications_in(element: &mut dyn Element) {
+        if let Some(render_object) = element.render_object_mut() {
+            render_object.flush_layout_notifications();
+        }
+        for child in element.children_mut() {
+            Self::flush_layout_notifications_in(child.as_mut());
         }
     }
 

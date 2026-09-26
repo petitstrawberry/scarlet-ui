@@ -125,6 +125,25 @@ impl Clone for Box<dyn View> {
 ///     .frame(200.0, 50.0);
 /// ```
 pub trait ViewExt: View {
+    /// Observe a value derived from this view's laid-out geometry.
+    ///
+    /// `action` runs after the initial layout and whenever the projected value
+    /// changes. Geometry is expressed in logical units. State changes made by
+    /// the action are processed in a later update pass.
+    fn on_geometry_change<T, P, A>(
+        self,
+        project: P,
+        action: A,
+    ) -> crate::views::modifiers::OnGeometryChange<Self, T, P, A>
+    where
+        Self: Sized + Clone,
+        T: PartialEq + Clone + 'static,
+        P: Fn(crate::geometry::GeometryProxy) -> T + Clone + 'static,
+        A: Fn(T) + Clone + 'static,
+    {
+        crate::views::modifiers::OnGeometryChange::new(self, project, action)
+    }
+
     /// Assign stable sibling identity to this view.
     ///
     /// Keys are only needed when children of the same parent can be inserted,
