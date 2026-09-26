@@ -10,7 +10,7 @@ use scarlet_ui_core::color::Color;
 use scarlet_ui_core::element::{Element, ElementRenderObject, LayoutConstraints, UpdateResult};
 use scarlet_ui_core::geometry::{Point, Rect, Size};
 use scarlet_ui_core::renderer::{PaintContext, PaintExtension};
-use scarlet_ui_core::state::{Listenable, State};
+use scarlet_ui_core::state::{InvalidationKind, Listenable, State, SubscriptionId};
 use scarlet_ui_core::view::View;
 
 static NEXT_CANVAS_ID: IdAllocator = IdAllocator::new();
@@ -562,14 +562,33 @@ pub struct SgfxCanvas {
 #[derive(Clone, Debug)]
 enum SgfxCanvasSource {
     Snapshot(Arc<SgfxCanvasFrame>),
-    State(State<Arc<SgfxCanvasFrame>>),
+    State(CanvasFrameState),
+}
+
+/// Frame content is read at paint time; changing it does not change the view's
+/// geometry or require rebuilding its element tree.
+#[derive(Clone, Debug)]
+struct CanvasFrameState(State<Arc<SgfxCanvasFrame>>);
+
+impl Listenable for CanvasFrameState {
+    fn subscribe_any(&self, callback: Arc<dyn Fn() + Send + Sync>) -> SubscriptionId {
+        self.0.subscribe_any(callback)
+    }
+
+    fn unsubscribe(&self, id: SubscriptionId) -> bool {
+        self.0.unsubscribe(id)
+    }
+
+    fn invalidation_kind(&self) -> InvalidationKind {
+        InvalidationKind::Paint
+    }
 }
 
 impl SgfxCanvasSource {
     fn frame(&self) -> Arc<SgfxCanvasFrame> {
         match self {
             Self::Snapshot(frame) => Arc::clone(frame),
-            Self::State(frame) => frame.get(),
+            Self::State(frame) => frame.0.get(),
         }
     }
 }
@@ -625,7 +644,7 @@ impl SgfxCanvas {
         Self {
             handle,
             size: Size::new(width, height),
-            source: SgfxCanvasSource::State(frame),
+            source: SgfxCanvasSource::State(CanvasFrameState(frame)),
             placeholder: Color::rgb(0.025, 0.035, 0.055),
         }
     }
@@ -751,6 +770,41 @@ impl ElementRenderObject for SgfxCanvasRenderObject {
 mod tests {
     use super::*;
 
+    #[test]
+    fn frame_updates_repaint_existing_canvas_without_resetting_layout() {
+        use scarlet_ui_core::renderer::PaintCommand;
+        use scarlet_ui_core::state::generate_state_id;
+
+        let frames = State::new(
+            generate_state_id(),
+            Arc::new(SgfxCanvasFrame::new(1, Color::BLACK)),
+        );
+        let view = SgfxCanvas::from_state(SgfxCanvasHandle::new(), 800.0, 600.0, frames.clone());
+        assert_eq!(
+            view.listenables()[0].invalidation_kind(),
+            InvalidationKind::Paint
+        );
+        let mut element = view.create_element();
+        element.layout(LayoutConstraints::tight(320.0, 240.0));
+
+        frames.set(Arc::new(SgfxCanvasFrame::new(2, Color::WHITE)));
+        let render = element.render_object().unwrap();
+        assert_eq!(render.size(), Size::new(320.0, 240.0));
+        let mut paint = PaintContext::default();
+        assert!(render.paint(&mut paint, Point::ZERO));
+        let frame = paint
+            .commands()
+            .iter()
+            .find_map(|command| {
+                let PaintCommand::Extension { payload, .. } = command else {
+                    return None;
+                };
+                payload.as_ref().as_any().downcast_ref::<SgfxCanvasPaint>()
+            })
+            .unwrap();
+        assert_eq!(frame.frame.revision, 2);
+    }
+
     fn triangle() -> Vec<SgfxCanvasVertex> {
         alloc::vec![
             SgfxCanvasVertex::new([0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]),
@@ -821,13 +875,8 @@ mod tests {
     #[test]
     fn shared_texture_pixels_are_not_copied() {
         let pixels: Arc<[u8]> = vec![255; 16].into();
-        let texture = SgfxTexture::rgba8_with_handle(
-            SgfxTextureHandle::new(),
-            1,
-            2,
-            2,
-            Arc::clone(&pixels),
-        );
+        let texture =
+            SgfxTexture::rgba8_with_handle(SgfxTextureHandle::new(), 1, 2, 2, Arc::clone(&pixels));
         let SgfxTextureSource::Rgba8(stored) = &texture.source else {
             panic!("expected RGBA pixels");
         };
