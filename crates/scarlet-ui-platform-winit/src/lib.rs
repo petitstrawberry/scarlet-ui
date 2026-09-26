@@ -231,6 +231,7 @@ struct WinitEventState {
     cursor_physical_y: f64,
     cursor_x: i32,
     cursor_y: i32,
+    cursor_inside: bool,
     window_focused: bool,
     fullscreen: bool,
     pointer_locked: bool,
@@ -353,6 +354,7 @@ impl WinitEventState {
             cursor_physical_y: 0.0,
             cursor_x: 0,
             cursor_y: 0,
+            cursor_inside: false,
             window_focused: true,
             fullscreen: false,
             pointer_locked: false,
@@ -377,6 +379,15 @@ impl WinitEventState {
             next_native_touch_serial: 1,
             native_touch_clock: Instant::now(),
             queue: VecDeque::new(),
+        }
+    }
+
+    fn set_cursor_inside(&mut self, inside: bool) -> bool {
+        if self.cursor_inside == inside {
+            false
+        } else {
+            self.cursor_inside = inside;
+            true
         }
     }
 
@@ -853,11 +864,17 @@ impl ApplicationHandler for WinitPumpHandler {
                 state.push(Event::Mouse(MouseEvent::Moved { x, y }));
             }
             WindowEvent::CursorEntered { .. } => {
+                if !state.set_cursor_inside(true) {
+                    return;
+                }
                 let x = state.cursor_x;
                 let y = state.cursor_y;
                 state.push(Event::Mouse(MouseEvent::Entered { x, y }));
             }
             WindowEvent::CursorLeft { .. } => {
+                if !state.set_cursor_inside(false) {
+                    return;
+                }
                 if state.pointer_locked {
                     self.shared.clear_pointer_lock_owner(window_id);
                     release_native_pointer_lock(&window, &mut state);
@@ -1726,6 +1743,15 @@ mod tests {
             )),
             Err(Error::WindowDecorationUnsupported)
         );
+    }
+
+    #[test]
+    fn cursor_presence_changes_emit_once_per_boundary_crossing() {
+        let mut state = WinitEventState::new_with_wheel_coalesce(1.0, false);
+        assert!(state.set_cursor_inside(true));
+        assert!(!state.set_cursor_inside(true));
+        assert!(state.set_cursor_inside(false));
+        assert!(!state.set_cursor_inside(false));
     }
 
     #[test]
