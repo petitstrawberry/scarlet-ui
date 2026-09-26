@@ -1006,6 +1006,13 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn text_input_state(&self) -> Option<crate::element::TextInputElementState> {
+        if let Some(focusable) = self
+            .render_object
+            .as_any()
+            .downcast_ref::<crate::views::modifiers::FocusableRenderObject>()
+        {
+            return focusable.text_input_state();
+        }
         if self
             .view
             .as_any()
@@ -1034,6 +1041,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         use crate::event::{Event, MouseButton, MouseEvent, Phase};
 
         if let Event::Keyboard(key_event) = _event {
+            if self
+                .render_object
+                .as_any()
+                .is::<crate::views::modifiers::OnEventRenderObject>()
+                && self.render_object.handle_event(_event, _phase)
+            {
+                return true;
+            }
             if _phase == Phase::Target
                 && let Some(text_field) =
                     self.view.as_any().downcast_ref::<crate::views::TextField>()
@@ -1142,6 +1157,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 | Event::TextInputDeleteSurroundingText { .. }
                 | Event::TextInputDone { .. }
         ) {
+            if self
+                .render_object
+                .as_any()
+                .is::<crate::views::modifiers::OnEventRenderObject>()
+                && self.render_object.handle_event(_event, _phase)
+            {
+                return true;
+            }
             if _phase == Phase::Target
                 && let Some(text_field) =
                     self.view.as_any().downcast_ref::<crate::views::TextField>()

@@ -2,7 +2,9 @@
 //!
 //! Provides event modifiers for any view.
 
-use crate::element::{Element, ElementRenderObject, RenderElement, UpdateResult};
+use crate::element::{
+    Element, ElementRenderObject, RenderElement, TextInputElementState, UpdateResult,
+};
 use crate::event::{Event, FocusEvent, KeyEvent, MouseEvent, Phase};
 use crate::geometry::Size;
 use crate::state::{Listenable, State};
@@ -23,6 +25,7 @@ pub struct OnClick<V: View, F: Clone + 'static> {
 pub struct Focusable<V: View> {
     inner: V,
     focused: State<bool>,
+    text_input: Option<State<Option<TextInputElementState>>>,
 }
 
 impl<V: View> Focusable<V> {
@@ -37,7 +40,18 @@ impl<V: View> Focusable<V> {
     ///
     /// A focusable wrapper for the view.
     pub fn new(inner: V, focused: State<bool>) -> Self {
-        Self { inner, focused }
+        Self {
+            inner,
+            focused,
+            text_input: None,
+        }
+    }
+
+    /// Expose the caret and surrounding text of an embedded editor to the IME.
+    /// `None` disables text input while the wrapper retains keyboard focus.
+    pub fn text_input(mut self, state: State<Option<TextInputElementState>>) -> Self {
+        self.text_input = Some(state);
+        self
     }
 
     /// Return the focus state.
@@ -50,7 +64,11 @@ impl<V: View + Clone> View for Focusable<V> {
     fn create_element(&self) -> Box<dyn Element> {
         Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
-            |view| FocusableRenderObject::new(view.focused.clone()),
+            |view| {
+                let mut object = FocusableRenderObject::new(view.focused.clone());
+                object.text_input = view.text_input.clone();
+                object
+            },
             update_focusable_render_object::<V>,
             |view| vec![view.inner.clone_view()],
         ))
@@ -59,6 +77,9 @@ impl<V: View + Clone> View for Focusable<V> {
     fn listenables(&self) -> alloc::vec::Vec<&dyn Listenable> {
         let mut listenables = self.inner.listenables();
         listenables.push(&self.focused);
+        if let Some(text_input) = &self.text_input {
+            listenables.push(text_input);
+        }
         listenables
     }
 
@@ -72,12 +93,14 @@ fn update_focusable_render_object<V: View>(
     view: &Focusable<V>,
 ) -> UpdateResult {
     render_object.focused = view.focused.clone();
+    render_object.text_input = view.text_input.clone();
     UpdateResult::Updated
 }
 
 /// Render object for [`Focusable`].
 pub struct FocusableRenderObject {
     focused: State<bool>,
+    text_input: Option<State<Option<TextInputElementState>>>,
     size: Size,
 }
 
@@ -86,6 +109,7 @@ impl FocusableRenderObject {
     pub fn new(focused: State<bool>) -> Self {
         Self {
             focused,
+            text_input: None,
             size: Size::ZERO,
         }
     }
@@ -93,6 +117,13 @@ impl FocusableRenderObject {
     /// Return whether this object is currently focused.
     pub fn is_focused(&self) -> bool {
         self.focused.get()
+    }
+
+    pub(crate) fn text_input_state(&self) -> Option<TextInputElementState> {
+        if !self.is_focused() {
+            return None;
+        }
+        self.text_input.as_ref()?.get()
     }
 
     /// Apply a focus event.
@@ -1173,6 +1204,85 @@ mod tests {
     use crate::views::Text;
     use core::cell::Cell;
     use std::rc::Rc;
+
+    #[test]
+    fn focused_raw_event_view_receives_keyboard_and_ime_once() {
+        use crate::element::ElementTree;
+        use crate::event::{EventDispatcher, KeyCode, KeyModifiers};
+        let events = Rc::new(core::cell::RefCell::new(Vec::new()));
+        let recorded = Rc::clone(&events);
+        let focused = State::new(crate::state::generate_state_id(), true);
+        let view = Text::new("embedded editor")
+            .on_event(move |event| {
+                recorded.borrow_mut().push(format!("{event:?}"));
+                true
+            })
+            .focusable(focused);
+        let mut tree = ElementTree::new();
+        tree.set_root(view.create_element());
+        let mut dispatcher = EventDispatcher::new();
+        let expected = vec![
+            Event::Keyboard(KeyEvent::Pressed {
+                keycode: KeyCode::Char('a'),
+                modifiers: KeyModifiers::default(),
+            }),
+            Event::Keyboard(KeyEvent::Char { c: 'a' }),
+            Event::TextInputPreedit {
+                context_id: 1,
+                serial: 1,
+                cursor_byte: 3,
+                anchor_byte: 3,
+                text: "あ".into(),
+                spans: vec![],
+            },
+            Event::TextInputCommit {
+                context_id: 1,
+                serial: 2,
+                text: "日本語".into(),
+            },
+        ];
+        for event in &expected {
+            assert!(dispatcher.dispatch(&mut tree, event));
+        }
+        assert_eq!(
+            *events.borrow(),
+            expected
+                .iter()
+                .map(|event| format!("{event:?}"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn embedded_text_input_state_tracks_focus_and_editor_updates() {
+        let focused = State::new(crate::state::generate_state_id(), true);
+        let input = State::new(
+            crate::state::generate_state_id(),
+            Some(TextInputElementState {
+                cursor_rect: crate::geometry::Rect::new(
+                    crate::geometry::Point::ZERO,
+                    Size::new(1.0, 20.0),
+                ),
+                surrounding_text: "日本語".into(),
+                cursor_byte: 9,
+                anchor_byte: 0,
+            }),
+        );
+        let mut element = Text::new("editor")
+            .focusable(focused.clone())
+            .text_input(input.clone())
+            .create_element();
+        assert_eq!(
+            element.text_input_state().unwrap().surrounding_text,
+            "日本語"
+        );
+        assert!(element.handle_event(&Event::Focus(FocusEvent::Lost), Phase::Target));
+        assert!(element.text_input_state().is_none());
+        assert!(element.handle_event(&Event::Focus(FocusEvent::Gained), Phase::Target));
+        assert_eq!(element.text_input_state().unwrap().cursor_byte, 9);
+        input.set(None);
+        assert!(element.text_input_state().is_none());
+    }
 
     fn hover_view(counter: Rc<Cell<u32>>) -> impl View + Clone {
         Text::new("hover target").on_hover(move || counter.set(counter.get() + 1))
