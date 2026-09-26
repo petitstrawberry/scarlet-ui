@@ -2431,7 +2431,9 @@ fn define_canvas_pipeline(
         layout,
         FragmentProgram::VertexColor,
         BlendState::SOURCE_OVER_STRAIGHT_ALPHA,
-        RasterState::new(sgfx::ir::CullMode::Back, FrontFace::CounterClockwise),
+        // Canvas meshes are also used for 2D tessellation, where contour
+        // winding can legitimately differ between shapes and fonts.
+        RasterState::new(sgfx::ir::CullMode::None, FrontFace::CounterClockwise),
     )
     .map_err(|_| Error::sgfx(Stage::DefineResources))?;
     let descriptor = if depth_test {
@@ -2469,7 +2471,7 @@ fn define_canvas_texture_pipeline(
         layout,
         FragmentProgram::TextureVertexColor(TextureSampleMode::Rgba),
         BlendState::SOURCE_OVER_STRAIGHT_ALPHA,
-        RasterState::new(sgfx::ir::CullMode::Back, FrontFace::CounterClockwise),
+        RasterState::new(sgfx::ir::CullMode::None, FrontFace::CounterClockwise),
     )
     .map_err(|_| Error::sgfx(Stage::DefineResources))?;
     let descriptor = if depth_test {
