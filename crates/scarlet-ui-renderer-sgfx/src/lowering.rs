@@ -17,7 +17,7 @@ use sgfx::ir::{
     FrontFace, LoadOp, MAX_COMMANDS, PixelRect, PrimitiveTopology, RasterState, RenderPassDesc,
     RenderPipelineDesc, RenderPipelineId, ResourceTable, SamplerDesc, SamplerId, StoreOp,
     TextureDesc, TextureFormat, TextureId, TextureSampleMode, TextureUsage, TextureWrite,
-    Transform, VertexAttribute, VertexBufferLayout, VertexFormat,
+    Transform, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
 };
 
 use crate::canvas::{SgfxCanvasFrame, SgfxCanvasPaint, SgfxCanvasVertex, SgfxMesh, SgfxTexture};
@@ -29,6 +29,7 @@ use crate::geometry::{
 
 const PAINT_VERTEX_STRIDE: u32 = 40;
 const PASS_COMMANDS: usize = 2;
+const CANVAS_PASS_COMMANDS: usize = PASS_COMMANDS + 2; // viewport and scissor
 const MAX_PAINT_DRAW_COMMANDS: usize = 7;
 const MAX_CANVAS_DRAW_COMMANDS: usize = 6;
 const GLYPH_ATLAS_SIZE: u32 = 2_048;
@@ -356,7 +357,7 @@ fn canvas_pass_reaches_frame_end(
     mut draw_index: usize,
     prefix_commands: usize,
 ) -> bool {
-    let mut command_count = prefix_commands.saturating_add(PASS_COMMANDS);
+    let mut command_count = prefix_commands.saturating_add(CANVAS_PASS_COMMANDS);
     while draw_index < mesh_indices.len() {
         if mesh_indices.get(draw_index).is_none() {
             return false;
@@ -1731,8 +1732,26 @@ impl SgfxPaintEncoder {
         let target = table
             .texture_ref(target_state.texture)
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-        let area = PixelRect::new(0, 0, target_state.width, target_state.height)
-            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+        // Clear the entire attachment, including padding. Partial depth clears
+        // are unsupported by WGPU; the viewport/scissor below bound the draws.
+        let area = PixelRect::new(
+            0,
+            0,
+            target_state.capacity_width,
+            target_state.capacity_height,
+        )
+        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+        let viewport = Viewport::new(
+            0.,
+            0.,
+            target_state.width as f32,
+            target_state.height as f32,
+            0.,
+            1.,
+        )
+        .map_err(|_| Error::InvalidFrame)?;
+        let scissor = PixelRect::new(0, 0, target_state.width, target_state.height)
+            .map_err(|_| Error::InvalidFrame)?;
         let color_pipeline_id = if frame.depth_test {
             self.canvas_depth_pipeline.ok_or(Error::InvalidFrame)?
         } else {
@@ -1809,6 +1828,10 @@ impl SgfxPaintEncoder {
             };
             let mut pass = encoder
                 .begin_render_pass(descriptor)
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            pass.set_viewport(viewport)
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            pass.set_scissor(Some(scissor))
                 .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
             pass.set_pipeline(color_pipeline)
                 .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -1898,7 +1921,11 @@ impl SgfxPaintEncoder {
                 let mut pass = encoder
                     .begin_render_pass(descriptor)
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                let mut command_count = prefix_commands.saturating_add(PASS_COMMANDS);
+                pass.set_viewport(viewport)
+                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                pass.set_scissor(Some(scissor))
+                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                let mut command_count = prefix_commands.saturating_add(CANVAS_PASS_COMMANDS);
 
                 while draw_index < frame.draws.len() {
                     let draw = &frame.draws[draw_index];
@@ -1944,7 +1971,7 @@ impl SgfxPaintEncoder {
                     command_count = command_count.saturating_add(MAX_CANVAS_DRAW_COMMANDS);
                     draw_index += 1;
                 }
-                if command_count == prefix_commands.saturating_add(PASS_COMMANDS) {
+                if command_count == prefix_commands.saturating_add(CANVAS_PASS_COMMANDS) {
                     return Err(Error::FrameTooComplex.into());
                 }
                 pass.end().map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -2838,6 +2865,9 @@ mod tests {
         command_kinds: Vec<Vec<&'static str>>,
         draw_vertices: Vec<u32>,
         buffer_write_sizes: Vec<usize>,
+        viewports: Vec<[f32; 6]>,
+        scissors: Vec<Option<PixelRect>>,
+        render_areas: Vec<PixelRect>,
     }
 
     impl CommandExecutor for RecordingExecutor {
@@ -2865,7 +2895,10 @@ mod tests {
                     Command::WriteTexture { .. } => "write-texture",
                     Command::CopyTextureToTexture { .. } => "copy",
                     Command::BlitTexture { .. } => "blit-texture",
-                    Command::BeginRenderPass(_) => "begin-pass",
+                    Command::BeginRenderPass(desc) => {
+                        self.render_areas.push(desc.area());
+                        "begin-pass"
+                    }
                     Command::EndRenderPass => "end-pass",
                     Command::SetPipeline(_) => "set-pipeline",
                     Command::SetVertexBuffer { .. } => "set-vertex-buffer",
@@ -2874,8 +2907,14 @@ mod tests {
                     Command::SetTexture(_) => "set-texture",
                     Command::SetSampler(_) => "set-sampler",
                     Command::SetUniforms(_) => "set-uniforms",
-                    Command::SetScissor(_) => "set-scissor",
-                    Command::SetViewport(_) => "set-viewport",
+                    Command::SetScissor(rect) => {
+                        self.scissors.push(*rect);
+                        "set-scissor"
+                    }
+                    Command::SetViewport(viewport) => {
+                        self.viewports.push(viewport.components());
+                        "set-viewport"
+                    }
                     Command::SetPushConstants { .. } => "set-push-constants",
                     Command::Draw { vertex_count, .. } => {
                         self.draw_vertices.push(*vertex_count);
@@ -3603,8 +3642,101 @@ mod tests {
     }
 
     #[test]
+    fn canvas_capacity_padding_does_not_expand_the_draw_viewport() {
+        for scale in [1_000, 2_000] {
+            for depth in [false, true] {
+                for has_draws in [false, true] {
+                    let handle = crate::canvas::SgfxCanvasHandle::new();
+                    let mut encoder = SgfxPaintEncoder::new(1024, 256, depth).unwrap();
+                    for width in [300., 250., 340.] {
+                        let mut frame = SgfxCanvasFrame::new(1, UiColor::BLACK);
+                        if depth {
+                            frame = frame.depth_tested();
+                        }
+                        if has_draws {
+                            frame = frame.draw(SgfxCanvasDraw::new(
+                                SgfxMesh::new(triangle(0.0)),
+                                Transform::identity().columns(),
+                            ));
+                        }
+                        let mut paint = PaintContext::new();
+                        paint.draw_extension(
+                            Rect::from_xywh(0., 0., width, 84.),
+                            Arc::new(SgfxCanvasPaint {
+                                handle,
+                                frame: Arc::new(frame),
+                            }),
+                        );
+                        let mut executor = RecordingExecutor::default();
+                        encoder
+                            .prepare_canvases(&mut executor, &paint, scale)
+                            .unwrap();
+                        let target = &encoder.canvas_targets[0];
+                        let factor = scale as f32 / 1_000.;
+                        assert_eq!(
+                            executor.viewports,
+                            [[0., 0., width * factor, 84. * factor, 0., 1.]]
+                        );
+                        assert_eq!(
+                            executor.scissors,
+                            [Some(
+                                PixelRect::new(0, 0, target.width, target.height).unwrap()
+                            )]
+                        );
+                        // Full-attachment clear permits depth-tested canvases on WGPU.
+                        assert_eq!(
+                            executor.render_areas,
+                            [
+                                PixelRect::new(0, 0, target.capacity_width, target.capacity_height)
+                                    .unwrap()
+                            ]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canvas_draw_limit_keeps_the_requested_viewport_and_scissor() {
+        let mut encoder = SgfxPaintEncoder::new(512, 128, true).unwrap();
+        let target = encoder.canvas_target(1, 300, 84, true).unwrap();
+        let mesh = SgfxMesh::new(triangle(0.0));
+        let mut frame = SgfxCanvasFrame::new(1, UiColor::BLACK).depth_tested();
+        for _ in 0..MAX_CANVAS_DRAWS {
+            frame = frame.draw(SgfxCanvasDraw::new(
+                Arc::clone(&mesh),
+                Transform::identity().columns(),
+            ));
+        }
+        let mut executor = RecordingExecutor::default();
+        encoder
+            .render_canvas(&mut executor, target, &frame)
+            .unwrap();
+        assert!(!executor.render_areas.is_empty());
+        assert_eq!(executor.viewports.len(), executor.render_areas.len());
+        assert_eq!(executor.scissors.len(), executor.render_areas.len());
+        assert!(
+            executor
+                .viewports
+                .iter()
+                .all(|v| *v == [0., 0., 300., 84., 0., 1.])
+        );
+        assert!(
+            executor
+                .scissors
+                .iter()
+                .all(|s| *s == Some(PixelRect::new(0, 0, 300, 84).unwrap()))
+        );
+        assert_eq!(
+            executor.draw_vertices.iter().sum::<u32>(),
+            (MAX_CANVAS_DRAWS * 3) as u32
+        );
+    }
+
+    #[test]
     fn retained_canvas_pass_is_limited_only_by_ir_commands() {
-        let max_draws = (MAX_COMMANDS - PASS_COMMANDS) / MAX_CANVAS_DRAW_COMMANDS;
+        let max_draws = (MAX_COMMANDS - CANVAS_PASS_COMMANDS) / MAX_CANVAS_DRAW_COMMANDS;
         let meshes = vec![0; max_draws];
         assert!(canvas_pass_reaches_frame_end(&meshes, 0, 0));
 
