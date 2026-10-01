@@ -287,6 +287,9 @@ struct CanvasTarget {
     depth: Option<TextureId>,
     width: u32,
     height: u32,
+    capacity_width: u32,
+    capacity_height: u32,
+    used_in_frame: bool,
     revision: u64,
     initialized: bool,
 }
@@ -1346,8 +1349,10 @@ impl SgfxPaintEncoder {
                         truncated_scaled(rect.size.width, scale),
                         truncated_scaled(rect.size.height, scale),
                     );
-                    if let Some(geometry) =
-                        tessellator.textured_rect(destination, CANVAS_TARGET_TEX_COORDS)?
+                    let u = texture.width as f32 / texture.capacity_width as f32;
+                    let v = texture.height as f32 / texture.capacity_height as f32;
+                    if let Some(geometry) = tessellator
+                        .textured_rect(destination, [[0., 0.], [u, 0.], [u, v], [0., v]])?
                     {
                         push_draw(
                             &mut draws,
@@ -1387,6 +1392,9 @@ impl SgfxPaintEncoder {
         scale_milli: u32,
     ) -> core::result::Result<(), FrameError<E::Error>> {
         let scale = scale_milli.max(1) as f32 / 1000.0;
+        for target in &mut self.canvas_targets {
+            target.used_in_frame = false;
+        }
         for command in paint.commands() {
             let PaintCommand::Extension { rect, payload } = command else {
                 continue;
@@ -1400,6 +1408,7 @@ impl SgfxPaintEncoder {
                 rasterized_canvas_extent(rect.size.height, scale, canvas.frame.raster_scale)?;
             let target_index =
                 self.canvas_target(canvas.handle.id(), width, height, canvas.frame.depth_test)?;
+            self.canvas_targets[target_index].used_in_frame = true;
             let unchanged = {
                 let target = &self.canvas_targets[target_index];
                 target.initialized && target.revision == canvas.frame.revision
@@ -1422,19 +1431,60 @@ impl SgfxPaintEncoder {
         height: u32,
         depth_test: bool,
     ) -> Result<usize> {
-        if let Some(index) = self.canvas_targets.iter().position(|target| {
-            target.handle_id == handle_id
-                && target.width == width
-                && target.height == height
-                && target.depth.is_some() == depth_test
-        }) {
-            return Ok(index);
+        if width == 0 || height == 0 {
+            return Err(Error::InvalidFrame);
+        }
+        let matches_handle = |target: &CanvasTarget| {
+            target.handle_id == handle_id && target.depth.is_some() == depth_test
+        };
+        // A handle may appear at multiple sizes in one paint list. Preserve
+        // targets already used by this frame, but recycle prior-frame sizes.
+        let existing = self
+            .canvas_targets
+            .iter()
+            .position(|target| {
+                matches_handle(target) && target.width == width && target.height == height
+            })
+            .or_else(|| {
+                self.canvas_targets
+                    .iter()
+                    .position(|target| matches_handle(target) && !target.used_in_frame)
+            });
+        if let Some(index) = existing {
+            let target = &mut self.canvas_targets[index];
+            if width <= target.capacity_width && height <= target.capacity_height {
+                if target.width != width || target.height != height {
+                    target.width = width;
+                    target.height = height;
+                    target.initialized = false;
+                }
+                return Ok(index);
+            }
         }
         validate_depth_support(depth_test, self.supports_depth)?;
-        if self.canvas_targets.len() >= MAX_CANVASES {
+        if existing.is_none() && self.canvas_targets.len() >= MAX_CANVASES {
             return Err(Error::FrameTooComplex);
         }
-        let extent = Extent2D::new(width, height).map_err(|_| Error::InvalidFrame)?;
+        // Keep one cache entry per concurrent canvas size. Capacity growth bounds
+        // immutable texture definitions during arbitrarily many resize steps.
+        let old_capacity = existing
+            .map(|i| {
+                (
+                    self.canvas_targets[i].capacity_width,
+                    self.canvas_targets[i].capacity_height,
+                )
+            })
+            .unwrap_or((0, 0));
+        let capacity_width = width
+            .max(old_capacity.0)
+            .checked_next_power_of_two()
+            .ok_or(Error::InvalidFrame)?;
+        let capacity_height = height
+            .max(old_capacity.1)
+            .checked_next_power_of_two()
+            .ok_or(Error::InvalidFrame)?;
+        let extent =
+            Extent2D::new(capacity_width, capacity_height).map_err(|_| Error::InvalidFrame)?;
         let texture = self
             .table
             .define_texture(
@@ -1464,16 +1514,25 @@ impl SgfxPaintEncoder {
         } else {
             None
         };
-        self.canvas_targets.push(CanvasTarget {
+        let target = CanvasTarget {
             handle_id,
             texture,
             depth,
             width,
             height,
+            capacity_width,
+            capacity_height,
+            used_in_frame: false,
             revision: 0,
             initialized: false,
-        });
-        Ok(self.canvas_targets.len() - 1)
+        };
+        if let Some(index) = existing {
+            self.canvas_targets[index] = target;
+            Ok(index)
+        } else {
+            self.canvas_targets.push(target);
+            Ok(self.canvas_targets.len() - 1)
+        }
     }
 
     fn canvas_mesh(&mut self, mesh: &SgfxMesh) -> Result<usize> {
@@ -3363,6 +3422,184 @@ mod tests {
         assert!(matches!(frame.draws[1].source, DrawSource::Glyph(_)));
         assert!(matches!(frame.draws[2].source, DrawSource::Texture(_)));
         assert!(frame.draws[3].source == DrawSource::Solid);
+    }
+
+    #[test]
+    fn repeated_canvas_resizes_do_not_exhaust_target_slots() {
+        let handles = [
+            crate::canvas::SgfxCanvasHandle::new(),
+            crate::canvas::SgfxCanvasHandle::new(),
+            crate::canvas::SgfxCanvasHandle::new(),
+        ];
+        let frame = Arc::new(SgfxCanvasFrame::new(1, UiColor::BLACK));
+        let mut encoder = SgfxPaintEncoder::new(1024, 256, false).unwrap();
+        let mut executor = RecordingExecutor::default();
+        let mut textures = Vec::new();
+        for step in 0..500 {
+            let mut paint = PaintContext::new();
+            for (row, handle) in handles.iter().copied().enumerate() {
+                paint.draw_extension(
+                    Rect::from_xywh(0.0, row as f32 * 84.0, 1000.0 - step as f32, 84.0),
+                    Arc::new(SgfxCanvasPaint {
+                        handle,
+                        frame: Arc::clone(&frame),
+                    }),
+                );
+            }
+            encoder
+                .encode_frame(
+                    &mut executor,
+                    0,
+                    None,
+                    &paint,
+                    UiColor::BLACK,
+                    1_000,
+                    &[(0, 0, 1024, 256)],
+                )
+                .unwrap();
+            assert_eq!(encoder.canvas_targets.len(), 3);
+            let current: Vec<_> = encoder.canvas_targets.iter().map(|t| t.texture).collect();
+            if step == 0 {
+                textures = current;
+            } else {
+                assert_eq!(current, textures);
+            }
+            assert!(
+                encoder
+                    .canvas_targets
+                    .iter()
+                    .all(|t| t.width == 1000 - step)
+            );
+        }
+    }
+
+    #[test]
+    fn canvas_capacity_grows_without_changing_existing_resource_definitions() {
+        let mut encoder = SgfxPaintEncoder::new(128, 128, true).unwrap();
+        let index = encoder.canvas_target(1, 33, 17, true).unwrap();
+        let texture = encoder.canvas_targets[index].texture;
+        let depth = encoder.canvas_targets[index].depth;
+        assert_eq!(
+            (
+                encoder.canvas_targets[index].capacity_width,
+                encoder.canvas_targets[index].capacity_height
+            ),
+            (64, 32)
+        );
+        let grown = encoder.canvas_target(1, 65, 10, true).unwrap();
+        assert_eq!(grown, index);
+        assert_eq!(encoder.canvas_targets.len(), 1);
+        let target = &encoder.canvas_targets[grown];
+        assert_eq!((target.capacity_width, target.capacity_height), (128, 32));
+        assert_ne!(target.texture, texture);
+        assert_ne!(target.depth, depth);
+        // Prior submissions may still reference the immutable old definitions.
+        assert!(encoder.table.texture_ref(texture).is_ok());
+        assert!(encoder.table.texture_ref(depth.unwrap()).is_ok());
+        assert!(matches!(
+            encoder.canvas_target(1, 0, 10, true),
+            Err(Error::InvalidFrame)
+        ));
+    }
+
+    #[test]
+    fn canvas_resize_invalidates_same_revision_and_crops_capacity_padding() {
+        let handle = crate::canvas::SgfxCanvasHandle::new();
+        let frame = Arc::new(SgfxCanvasFrame::new(1, UiColor::BLACK));
+        let make_paint = |width, height| {
+            let mut paint = PaintContext::new();
+            paint.draw_extension(
+                Rect::from_xywh(0.0, 0.0, width, height),
+                Arc::new(SgfxCanvasPaint {
+                    handle,
+                    frame: Arc::clone(&frame),
+                }),
+            );
+            paint
+        };
+        let mut encoder = SgfxPaintEncoder::new(64, 32, false).unwrap();
+        let mut executor = RecordingExecutor::default();
+        let first = make_paint(60.0, 30.0);
+        encoder
+            .prepare_canvases(&mut executor, &first, 1_000)
+            .unwrap();
+        let texture = encoder.canvas_targets[0].texture;
+        assert_eq!(executor.command_kinds.len(), 1);
+        encoder
+            .prepare_canvases(&mut executor, &first, 1_000)
+            .unwrap();
+        assert_eq!(executor.command_kinds.len(), 1);
+        let resized = make_paint(50.0, 25.0);
+        encoder
+            .prepare_canvases(&mut executor, &resized, 1_000)
+            .unwrap();
+        assert_eq!(executor.command_kinds.len(), 2);
+        assert_eq!(encoder.canvas_targets[0].texture, texture);
+        let lowered = encoder
+            .lower_once(
+                &resized,
+                1_000,
+                PixelBounds {
+                    x: 0,
+                    y: 0,
+                    width: 64,
+                    height: 32,
+                },
+            )
+            .unwrap();
+        let maximum_uv = |offset| {
+            lowered
+                .vertex_bytes
+                .chunks_exact(40)
+                .map(|vertex| f32::from_le_bytes(vertex[offset..offset + 4].try_into().unwrap()))
+                .fold(0.0, f32::max)
+        };
+        assert_eq!(maximum_uv(32), 50.0 / 64.0);
+        assert_eq!(maximum_uv(36), 25.0 / 32.0);
+    }
+
+    #[test]
+    fn shared_canvas_handle_preserves_multiple_sizes_in_the_same_frame() {
+        let handle = crate::canvas::SgfxCanvasHandle::new();
+        let frame = Arc::new(SgfxCanvasFrame::new(1, UiColor::BLACK));
+        let mut encoder = SgfxPaintEncoder::new(256, 64, false).unwrap();
+        let mut executor = RecordingExecutor::default();
+        for step in 0..100 {
+            let mut paint = PaintContext::new();
+            for width in [100.0 - (step % 50) as f32, 150.0 - (step % 50) as f32] {
+                paint.draw_extension(
+                    Rect::from_xywh(0.0, 0.0, width, 32.0),
+                    Arc::new(SgfxCanvasPaint {
+                        handle,
+                        frame: Arc::clone(&frame),
+                    }),
+                );
+            }
+            encoder
+                .prepare_canvases(&mut executor, &paint, 1_000)
+                .unwrap();
+            assert_eq!(encoder.canvas_targets.len(), 2);
+            let lowered = encoder
+                .lower_once(
+                    &paint,
+                    1_000,
+                    PixelBounds {
+                        x: 0,
+                        y: 0,
+                        width: 256,
+                        height: 64,
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                lowered
+                    .draws
+                    .iter()
+                    .filter(|draw| matches!(draw.source, DrawSource::Texture(_)))
+                    .count(),
+                2
+            );
+        }
     }
 
     #[test]
