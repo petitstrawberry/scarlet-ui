@@ -1842,9 +1842,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "sbus"
+version = "1.0.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=b3d2a55740a3d2ca49daad0ec7baba233f706f7a#b3d2a55740a3d2ca49daad0ec7baba233f706f7a"
+
+[[package]]
+name = "sbus-client"
+version = "1.0.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=b3d2a55740a3d2ca49daad0ec7baba233f706f7a#b3d2a55740a3d2ca49daad0ec7baba233f706f7a"
+dependencies = [
+ "sbus",
+ "scarlet-os",
+ "scarlet-std",
+]
+
+[[package]]
 name = "scarlet-abi"
 version = "1.0.0"
 source = "git+https://github.com/petitstrawberry/Scarlet?rev=b3d2a55740a3d2ca49daad0ec7baba233f706f7a#b3d2a55740a3d2ca49daad0ec7baba233f706f7a"
+
+[[package]]
+name = "scarlet-desktop-config"
+version = "1.0.0"
+source = "git+https://github.com/petitstrawberry/Scarlet?rev=b3d2a55740a3d2ca49daad0ec7baba233f706f7a#b3d2a55740a3d2ca49daad0ec7baba233f706f7a"
+dependencies = [
+ "scarlet-std",
+]
 
 [[package]]
 name = "scarlet-os"
@@ -1952,6 +1975,8 @@ dependencies = [
 name = "scarlet-ui-platform-sws"
 version = "1.0.0"
 dependencies = [
+ "sbus-client",
+ "scarlet-desktop-config",
  "scarlet-std",
  "scarlet-ui-core",
  "scarlet-ui-renderer-sgfx",
@@ -1964,7 +1989,10 @@ dependencies = [
 name = "scarlet-ui-platform-winit"
 version = "1.0.0"
 dependencies = [
+ "block2",
+ "objc2 0.5.2",
  "objc2-app-kit",
+ "objc2-foundation 0.2.2",
  "objc2-quartz-core 0.2.2",
  "raw-window-handle",
  "scarlet-ui-core",

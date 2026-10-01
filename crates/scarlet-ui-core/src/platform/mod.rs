@@ -217,6 +217,20 @@ pub trait PlatformBackend {
 /// PlatformWindow abstracts platform-specific window functionality,
 /// allowing ScarletUI to work with different window systems.
 pub trait PlatformWindow: Any {
+    /// Begin owner-bound selection on the UI thread without blocking the event loop.
+    /// Existing/custom backends explicitly report unsupported by default.
+    fn begin_file_dialog(
+        &mut self,
+        _options: &crate::file_dialog::FileDialog,
+    ) -> core::result::Result<
+        Box<dyn crate::file_dialog::FileDialogSession>,
+        crate::file_dialog::FileDialogError,
+    > {
+        Err(crate::file_dialog::FileDialogError::Unsupported(
+            "file dialogs unavailable on this backend".into(),
+        ))
+    }
+
     /// Create a new platform window
     fn new(app_id: &str, title: &str, size: Size) -> Result<Self>
     where

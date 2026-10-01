@@ -311,6 +311,7 @@ impl ApplicationRunner {
     ///
     /// `Ok(())` when the application exits normally.
     pub fn run<A: Application + View>(&mut self, app: &mut A) -> Result<()> {
+        let _dialog_guard = crate::file_dialog::RunnerDialogGuard;
         crate::debug::set_enabled(app.debug_logging());
         crate::debug::set_wheel_log_enabled(wheel_log_env_enabled());
         crate::platform::install_platform_window_defaults(self.backend.window_defaults());
@@ -429,6 +430,7 @@ impl ApplicationRunner {
             context,
             pipeline,
             window,
+            file_dialog: None,
             presented_this_cycle: false,
             frame_pacing_enabled,
             frame_ready: !frame_pacing_enabled,
@@ -505,12 +507,15 @@ impl ApplicationRunner {
             }
 
             remove_closed_slots(slots, &close_ids);
+            handle_file_dialog_requests(slots);
             if slots.is_empty() && app.exit_when_all_windows_closed() {
                 app.on_shutdown();
                 return Ok(());
             }
 
+            poll_file_dialogs(slots);
             app.on_idle();
+            handle_file_dialog_requests(slots);
             self.handle_application_commands(app, slots)?;
             if slots.is_empty() && app.exit_when_all_windows_closed() {
                 app.on_shutdown();
@@ -634,6 +639,7 @@ impl ApplicationRunner {
                         .collect::<Vec<_>>();
                     for slot in slots.iter_mut() {
                         if close_ids.contains(&slot.context.window_id) {
+                            slot.file_dialog = None;
                             let _ = slot.window.close();
                         }
                     }
@@ -649,6 +655,7 @@ impl ApplicationRunner {
 struct WindowSlot<A: Application> {
     context: WindowContext,
     pipeline: RenderingPipeline,
+    file_dialog: Option<crate::file_dialog::ActiveDialog>,
     window: Box<dyn PlatformWindow>,
     presented_this_cycle: bool,
     frame_pacing_enabled: bool,
@@ -873,6 +880,7 @@ fn handle_window_event<A: Application>(
 ) -> Result<bool> {
     match event {
         Event::Quit => {
+            slot.file_dialog = None;
             let _ = slot.window.close();
             close_ids.push(slot.context.window_id);
             return Ok(true);
@@ -1077,6 +1085,7 @@ fn handle_window_close_request<A: Application>(
         return false;
     }
 
+    slot.file_dialog = None;
     let _ = slot.window.close();
     close_ids.push(slot.context.window_id);
     true
@@ -1571,6 +1580,10 @@ mod tests {
         suspended_emitted: [bool; 2],
         resumed_emitted: [bool; 2],
         pacing_waits: usize,
+        dialog_starts: Vec<(usize, crate::file_dialog::FileDialogMode)>,
+        dialog_results: [Option<crate::file_dialog::FileDialogResult>; 2],
+        dialog_cancels: Vec<usize>,
+        dialog_focuses: Vec<usize>,
     }
 
     struct EnvironmentTestBackend {
@@ -1608,7 +1621,40 @@ mod tests {
         probe: Rc<RefCell<EnvironmentRunnerProbe>>,
     }
 
+    struct TestDialogSession {
+        index: usize,
+        probe: Rc<RefCell<EnvironmentRunnerProbe>>,
+    }
+    impl crate::file_dialog::FileDialogSession for TestDialogSession {
+        fn poll(&mut self) -> Option<crate::file_dialog::FileDialogResult> {
+            self.probe.borrow_mut().dialog_results[self.index].take()
+        }
+        fn cancel(&mut self) {
+            self.probe.borrow_mut().dialog_cancels.push(self.index);
+        }
+    }
     impl PlatformWindow for EnvironmentTestWindow {
+        fn focus(&mut self) -> Result<()> {
+            self.probe.borrow_mut().dialog_focuses.push(self.index);
+            Ok(())
+        }
+        fn begin_file_dialog(
+            &mut self,
+            options: &crate::file_dialog::FileDialog,
+        ) -> core::result::Result<
+            Box<dyn crate::file_dialog::FileDialogSession>,
+            crate::file_dialog::FileDialogError,
+        > {
+            self.probe
+                .borrow_mut()
+                .dialog_starts
+                .push((self.index, options.mode));
+            Ok(Box::new(TestDialogSession {
+                index: self.index,
+                probe: self.probe.clone(),
+            }))
+        }
+
         fn new(_app_id: &str, _title: &str, size: Size) -> Result<Self> {
             Ok(Self {
                 index: 0,
@@ -2407,5 +2453,109 @@ mod tests {
         assert!(!env_flag_enabled("0"));
         assert!(!env_flag_enabled("false"));
         assert!(!env_flag_enabled("off"));
+    }
+    #[test]
+    fn file_dialog_runtime_owner_busy_cancel_and_owner_teardown_are_isolated() {
+        use crate::file_dialog::*;
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: probe.clone(),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let mut app = SceneContractApp::new([true, true]);
+        let declarations = collect_scene_declarations(&app).unwrap();
+        let mut slots = runner.create_slots(&mut app, declarations).unwrap();
+        let one = slots[0].context.window_id;
+        let two = slots[1].context.window_id;
+        let make = |owner, mode| {
+            let handle = FileDialogHandle::new();
+            (
+                QueuedDialog {
+                    owner,
+                    options: FileDialog::new(mode),
+                    handle: handle.clone(),
+                },
+                handle,
+            )
+        };
+        let (request, first) = make(two, FileDialogMode::OpenMultiple);
+        handle_file_dialog_request(&mut slots, request);
+        assert!(slots[0].file_dialog.is_none());
+        assert!(slots[1].file_dialog.is_some());
+        assert_eq!(
+            probe.borrow().dialog_starts,
+            vec![(1, FileDialogMode::OpenMultiple)]
+        );
+        let (request, duplicate) = make(two, FileDialogMode::Save);
+        handle_file_dialog_request(&mut slots, request);
+        assert_eq!(duplicate.take_result(), Some(Err(FileDialogError::Busy)));
+        let (request, independent) = make(one, FileDialogMode::Save);
+        handle_file_dialog_request(&mut slots, request);
+        first.cancel();
+        poll_file_dialogs(&mut slots);
+        assert_eq!(probe.borrow().dialog_focuses, vec![1]);
+        assert_eq!(first.take_result(), Some(Ok(FileDialogOutcome::Cancelled)));
+        assert!(!independent.is_finished());
+        remove_closed_slots(&mut slots, &[one]);
+        assert_eq!(
+            independent.take_result(),
+            Some(Err(FileDialogError::OwnerClosed))
+        );
+        let (request, stale) = make(one, FileDialogMode::Open);
+        handle_file_dialog_request(&mut slots, request);
+        assert_eq!(stale.take_result(), Some(Err(FileDialogError::OwnerClosed)));
+        let (request, pre_cancel) = make(two, FileDialogMode::Open);
+        pre_cancel.cancel();
+        handle_file_dialog_request(&mut slots, request);
+        assert_eq!(
+            pre_cancel.take_result(),
+            Some(Ok(FileDialogOutcome::Cancelled))
+        );
+        assert_eq!(probe.borrow().dialog_starts.len(), 2);
+    }
+}
+
+fn handle_file_dialog_requests<A: Application>(slots: &mut [WindowSlot<A>]) {
+    for request in crate::file_dialog::take_requests() {
+        handle_file_dialog_request(slots, request);
+    }
+}
+fn handle_file_dialog_request<A: Application>(
+    slots: &mut [WindowSlot<A>],
+    request: crate::file_dialog::QueuedDialog,
+) {
+    use crate::file_dialog::{ActiveDialog, FileDialogError, FileDialogOutcome};
+    if request.handle.cancelled() {
+        request.handle.complete(Ok(FileDialogOutcome::Cancelled));
+        return;
+    }
+    let Some(slot) = slots
+        .iter_mut()
+        .find(|s| s.context.window_id == request.owner)
+    else {
+        request.handle.complete(Err(FileDialogError::OwnerClosed));
+        return;
+    };
+    if slot.file_dialog.is_some() {
+        request.handle.complete(Err(FileDialogError::Busy));
+        return;
+    }
+    match slot.window.begin_file_dialog(&request.options) {
+        Ok(session) => {
+            slot.file_dialog = Some(ActiveDialog {
+                session,
+                handle: request.handle,
+            })
+        }
+        Err(error) => request.handle.complete(Err(error)),
+    }
+}
+
+fn poll_file_dialogs<A: Application>(slots: &mut [WindowSlot<A>]) {
+    for slot in slots.iter_mut() {
+        if crate::file_dialog::poll_active(&mut slot.file_dialog) {
+            let _ = slot.window.focus();
+        }
     }
 }
