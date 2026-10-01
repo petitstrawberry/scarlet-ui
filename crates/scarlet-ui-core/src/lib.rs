@@ -56,6 +56,7 @@ pub mod debug;
 pub mod element;
 pub mod error;
 pub mod event;
+pub mod file_dialog;
 pub mod geometry;
 pub mod graphics;
 pub mod icon;

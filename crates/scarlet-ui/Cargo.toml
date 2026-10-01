@@ -37,3 +37,7 @@ syn = { version = "2.0", default-features = false, features = ["derive"] }
 [lib]
 name = "scarlet_ui"
 path = "src/lib.rs"
+
+[[example]]
+name = "file-dialog-smoke"
+required-features = ["platform-winit"]

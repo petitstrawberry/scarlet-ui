@@ -12,6 +12,8 @@ legacy-scarlet-std = [
     "sgfx/legacy-scarlet-std",
     "sws-client/legacy-scarlet-std",
     "sws-protocol/legacy-scarlet-std",
+    "sbus-client/legacy-scarlet-std",
+    "scarlet-desktop-config/legacy-scarlet-std",
 ]
 std = [
     "scarlet-ui-core/std",
@@ -19,6 +21,8 @@ std = [
     "sgfx/std",
     "sws-client/std",
     "sws-protocol/std",
+    "sbus-client/std",
+    "scarlet-desktop-config/std",
 ]
 
 [dependencies]
@@ -30,6 +34,9 @@ scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", rev = "b3d2a
 sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "49fa00da35a6ea416c99207b49ba7aee480d6985", package = "sgfx", default-features = false, features = ["backend-scarlet-virgl", "backend-scarlet-adreno", "backend-scarlet-maxwell"] }
 sws-client = { git = "https://github.com/petitstrawberry/Scarlet", rev = "b3d2a55740a3d2ca49daad0ec7baba233f706f7a", package = "sws-client", default-features = false }
 sws-protocol = { git = "https://github.com/petitstrawberry/Scarlet", rev = "b3d2a55740a3d2ca49daad0ec7baba233f706f7a", package = "sws-protocol", default-features = false }
+
+sbus-client = { git = "https://github.com/petitstrawberry/Scarlet", rev = "b3d2a55740a3d2ca49daad0ec7baba233f706f7a", default-features = false }
+scarlet-desktop-config = { git = "https://github.com/petitstrawberry/Scarlet", rev = "b3d2a55740a3d2ca49daad0ec7baba233f706f7a", default-features = false }
 
 [lib]
 name = "scarlet_ui_platform_sws"

@@ -10,6 +10,7 @@ extern crate alloc;
 extern crate scarlet_std as std;
 
 mod backend;
+mod file_dialog;
 mod shared_image;
 mod sink;
 
@@ -1786,6 +1787,16 @@ impl SWSPlatformWindow {
 }
 
 impl PlatformWindow for SWSPlatformWindow {
+    fn begin_file_dialog(
+        &mut self,
+        options: &scarlet_ui_core::file_dialog::FileDialog,
+    ) -> core::result::Result<
+        Box<dyn scarlet_ui_core::file_dialog::FileDialogSession>,
+        scarlet_ui_core::file_dialog::FileDialogError,
+    > {
+        file_dialog::begin(options)
+    }
+
     fn new(app_id: &str, title: &str, size: Size) -> Result<Self> {
         Self::create_with_type_and_menu_and_policies(
             app_id,

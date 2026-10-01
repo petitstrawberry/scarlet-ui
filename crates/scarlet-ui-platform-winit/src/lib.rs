@@ -52,6 +52,8 @@ use ::winit::window::{
     CursorGrabMode, Fullscreen, Window as WinitWindow, WindowAttributes, WindowId,
 };
 
+#[cfg(target_os = "macos")]
+mod file_dialog;
 #[cfg(feature = "sgfx")]
 mod sgfx_renderer;
 mod tablet_mode;
@@ -1309,6 +1311,17 @@ impl WinitPlatformWindow {
 }
 
 impl PlatformWindow for WinitPlatformWindow {
+    #[cfg(target_os = "macos")]
+    fn begin_file_dialog(
+        &mut self,
+        options: &scarlet_ui_core::file_dialog::FileDialog,
+    ) -> core::result::Result<
+        Box<dyn scarlet_ui_core::file_dialog::FileDialogSession>,
+        scarlet_ui_core::file_dialog::FileDialogError,
+    > {
+        file_dialog::begin(&self.window, options)
+    }
+
     fn new(app_id: &str, title: &str, size: Size) -> Result<Self> {
         let backend = WinitBackend::new();
         Self::create(
