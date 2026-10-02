@@ -92,6 +92,15 @@ pub struct FileDialogFilter {
     pub name: String,
     pub extensions: Vec<String>,
 }
+/// Whether the provider must apply the extension filters to its chooser UI.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FileDialogFilterPolicy {
+    /// Return Unsupported when the chooser cannot apply the requested filters.
+    #[default]
+    Required,
+    /// Allow an unfiltered chooser; the application validates the selected format.
+    Optional,
+}
 /// File dialog options. Initial directory must be absolute; default name is a basename.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -101,6 +110,7 @@ pub struct FileDialog {
     pub initial_directory: Option<FileDialogPath>,
     pub default_name: Option<String>,
     pub filters: Vec<FileDialogFilter>,
+    pub filter_policy: FileDialogFilterPolicy,
 }
 impl FileDialog {
     pub fn new(mode: FileDialogMode) -> Self {
@@ -110,6 +120,7 @@ impl FileDialog {
             initial_directory: None,
             default_name: None,
             filters: Vec::new(),
+            filter_policy: FileDialogFilterPolicy::Required,
         }
     }
     /// Queue on the application runner. Call from a UI callback with its live runtime owner.

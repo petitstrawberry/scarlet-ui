@@ -11,6 +11,7 @@ extern crate scarlet_std as std;
 
 mod backend;
 mod file_dialog;
+mod file_dialog_policy;
 mod shared_image;
 mod sink;
 
