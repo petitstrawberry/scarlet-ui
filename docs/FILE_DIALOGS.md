@@ -66,7 +66,7 @@ new application-event enum variant or synchronous callback into user code.
 | Backend | Single open/save | Multiple open | Extension filters | Ownership/cancel |
 | --- | --- | --- | --- | --- |
 | macOS/winit | NSOpenPanel/NSSavePanel | Yes | AppKit union | Owner NSWindow sheet, native cancel |
-| Scarlet/SWS | Existing Files service | Unsupported | Required: unsupported; Optional: unfiltered | Request ID correlation; local abandon only |
+| Scarlet/SWS | Existing Files service | Unsupported | Negotiated extension union; older providers: Required unsupported / Optional unfiltered | Request ID correlation; local abandon only |
 | Linux/winit, other/custom defaults | Unsupported | Unsupported | Unsupported | In-app fallback supplied by application |
 
 macOS uses the winit NSView's actual NSWindow, verifies the main thread, rejects
@@ -97,22 +97,35 @@ only while the service remains absent, for up to 3 seconds. Response polling is 
 at 100 ms with a 10-minute overall deadline. Missing/malformed responses and
 transport/launch failures are errors, not user cancellation.
 
-The provider accepts `allow_multiple` but returns one selected path; arbitrary
-extensions and audio MIME filters are not enforced. Multiple-selection requests and `Required` filter requests return `Unsupported`
-before IPC. `Optional` single/open/save requests show Files without a filter.
-Applications must validate their chosen extension before starting file I/O. The
-protocol has no caller-window identity or remote Cancel. For single/save requests, `cancel()` abandons the receipt and worker but the remote
-picker can remain open; late signals cannot start application I/O. This is an
-independent desktop window, not an owner-attached modal sheet. It cannot promise
-native multiwindow ownership, remote closure, or save overwrite confirmation.
+Filtered requests first call `GetPickerCapabilities()` on the same worker
+connection. A provider advertising `extension-list-v1` receives a literal,
+case-insensitive extension union in the existing filter argument, e.g.
+`extensions:wav,flac,json`. Files keeps folders visible for navigation, filters
+file listings, and revalidates Open/Save acceptance. An invalid Save filename
+keeps the picker open rather than returning a path. No extension is auto-appended.
+This capability is implemented in Scarlet's Files provider; older snapshots
+including `b3d2a55740a3d2ca49daad0ec7baba233f706f7a` do not provide it.
+The constants are kept locally until the runtime binding pin can be updated
+independently of this extension; no SWS wire ABI changes are introduced.
 
-Evidence: Scarlet `user/std-bin/src/filer.rs` (provider and `matches_filter`),
-`user/std-bin/src/notepad.rs` (open/save client),
-`user/lib/scarlet-desktop-config/src/lib.rs` (constants), and
-`user/lib/sbus-client/src/lib.rs` (bounded receive/pending messages).
-The current Scarlet dev snapshot `0639a916dfd652e9b2c1ea740cacc1c09743d9eb`
-has the same capability limits. No Scarlet protocol or dependency rev change
-is required here.
+On an old provider, the explicit `Unknown FileManager method` reply to this
+read-only query denotes absent capability. Required filters return Unsupported;
+Optional filters permit an unfiltered chooser. With a capable provider Optional
+also applies the filter. Other IPC failures remain errors. A Required filter is
+never silently sent to a provider which might ignore it.
+
+The provider accepts `allow_multiple` but returns only one selected path, so
+multiple-selection requests still return Unsupported before IPC. Applications
+must validate their chosen extension before starting file I/O. The protocol has
+no caller-window identity or remote Cancel. Cancel abandons the receipt and
+worker but the remote picker can remain open; late signals cannot start I/O.
+This is an independent desktop window, not an owner-attached modal sheet. It
+cannot promise native multiwindow ownership, remote closure, or save overwrite
+confirmation.
+
+Evidence: Scarlet `user/std-bin/src/filer.rs` and `picker_filter.rs`,
+`docs/desktop/files-picker.md`, `user/lib/scarlet-desktop-config/src/lib.rs`,
+and `user/lib/sbus-client/src/lib.rs`.
 
 Linux deliberately uses the unsupported default in this change. It does not
 claim GTK/portal/native support. An implementation can override the same
