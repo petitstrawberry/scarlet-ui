@@ -160,7 +160,8 @@ pub use views::{
     BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, HorizontalSizeClass,
     IconView, Image, ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView,
     ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabBarPlacement, TabBarPosition,
-    TabItem, TabView, Toggle, VectorImageData, VectorTriangle, VerticalSizeClass, WindowSizeClass,
+    TabItem, TabStyle, TabView, Toggle, VectorImageData, VectorTriangle, VerticalSizeClass,
+    WindowSizeClass,
 };
 pub use views::{
     Button, ElevationRole, HStack, LazyVStack, Rectangle, Spacer, SplitAxis, SplitAxisPolicy,
@@ -220,8 +221,8 @@ pub mod prelude {
         BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar,
         HorizontalSizeClass, IconView, Image, ImageFit, ImageSource, ListView, ProgressView,
         ScrollAxis, ScrollView, ScrollWheelDirection, ScrollbarVisibility, Select, Slider,
-        TabBarPlacement, TabBarPosition, TabItem, TabView, Toggle, VectorImageData, VectorTriangle,
-        VerticalSizeClass, WindowSizeClass,
+        TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, Toggle, VectorImageData,
+        VectorTriangle, VerticalSizeClass, WindowSizeClass,
     };
     pub use crate::views::{
         Button, Either, Either3, Either4, Either5, Either6, ElevationRole, HStack, LazyVStack,
