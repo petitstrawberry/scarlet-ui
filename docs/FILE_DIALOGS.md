@@ -34,6 +34,9 @@ Options use absolute initial directories, literal extensions without dots or
 wildcards, and a default basename (no directory components). Filters form a
 union; separate named filter groups are not a promised chooser UI. Native
 selection does not replace file-format validation or application I/O errors.
+`filter_policy` defaults to `FileDialogFilterPolicy::Required`. Set it to
+`Optional` to allow a backend without arbitrary extension filters to show an
+unfiltered native chooser, then validate the returned path in your application.
 No file is opened or written by this API. `FileDialogPath` converts to/from
 `PathBuf` in std builds without losing non-UTF8 filenames; the legacy Scarlet
 runtime carries UTF-8 paths. Save overwrite confirmation/default-extension
@@ -63,7 +66,7 @@ new application-event enum variant or synchronous callback into user code.
 | Backend | Single open/save | Multiple open | Extension filters | Ownership/cancel |
 | --- | --- | --- | --- | --- |
 | macOS/winit | NSOpenPanel/NSSavePanel | Yes | AppKit union | Owner NSWindow sheet, native cancel |
-| Scarlet/SWS | Existing Files service | Unsupported | Unsupported | Request ID correlation; local abandon only |
+| Scarlet/SWS | Existing Files service | Unsupported | Required: unsupported; Optional: unfiltered | Request ID correlation; local abandon only |
 | Linux/winit, other/custom defaults | Unsupported | Unsupported | Unsupported | In-app fallback supplied by application |
 
 macOS uses the winit NSView's actual NSWindow, verifies the main thread, rejects
@@ -88,15 +91,17 @@ Scarlet uses the **existing sbus Files service**, not new SWS messages:
 One detached worker owns one connection for the call and subsequent signals;
 the sbus client's pending queue preserves a Response arriving before the method
 reply. The UI thread never waits for IPC. The initial call has a 2-second bound;
-ambiguous failures are not automatically resent. Response polling is bounded
+ambiguous failures are not automatically resent. A definite `ServiceNotFound`
+activates Files through stemd `LaunchOrFocus(DESKTOP_FILES_APP_ID)` and retries
+only while the service remains absent, for up to 3 seconds. Response polling is bounded
 at 100 ms with a 10-minute overall deadline. Missing/malformed responses and
 transport/launch failures are errors, not user cancellation.
 
 The provider accepts `allow_multiple` but returns one selected path; arbitrary
-extensions and audio MIME filters are not enforced. Therefore multi/filter
-requests return `Unsupported` before IPC, allowing reliable fallback. The
-protocol has no caller-window identity or remote Cancel. For unfiltered
-single/save requests, `cancel()` abandons the receipt and worker but the remote
+extensions and audio MIME filters are not enforced. Multiple-selection requests and `Required` filter requests return `Unsupported`
+before IPC. `Optional` single/open/save requests show Files without a filter.
+Applications must validate their chosen extension before starting file I/O. The
+protocol has no caller-window identity or remote Cancel. For single/save requests, `cancel()` abandons the receipt and worker but the remote
 picker can remain open; late signals cannot start application I/O. This is an
 independent desktop window, not an owner-attached modal sheet. It cannot promise
 native multiwindow ownership, remote closure, or save overwrite confirmation.

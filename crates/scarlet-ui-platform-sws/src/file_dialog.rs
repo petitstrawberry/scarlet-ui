@@ -8,7 +8,7 @@ use alloc::{
     vec::Vec,
 };
 use core::sync::atomic::{AtomicBool, Ordering};
-use sbus_client::{Argument, Connection, Message};
+use sbus_client::{Argument, Connection, Error as BusError, Message};
 use scarlet_desktop_config::*;
 use scarlet_ui_core::file_dialog::*;
 use std::sync::Mutex;
@@ -38,30 +38,23 @@ impl Drop for Session {
 }
 
 pub(crate) fn begin(options: &FileDialog) -> Result<Box<dyn FileDialogSession>, FileDialogError> {
-    options.validate()?;
-    if options.mode == FileDialogMode::OpenMultiple {
-        return Err(FileDialogError::Unsupported(
-            "Files returns only one path despite allow_multiple".into(),
-        ));
-    }
-    if !options.filters.is_empty() {
-        return Err(FileDialogError::Unsupported(
-            "Files cannot enforce arbitrary extension filters".into(),
-        ));
-    }
+    super::file_dialog_policy::native_filter(options)?;
     let options = options.clone();
     let result = Arc::new(Mutex::new(None));
     let abandon = Arc::new(AtomicBool::new(false));
     let output = result.clone();
     let stopped = abandon.clone();
-    std::thread::spawn(move || {
-        let value = request(options, &stopped);
-        #[cfg(feature = "std")]
-        let mut result = output.lock().unwrap();
-        #[cfg(not(feature = "std"))]
-        let mut result = output.lock();
-        *result = Some(value);
-    });
+    std::thread::Builder::new()
+        .name("files-picker".into())
+        .spawn(move || {
+            let value = request(options, &stopped);
+            #[cfg(feature = "std")]
+            let mut result = output.lock().unwrap();
+            #[cfg(not(feature = "std"))]
+            let mut result = output.lock();
+            *result = Some(value);
+        })
+        .map_err(|e| FileDialogError::Platform(format!("Files worker: {e:?}")))?;
     Ok(Box::new(Session { result, abandon }))
 }
 fn request(options: FileDialog, abandon: &AtomicBool) -> FileDialogResult {
@@ -108,16 +101,7 @@ fn request(options: FileDialog, abandon: &AtomicBool) -> FileDialogResult {
     // One connection keeps any Response arriving before MethodReturn in the
     // client's pending queue. Do not resend an ambiguous timed-out request.
     let mut connection = Connection::connect().map_err(platform)?;
-    let reply = connection
-        .call_method_timeout(
-            DESKTOP_FILE_MANAGER_BUS_NAME,
-            DESKTOP_FILE_MANAGER_OBJECT_PATH,
-            DESKTOP_FILE_MANAGER_INTERFACE,
-            method,
-            args,
-            2_000,
-        )
-        .map_err(platform)?;
+    let reply = call_files(&mut connection, method, args, abandon).map_err(platform)?;
     let Some(Argument::String(id)) = reply.first() else {
         return Err(FileDialogError::Platform(
             "Files returned no request id".into(),
@@ -181,6 +165,55 @@ fn request(options: FileDialog, abandon: &AtomicBool) -> FileDialogResult {
         }
         return Ok(FileDialogOutcome::Selected(vec![path]));
     }
+}
+
+// A definite ServiceNotFound is safe to retry. Never resend an ambiguous
+// timeout: the Files process might already have created a picker for that call.
+fn call_files(
+    connection: &mut Connection,
+    method: &str,
+    args: Vec<Argument>,
+    abandon: &AtomicBool,
+) -> Result<Vec<Argument>, BusError> {
+    let call = |connection: &mut Connection| {
+        connection.call_method_timeout(
+            DESKTOP_FILE_MANAGER_BUS_NAME,
+            DESKTOP_FILE_MANAGER_OBJECT_PATH,
+            DESKTOP_FILE_MANAGER_INTERFACE,
+            method,
+            args.clone(),
+            2_000,
+        )
+    };
+    match call(connection) {
+        Err(BusError::ServiceNotFound) => {}
+        result => return result,
+    }
+    if abandon.load(Ordering::Acquire) {
+        return Err(BusError::ServiceNotFound);
+    }
+    // Same activation route as Scarlet's video player, on a separate connection
+    // so the picker connection retains early Response signals in its pending queue.
+    let mut launcher = Connection::connect()?;
+    launcher.call_method_timeout(
+        DESKTOP_STEMD_BUS_NAME,
+        DESKTOP_STEMD_OBJECT_PATH,
+        DESKTOP_STEMD_INTERFACE,
+        DESKTOP_STEMD_LAUNCH_OR_FOCUS_METHOD,
+        vec![Argument::String(DESKTOP_FILES_APP_ID.into())],
+        3_000,
+    )?;
+    for _ in 0..30 {
+        if abandon.load(Ordering::Acquire) {
+            return Err(BusError::ServiceNotFound);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        match call(connection) {
+            Err(BusError::ServiceNotFound) => {}
+            result => return result,
+        }
+    }
+    Err(BusError::ServiceNotFound)
 }
 
 fn monotonic_ns() -> u64 {
