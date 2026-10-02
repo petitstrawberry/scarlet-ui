@@ -136,6 +136,49 @@ impl TabItem {
     }
 }
 
+/// Colors and selected-indicator geometry for a [`TabView`] tab bar.
+///
+/// Defaults follow the ScarletUI palette. Override these values to match an
+/// application's surfaces without replacing the tab bar's interaction behavior.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabStyle {
+    /// Background of the full tab bar.
+    pub background_color: Color,
+    /// Background of the selected tab.
+    pub selected_color: Color,
+    /// Background of a hovered or pressed tab.
+    pub hover_color: Color,
+    /// Divider between the tab bar and its content.
+    pub border_color: Color,
+    /// Label color of unselected tabs.
+    pub text_color: Color,
+    /// Label color of the selected tab.
+    pub selected_text_color: Color,
+    /// Color of the selected-tab indicator on the content edge.
+    pub indicator_color: Color,
+    /// Indicator thickness in logical pixels. Zero hides the indicator.
+    ///
+    /// Negative or non-finite values are treated as zero, and the thickness is
+    /// limited to the tab-bar height when painting.
+    pub indicator_height: f32,
+}
+
+impl Default for TabStyle {
+    fn default() -> Self {
+        let palette = ColorPalette::default();
+        Self {
+            background_color: style::surface_color(&palette, style::SurfaceRole::Structural),
+            selected_color: style::surface_color(&palette, style::SurfaceRole::Canvas),
+            hover_color: palette.menu_hover(),
+            border_color: palette.divider(),
+            text_color: palette.text_secondary(),
+            selected_text_color: palette.text(),
+            indicator_color: palette.primary(),
+            indicator_height: style::metrics().tab_indicator_height,
+        }
+    }
+}
+
 /// Tabbed content view.
 #[derive(Clone)]
 pub struct TabView {
@@ -145,12 +188,7 @@ pub struct TabView {
     tab_bar_placement: TabBarPlacement,
     tab_padding: f32,
     font_size: f32,
-    background_color: Color,
-    selected_color: Color,
-    hover_color: Color,
-    border_color: Color,
-    text_color: Color,
-    selected_text_color: Color,
+    style: TabStyle,
 }
 
 impl TabView {
@@ -178,7 +216,6 @@ impl TabView {
     ///
     /// New tab view bound to `selected_index`.
     pub fn with_selected_index(tabs: Vec<TabItem>, selected_index: State<usize>) -> Self {
-        let palette = ColorPalette::default();
         Self {
             tabs,
             selected_index,
@@ -186,13 +223,22 @@ impl TabView {
             tab_bar_placement: TabBarPlacement::Automatic,
             tab_padding: 14.0,
             font_size: 13.0,
-            background_color: style::surface_color(&palette, style::SurfaceRole::Structural),
-            selected_color: style::surface_color(&palette, style::SurfaceRole::Canvas),
-            hover_color: palette.menu_hover(),
-            border_color: palette.divider(),
-            text_color: palette.text_secondary(),
-            selected_text_color: palette.text(),
+            style: TabStyle::default(),
         }
+    }
+
+    /// Set the colors and selected indicator of the tab bar.
+    ///
+    /// # Arguments
+    ///
+    /// * `style` - Tab-bar appearance. Geometry and selection behavior are unchanged.
+    ///
+    /// # Returns
+    ///
+    /// Updated tab view.
+    pub fn style(mut self, style: TabStyle) -> Self {
+        self.style = style;
+        self
     }
 
     /// Set tab bar height.
@@ -351,20 +397,23 @@ impl View for TabViewContent {
 }
 
 fn tab_render_object(view: &TabViewContent) -> TabViewRenderObject {
-    TabViewRenderObject::with_placement(
+    let mut render_object = TabViewRenderObject::with_placement(
         view.tabs.labels(),
         view.tabs.selected_index_state().clone(),
         view.tabs.tab_bar_height,
         view.tabs.tab_bar_placement,
         view.tabs.tab_padding,
         view.tabs.font_size,
-        view.tabs.background_color,
-        view.tabs.selected_color,
-        view.tabs.hover_color,
-        view.tabs.border_color,
-        view.tabs.text_color,
-        view.tabs.selected_text_color,
-    )
+        view.tabs.style.background_color,
+        view.tabs.style.selected_color,
+        view.tabs.style.hover_color,
+        view.tabs.style.border_color,
+        view.tabs.style.text_color,
+        view.tabs.style.selected_text_color,
+    );
+    render_object.indicator_color = view.tabs.style.indicator_color;
+    render_object.indicator_height = view.tabs.style.indicator_height;
+    render_object
 }
 
 /// Render object for [`TabView`].
@@ -385,6 +434,8 @@ pub struct TabViewRenderObject {
     border_color: Color,
     text_color: Color,
     selected_text_color: Color,
+    indicator_color: Color,
+    indicator_height: f32,
     size: Size,
 }
 
@@ -494,6 +545,8 @@ impl TabViewRenderObject {
             border_color,
             text_color,
             selected_text_color,
+            indicator_color: ColorPalette::default().primary(),
+            indicator_height: style::metrics().tab_indicator_height,
             size: Size::ZERO,
         }
     }
@@ -707,7 +760,11 @@ impl ElementRenderObject for TabViewRenderObject {
     }
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
-        let metrics = style::metrics();
+        let indicator_height = if self.indicator_height.is_finite() {
+            self.indicator_height.max(0.0).min(self.tab_bar_height)
+        } else {
+            0.0
+        };
         let tab_bar_y = origin.y + self.tab_bar_origin_y();
         ctx.fill_rect(
             Rect::from_xywh(origin.x, tab_bar_y, self.size.width, self.tab_bar_height),
@@ -764,21 +821,19 @@ impl ElementRenderObject for TabViewRenderObject {
             ),
             self.border_color,
         );
-        if selected < self.labels.len() {
+        if selected < self.labels.len() && indicator_height > 0.0 {
             let selected_rect = self.tab_rect(selected);
             ctx.fill_rect(
                 Rect::from_xywh(
                     origin.x + selected_rect.origin.x,
                     match self.tab_bar_position {
-                        TabBarPosition::Top => {
-                            tab_bar_y + self.tab_bar_height - metrics.tab_indicator_height
-                        }
+                        TabBarPosition::Top => tab_bar_y + self.tab_bar_height - indicator_height,
                         TabBarPosition::Bottom => tab_bar_y,
                     },
                     selected_rect.size.width,
-                    metrics.tab_indicator_height,
+                    indicator_height,
                 ),
-                ColorPalette::default().primary(),
+                self.indicator_color,
             );
         }
         true
@@ -803,12 +858,14 @@ impl ElementRenderObject for TabViewRenderObject {
         self.tab_bar_placement = content.tabs.tab_bar_placement;
         self.tab_padding = content.tabs.tab_padding;
         self.font_size = content.tabs.font_size;
-        self.background_color = content.tabs.background_color;
-        self.selected_color = content.tabs.selected_color;
-        self.hover_color = content.tabs.hover_color;
-        self.border_color = content.tabs.border_color;
-        self.text_color = content.tabs.text_color;
-        self.selected_text_color = content.tabs.selected_text_color;
+        self.background_color = content.tabs.style.background_color;
+        self.selected_color = content.tabs.style.selected_color;
+        self.hover_color = content.tabs.style.hover_color;
+        self.border_color = content.tabs.style.border_color;
+        self.text_color = content.tabs.style.text_color;
+        self.selected_text_color = content.tabs.style.selected_text_color;
+        self.indicator_color = content.tabs.style.indicator_color;
+        self.indicator_height = content.tabs.style.indicator_height;
         self.hovered_index = self
             .hovered_index
             .filter(|index| *index < self.labels.len());
@@ -1159,6 +1216,144 @@ mod tests {
         ));
         assert_eq!(render_object.pressed_index(), None);
         assert_eq!(selected.get(), 0);
+    }
+
+    fn custom_style() -> TabStyle {
+        TabStyle {
+            background_color: Color::rgb(10, 11, 12),
+            selected_color: Color::rgb(20, 21, 22),
+            hover_color: Color::rgb(30, 31, 32),
+            border_color: Color::rgb(40, 41, 42),
+            text_color: Color::rgb(50, 51, 52),
+            selected_text_color: Color::rgb(60, 61, 62),
+            indicator_color: Color::rgb(70, 71, 72),
+            indicator_height: 3.0,
+        }
+    }
+
+    fn styled_tabs(style: TabStyle, placement: TabBarPlacement) -> TabViewContent {
+        TabViewContent {
+            tabs: TabView::new(vec![
+                TabItem::new("Mixer", Spacer::new),
+                TabItem::new("Editor", Spacer::new),
+            ])
+            .tab_bar_height(30.0)
+            .tab_bar_placement(placement)
+            .style(style),
+        }
+    }
+
+    #[test]
+    fn default_style_preserves_the_existing_tab_palette() {
+        let palette = ColorPalette::default();
+        let tabs = TabView::new(vec![]);
+        assert_eq!(
+            tabs.style.background_color,
+            style::surface_color(&palette, style::SurfaceRole::Structural)
+        );
+        assert_eq!(
+            tabs.style.selected_color,
+            style::surface_color(&palette, style::SurfaceRole::Canvas)
+        );
+        assert_eq!(tabs.style.hover_color, palette.menu_hover());
+        assert_eq!(tabs.style.border_color, palette.divider());
+        assert_eq!(tabs.style.text_color, palette.text_secondary());
+        assert_eq!(tabs.style.selected_text_color, palette.text());
+        assert_eq!(tabs.style.indicator_color, palette.primary());
+        assert_eq!(
+            tabs.style.indicator_height,
+            style::metrics().tab_indicator_height
+        );
+    }
+
+    #[test]
+    fn custom_tab_style_paints_surfaces_labels_and_indicator_at_both_edges() {
+        let style = custom_style();
+        for (placement, expected_y) in [
+            (TabBarPlacement::Top, 27.0),
+            (TabBarPlacement::Bottom, 150.0),
+        ] {
+            let mut tabs = tab_render_object(&styled_tabs(style, placement));
+            tabs.layout(LayoutConstraints::tight(300.0, 180.0));
+            let editor = tabs.tab_rect(1);
+            tabs.handle_event(
+                &Event::Mouse(MouseEvent::Moved {
+                    x: (editor.origin.x + 1.0) as i32,
+                    y: (editor.origin.y + 1.0) as i32,
+                }),
+                Phase::Target,
+            );
+            let mut ctx = PaintContext::new();
+            tabs.paint(&mut ctx, Point::ZERO);
+            for expected in [
+                style.background_color,
+                style.selected_color,
+                style.hover_color,
+                style.border_color,
+            ] {
+                assert!(ctx.commands().iter().any(|command| matches!(command, PaintCommand::FillPath { color, .. } if *color == expected)));
+            }
+            for (label, expected) in [
+                ("Mixer", style.selected_text_color),
+                ("Editor", style.text_color),
+            ] {
+                assert!(ctx.commands().iter().any(|command| matches!(command, PaintCommand::DrawText { text, color, .. } if text == label && *color == expected)));
+            }
+            let indicator = ctx
+                .commands()
+                .iter()
+                .find_map(|command| match command {
+                    PaintCommand::FillPath { path, color } if *color == style.indicator_color => {
+                        Some(path)
+                    }
+                    _ => None,
+                })
+                .expect("custom indicator");
+            assert_eq!(indicator[0].y, expected_y);
+            assert_eq!(indicator[2].y, expected_y + 3.0);
+            assert_eq!(tabs.selected_index.get(), 0);
+        }
+    }
+
+    #[test]
+    fn style_update_reaches_existing_render_object() {
+        let mut tabs = tab_render_object(&styled_tabs(TabStyle::default(), TabBarPlacement::Top));
+        tabs.layout(LayoutConstraints::tight(300.0, 180.0));
+        assert!(matches!(
+            tabs.update(&styled_tabs(custom_style(), TabBarPlacement::Top)),
+            crate::element::UpdateResult::Updated
+        ));
+        let mut ctx = PaintContext::new();
+        tabs.paint(&mut ctx, Point::ZERO);
+        assert!(ctx.commands().iter().any(|command| matches!(command, PaintCommand::FillPath { color, .. } if *color == custom_style().indicator_color)));
+        assert!(ctx.commands().iter().any(|command| matches!(command, PaintCommand::DrawText { color, .. } if *color == custom_style().selected_text_color)));
+    }
+
+    #[test]
+    fn indicator_height_is_bounded_and_can_be_hidden() {
+        for height in [0.0, -1.0, f32::NAN, f32::INFINITY, 300.0] {
+            let style = TabStyle {
+                indicator_height: height,
+                ..custom_style()
+            };
+            let mut tabs = tab_render_object(&styled_tabs(style, TabBarPlacement::Top));
+            tabs.layout(LayoutConstraints::tight(300.0, 180.0));
+            let mut ctx = PaintContext::new();
+            tabs.paint(&mut ctx, Point::ZERO);
+            let indicator = ctx.commands().iter().find_map(|command| match command {
+                PaintCommand::FillPath { path, color } if *color == style.indicator_color => {
+                    Some(path)
+                }
+                _ => None,
+            });
+            if height == 300.0 {
+                let path = indicator.expect("indicator clamped to tab height");
+                assert_eq!(path[0].y, 0.0);
+                assert_eq!(path[2].y, 30.0);
+            } else {
+                assert!(indicator.is_none());
+            }
+        }
     }
 
     #[test]

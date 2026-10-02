@@ -63,7 +63,7 @@ pub use slider::{Slider, SliderRenderObject};
 pub use spacer::{Spacer, SpacerRenderObject};
 pub use split::{SplitAxis, SplitAxisPolicy, SplitView, SplitViewRenderObject};
 pub use surface::{ElevationRole, Surface, SurfaceRole};
-pub use tab::{TabBarPlacement, TabBarPosition, TabItem, TabView, TabViewRenderObject};
+pub use tab::{TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, TabViewRenderObject};
 pub use text::{Text, TextRenderObject};
 pub use text_field::{TextField, TextFieldRenderObject};
 pub use text_grid::{
