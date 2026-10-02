@@ -803,7 +803,9 @@ impl RenderingPipeline {
             Self::collect_paint_bounds(root, Point::ZERO, None, &mut self.last_paint_bounds);
         }
 
-        if !should_render {
+        // Rebuilt/clipped views can paint commands while dirtying no visible
+        // pixels. Empty damage is an idle frame, not an invalid GPU submission.
+        if !should_render || self.paint_damage.as_ref().is_some_and(Vec::is_empty) {
             return Ok(PresentedFrame::Idle);
         }
 
@@ -992,6 +994,10 @@ impl RenderingPipeline {
         &mut self,
         background_color: crate::color::Color,
     ) -> crate::error::Result<PresentedFrame<'_>> {
+        if self.paint_damage.as_ref().is_some_and(Vec::is_empty) {
+            self.retained_ctx.clear();
+            return Ok(PresentedFrame::Idle);
+        }
         let partial = self.paint_damage.is_some();
         let damage_clip = partial.then_some(self.dirty_scratch.rects.as_slice());
         let physical_damage = self.paint_damage.as_deref();
@@ -3002,6 +3008,39 @@ mod tests {
     };
     use core::cell::Cell;
     use std::rc::Rc;
+
+    #[test]
+    fn empty_retained_damage_is_idle_but_visible_gpu_errors_propagate() {
+        struct FailingBackend(Rc<Cell<usize>>);
+        impl PaintBackend for FailingBackend {
+            fn resize(&mut self, _: Size, _: u32) {}
+            fn render<'a>(
+                &'a mut self,
+                _: &PaintContext<'_>,
+                _: crate::color::Color,
+                _: Option<&[Rect]>,
+                _: Option<&[DamageRect]>,
+            ) -> crate::Result<BackendFrame<'a>> {
+                self.0.set(self.0.get() + 1);
+                Err(crate::Error::RenderError)
+            }
+        }
+        let attempts = Rc::new(Cell::new(0));
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_paint_backend(Box::new(FailingBackend(attempts.clone())));
+        pipeline.paint_damage = Some(Vec::new());
+        assert!(matches!(
+            pipeline.render_prepared_retained_composite(crate::color::Color::BLACK),
+            Ok(PresentedFrame::Idle)
+        ));
+        assert_eq!(attempts.get(), 0);
+        pipeline.paint_damage = Some(alloc::vec![(0, 0, 1, 1)]);
+        assert!(matches!(
+            pipeline.render_prepared_retained_composite(crate::color::Color::BLACK),
+            Err(crate::Error::RenderError)
+        ));
+        assert_eq!(attempts.get(), 1);
+    }
 
     fn touch_frame(serial: u64, id: u64, phase: TouchPhase, x: i32, y: i32) -> Event {
         Event::TouchFrame(TouchFrame {
