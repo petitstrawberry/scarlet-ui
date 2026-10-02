@@ -1,12 +1,5 @@
 //! Existing Files/sbus request/reply adapter; no invented SWS wire messages.
-use alloc::{
-    boxed::Box,
-    format,
-    string::{String, ToString},
-    sync::Arc,
-    vec,
-    vec::Vec,
-};
+use alloc::{boxed::Box, format, string::ToString, sync::Arc, vec, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use sbus_client::{Argument, Connection, Error as BusError, Message};
 use scarlet_desktop_config::*;
@@ -38,7 +31,7 @@ impl Drop for Session {
 }
 
 pub(crate) fn begin(options: &FileDialog) -> Result<Box<dyn FileDialogSession>, FileDialogError> {
-    super::file_dialog_policy::native_filter(options)?;
+    super::file_dialog_policy::native_filter(options, true)?;
     let options = options.clone();
     let result = Arc::new(Mutex::new(None));
     let abandon = Arc::new(AtomicBool::new(false));
@@ -61,6 +54,24 @@ fn request(options: FileDialog, abandon: &AtomicBool) -> FileDialogResult {
     if abandon.load(Ordering::Acquire) {
         return Ok(FileDialogOutcome::Cancelled);
     }
+    let platform = |e| FileDialogError::Platform(format!("Files/sbus: {e:?}"));
+    let mut connection = Connection::connect().map_err(platform)?;
+    let extensions_supported = if options.filters.is_empty() {
+        false
+    } else {
+        match call_files(&mut connection, super::file_dialog_policy::CAPABILITIES_METHOD, vec![], abandon) {
+            Ok(capabilities) => capabilities.iter().any(|capability| {
+                matches!(capability, Argument::String(value) if value == super::file_dialog_policy::EXTENSION_CAPABILITY)
+            }),
+            // Older Files explicitly rejects this read-only query; no picker was created.
+            Err(BusError::MethodFailed(message)) if message == "Unknown FileManager method" => false,
+            Err(error) => return Err(platform(error)),
+        }
+    };
+    let filter = super::file_dialog_policy::native_filter(&options, extensions_supported)?;
+    if abandon.load(Ordering::Acquire) {
+        return Ok(FileDialogOutcome::Cancelled);
+    }
     let directory = options
         .initial_directory
         .as_ref()
@@ -77,7 +88,7 @@ fn request(options: FileDialog, abandon: &AtomicBool) -> FileDialogResult {
             vec![
                 Argument::String(options.title),
                 Argument::String(directory),
-                Argument::String(String::new()),
+                Argument::String(filter),
                 Argument::Boolean(false),
                 Argument::Boolean(false),
             ],
@@ -88,7 +99,7 @@ fn request(options: FileDialog, abandon: &AtomicBool) -> FileDialogResult {
                 Argument::String(options.title),
                 Argument::String(directory),
                 Argument::String(options.default_name.unwrap_or_default()),
-                Argument::String(String::new()),
+                Argument::String(filter),
             ],
         ),
         _ => {
@@ -97,10 +108,8 @@ fn request(options: FileDialog, abandon: &AtomicBool) -> FileDialogResult {
             ));
         }
     };
-    let platform = |e| FileDialogError::Platform(format!("Files/sbus: {e:?}"));
     // One connection keeps any Response arriving before MethodReturn in the
     // client's pending queue. Do not resend an ambiguous timed-out request.
-    let mut connection = Connection::connect().map_err(platform)?;
     let reply = call_files(&mut connection, method, args, abandon).map_err(platform)?;
     let Some(Argument::String(id)) = reply.first() else {
         return Err(FileDialogError::Platform(
