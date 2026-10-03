@@ -904,6 +904,10 @@ fn handle_window_event<A: Application>(
             if slot.window.resize(width, height).is_ok() {
                 sync_output_scale(&mut slot.pipeline, slot.window.as_ref());
                 slot.pipeline.resize(new_size);
+                // A configure replaces the backing buffer. Permit one redraw
+                // to populate it even if a frame grant for the old extent is
+                // still pending; subsequent frames return to normal pacing.
+                slot.frame_ready = true;
                 app.on_window_resize(&slot.context, width, height);
                 sync_text_input(slot.window.as_mut(), &slot.pipeline);
             }
@@ -2211,6 +2215,37 @@ mod tests {
         fn as_any(&self) -> &dyn Any {
             self
         }
+    }
+
+    #[test]
+    fn resize_populates_new_backing_while_an_old_frame_grant_is_pending() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let mut app = RenderFailureApp(Rc::new(RefCell::new(Vec::new())));
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: Rc::new(RefCell::new(EnvironmentRunnerProbe::default())),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slot = runner.create_slot(&mut app, declaration, true).unwrap();
+        slot.frame_pacing_enabled = true;
+        slot.frame_ready = false;
+        slot.frame_request_outstanding = true;
+        handle_window_event(
+            &mut app,
+            &mut slot,
+            Event::Resize {
+                width: 600,
+                height: 800,
+            },
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(slot.frame_ready);
+        assert!(slot.frame_request_outstanding);
+        assert!(slot.pipeline.has_dirty());
+        request_next_frame(&mut slot);
+        assert!(!slot.frame_ready, "resize grant must only permit one frame");
     }
 
     #[test]
