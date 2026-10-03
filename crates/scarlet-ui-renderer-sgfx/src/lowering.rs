@@ -54,6 +54,7 @@ const CANVAS_TARGET_TEX_COORDS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1
 enum DrawSource {
     Solid,
     Texture(TextureId),
+    PixelTexture(TextureId),
     Glyph(TextureId),
 }
 
@@ -399,6 +400,7 @@ pub struct SgfxPaintEncoder {
     texture_pipeline: RenderPipelineId,
     glyph_pipeline: RenderPipelineId,
     sampler: SamplerId,
+    pixel_sampler: SamplerId,
     buffer_textures: Vec<BufferTexture>,
     glyph_atlases: Vec<GlyphAtlas>,
     glyph_atlas_rebuild_required: bool,
@@ -517,6 +519,10 @@ impl SgfxPaintEncoder {
             ))
             .map_err(|_| Error::sgfx(Stage::DefineResources))?
             .id();
+        let pixel_sampler = table.define_sampler(SamplerDesc::new(
+            FilterMode::Nearest, FilterMode::Nearest,
+            AddressMode::ClampToEdge, AddressMode::ClampToEdge,
+        )).map_err(|_| Error::sgfx(Stage::DefineResources))?.id();
         let glyph_atlas = GlyphAtlas::new(define_sampled_texture(
             &table,
             TextureFormat::R8Unorm,
@@ -549,6 +555,7 @@ impl SgfxPaintEncoder {
             texture_pipeline,
             glyph_pipeline,
             sampler,
+            pixel_sampler,
             buffer_textures: Vec::new(),
             glyph_atlases,
             glyph_atlas_rebuild_required: false,
@@ -1277,6 +1284,23 @@ impl SgfxPaintEncoder {
                     opacity = finite_unit(*next_opacity)?;
                 }
                 PaintCommand::Extension { rect, payload } => {
+                    if let Some(image) = payload.as_ref().as_any()
+                        .downcast_ref::<crate::scaled_buffer::ScaledBufferPaint>() {
+                        let buffer = &image.buffer;
+                        if let Some((geometry, texture, upload)) = self.lower_buffer(
+                            &mut tessellator, &mut buffer_mappings, buffer,
+                            FloatRect::new(0.0, 0.0, buffer.width() as f32, buffer.height() as f32),
+                            FloatRect::new(truncated_scaled(rect.origin.x, scale),
+                                truncated_scaled(rect.origin.y, scale),
+                                truncated_scaled(rect.size.width, scale),
+                                truncated_scaled(rect.size.height, scale)),
+                        )? {
+                            if let Some(upload) = upload { uploads.push(upload); }
+                            push_draw(&mut draws, &mut tessellator, geometry,
+                                [1.0, 1.0, 1.0, opacity], DrawSource::PixelTexture(texture))?;
+                        }
+                        continue;
+                    }
                     if let Some(surface) = payload
                         .as_ref()
                         .as_any()
@@ -1893,11 +1917,13 @@ impl SgfxPaintEncoder {
         if source_right <= source_left || source_bottom <= source_top {
             return Ok(None);
         }
+        let scale_x = destination.width / source.width;
+        let scale_y = destination.height / source.height;
         let clipped_destination = FloatRect::new(
-            destination.x + source_left - source.x,
-            destination.y + source_top - source.y,
-            source_right - source_left,
-            source_bottom - source_top,
+            destination.x + (source_left - source.x) * scale_x,
+            destination.y + (source_top - source.y) * scale_y,
+            (source_right - source_left) * scale_x,
+            (source_bottom - source_top) * scale_y,
         );
         let inverse_width = 1.0 / buffer.width() as f32;
         let inverse_height = 1.0 / buffer.height() as f32;
@@ -2211,7 +2237,7 @@ impl SgfxPaintEncoder {
                     }
                     let (pipeline, texture) = match draw.source {
                         DrawSource::Solid => (solid_pipeline, None),
-                        DrawSource::Texture(texture) => (texture_pipeline, Some(texture)),
+                        DrawSource::Texture(texture) | DrawSource::PixelTexture(texture) => (texture_pipeline, Some(texture)),
                         DrawSource::Glyph(texture) => (glyph_pipeline, Some(texture)),
                     };
                     pass.set_pipeline(pipeline)
@@ -2224,7 +2250,10 @@ impl SgfxPaintEncoder {
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                         pass.set_texture(texture)
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                        pass.set_sampler(sampler)
+                        let selected_sampler = if matches!(draw.source, DrawSource::PixelTexture(_)) {
+                            table.sampler_ref(self.pixel_sampler).map_err(|_| Error::sgfx(Stage::EncodeCommands))?
+                        } else {sampler};
+                        pass.set_sampler(selected_sampler)
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                     }
                     pass.set_uniforms(DrawUniforms::new(transform, white))

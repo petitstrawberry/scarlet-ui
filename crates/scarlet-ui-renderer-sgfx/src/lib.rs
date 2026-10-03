@@ -21,6 +21,7 @@ mod geometry;
 mod lowering;
 mod submission;
 mod upload;
+mod scaled_buffer;
 
 pub use canvas::{
     SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
@@ -32,3 +33,4 @@ pub use lowering::SgfxExternalTextureBinding;
 pub use lowering::SgfxPaintEncoder;
 pub use submission::{FrameExecutor, FrameSubmissionError};
 pub use upload::upload_texture;
+pub use scaled_buffer::paint_scaled_buffer;
