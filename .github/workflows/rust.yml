@@ -12,7 +12,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  SCARLET_TOOLCHAIN: github:petitstrawberry/scarlet-rust-nix/2b4ddd555389a8c53806bbc2586440b2662c38dd#scarlet-rust-toolchain
+  SCARLET_TOOLCHAIN: github:petitstrawberry/scarlet-rust-nix/074b722ac3c0d69daa8d4560996e23474c373d7c#scarlet-rust-toolchain
 
 jobs:
   build:

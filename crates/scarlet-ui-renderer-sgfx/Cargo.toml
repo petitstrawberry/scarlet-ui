@@ -16,7 +16,7 @@ std = [
 [dependencies]
 libm = { version = "0.2", default-features = false }
 scarlet-ui-core = { path = "../scarlet-ui-core", default-features = false }
-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "5ea41a0dfd6992bb1c0fce06c8e65425dc978140", package = "sgfx-core", default-features = false }
+sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "040dbb5cf42b75489504e1765183d37f6131f54c", package = "sgfx-core", default-features = false }
 
 [lib]
 name = "scarlet_ui_renderer_sgfx"
