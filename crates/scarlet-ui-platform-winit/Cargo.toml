@@ -16,7 +16,7 @@ scarlet-ui-renderer-sgfx = { path = "../scarlet-ui-renderer-sgfx", default-featu
 softbuffer = "0.4.8"
 winit = "0.30.13"
 raw-window-handle = { version = "0.6", optional = true }
-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "360523603f01c04cc8ff24cd882a8ba34d51414d", package = "sgfx", default-features = false, features = ["std", "backend-wgpu"], optional = true }
+sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "51e1e62516f65cf9425a97ca5f1ae9292ad8ad97", package = "sgfx", default-features = false, features = ["std", "backend-wgpu"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSView", "NSWindow", "NSPanel", "NSResponder", "NSApplication", "NSOpenPanel", "NSSavePanel", "block2", "objc2-quartz-core"] }
