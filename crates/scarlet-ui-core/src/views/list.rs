@@ -121,15 +121,17 @@ struct ListContentView<T: Clone + 'static> {
 }
 
 fn build_list_content<T: Clone + 'static>(view: &ListContentView<T>) -> Box<dyn View> {
-    let items = view.items.clone();
+    // Snapshot once per collection/selection change. State::get clones the
+    // entire Vec, so doing it in the row builder made every newly visible row
+    // copy the whole library during scrolling.
+    let items = view.items.get();
     let selected = view.selected.clone();
     let row_builder = view.row_builder.clone();
     let row_height = view.row_height;
-    let item_count = items.get().len();
+    let item_count = items.len();
 
     let rows = LazyVStack::new(item_count, row_height, move |index| {
         let item = items
-            .get()
             .get(index)
             .cloned()
             .expect("ListView row index must be within item count");
@@ -201,6 +203,159 @@ mod tests {
     use crate::state::{State, StateId};
     use crate::view::ViewExt;
     use crate::views::{TabItem, TabView, Text, Window};
+
+    fn scroll_geometry<T: Clone + 'static>(
+        pipeline: &RenderingPipeline,
+    ) -> (Size, Size, (f32, f32)) {
+        let id = find_scroll_id(pipeline.element_tree().root().unwrap()).unwrap();
+        let object = pipeline
+            .element_tree()
+            .find_element(id)
+            .unwrap()
+            .render_object()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<crate::views::ScrollViewRenderObject<ListContentView<T>>>()
+            .unwrap();
+        (
+            object.viewport_size(),
+            object.content_size(),
+            object.offset(),
+        )
+    }
+
+    #[test]
+    fn shrinking_items_clamps_scroll_extent_and_offset_to_the_new_content() {
+        let items = State::new(
+            crate::state::generate_state_id(),
+            (0usize..100).collect::<Vec<_>>(),
+        );
+        let list = ListView::new(
+            items.clone(),
+            State::new(crate::state::generate_state_id(), None),
+            20.,
+            |_, item, _| {
+                crate::views::Rectangle::new()
+                    .fill(crate::color::Color::rgb(item as u8, 20, 50))
+                    .frame(f32::INFINITY, 20.)
+            },
+        );
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new("List", list.frame(200., 100.))
+                .decorated(false)
+                .size(Size::new(200., 100.))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+        assert_eq!(scroll_geometry::<usize>(&pipeline).1.height, 2000.);
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: -100_000,
+            x: 20,
+            y: 20,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
+        }));
+        let last_pixel = pipeline.render_with_damage().unwrap().0.get_pixel(20, 90);
+        assert_eq!(scroll_geometry::<usize>(&pipeline).2.1, 1900.);
+        assert_eq!(
+            last_pixel,
+            Some(crate::color::Color::rgb(99, 20, 50).to_bgra()),
+            "Last list row must be painted, not just materialized"
+        );
+        items.set((0..3).collect());
+        for _ in 0..4 {
+            pipeline.render_with_damage();
+        }
+        let (viewport, content, offset) = scroll_geometry::<usize>(&pipeline);
+        assert_eq!(
+            content.height, viewport.height,
+            "Short lists must not retain the old extent"
+        );
+        assert_eq!(offset.1, 0., "Short lists must not scroll into blank space");
+        items.set((0..150).collect());
+        for _ in 0..4 {
+            pipeline.render_with_damage();
+        }
+        assert_eq!(scroll_geometry::<usize>(&pipeline).1.height, 3000.);
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: -100_000,
+            x: 20,
+            y: 20,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
+        }));
+        pipeline.render_with_damage();
+        assert_eq!(scroll_geometry::<usize>(&pipeline).2.1, 2900.);
+    }
+
+    #[test]
+    fn scrolling_clones_visible_rows_instead_of_the_entire_collection() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Item {
+            index: usize,
+            clones: Arc<AtomicUsize>,
+        }
+        impl Clone for Item {
+            fn clone(&self) -> Self {
+                self.clones.fetch_add(1, Ordering::Relaxed);
+                Self {
+                    index: self.index,
+                    clones: self.clones.clone(),
+                }
+            }
+        }
+        let clones = Arc::new(AtomicUsize::new(0));
+        let items = State::new(
+            crate::state::generate_state_id(),
+            (0..1000)
+                .map(|index| Item {
+                    index,
+                    clones: clones.clone(),
+                })
+                .collect::<Vec<_>>(),
+        );
+        let list = ListView::new(
+            items,
+            State::new(crate::state::generate_state_id(), None),
+            20.,
+            |_, item, _| Text::new(format!("Row {}", item.index)),
+        );
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new("List", list.frame(200., 100.))
+                .decorated(false)
+                .size(Size::new(200., 100.))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        for _ in 0..4 {
+            pipeline.render_with_damage();
+        }
+        clones.store(0, Ordering::Relaxed);
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: -600,
+            x: 20,
+            y: 20,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
+        }));
+        for _ in 0..4 {
+            pipeline.render_with_damage();
+        }
+        assert!(scroll_geometry::<Item>(&pipeline).2.1 > 0.);
+        assert!(
+            clones.load(Ordering::Relaxed) < 100,
+            "Scrolling a few rows copied the entire 1000-item collection"
+        );
+    }
 
     fn find_scroll_id(element: &dyn Element) -> Option<ElementId> {
         if element.type_name_debug().contains("ScrollView<") {

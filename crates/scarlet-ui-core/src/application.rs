@@ -38,7 +38,8 @@ fn wheel_log_env_enabled() -> bool {
 
 #[cfg(feature = "std")]
 fn app_wheel_coalesce_env_enabled() -> bool {
-    std::env::var("SCARLET_UI_APP_WHEEL_COALESCE").is_ok_and(|value| env_flag_enabled(&value))
+    let value = std::env::var("SCARLET_UI_APP_WHEEL_COALESCE").ok();
+    app_wheel_coalesce_setting(value.as_deref())
 }
 
 #[cfg(not(feature = "std"))]
@@ -48,7 +49,12 @@ fn wheel_log_env_enabled() -> bool {
 
 #[cfg(not(feature = "std"))]
 fn app_wheel_coalesce_env_enabled() -> bool {
-    false
+    true
+}
+
+#[cfg(feature = "std")]
+fn app_wheel_coalesce_setting(value: Option<&str>) -> bool {
+    value.is_none_or(env_flag_enabled)
 }
 
 #[cfg(feature = "std")]
@@ -447,7 +453,11 @@ impl ApplicationRunner {
         app: &mut A,
         slots: &mut Vec<WindowSlot<A>>,
     ) -> Result<()> {
+        // Merge samples already queued in this frame, without an input-rate
+        // timer. This applies the net scroll once instead of materializing
+        // virtual rows for every intermediate trackpad sample.
         let app_wheel_coalesce_enabled = app_wheel_coalesce_env_enabled();
+        let timing_enabled = crate::debug::frame_log_enabled();
         let mut applied_environment = current_input_environment();
         // Counts consecutive iterations that processed events (or had a dirty
         // pipeline) without actually presenting a frame. A few of these are
@@ -498,6 +508,7 @@ impl ApplicationRunner {
                 }
             }
 
+            let events_us = timing_enabled.then(|| cycle_started.elapsed().as_micros());
             let current_environment = current_input_environment();
             if current_environment != applied_environment {
                 for slot in slots.iter_mut() {
@@ -522,6 +533,12 @@ impl ApplicationRunner {
                 return Ok(());
             }
 
+            let idle_us = timing_enabled.then(|| {
+                cycle_started
+                    .elapsed()
+                    .as_micros()
+                    .saturating_sub(events_us.unwrap_or_default())
+            });
             for slot in slots.iter_mut() {
                 sync_application_window(app, slot);
                 sync_text_input(slot.window.as_mut(), &slot.pipeline);
@@ -567,6 +584,14 @@ impl ApplicationRunner {
                 }
             }
 
+            if timing_enabled && (any_event || any_presented) {
+                crate::logln!(
+                    "[ScrollCycle] events_us={} idle_us={} cycle_us={} presented={any_presented}",
+                    events_us.unwrap_or_default(),
+                    idle_us.unwrap_or_default(),
+                    cycle_started.elapsed().as_micros()
+                );
+            }
             if !any_event && !any_presented {
                 spin_without_present = 0;
                 wait_for_next_event(slots, Duration::from_millis(16));
@@ -2480,7 +2505,11 @@ mod tests {
     }
 
     #[test]
-    fn app_wheel_coalesce_env_flag_defaults_off_and_one_enables() {
+    fn app_wheel_coalesce_defaults_on_without_a_rate_limit_and_can_be_disabled() {
+        assert!(app_wheel_coalesce_setting(None));
+        assert!(app_wheel_coalesce_setting(Some("1")));
+        assert!(!app_wheel_coalesce_setting(Some("0")));
+        assert!(!app_wheel_coalesce_setting(Some("off")));
         assert!(env_flag_enabled("1"));
         assert!(env_flag_enabled("true"));
         assert!(env_flag_enabled("on"));

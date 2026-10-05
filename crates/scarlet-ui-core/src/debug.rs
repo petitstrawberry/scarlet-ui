@@ -57,3 +57,20 @@ fn wheel_log_env_enabled() -> bool {
 fn repaint_boundary_log_env_enabled() -> bool {
     false
 }
+
+/// Enable focused input/frame timing via `SCARLET_UI_FRAME_LOG=1`.
+/// The environment flag is read once; ordinary frames do not allocate or log.
+pub fn frame_log_enabled() -> bool {
+    #[cfg(feature = "std")]
+    {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("SCARLET_UI_FRAME_LOG")
+                .is_ok_and(|value| matches!(value.as_str(), "1" | "true"))
+        })
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        false
+    }
+}

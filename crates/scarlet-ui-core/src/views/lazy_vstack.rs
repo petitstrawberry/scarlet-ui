@@ -109,6 +109,7 @@ struct LazyVStackElement {
     last_constraints: Option<LayoutConstraints>,
     mount_context: Option<MountContext>,
     children_need_update: bool,
+    children_needing_layout: Vec<usize>,
 }
 
 impl LazyVStackElement {
@@ -124,6 +125,7 @@ impl LazyVStackElement {
             last_constraints: None,
             mount_context: None,
             children_need_update: false,
+            children_needing_layout: Vec::new(),
         }
     }
 
@@ -150,23 +152,34 @@ impl LazyVStackElement {
 
     fn materialize_visible_children(&mut self) -> bool {
         let range = self.visible_range();
-        let desired_indices = range.collect::<Vec<_>>();
-        if self.child_indices == desired_indices && !self.children_need_update {
+        if self.child_indices.len() == range.len()
+            && self.child_indices.first().copied() == range.clone().next()
+            && !self.children_need_update
+        {
             return false;
         }
 
         let update_existing = self.children_need_update;
-        let mut old_children = core::mem::take(&mut self.children);
-        let mut old_indices = core::mem::take(&mut self.child_indices);
-        let mut new_children = Vec::new();
-        let mut new_indices = Vec::new();
+        let old_children = core::mem::take(&mut self.children);
+        let old_indices = core::mem::take(&mut self.child_indices);
+        let mut old = old_indices.into_iter().zip(old_children).peekable();
+        self.children_needing_layout.clear();
+        let mut new_children = Vec::with_capacity(range.len());
+        let mut new_indices = Vec::with_capacity(range.len());
         let mut changed = false;
 
-        for index in desired_indices {
-            if let Some(position) = old_indices.iter().position(|old| *old == index) {
-                let old_child = old_children.remove(position);
-                old_indices.remove(position);
+        // Both index streams are sorted. Merge them without repeatedly shifting
+        // or searching every retained row when the viewport advances.
+        for index in range {
+            while old.peek().is_some_and(|(old_index, _)| *old_index < index) {
+                let (_, mut child) = old.next().unwrap();
+                child.unmount();
+                changed = true;
+            }
+            if old.peek().is_some_and(|(old_index, _)| *old_index == index) {
+                let (_, old_child) = old.next().unwrap();
                 if update_existing {
+                    self.children_needing_layout.push(index);
                     let item_view = self.view.build_item(index);
                     let mut child = Some(old_child);
                     let result = crate::element::update_child(
@@ -184,6 +197,7 @@ impl LazyVStackElement {
                     new_children.push(old_child);
                 }
             } else {
+                self.children_needing_layout.push(index);
                 let item_view = self.view.build_item(index);
                 let mut child = item_view.create_element();
                 if let Some(ctx) = self.mount_context {
@@ -195,9 +209,9 @@ impl LazyVStackElement {
             new_indices.push(index);
         }
 
-        for mut child in old_children {
-            child.unmount();
+        for (_, mut child) in old {
             changed = true;
+            child.unmount();
         }
 
         self.children = new_children;
@@ -206,14 +220,16 @@ impl LazyVStackElement {
         changed
     }
 
-    fn layout_visible_children(&mut self) {
+    fn layout_visible_children(&mut self, only_new: bool) {
         let width = self.size.width.max(0.0);
         for (child, index) in self
             .children
             .iter_mut()
             .zip(self.child_indices.iter().copied())
         {
-            child.layout(LayoutConstraints::tight(width, self.view.item_height));
+            if !only_new || self.children_needing_layout.binary_search(&index).is_ok() {
+                child.layout(LayoutConstraints::tight(width, self.view.item_height));
+            }
             child.set_position(Point::new(0.0, index as f32 * self.view.stride()));
         }
     }
@@ -284,7 +300,7 @@ impl Element for LazyVStackElement {
         };
         self.size = Size::new(width, self.view.total_height());
         self.materialize_visible_children();
-        self.layout_visible_children();
+        self.layout_visible_children(false);
         self.size
     }
 
@@ -311,7 +327,8 @@ impl Element for LazyVStackElement {
         self.viewport_hint = Some(viewport);
         let changed = self.materialize_visible_children();
         if changed {
-            self.layout_visible_children();
+            // Scrolling changes position, not the constraints of retained rows.
+            self.layout_visible_children(true);
         }
         changed
     }
@@ -347,5 +364,65 @@ mod tests {
         assert!(element.children().len() < 80);
         assert!(element.child_indices.first().copied().unwrap_or(0) < 20);
         assert!(element.child_indices.last().copied().unwrap_or(0) > 20);
+    }
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+    use crate::testing::layout_probe::LayoutProbe;
+    use core::cell::Cell;
+    #[test]
+    fn scrolling_lays_out_only_entering_rows_and_resize_remeasures_retained_rows() {
+        let calls = Rc::new(Cell::new(0));
+        let layouts = calls.clone();
+        let initial_layouts = layouts.clone();
+        let mut element = LazyVStackElement::new(
+            LazyVStack::new(50_000, 20., move |_| LayoutProbe(initial_layouts.clone()))
+                .cache_extent(0.),
+        );
+        element.set_viewport_hint(Rect::from_xywh(0., 201., 200., 100.));
+        element.layout(LayoutConstraints::tight(200., 100.));
+        let ids: Vec<_> = element.children.iter().map(|child| child.id()).collect();
+        calls.set(0);
+        assert!(!element.set_viewport_hint(Rect::from_xywh(0., 202., 200., 100.)));
+        assert_eq!(calls.get(), 0);
+        assert!(element.set_viewport_hint(Rect::from_xywh(0., 221., 200., 100.)));
+        assert_eq!(
+            calls.get(),
+            1,
+            "Moving by one row must not measure the retained rows"
+        );
+        assert_eq!(element.children[0].id(), ids[1]);
+        calls.set(0);
+        element.layout(LayoutConstraints::tight(300., 100.));
+        assert_eq!(calls.get(), element.children.len());
+        assert!(
+            element
+                .children
+                .iter()
+                .all(|child| child.bounds().size.width == 300.)
+        );
+        calls.set(0);
+        let view =
+            LazyVStack::new(50_000, 30., move |_| LayoutProbe(layouts.clone())).cache_extent(0.);
+        element.update(&view);
+        assert!(calls.get() >= element.children.len());
+        assert!(
+            element
+                .children
+                .iter()
+                .all(|child| child.bounds().size.height == 30.)
+        );
+        // Moving backwards also retains the overlapping rows in index order.
+        calls.set(0);
+        let previous = element.child_indices.clone();
+        element.set_viewport_hint(Rect::from_xywh(0., 190., 300., 100.));
+        let entering = element
+            .child_indices
+            .iter()
+            .filter(|index| !previous.contains(index))
+            .count();
+        assert_eq!(calls.get(), entering);
     }
 }

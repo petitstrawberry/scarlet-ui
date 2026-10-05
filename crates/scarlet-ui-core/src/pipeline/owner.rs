@@ -374,7 +374,18 @@ impl PipelineOwner {
                 chosen_id = *ancestor_id;
                 has_constraints = true;
 
-                if ancestor_constraints.is_tight() {
+                // Virtual content deliberately exceeds tight viewport
+                // constraints. Its size changes must reach ScrollView so the
+                // content extent and offsets are remeasured and clamped.
+                let size = element_tree
+                    .find_element(*ancestor_id)
+                    .map(|element| element.bounds().size);
+                if ancestor_constraints.is_tight()
+                    && size.is_some_and(|size| {
+                        size.width == ancestor_constraints.max_width
+                            && size.height == ancestor_constraints.max_height
+                    })
+                {
                     break;
                 }
             }
@@ -399,7 +410,18 @@ impl PipelineOwner {
         for id in layout_roots.iter().copied() {
             if let Some(element) = element_tree.find_element_mut(id) {
                 if let Some(local_constraints) = element.last_layout_constraints() {
-                    element.layout(local_constraints);
+                    let before = element.bounds().size;
+                    let after = element.layout(local_constraints);
+                    if before != after
+                        && local_constraints.is_tight()
+                        && (after.width != local_constraints.max_width
+                            || after.height != local_constraints.max_height)
+                    {
+                        // Content that previously fit may have grown. A full
+                        // layout propagates this new extent to its scroll owner.
+                        fallback_full = true;
+                        break;
+                    }
                     self.dirty_paint.insert(id);
                 } else {
                     fallback_full = true;

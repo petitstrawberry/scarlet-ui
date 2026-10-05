@@ -603,6 +603,9 @@ impl RenderingPipeline {
         &mut self,
         background_color: crate::color::Color,
     ) -> crate::error::Result<PresentedFrame<'_>> {
+        if !self.paint_backend.uses_cpu_picture_cache() {
+            return self.render_direct_paint_path(background_color);
+        }
         let size = self.window_size;
         let scale = self.scale_milli;
         let creating_renderer = self.paint_renderer.is_none();
@@ -681,7 +684,7 @@ impl RenderingPipeline {
         self.dirty_scratch.ids.sort_unstable();
         self.dirty_scratch.ids.dedup();
 
-        let has_dirty_rects = !force_full;
+        let mut has_dirty_rects = !force_full;
         if has_dirty_rects {
             Self::paint_dirty_rects_into(
                 &self.element_tree,
@@ -717,6 +720,11 @@ impl RenderingPipeline {
         } else {
             self.paint_damage = None;
         }
+
+        // Presentation may expand/coalesce damage or choose a full redraw.
+        // Paint everything the backend will clear, including unchanged pixels
+        // in the gaps between dirty rectangles.
+        has_dirty_rects = has_dirty_rects && self.paint_damage.is_some();
 
         self.invalidate_repaint_boundary_caches();
         let layer_generation = self.layer_store.begin_rebuild();
@@ -827,6 +835,124 @@ impl RenderingPipeline {
                 damage: physical_damage,
             }),
             BackendFrame::External => Ok(PresentedFrame::External),
+        }
+    }
+
+    /// GPU backends encode the visible paint commands directly. Repaint
+    /// boundaries remain useful for the CPU fallback but must not turn native
+    /// GPU rendering into a rasterize/upload loop on each scroll frame.
+    fn render_direct_paint_path(
+        &mut self,
+        background_color: crate::color::Color,
+    ) -> crate::error::Result<PresentedFrame<'_>> {
+        let started = crate::debug::frame_log_enabled().then(crate::clock::Instant::now);
+        let force_full =
+            self.paint_needs_full || self.paint_background_color != Some(background_color);
+        self.dirty_scratch.clear_for_frame();
+        self.dirty_scratch
+            .ids
+            .extend_from_slice(self.pipeline_owner.last_paint_ids());
+        self.dirty_scratch
+            .ids
+            .extend_from_slice(self.pipeline_owner.last_composite_ids());
+        self.dirty_scratch.ids.sort_unstable();
+        self.dirty_scratch.ids.dedup();
+        if !force_full && self.dirty_scratch.ids.is_empty() {
+            return Ok(PresentedFrame::Idle);
+        }
+        if force_full {
+            self.paint_damage = None;
+        } else {
+            Self::paint_dirty_rects_into(
+                &self.element_tree,
+                &self.last_paint_bounds,
+                &self.dirty_scratch.ids,
+                self.pipeline_owner.last_self_paint_ids(),
+                &mut self.dirty_scratch.path,
+                &mut self.dirty_scratch.rects,
+            );
+            Self::merge_overlapping_rects(&mut self.dirty_scratch.rects);
+            let partial = Self::present_damage_rects_into(
+                &self.dirty_scratch.rects,
+                self.window_size,
+                self.scale_milli,
+                &mut self.dirty_scratch.damage,
+            );
+            self.store_paint_damage(partial);
+        }
+        if self.paint_damage.as_ref().is_some_and(Vec::is_empty) {
+            return Ok(PresentedFrame::Idle);
+        }
+        let mut ctx = PaintContext::new();
+        let damage = self
+            .paint_damage
+            .as_ref()
+            .map(|_| self.dirty_scratch.rects.as_slice());
+        if let Some(root) = self.element_tree.root() {
+            if let Some((backdrop, origin)) = Self::find_deferred_window_backdrop(root, Point::ZERO)
+            {
+                backdrop.paint(&mut ctx, origin);
+            }
+            Self::walk_direct_paint(&mut ctx, root, Point::ZERO, damage);
+            Self::paint_select_overlays(&mut ctx, root, Point::ZERO, damage);
+        }
+        self.last_paint_bounds.clear();
+        if let Some(root) = self.element_tree.root() {
+            Self::collect_paint_bounds(root, Point::ZERO, None, &mut self.last_paint_bounds);
+        }
+        self.paint_needs_full = false;
+        self.paint_background_color = Some(background_color);
+        let physical_damage = self.paint_damage.as_deref();
+        let prepare_us = started.map(|start| start.elapsed().as_micros());
+        let backend_started = started.map(|_| crate::clock::Instant::now());
+        let result = self
+            .paint_backend
+            .render(&ctx, background_color, damage, physical_damage);
+        if let Some(start) = backend_started {
+            crate::logln!(
+                "[ScrollTiming] prepare_us={} backend_us={}",
+                prepare_us.unwrap_or_default(),
+                start.elapsed().as_micros()
+            );
+        }
+        match result {
+            Ok(BackendFrame::External) => Ok(PresentedFrame::External),
+            Ok(BackendFrame::Cpu { buffer }) => Ok(PresentedFrame::Cpu {
+                buffer,
+                damage: physical_damage,
+            }),
+            Err(error) => {
+                self.paint_needs_full = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn walk_direct_paint<'a>(
+        ctx: &mut PaintContext<'a>,
+        element: &'a dyn Element,
+        origin: Point,
+        damage: Option<&[Rect]>,
+    ) {
+        let abs = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+        if damage
+            .is_none_or(|rects| Self::overlaps_any(Self::element_paint_bounds(element, abs), rects))
+        {
+            Self::paint_element_self(ctx, element, abs);
+        }
+        let clip = Self::clip_for_element(element, abs);
+        if let Some((rect, radius)) = clip {
+            ctx.push_rounded_clip(rect, radius);
+        }
+        for child in element.children() {
+            Self::walk_direct_paint(ctx, child.as_ref(), abs, damage);
+        }
+        Self::paint_element_overlay(ctx, element, abs);
+        if clip.is_some() {
+            ctx.pop_clip();
         }
     }
 
@@ -1552,16 +1678,37 @@ impl RenderingPipeline {
         if chunk_ctx.is_empty() {
             return false;
         }
+        let bounds = chunk_ctx.raster_bounds(container_size, scale_milli);
+        // Align translation to integer logical AND physical pixels. This keeps
+        // Canvas text truncation and fractional-DPI rasterization unchanged.
+        let mut divisor = scale_milli;
+        let mut remainder = 1000;
+        while remainder != 0 {
+            (divisor, remainder) = (remainder, divisor % remainder);
+        }
+        let step = (1000 / divisor) as f32;
+        let origin = Point::new(
+            libm::floorf(bounds.origin.x / step) * step,
+            libm::floorf(bounds.origin.y / step) * step,
+        );
+        let raster_size = Size::new(
+            libm::ceilf((bounds.origin.x + bounds.size.width - origin.x) / step) * step,
+            libm::ceilf((bounds.origin.y + bounds.size.height - origin.y) / step) * step,
+        );
+        chunk_ctx.translate(Point::new(-origin.x, -origin.y));
         let ordinal = *next_ordinal;
         *next_ordinal = (*next_ordinal).saturating_add(1);
         let chunk_id = LayerId::Chunk { owner, ordinal };
         if let Some(chunk) = layer_store.chunk_mut(chunk_id)
             && let Some(buffer) = Arc::get_mut(&mut chunk.buffer)
         {
-            if chunk.logical_bounds.size != container_size || buffer.scale_milli() != scale_milli {
+            if buffer.logical_width() != raster_size.width as u32
+                || buffer.logical_height() != raster_size.height as u32
+                || buffer.scale_milli() != scale_milli
+            {
                 buffer.resize_logical_dimensions_with_scale(
-                    libm::ceilf(container_size.width) as u32,
-                    libm::ceilf(container_size.height) as u32,
+                    raster_size.width as u32,
+                    raster_size.height as u32,
                     scale_milli,
                 );
             }
@@ -1573,6 +1720,8 @@ impl RenderingPipeline {
             );
             Self::prepare_cached_buffer_for_composite(buffer);
             chunk.logical_bounds = Self::compact_picture_chunk(buffer);
+            chunk.logical_bounds.origin.x += origin.x;
+            chunk.logical_bounds.origin.y += origin.y;
             chunk.generation = layer_generation;
             layer_store.mark_chunk(chunk_id, layer_generation);
             layer_store.finish_chunk_rebuild(chunk_id);
@@ -1589,8 +1738,8 @@ impl RenderingPipeline {
         }
 
         let mut buffer = Buffer::from_logical_dimensions_with_scale(
-            libm::ceilf(container_size.width) as u32,
-            libm::ceilf(container_size.height) as u32,
+            raster_size.width as u32,
+            raster_size.height as u32,
             scale_milli,
         );
         paint_renderer.execute_into_external_buffer(
@@ -1600,7 +1749,9 @@ impl RenderingPipeline {
             None,
         );
         Self::prepare_cached_buffer_for_composite(&mut buffer);
-        let logical_bounds = Self::compact_picture_chunk(&mut buffer);
+        let mut logical_bounds = Self::compact_picture_chunk(&mut buffer);
+        logical_bounds.origin.x += origin.x;
+        logical_bounds.origin.y += origin.y;
         if let Some(chunk) = layer_store.chunk_mut(chunk_id) {
             chunk.buffer = Arc::new(buffer);
             chunk.logical_bounds = logical_bounds;
@@ -2775,6 +2926,18 @@ impl RenderingPipeline {
             let damage = self.paint_damage.get_or_insert_with(Vec::new);
             damage.clear();
             damage.extend_from_slice(&self.dirty_scratch.damage);
+            let scale = self.scale_milli.max(1) as f32 / 1000.0;
+            self.dirty_scratch.rects.clear();
+            self.dirty_scratch
+                .rects
+                .extend(damage.iter().map(|&(x, y, width, height)| {
+                    Rect::from_xywh(
+                        x as f32 / scale,
+                        y as f32 / scale,
+                        width as f32 / scale,
+                        height as f32 / scale,
+                    )
+                }));
         } else {
             self.paint_damage = None;
         }
@@ -2811,25 +2974,23 @@ impl RenderingPipeline {
     fn coalesce_damage_rects(rects: &mut Vec<DamageRect>) {
         rects.retain(|(_, _, width, height)| *width > 0 && *height > 0);
 
-        let mut index = 0usize;
-        while index < rects.len() {
-            let mut merged = false;
-            let mut other = index + 1;
-            while other < rects.len() {
-                if Self::damage_rects_touch_or_overlap(rects[index], rects[other]) {
-                    rects[index] = Self::union_damage_rect(rects[index], rects[other]);
-                    rects.remove(other);
-                    merged = true;
-                } else {
-                    other += 1;
-                }
+        loop {
+            // Every union can touch an earlier rectangle or cross another
+            // region. Restart the merge pass after both kinds of expansion;
+            // overlapping output damage would composite alpha more than once.
+            let touching = (0..rects.len()).find_map(|i| {
+                ((i + 1)..rects.len())
+                    .find(|&j| Self::damage_rects_touch_or_overlap(rects[i], rects[j]))
+                    .map(|j| (i, j))
+            });
+            if let Some((i, j)) = touching {
+                rects[i] = Self::union_damage_rect(rects[i], rects[j]);
+                rects.remove(j);
+                continue;
             }
-            if !merged {
-                index += 1;
+            if rects.len() <= MAX_PRESENT_DAMAGE_RECTS {
+                break;
             }
-        }
-
-        while rects.len() > MAX_PRESENT_DAMAGE_RECTS {
             let mut best_pair = (0usize, 1usize);
             let mut best_extra = u64::MAX;
 
@@ -2913,14 +3074,26 @@ impl RenderingPipeline {
             });
         }
 
+        let started = crate::debug::frame_log_enabled().then(crate::clock::Instant::now);
         crate::graphics::set_current_scale_milli(self.scale_milli);
         self.pipeline_owner.flush_with_legacy_paint(
             &mut self.element_tree,
             self.window_size,
             false,
         );
+        let layout_us = started.map(|start| start.elapsed().as_micros());
         let background_color = self.extract_background_color();
-        self.render_paint_path(background_color)
+        let result = self.render_paint_path(background_color);
+        if !matches!(&result, Ok(PresentedFrame::Idle))
+            && let Some(start) = started
+        {
+            crate::logln!(
+                "[ScrollTiming] layout_us={} frame_us={}",
+                layout_us.unwrap_or_default(),
+                start.elapsed().as_micros()
+            );
+        }
+        result
     }
 
     pub fn window_buffer(&self) -> Option<&Buffer> {
@@ -2941,8 +3114,22 @@ impl RenderingPipeline {
     /// In a full implementation, this would route events through the
     /// EventDispatcher to the target elements.
     pub fn handle_event(&mut self, _event: &crate::event::Event) -> bool {
-        self.event_dispatcher
-            .dispatch(&mut self.element_tree, _event)
+        let started = (crate::debug::frame_log_enabled()
+            && matches!(
+                _event,
+                crate::event::Event::Mouse(crate::event::MouseEvent::Wheel { .. })
+            ))
+        .then(crate::clock::Instant::now);
+        let handled = self
+            .event_dispatcher
+            .dispatch(&mut self.element_tree, _event);
+        if let Some(started) = started {
+            crate::logln!(
+                "[ScrollTiming] input_us={} handled={handled}",
+                started.elapsed().as_micros()
+            );
+        }
+        handled
     }
 
     /// Whether a scroll owner needs another animation tick.
@@ -2989,6 +3176,10 @@ impl Default for RenderingPipeline {
 mod rebuild_tests;
 
 #[cfg(test)]
+#[path = "damage_tests.rs"]
+mod damage_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::element::ComponentElement;
@@ -3008,6 +3199,108 @@ mod tests {
     };
     use core::cell::Cell;
     use std::rc::Rc;
+
+    #[test]
+    fn direct_backend_scrolls_virtual_rows_without_cpu_raster_pictures() {
+        use crate::renderer::PaintCommand;
+        struct DirectBackend {
+            renderer: CpuPaintRenderer,
+            saw_primitives: Rc<Cell<bool>>,
+        }
+        impl PaintBackend for DirectBackend {
+            fn resize(&mut self, size: Size, scale: u32) {
+                self.renderer.resize(size, scale);
+            }
+            fn render<'a>(
+                &'a mut self,
+                ctx: &PaintContext<'_>,
+                background: crate::color::Color,
+                damage: Option<&[Rect]>,
+                _: Option<&[DamageRect]>,
+            ) -> crate::Result<BackendFrame<'a>> {
+                self.saw_primitives.set(
+                    ctx.commands()
+                        .iter()
+                        .any(|c| matches!(c, PaintCommand::FillPath { .. })),
+                );
+                assert!(
+                    ctx.buffers().is_empty(),
+                    "Virtual geometry was flattened into CPU bitmaps"
+                );
+                // A test-only oracle rasterizes what a real GPU receives, to
+                // verify actual pixels as well as the absence of CPU pictures.
+                self.renderer.set_background_color(background);
+                self.renderer.execute_with_damage(ctx, damage);
+                Ok(BackendFrame::Cpu {
+                    buffer: self.renderer.buffer(),
+                })
+            }
+        }
+        let saw_primitives = Rc::new(Cell::new(false));
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_paint_backend(Box::new(DirectBackend {
+            renderer: CpuPaintRenderer::new(
+                Size::new(400.0, 200.0),
+                1000,
+                crate::color::Color::WHITE,
+            ),
+            saw_primitives: saw_primitives.clone(),
+        }));
+        let grid = GridView::new(
+            State::new(
+                crate::state::generate_state_id(),
+                (0usize..1000).collect::<Vec<_>>(),
+            ),
+            State::new(crate::state::generate_state_id(), None),
+            4,
+            100.0,
+            |_, item, _| {
+                Rectangle::new()
+                    .fill(crate::color::Color::rgb(item as u8, 20, 50))
+                    .frame(f32::INFINITY, 100.0)
+            },
+        )
+        .row_spacing(10.0)
+        .frame(400.0, 200.0);
+        pipeline.set_root(
+            Window::new("GPU albums", crate::views::RepaintBoundary::new(grid))
+                .decorated(false)
+                .size(Size::new(400.0, 200.0))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        pipeline.render_with_damage().unwrap();
+        assert!(saw_primitives.get());
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: -1_000_000,
+            x: 20,
+            y: 20,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
+        }));
+        let frame = pipeline.render_with_damage().unwrap().0;
+        assert_eq!(
+            frame.get_pixel(20, 120),
+            Some(crate::color::Color::rgb(996usize as u8, 20, 50).to_bgra())
+        );
+        assert!(pipeline.paint_renderer.is_none());
+        assert!(pipeline.paint_caches.is_empty());
+        assert!(
+            pipeline
+                .layer_store
+                .chunk(LayerId::Chunk {
+                    owner: pipeline.element_tree.root().unwrap().id(),
+                    ordinal: 0
+                })
+                .is_none()
+        );
+        assert_eq!(pipeline.paint_test_counters.boundary_rebuilds, 0);
+        assert!(
+            pipeline.render_with_damage().is_none(),
+            "Idle GPU window submitted another frame"
+        );
+    }
 
     #[test]
     fn empty_retained_damage_is_idle_but_visible_gpu_errors_propagate() {
@@ -4459,7 +4752,19 @@ mod tests {
         }
         pipeline.reset_paint_test_counters();
 
-        drive_warm_scroll_frame(&mut pipeline);
+        // Stay within the already materialized row range. Crossing a virtual
+        // row boundary must repaint new content, rather than move old pixels.
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: -1,
+            x: 10,
+            y: 10,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Wheel,
+        }));
+        pipeline
+            .render_with_damage()
+            .expect("cached scroll must render");
 
         let counters = pipeline.paint_test_counters();
         assert_eq!(counters.paint_context_news, 0);
@@ -5606,6 +5911,142 @@ mod tests {
             outer.children.last(),
             Some(LayerChild::Chunk { .. })
         ));
+    }
+
+    #[test]
+    fn sparse_virtual_content_rasterization_is_bounded_by_painted_rows() {
+        use crate::testing::alloc_counter::measure_allocations;
+        let owner = ElementId::new(92_721);
+        let id = LayerId::Boundary(owner);
+        let size = Size::new(400.0, 100_000.0);
+        let mut store = LayerStore::new();
+        let mut renderer =
+            CpuPaintRenderer::new(Size::new(400.0, 200.0), 2000, crate::color::Color::WHITE);
+        for shared in [false, true] {
+            let generation = store.begin_rebuild();
+            store.begin_container_rebuild(id, Some(owner), size, 2000, generation);
+            let mut ctx = PaintContext::new();
+            ctx.fill_rect(
+                Rect::from_xywh(20.0, 99_950.0, 300.0, 40.0),
+                crate::color::Color::RED,
+            );
+            let old = shared.then(|| {
+                store
+                    .chunk(LayerId::Chunk { owner, ordinal: 0 })
+                    .unwrap()
+                    .buffer
+                    .clone()
+            });
+            let allocation = measure_allocations(|| {
+                assert!(RenderingPipeline::flush_picture_chunk(
+                    &mut ctx,
+                    owner,
+                    id,
+                    size,
+                    &mut store,
+                    &mut renderer,
+                    2000,
+                    generation,
+                    &mut 0
+                ));
+            });
+            // A full content bitmap would allocate 640 MB before cropping.
+            assert!(allocation.allocated_bytes < 1_000_000, "{allocation:?}");
+            let chunk = store.chunk(LayerId::Chunk { owner, ordinal: 0 }).unwrap();
+            assert!(chunk.buffer.width() <= 604 && chunk.buffer.height() <= 84);
+            assert_eq!(chunk.logical_bounds.origin, Point::new(20.0, 99_950.0));
+            assert_eq!(
+                chunk.buffer.get_pixel(20, 20),
+                Some(crate::color::Color::RED.to_bgra())
+            );
+            drop(old);
+        }
+    }
+
+    #[test]
+    fn bounded_chunks_match_full_raster_with_text_paths_clips_and_fractional_dpi() {
+        use crate::renderer::PaintCommand;
+        for scale in [1000, 1250, 1500, 2000, 2750] {
+            crate::graphics::set_current_scale_milli(scale);
+            let owner = ElementId::new(92_722);
+            let id = LayerId::Boundary(owner);
+            let size = Size::new(120.0, 90.0);
+            let mut ctx = PaintContext::new();
+            ctx.push_rounded_clip(Rect::from_xywh(19.25, 14.75, 70.0, 55.0), 7.0);
+            ctx.fill_rect(
+                Rect::from_xywh(22.25, 16.5, 41.75, 31.0),
+                crate::color::Color::rgba(220, 70, 30, 100),
+            );
+            ctx.stroke_path(
+                alloc::vec![Point::new(20.25, 21.5), Point::new(85.0, 58.0)],
+                3.0,
+                crate::color::Color::RED,
+            );
+            ctx.draw_text(
+                Point::new(21.75, 39.25),
+                "fÅ日本",
+                crate::color::Color::BLACK,
+                15.0,
+            );
+            ctx.pop_clip();
+            let mut expected = Buffer::from_logical_dimensions_with_scale(120, 90, scale);
+            let mut renderer = CpuPaintRenderer::new(size, scale, crate::color::Color::TRANSPARENT);
+            renderer.execute_into_external_buffer(
+                &mut expected,
+                crate::color::Color::TRANSPARENT,
+                &ctx,
+                None,
+            );
+            RenderingPipeline::prepare_cached_buffer_for_composite(&mut expected);
+            let mut store = LayerStore::new();
+            let generation = store.begin_rebuild();
+            store.begin_container_rebuild(id, Some(owner), size, scale, generation);
+            RenderingPipeline::flush_picture_chunk(
+                &mut ctx,
+                owner,
+                id,
+                size,
+                &mut store,
+                &mut renderer,
+                scale,
+                generation,
+                &mut 0,
+            );
+            store.finish_container_rebuild(id);
+            let mut full_ctx = PaintContext::new();
+            full_ctx.draw_buffer_rect_ref(
+                Rect::new(Point::ZERO, size),
+                Rect::new(Point::ZERO, size),
+                &expected,
+                1.0,
+            );
+            let mut actual_ctx = PaintContext::new();
+            RenderingPipeline::composite_layer_container(&mut actual_ctx, &store, id, Point::ZERO);
+            let mut full = expected.clone();
+            let mut actual = expected.clone();
+            renderer.execute_into_external_buffer(
+                &mut full,
+                crate::color::Color::WHITE,
+                &full_ctx,
+                None,
+            );
+            renderer.execute_into_external_buffer(
+                &mut actual,
+                crate::color::Color::WHITE,
+                &actual_ctx,
+                None,
+            );
+            assert_eq!(
+                actual.data(),
+                full.data(),
+                "scale={scale}, commands={:?}",
+                actual_ctx
+                    .commands()
+                    .iter()
+                    .filter(|c| matches!(c, PaintCommand::DrawBufferRect { .. }))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

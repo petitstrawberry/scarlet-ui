@@ -41,3 +41,7 @@ path = "src/lib.rs"
 [[example]]
 name = "file-dialog-smoke"
 required-features = ["platform-winit"]
+
+[[example]]
+name = "scroll-stress"
+required-features = ["platform-winit"]

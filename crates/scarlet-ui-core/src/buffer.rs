@@ -62,6 +62,23 @@ impl Buffer {
         }
     }
 
+    /// Adopt immutable decoded pixels without copying or resizing them.
+    pub(crate) fn from_pixel_data(data: Vec<u32>, width: u32, height: u32) -> Self {
+        if (width as usize).checked_mul(height as usize) != Some(data.len()) {
+            return Self::empty();
+        }
+        Self {
+            identity: allocate_buffer_identity(),
+            revision: INITIAL_BUFFER_REVISION,
+            width,
+            height,
+            logical_width: width,
+            logical_height: height,
+            scale_milli: 1000,
+            data,
+        }
+    }
+
     /// Create a new buffer with the given size
     pub fn new(size: Size) -> Self {
         let width = size.width as u32;

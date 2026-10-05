@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::color::Color as UiColor;
 use scarlet_ui_core::compositor::DamageRect;
-use scarlet_ui_core::graphics::{GlyphRasterKey, rasterize_text};
+use scarlet_ui_core::graphics::{GlyphRasterKey, rasterize_text_cached};
 use scarlet_ui_core::icon::{IconMaskKey, rasterize_icon};
 use scarlet_ui_core::renderer::{BufferHandle, PaintCommand, PaintContext, PaintExtension};
 use sgfx::backend::CommandExecutor;
@@ -122,6 +122,8 @@ struct BufferTexture {
     revision: u64,
     width: u32,
     height: u32,
+    capacity_width: u32,
+    capacity_height: u32,
     used_frame: u64,
     upload_state: TextureUploadState,
 }
@@ -531,10 +533,15 @@ impl SgfxPaintEncoder {
             ))
             .map_err(|_| Error::sgfx(Stage::DefineResources))?
             .id();
-        let pixel_sampler = table.define_sampler(SamplerDesc::new(
-            FilterMode::Nearest, FilterMode::Nearest,
-            AddressMode::ClampToEdge, AddressMode::ClampToEdge,
-        )).map_err(|_| Error::sgfx(Stage::DefineResources))?.id();
+        let pixel_sampler = table
+            .define_sampler(SamplerDesc::new(
+                FilterMode::Nearest,
+                FilterMode::Nearest,
+                AddressMode::ClampToEdge,
+                AddressMode::ClampToEdge,
+            ))
+            .map_err(|_| Error::sgfx(Stage::DefineResources))?
+            .id();
         let glyph_atlas = GlyphAtlas::new(define_sampled_texture(
             &table,
             TextureFormat::R8Unorm,
@@ -794,6 +801,8 @@ impl SgfxPaintEncoder {
         scale_milli: u32,
         render_areas: &[DamageRect],
     ) -> core::result::Result<(), FrameError<E::Error>> {
+        #[cfg(feature = "std")]
+        let started = scarlet_ui_core::debug::frame_log_enabled().then(std::time::Instant::now);
         let render_areas = self.validate_render_areas(render_areas)?;
         let target = *self.targets.get(slot).ok_or(Error::InvalidFrame)?;
         if let Some(source_slot) = copy_from {
@@ -803,7 +812,18 @@ impl SgfxPaintEncoder {
         self.advance_frame_serial();
         self.prepare_canvases(executor, paint, scale_milli)?;
         let lowered = self.lower(paint, scale_milli, render_bounds)?;
-        self.submit(executor, target, background, &render_areas, &lowered)
+        #[cfg(feature = "std")]
+        let lower_us = started.map(|start| start.elapsed().as_micros());
+        let result = self.submit(executor, target, background, &render_areas, &lowered);
+        #[cfg(feature = "std")]
+        if let Some(start) = started {
+            eprintln!(
+                "[ScrollTiming] lower_us={} encode_us={}",
+                lower_us.unwrap_or_default(),
+                start.elapsed().as_micros()
+            );
+        }
+        result
     }
 
     fn copy_target<E: CommandExecutor>(
@@ -1125,8 +1145,8 @@ impl SgfxPaintEncoder {
                     let origin_x = scale_text_origin(position.x, scale_milli);
                     let origin_y = scale_text_origin(position.y, scale_milli);
                     let color = ui_color(*color, opacity)?;
-                    let glyphs = rasterize_text(text, *font_size_px, scale_milli);
-                    for glyph in glyphs {
+                    let glyphs = rasterize_text_cached(text, *font_size_px, scale_milli);
+                    for glyph in glyphs.iter() {
                         if glyph.width == 0 || glyph.height == 0 {
                             continue;
                         }
@@ -1143,7 +1163,7 @@ impl SgfxPaintEncoder {
                                 width: glyph.width,
                                 height: glyph.height,
                                 bytes_per_row: glyph.width,
-                                bytes: UploadBytes::Shared(glyph.mask),
+                                bytes: UploadBytes::Shared(Arc::clone(&glyph.mask)),
                             });
                         }
                         let destination = FloatRect::new(
@@ -1231,9 +1251,7 @@ impl SgfxPaintEncoder {
                             buffer.height() as f32,
                         ),
                     )? {
-                        if let Some(upload) = upload {
-                            uploads.push(upload);
-                        }
+                        uploads.extend(upload);
                         push_draw(
                             &mut draws,
                             &mut tessellator,
@@ -1252,7 +1270,8 @@ impl SgfxPaintEncoder {
                     let Some(buffer) = paint.buffer(BufferHandle(*buffer_idx)) else {
                         continue;
                     };
-                    let scaled_source = FloatRect::from_logical(*src, scale);
+                    let scaled_source =
+                        FloatRect::from_logical(*src, buffer.scale_milli() as f32 / 1000.0);
                     let source = FloatRect::new(
                         truncated(scaled_source.x),
                         truncated(scaled_source.y),
@@ -1262,8 +1281,8 @@ impl SgfxPaintEncoder {
                     let destination = FloatRect::new(
                         truncated_scaled(dst.origin.x, scale),
                         truncated_scaled(dst.origin.y, scale),
-                        source.width,
-                        source.height,
+                        truncated_scaled(dst.size.width, scale),
+                        truncated_scaled(dst.size.height, scale),
                     );
                     if let Some((geometry, texture, upload)) = self.lower_buffer(
                         &mut tessellator,
@@ -1272,9 +1291,7 @@ impl SgfxPaintEncoder {
                         source,
                         destination,
                     )? {
-                        if let Some(upload) = upload {
-                            uploads.push(upload);
-                        }
+                        uploads.extend(upload);
                         let combined_opacity = finite_unit(*command_opacity)? * opacity;
                         push_draw(
                             &mut draws,
@@ -1296,20 +1313,32 @@ impl SgfxPaintEncoder {
                     opacity = finite_unit(*next_opacity)?;
                 }
                 PaintCommand::Extension { rect, payload } => {
-                    if let Some(image) = payload.as_ref().as_any()
-                        .downcast_ref::<crate::scaled_buffer::ScaledBufferPaint>() {
+                    if let Some(image) = payload
+                        .as_ref()
+                        .as_any()
+                        .downcast_ref::<crate::scaled_buffer::ScaledBufferPaint>()
+                    {
                         let buffer = &image.buffer;
                         if let Some((geometry, texture, upload)) = self.lower_buffer(
-                            &mut tessellator, &mut buffer_mappings, buffer,
+                            &mut tessellator,
+                            &mut buffer_mappings,
+                            buffer,
                             FloatRect::new(0.0, 0.0, buffer.width() as f32, buffer.height() as f32),
-                            FloatRect::new(truncated_scaled(rect.origin.x, scale),
+                            FloatRect::new(
+                                truncated_scaled(rect.origin.x, scale),
                                 truncated_scaled(rect.origin.y, scale),
                                 truncated_scaled(rect.size.width, scale),
-                                truncated_scaled(rect.size.height, scale)),
+                                truncated_scaled(rect.size.height, scale),
+                            ),
                         )? {
-                            if let Some(upload) = upload { uploads.push(upload); }
-                            push_draw(&mut draws, &mut tessellator, geometry,
-                                [1.0, 1.0, 1.0, opacity], DrawSource::PixelTexture(texture))?;
+                            uploads.extend(upload);
+                            push_draw(
+                                &mut draws,
+                                &mut tessellator,
+                                geometry,
+                                [1.0, 1.0, 1.0, opacity],
+                                DrawSource::PixelTexture(texture),
+                            )?;
                         }
                         continue;
                     }
@@ -2034,7 +2063,7 @@ impl SgfxPaintEncoder {
         buffer: &'frame Buffer,
         source: FloatRect,
         destination: FloatRect,
-    ) -> Result<Option<(GeometryRange, TextureId, Option<TextureUpload<'frame>>)>> {
+    ) -> Result<Option<(GeometryRange, TextureId, Vec<TextureUpload<'frame>>)>> {
         if buffer.width() == 0 || buffer.height() == 0 || source.is_empty() {
             return Ok(None);
         }
@@ -2053,8 +2082,17 @@ impl SgfxPaintEncoder {
             (source_right - source_left) * scale_x,
             (source_bottom - source_top) * scale_y,
         );
-        let inverse_width = 1.0 / buffer.width() as f32;
-        let inverse_height = 1.0 / buffer.height() as f32;
+        // Determine allocation dimensions without consuming a slot for a
+        // completely clipped image. The same slot remains available below.
+        let (capacity_width, capacity_height) = match self.buffer_texture_slot(buffer) {
+            Some(index) => {
+                let texture = &self.buffer_textures[index];
+                (texture.capacity_width, texture.capacity_height)
+            }
+            None => buffer_texture_capacity(buffer.width(), buffer.height())?,
+        };
+        let inverse_width = 1.0 / capacity_width as f32;
+        let inverse_height = 1.0 / capacity_height as f32;
         let tex_coords = [
             [source_left * inverse_width, source_top * inverse_height],
             [source_right * inverse_width, source_top * inverse_height],
@@ -2070,7 +2108,7 @@ impl SgfxPaintEncoder {
             .iter()
             .find(|(mapped_identity, _)| *mapped_identity == buffer_identity)
         {
-            return Ok(Some((geometry, *texture, None)));
+            return Ok(Some((geometry, *texture, Vec::new())));
         }
         let (texture, upload_required) = self.buffer_texture(buffer)?;
         mappings
@@ -2078,25 +2116,99 @@ impl SgfxPaintEncoder {
             .map_err(|_| Error::FrameTooComplex)?;
         mappings.push((buffer_identity, texture));
         if !upload_required {
-            return Ok(Some((geometry, texture, None)));
+            return Ok(Some((geometry, texture, Vec::new())));
         }
         let bytes_per_row = buffer
             .width()
             .checked_mul(4)
             .ok_or(Error::FrameTooComplex)?;
-        Ok(Some((
-            geometry,
+        let mut uploads = Vec::new();
+        uploads.try_reserve(3).map_err(|_| Error::FrameTooComplex)?;
+        uploads.push(TextureUpload {
             texture,
-            Some(TextureUpload {
+            x: 0,
+            y: 0,
+            width: buffer.width(),
+            height: buffer.height(),
+            bytes_per_row,
+            bytes: UploadBytes::Borrowed(buffer.data()),
+        });
+        // A linear sampler must see the current image's edge, never unused
+        // padding left by an older image. One duplicate column/row suffices;
+        // UVs never address the remaining capacity. Full-capacity edges use
+        // the sampler's existing ClampToEdge behavior.
+        let row_bytes = usize::try_from(bytes_per_row).map_err(|_| Error::FrameTooComplex)?;
+        let padded_right = buffer.width() < capacity_width;
+        if padded_right {
+            let mut edge = Vec::new();
+            edge.try_reserve_exact(
+                usize::try_from(buffer.height())
+                    .map_err(|_| Error::FrameTooComplex)?
+                    .checked_mul(4)
+                    .ok_or(Error::FrameTooComplex)?,
+            )
+            .map_err(|_| Error::FrameTooComplex)?;
+            for row in buffer.data().chunks_exact(row_bytes) {
+                edge.extend_from_slice(&row[row_bytes - 4..]);
+            }
+            uploads.push(TextureUpload {
+                texture,
+                x: buffer.width(),
+                y: 0,
+                width: 1,
+                height: buffer.height(),
+                bytes_per_row: 4,
+                bytes: UploadBytes::Shared(Arc::from(edge)),
+            });
+        }
+        if buffer.height() < capacity_height {
+            let bottom_width = buffer.width() + u32::from(padded_right);
+            let bottom_bytes = bottom_width.checked_mul(4).ok_or(Error::FrameTooComplex)?;
+            let mut edge = Vec::new();
+            edge.try_reserve_exact(
+                usize::try_from(bottom_bytes).map_err(|_| Error::FrameTooComplex)?,
+            )
+            .map_err(|_| Error::FrameTooComplex)?;
+            let last_row = &buffer.data()[buffer.data().len() - row_bytes..];
+            edge.extend_from_slice(last_row);
+            if padded_right {
+                edge.extend_from_slice(&last_row[row_bytes - 4..]);
+            }
+            uploads.push(TextureUpload {
                 texture,
                 x: 0,
-                y: 0,
-                width: buffer.width(),
-                height: buffer.height(),
-                bytes_per_row,
-                bytes: UploadBytes::Borrowed(buffer.data()),
-            }),
-        )))
+                y: buffer.height(),
+                width: bottom_width,
+                height: 1,
+                bytes_per_row: bottom_bytes,
+                bytes: UploadBytes::Shared(Arc::from(edge)),
+            });
+        }
+        Ok(Some((geometry, texture, uploads)))
+    }
+
+    fn buffer_texture_slot(&self, buffer: &Buffer) -> Option<usize> {
+        self.buffer_textures
+            .iter()
+            .position(|texture| {
+                texture.buffer_identity == buffer.identity()
+                    && texture.width == buffer.width()
+                    && texture.height == buffer.height()
+            })
+            .or_else(|| {
+                self.buffer_textures
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, texture)| {
+                        texture.used_frame != self.frame_serial
+                            && texture.capacity_width >= buffer.width()
+                            && texture.capacity_height >= buffer.height()
+                    })
+                    .min_by_key(|(_, texture)| {
+                        u64::from(texture.capacity_width) * u64::from(texture.capacity_height)
+                    })
+                    .map(|(index, _)| index)
+            })
     }
 
     fn buffer_texture(&mut self, buffer: &Buffer) -> Result<(TextureId, bool)> {
@@ -2104,42 +2216,39 @@ impl SgfxPaintEncoder {
         let revision = buffer.revision();
         let width = buffer.width();
         let height = buffer.height();
-        if let Some(texture) = self.buffer_textures.iter_mut().find(|texture| {
-            texture.buffer_identity == buffer_identity
-                && texture.width == width
-                && texture.height == height
-        }) {
-            let upload_required =
-                texture.revision != revision || texture.upload_state == TextureUploadState::Pending;
-            if texture.revision != revision {
+        if let Some(index) = self.buffer_texture_slot(buffer) {
+            let texture = &mut self.buffer_textures[index];
+            let upload_required = texture.buffer_identity != buffer_identity
+                || texture.revision != revision
+                || texture.upload_state == TextureUploadState::Pending;
+            if upload_required {
                 texture.upload_state = TextureUploadState::Pending;
             }
-            texture.revision = revision;
-            texture.used_frame = self.frame_serial;
-            return Ok((texture.texture, upload_required));
-        }
-        if let Some(texture) = self.buffer_textures.iter_mut().find(|texture| {
-            texture.width == width
-                && texture.height == height
-                && texture.used_frame != self.frame_serial
-        }) {
             texture.buffer_identity = buffer_identity;
             texture.revision = revision;
+            texture.width = width;
+            texture.height = height;
             texture.used_frame = self.frame_serial;
-            texture.upload_state = TextureUploadState::Pending;
-            return Ok((texture.texture, true));
+            return Ok((texture.texture, upload_required));
         }
         if self.buffer_textures.len() >= MAX_BUFFER_TEXTURES {
             return Err(Error::FrameTooComplex);
         }
-        let texture =
-            define_sampled_texture(&self.table, TextureFormat::Bgra8Unorm, width, height)?;
+        let (capacity_width, capacity_height) = buffer_texture_capacity(width, height)?;
+        let texture = define_sampled_texture(
+            &self.table,
+            TextureFormat::Bgra8Unorm,
+            capacity_width,
+            capacity_height,
+        )?;
         self.buffer_textures.push(BufferTexture {
             texture,
             buffer_identity,
             revision,
             width,
             height,
+            capacity_width,
+            capacity_height,
             used_frame: self.frame_serial,
             upload_state: TextureUploadState::Pending,
         });
@@ -2365,7 +2474,9 @@ impl SgfxPaintEncoder {
                     }
                     let (pipeline, texture) = match draw.source {
                         DrawSource::Solid => (solid_pipeline, None),
-                        DrawSource::Texture(texture) | DrawSource::PixelTexture(texture) => (texture_pipeline, Some(texture)),
+                        DrawSource::Texture(texture) | DrawSource::PixelTexture(texture) => {
+                            (texture_pipeline, Some(texture))
+                        }
                         DrawSource::Glyph(texture) => (glyph_pipeline, Some(texture)),
                     };
                     pass.set_pipeline(pipeline)
@@ -2378,9 +2489,14 @@ impl SgfxPaintEncoder {
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                         pass.set_texture(texture)
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                        let selected_sampler = if matches!(draw.source, DrawSource::PixelTexture(_)) {
-                            table.sampler_ref(self.pixel_sampler).map_err(|_| Error::sgfx(Stage::EncodeCommands))?
-                        } else {sampler};
+                        let selected_sampler = if matches!(draw.source, DrawSource::PixelTexture(_))
+                        {
+                            table
+                                .sampler_ref(self.pixel_sampler)
+                                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?
+                        } else {
+                            sampler
+                        };
                         pass.set_sampler(selected_sampler)
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                     }
@@ -2698,6 +2814,20 @@ fn push_draw(
     draws.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
     draws.push(Draw { geometry, source });
     Ok(())
+}
+
+fn buffer_texture_capacity(width: u32, height: u32) -> Result<(u32, u32)> {
+    if width == 0 || height == 0 {
+        return Err(Error::InvalidFrame);
+    }
+    Ok((
+        width
+            .checked_next_power_of_two()
+            .ok_or(Error::FrameTooComplex)?,
+        height
+            .checked_next_power_of_two()
+            .ok_or(Error::FrameTooComplex)?,
+    ))
 }
 
 fn atlas_tex_coords(bounds: PixelBounds) -> [[f32; 2]; 4] {
@@ -3168,6 +3298,326 @@ mod tests {
         assert_eq!(CANVAS_TARGET_TEX_COORDS[1], [1.0, 0.0]);
         assert_eq!(CANVAS_TARGET_TEX_COORDS[2], [1.0, 1.0]);
         assert_eq!(CANVAS_TARGET_TEX_COORDS[3], [0.0, 1.0]);
+    }
+
+    #[test]
+    fn changing_raster_buffer_dimensions_do_not_exhaust_historical_texture_slots() {
+        let mut encoder = SgfxPaintEncoder::new(256, 256, false).unwrap();
+        for height in 1..=256 {
+            // Gallery images and retained layer buffers may change dimensions
+            // without changing the window. Every frame here owns just one image.
+            let image = Buffer::from_dimensions(256, height);
+            let mut paint = PaintContext::new();
+            paint.draw_buffer_ref(Rect::from_xywh(0., 0., 256., 256.), &image);
+            let mut executor = RecordingExecutor::default();
+            encoder
+                .encode_frame(
+                    &mut executor,
+                    0,
+                    None,
+                    &paint,
+                    UiColor::BLACK,
+                    1_000,
+                    &[(0, 0, 256, 256)],
+                )
+                .unwrap_or_else(|error| {
+                    panic!("A frame with one {height}-pixel image failed: {error:?}")
+                });
+            assert!(encoder.buffer_textures.len() <= MAX_BUFFER_TEXTURES);
+            assert_eq!(executor.draw_vertices, [6, 3]);
+        }
+    }
+
+    #[test]
+    fn buffer_rect_scales_destination_independently_from_source_dpi_and_reuses_upload() {
+        let image = Buffer::from_dimensions(320, 240);
+        let mut paint = PaintContext::new();
+        paint.draw_buffer_rect_ref(
+            Rect::from_xywh(10.0, 10.0, 100.0, 80.0),
+            Rect::from_xywh(40.0, 0.0, 240.0, 240.0),
+            &image,
+            1.0,
+        );
+        let mut encoder = SgfxPaintEncoder::new(800, 600, false).unwrap();
+        let bounds = PixelBounds {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        };
+        let frame = encoder.lower_once(&paint, 2000, bounds).unwrap();
+        let floats: Vec<_> = frame
+            .vertex_bytes
+            .chunks_exact(PAINT_VERTEX_STRIDE as usize)
+            .take(6)
+            .map(|vertex| {
+                (
+                    f32::from_le_bytes(vertex[0..4].try_into().unwrap()),
+                    f32::from_le_bytes(vertex[4..8].try_into().unwrap()),
+                    f32::from_le_bytes(vertex[32..36].try_into().unwrap()),
+                    f32::from_le_bytes(vertex[36..40].try_into().unwrap()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            floats.iter().map(|v| v.0).fold(f32::INFINITY, f32::min),
+            20.0
+        );
+        assert_eq!(
+            floats.iter().map(|v| v.0).fold(f32::NEG_INFINITY, f32::max),
+            220.0
+        );
+        assert_eq!(
+            floats.iter().map(|v| v.1).fold(f32::NEG_INFINITY, f32::max),
+            180.0
+        );
+        let texture = &encoder.buffer_textures[0];
+        let expected_u = 280.0 / texture.capacity_width as f32;
+        let expected_v = 240.0 / texture.capacity_height as f32;
+        assert!((floats.iter().map(|v| v.2).fold(0.0, f32::max) - expected_u).abs() < 0.0001);
+        assert!((floats.iter().map(|v| v.3).fold(0.0, f32::max) - expected_v).abs() < 0.0001);
+        encoder.commit_texture_uploads(&frame);
+        let warm = encoder.lower_once(&paint, 2000, bounds).unwrap();
+        assert!(
+            warm.uploads.is_empty(),
+            "Unchanged source was uploaded again"
+        );
+    }
+
+    #[test]
+    fn buffer_texture_pool_accepts_128_live_images_and_rejects_129() {
+        let images = (0..MAX_BUFFER_TEXTURES + 1)
+            .map(|_| Buffer::from_dimensions(4, 4))
+            .collect::<Vec<_>>();
+        let mut encoder = SgfxPaintEncoder::new(8, 8, false).unwrap();
+        let mut paint = PaintContext::new();
+        for image in &images[..MAX_BUFFER_TEXTURES] {
+            paint.draw_buffer_ref(Rect::from_xywh(0., 0., 4., 4.), image);
+        }
+        let mut accepted = RecordingExecutor::default();
+        encoder
+            .encode_frame(
+                &mut accepted,
+                0,
+                None,
+                &paint,
+                UiColor::BLACK,
+                1_000,
+                &[(0, 0, 8, 8)],
+            )
+            .unwrap();
+        assert_eq!(encoder.buffer_textures.len(), MAX_BUFFER_TEXTURES);
+        assert_eq!(
+            accepted
+                .draw_vertices
+                .iter()
+                .filter(|&&count| count == 6)
+                .count(),
+            MAX_BUFFER_TEXTURES
+        );
+
+        paint.draw_buffer_ref(
+            Rect::from_xywh(0., 0., 4., 4.),
+            &images[MAX_BUFFER_TEXTURES],
+        );
+        let mut rejected = RecordingExecutor::default();
+        assert!(matches!(
+            encoder.encode_frame(
+                &mut rejected,
+                0,
+                None,
+                &paint,
+                UiColor::BLACK,
+                1_000,
+                &[(0, 0, 8, 8)],
+            ),
+            Err(FrameError::Lowering(Error::FrameTooComplex))
+        ));
+        assert!(rejected.command_kinds.is_empty());
+        assert_eq!(encoder.buffer_textures.len(), MAX_BUFFER_TEXTURES);
+    }
+
+    #[test]
+    fn buffer_texture_reuse_selects_the_smallest_unused_capacity() {
+        let small = Buffer::from_dimensions(17, 17);
+        let large = Buffer::from_dimensions(33, 33);
+        let mut encoder = SgfxPaintEncoder::new(64, 64, false).unwrap();
+        encoder.advance_frame_serial();
+        let small_texture = encoder.buffer_texture(&small).unwrap().0;
+        let large_texture = encoder.buffer_texture(&large).unwrap().0;
+        assert_ne!(small_texture, large_texture);
+        encoder.advance_frame_serial();
+        let replacement = Buffer::from_dimensions(12, 12);
+        assert_eq!(
+            encoder.buffer_texture(&replacement).unwrap().0,
+            small_texture
+        );
+        // That slot is now occupied in this frame; another image uses the
+        // larger capacity instead of overwriting a draw already being encoded.
+        let second = Buffer::from_dimensions(12, 12);
+        assert_eq!(encoder.buffer_texture(&second).unwrap().0, large_texture);
+        assert_eq!(encoder.buffer_textures.len(), 2);
+    }
+
+    #[test]
+    fn reused_buffer_uvs_and_linear_edges_ignore_stale_capacity_pixels() {
+        let mut encoder = SgfxPaintEncoder::new(32, 32, false).unwrap();
+        encoder.advance_frame_serial();
+        let old = Buffer::from_dimensions(8, 8);
+        let old_texture = encoder.buffer_texture(&old).unwrap().0;
+        encoder.advance_frame_serial();
+        let mut image = Buffer::from_dimensions(3, 2);
+        for (index, pixel) in [
+            0xff010203, 0xff111213, 0xff212223, 0xff313233, 0xff414243, 0xff515253,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            image.set_pixel(index as u32 % 3, index as u32 / 3, pixel);
+        }
+        let mut tessellator =
+            Tessellator::new(1_000, 32, 32, FloatRect::new(0., 0., 32., 32.)).unwrap();
+        let mut mappings = Vec::new();
+        let (geometry, texture, uploads) = encoder
+            .lower_buffer(
+                &mut tessellator,
+                &mut mappings,
+                &image,
+                FloatRect::new(1., 0., 2., 2.),
+                FloatRect::new(0., 0., 20., 20.),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(texture, old_texture);
+        assert_eq!(encoder.buffer_textures.len(), 1);
+        let vertices = &tessellator.vertices()[geometry.first_vertex as usize..]
+            [..geometry.vertex_count as usize];
+        let min_u = vertices
+            .iter()
+            .map(|v| v.tex_coord[0])
+            .fold(f32::INFINITY, f32::min);
+        let max_u = vertices.iter().map(|v| v.tex_coord[0]).fold(0., f32::max);
+        let max_v = vertices.iter().map(|v| v.tex_coord[1]).fold(0., f32::max);
+        assert_eq!((min_u, max_u, max_v), (1. / 8., 3. / 8., 2. / 8.));
+        assert_eq!(uploads.len(), 3);
+        assert_eq!((uploads[0].width, uploads[0].height), (3, 2));
+        let right = &uploads[1];
+        assert_eq!((right.x, right.y, right.width, right.height), (3, 0, 1, 2));
+        assert_eq!(
+            right.bytes.as_slice(),
+            &[0x23, 0x22, 0x21, 0xff, 0x53, 0x52, 0x51, 0xff]
+        );
+        let bottom = &uploads[2];
+        assert_eq!(
+            (bottom.x, bottom.y, bottom.width, bottom.height),
+            (0, 2, 4, 1)
+        );
+        assert_eq!(
+            bottom.bytes.as_slice(),
+            &[
+                0x33, 0x32, 0x31, 0xff, 0x43, 0x42, 0x41, 0xff, 0x53, 0x52, 0x51, 0xff, 0x53, 0x52,
+                0x51, 0xff
+            ]
+        );
+        // At the normalized right/bottom UV, bilinear sampling touches the
+        // original corner and its three duplicates, all from this new image.
+        assert_eq!(
+            &right.bytes.as_slice()[4..],
+            &bottom.bytes.as_slice()[8..12]
+        );
+        assert_eq!(
+            &bottom.bytes.as_slice()[8..12],
+            &bottom.bytes.as_slice()[12..]
+        );
+        let (_, repeated_texture, repeated_uploads) = encoder
+            .lower_buffer(
+                &mut tessellator,
+                &mut mappings,
+                &image,
+                FloatRect::new(0., 0., 3., 2.),
+                FloatRect::new(0., 0., 3., 2.),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(repeated_texture, texture);
+        assert!(repeated_uploads.is_empty());
+    }
+
+    #[test]
+    fn failed_padded_buffer_upload_retries_image_and_edge_guards() {
+        let buffer = Buffer::from_dimensions(3, 3);
+        let mut paint = PaintContext::new();
+        paint.draw_buffer_ref(Rect::from_xywh(0., 0., 3., 3.), &buffer);
+        let mut encoder = SgfxPaintEncoder::new(8, 8, false).unwrap();
+        let mut executor = FailOnceExecutor {
+            fail_next: true,
+            texture_write_counts: Vec::new(),
+        };
+        assert!(matches!(
+            encoder.encode_frame(
+                &mut executor,
+                0,
+                None,
+                &paint,
+                UiColor::BLACK,
+                1_000,
+                &[(0, 0, 8, 8)],
+            ),
+            Err(FrameError::Execution("injected upload failure"))
+        ));
+        for _ in 0..2 {
+            encoder
+                .encode_frame(
+                    &mut executor,
+                    0,
+                    None,
+                    &paint,
+                    UiColor::BLACK,
+                    1_000,
+                    &[(0, 0, 8, 8)],
+                )
+                .unwrap();
+        }
+        assert_eq!(executor.texture_write_counts, [3, 3, 0, 0]);
+    }
+
+    #[test]
+    fn frame_vertex_limit_reserves_the_mandatory_clear_draw() {
+        let mut paint = PaintContext::new();
+        let content_vertices = ((MAX_FRAME_VERTICES - 3) / 6) * 6;
+        for _ in 0..content_vertices / 6 {
+            paint.fill_rect(Rect::from_xywh(0., 0., 8., 8.), UiColor::WHITE);
+        }
+        let mut encoder = SgfxPaintEncoder::new(8, 8, false).unwrap();
+        let mut executor = RecordingExecutor::default();
+        encoder
+            .encode_frame(
+                &mut executor,
+                0,
+                None,
+                &paint,
+                UiColor::BLACK,
+                1_000,
+                &[(0, 0, 8, 8)],
+            )
+            .unwrap();
+        assert_eq!(executor.draw_vertices, [(content_vertices + 3) as u32]);
+
+        paint.fill_rect(Rect::from_xywh(0., 0., 8., 8.), UiColor::WHITE);
+        let mut rejected = RecordingExecutor::default();
+        assert!(matches!(
+            encoder.encode_frame(
+                &mut rejected,
+                0,
+                None,
+                &paint,
+                UiColor::BLACK,
+                1_000,
+                &[(0, 0, 8, 8)],
+            ),
+            Err(FrameError::Lowering(Error::FrameTooComplex))
+        ));
+        assert!(rejected.command_kinds.is_empty());
     }
 
     #[test]
@@ -3950,6 +4400,7 @@ mod tests {
             writes: Vec<(u32, u32, usize)>,
             drew: bool,
             reject_second: bool,
+            batches: usize,
         }
         impl CommandExecutor for LimitedExecutor {
             type Error = ();
@@ -3968,7 +4419,7 @@ mod tests {
                             bytes += write.data().len();
                         }
                         Command::BeginRenderPass(_) => {
-                            assert_eq!(self.writes.len(), 2);
+                            assert_eq!(self.writes.len(), 4);
                             self.drew = true;
                         }
                         _ => {}
@@ -3978,7 +4429,10 @@ mod tests {
                     bytes <= 16 * 1024 * 1024,
                     "independent pictures must not be aggregated into an oversized stream"
                 );
-                if self.reject_second && self.writes.len() == 2 {
+                if bytes > 0 {
+                    self.batches += 1;
+                }
+                if self.reject_second && self.batches == 2 {
                     return Err(());
                 }
                 Ok(())
@@ -3994,6 +4448,7 @@ mod tests {
             writes: Vec::new(),
             drew: false,
             reject_second: true,
+            batches: 0,
         };
         assert!(matches!(
             encoder.encode_frame(
@@ -4018,6 +4473,7 @@ mod tests {
             writes: Vec::new(),
             drew: false,
             reject_second: false,
+            batches: 0,
         };
         encoder
             .encode_frame(
@@ -4034,7 +4490,9 @@ mod tests {
             executor.writes,
             [
                 (2048, 1100, first.data().len()),
-                (2048, 1100, second.data().len())
+                (2048, 1, 2048 * 4),
+                (2048, 1100, second.data().len()),
+                (2048, 1, 2048 * 4),
             ]
         );
         assert!(executor.drew);

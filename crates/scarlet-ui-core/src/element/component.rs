@@ -238,6 +238,20 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         self.position = position;
     }
 
+    fn set_viewport_hint(&mut self, viewport: crate::geometry::Rect) -> bool {
+        let mut changed = false;
+        for child in self.children_mut() {
+            let position = child.position();
+            changed |= child.set_viewport_hint(crate::geometry::Rect::from_xywh(
+                viewport.origin.x - position.x,
+                viewport.origin.y - position.y,
+                viewport.size.width,
+                viewport.size.height,
+            ));
+        }
+        changed
+    }
+
     fn bounds(&self) -> crate::geometry::Rect {
         crate::geometry::Rect {
             origin: self.position,

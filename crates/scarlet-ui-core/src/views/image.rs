@@ -63,7 +63,7 @@ impl ImageSource {
 /// Decoded bitmap image data.
 #[derive(Clone)]
 pub struct BitmapImage {
-    data: Arc<[u32]>,
+    data: Arc<Buffer>,
     width: u32,
     height: u32,
 }
@@ -72,7 +72,7 @@ impl BitmapImage {
     /// Create a decoded bitmap from shared BGRA pixel data.
     pub fn from_bgra(data: Vec<u32>, width: u32, height: u32) -> Self {
         Self {
-            data: Arc::from(data.into_boxed_slice()),
+            data: Arc::new(Buffer::from_pixel_data(data, width, height)),
             width,
             height,
         }
@@ -102,7 +102,7 @@ impl BitmapImage {
 
     /// Get BGRA pixels.
     pub fn pixels(&self) -> &[u32] {
-        &self.data
+        self.data.as_slice()
     }
 }
 
@@ -429,14 +429,8 @@ impl ElementRenderObject for ImageRenderObject {
             self.buffer = None;
             return self.size;
         }
-        let width = libm::ceilf(self.size.width.max(1.0)) as u32;
-        let height = libm::ceilf(self.size.height.max(1.0)) as u32;
-        let needs_resize = self.buffer.as_ref().map_or(true, |b| {
-            b.logical_width() != width || b.logical_height() != height
-        });
-        if needs_resize {
-            self.buffer = Some(Buffer::from_logical_dimensions(width, height));
-        }
+        // Paint borrows the shared source. Allocate a scaled destination only
+        // when the legacy buffer renderer is explicitly invoked.
         self.size
     }
 
@@ -453,6 +447,17 @@ impl ElementRenderObject for ImageRenderObject {
     }
 
     fn render(&mut self) {
+        if matches!(self.source, ImageSource::Bitmap(_)) {
+            let width = libm::ceilf(self.size.width.max(1.0)) as u32;
+            let height = libm::ceilf(self.size.height.max(1.0)) as u32;
+            if self
+                .buffer
+                .as_ref()
+                .is_none_or(|b| b.logical_width() != width || b.logical_height() != height)
+            {
+                self.buffer = Some(Buffer::from_logical_dimensions(width, height));
+            }
+        }
         if let Some(buffer) = self.buffer.as_mut() {
             match &self.source {
                 ImageSource::Bitmap(image) => render_raw_image(
@@ -477,25 +482,51 @@ impl ElementRenderObject for ImageRenderObject {
     }
 
     fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
-        if let Some(buffer) = self.buffer.as_ref() {
-            ctx.draw_buffer_ref(Rect::new(origin, self.size), buffer);
-        } else {
-            let rect = Rect::new(origin, self.size);
-            match &self.source {
-                ImageSource::Placeholder { .. } => {
-                    ctx.fill_rect(rect, Color::rgb(226u8, 229u8, 235u8))
+        let rect = Rect::new(origin, self.size);
+        match &self.source {
+            ImageSource::Placeholder { .. } => ctx.fill_rect(rect, Color::rgb(226u8, 229u8, 235u8)),
+            ImageSource::Vector(image) => {
+                paint_vector_image(ctx, origin, self.size, image, self.fit_mode)
+            }
+            ImageSource::Bitmap(image) => {
+                let width = image.data.width() as f32;
+                let height = image.data.height() as f32;
+                if width <= 0.0
+                    || height <= 0.0
+                    || self.size.width <= 0.0
+                    || self.size.height <= 0.0
+                {
+                    return false;
                 }
-                ImageSource::Bitmap(_) => ctx.fill_rect(rect, Color::TRANSPARENT),
-                ImageSource::Vector(image) => {
-                    paint_vector_image(ctx, origin, self.size, image, self.fit_mode)
+                let mut dst = rect;
+                let mut src = Rect::from_xywh(0.0, 0.0, width, height);
+                match self.fit_mode {
+                    ImageFit::Contain | ImageFit::None => {
+                        let scale = (self.size.width / width).min(self.size.height / height);
+                        dst = Rect::from_xywh(
+                            origin.x + (self.size.width - width * scale) * 0.5,
+                            origin.y + (self.size.height - height * scale) * 0.5,
+                            width * scale,
+                            height * scale,
+                        );
+                    }
+                    ImageFit::Cover => {
+                        let scale = (self.size.width / width).max(self.size.height / height);
+                        let crop_width = self.size.width / scale;
+                        let crop_height = self.size.height / scale;
+                        src = Rect::from_xywh(
+                            (width - crop_width) * 0.5,
+                            (height - crop_height) * 0.5,
+                            crop_width,
+                            crop_height,
+                        );
+                    }
+                    ImageFit::Fill => {}
                 }
+                ctx.draw_buffer_rect_ref(dst, src, &image.data, 1.0);
             }
         }
         true
-    }
-
-    fn requires_buffer_render_for_paint(&self) -> bool {
-        matches!(&self.source, ImageSource::Bitmap(_)) && self.buffer.is_some()
     }
 
     fn update(&mut self, new_view: &dyn View) -> crate::element::UpdateResult {
@@ -683,6 +714,44 @@ mod tests {
         assert_eq!(allocations.allocations, 0);
         assert_eq!(allocations.allocated_bytes, 0);
         assert!(core::ptr::eq(image.pixels(), cloned.pixels()));
+    }
+
+    #[test]
+    fn painting_and_resizing_bitmap_reuses_source_without_cpu_resampling() {
+        use crate::element::ElementRenderObject;
+        use crate::geometry::Point;
+        use crate::renderer::{PaintCommand, PaintContext};
+        let bitmap = BitmapImage::from_bgra(vec![0xff12_3456; 320 * 240], 320, 240);
+        let identity = bitmap.data.identity();
+        let revision = bitmap.data.revision();
+        let mut render =
+            ImageRenderObject::new(super::ImageSource::Bitmap(bitmap), ImageFit::Cover);
+        for side in [96.0, 180.0, 64.0] {
+            let mut ctx = PaintContext::new();
+            let allocations = measure_allocations(|| {
+                render.layout(LayoutConstraints::tight(side, side));
+            });
+            assert_eq!(
+                allocations.allocated_bytes, 0,
+                "Image layout allocated a scaled bitmap"
+            );
+            render.paint(&mut ctx, Point::ZERO);
+            assert!(!render.requires_buffer_render_for_paint());
+            assert!(render.buffer.is_none());
+            let buffer = ctx.buffers()[0].as_buffer();
+            assert_eq!(buffer.identity(), identity);
+            assert_eq!(buffer.revision(), revision);
+            assert_eq!(buffer.width(), 320);
+            assert_eq!(buffer.height(), 240);
+            let PaintCommand::DrawBufferRect { src, dst, .. } = ctx.commands()[0] else {
+                panic!("Bitmap did not emit a source texture");
+            };
+            assert!((src.origin.x - 40.0).abs() < 0.001);
+            assert!(src.origin.y.abs() < 0.001);
+            assert!((src.size.width - 240.0).abs() < 0.001);
+            assert!((src.size.height - 240.0).abs() < 0.001);
+            assert_eq!(dst.size, Size::new(side, side));
+        }
     }
 
     #[test]

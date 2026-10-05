@@ -8,7 +8,7 @@ use crate::color::{Color, ColorPalette};
 use crate::element::{
     Element, ElementRenderObject, LayoutConstraints, RenderElement, ScrollOffsetUpdate,
 };
-use crate::event::{Event, MouseEvent, Phase, WheelPhase};
+use crate::event::{Event, MouseEvent, Phase, ScrollSource, WheelPhase};
 use crate::geometry::{Point, Rect, Size};
 use crate::pipeline::layers::{LayerClip, LayerPrimitive, LayerPrimitiveKind};
 use crate::renderer::PaintContext;
@@ -599,6 +599,7 @@ pub struct ScrollViewRenderObject<V: View> {
     offset_x: f32,
     offset_y: f32,
     scrollbar_active: bool,
+    trackpad_axis_engaged: bool,
     selection_target: Option<SelectionScrollTarget>,
     selection_scroll_pending: bool,
     _marker: PhantomData<V>,
@@ -634,6 +635,7 @@ impl<V: View> ScrollViewRenderObject<V> {
             offset_x: 0.0,
             offset_y: 0.0,
             scrollbar_active: false,
+            trackpad_axis_engaged: false,
             selection_target: None,
             selection_scroll_pending: false,
             _marker: PhantomData,
@@ -809,6 +811,47 @@ impl<V: View> ScrollViewRenderObject<V> {
                 self.scale_wheel_axis_delta(raw_y),
             ),
         }
+    }
+
+    fn normalized_wheel_event(&self, event: &MouseEvent) -> (f32, f32) {
+        let MouseEvent::Wheel {
+            delta_x,
+            delta_y,
+            phase,
+            source,
+            ..
+        } = *event
+        else {
+            return (0.0, 0.0);
+        };
+        // Axis discrimination chooses a scroller at gesture start. Once a
+        // trackpad gesture is moving it, small diagonal jitter must not drop
+        // subsequent samples and repeatedly release/reacquire the target.
+        if self.trackpad_axis_engaged
+            && source == ScrollSource::Trackpad
+            && phase != WheelPhase::Started
+        {
+            match self.axes {
+                ScrollAxis::Vertical => {
+                    return (
+                        0.0,
+                        self.scale_wheel_axis_delta(
+                            delta_y as f32 * self.vertical_wheel_direction.multiplier(),
+                        ),
+                    );
+                }
+                ScrollAxis::Horizontal => {
+                    return (
+                        self.scale_wheel_axis_delta(
+                            delta_x as f32 * self.horizontal_wheel_direction.multiplier(),
+                        ),
+                        0.0,
+                    );
+                }
+                ScrollAxis::Both => {}
+            }
+        }
+        self.normalized_wheel_delta(delta_x, delta_y)
     }
 
     fn scale_wheel_axis_delta(&self, delta: f32) -> f32 {
@@ -1096,13 +1139,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
     }
 
     fn captures_wheel_event(&self, event: &MouseEvent) -> bool {
-        let MouseEvent::Wheel {
-            delta_x, delta_y, ..
-        } = *event
-        else {
-            return false;
-        };
-        let (scaled_x, scaled_y) = self.normalized_wheel_delta(delta_x, delta_y);
+        let (scaled_x, scaled_y) = self.normalized_wheel_event(event);
         (scaled_x.abs() > 0.01 && self.max_offset_x() > 0.0)
             || (scaled_y.abs() > 0.01 && self.max_offset_y() > 0.0)
     }
@@ -1168,7 +1205,10 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let (scaled_x, scaled_y) = if direct_touch {
             (delta_x as f32, delta_y as f32)
         } else {
-            self.normalized_wheel_delta(delta_x, delta_y)
+            let Event::Mouse(mouse) = event else {
+                return false;
+            };
+            self.normalized_wheel_event(mouse)
         };
         let scrollable = (self.axes.allows_x() && self.max_offset_x() > 0.0)
             || (self.axes.allows_y() && self.max_offset_y() > 0.0);
@@ -1187,6 +1227,20 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let offset_changed = self.set_offset(next_x, next_y);
         if offset_changed {
             self.selection_scroll_pending = false;
+        }
+        if let Event::Mouse(MouseEvent::Wheel {
+            phase,
+            source: ScrollSource::Trackpad,
+            ..
+        }) = event
+        {
+            if matches!(phase, WheelPhase::Ended | WheelPhase::Cancelled) {
+                self.trackpad_axis_engaged = false;
+            } else if offset_changed {
+                self.trackpad_axis_engaged = true;
+            } else if *phase == WheelPhase::Started {
+                self.trackpad_axis_engaged = false;
+            }
         }
         let scrollbar_deactivated = old_scrollbar_active && !self.scrollbar_active;
         offset_changed
@@ -1228,14 +1282,23 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
     fn apply_scroll_offset(&mut self, children: &mut [Box<dyn Element>]) -> ScrollOffsetUpdate {
         if let Some(child) = children.first_mut() {
             child.set_position(Point::new(-self.offset_x, -self.offset_y));
-            child.set_viewport_hint(Rect::from_xywh(
+            let materialized = child.set_viewport_hint(Rect::from_xywh(
                 self.offset_x,
                 self.offset_y,
                 self.viewport_size.width,
                 self.viewport_size.height,
             ));
+            if materialized {
+                // Newly visible virtual rows have new paint content. Moving
+                // the old retained scene alone leaves those rows blank.
+                return ScrollOffsetUpdate::NeedsPaint;
+            }
         }
         ScrollOffsetUpdate::NeedsComposite
+    }
+
+    fn owns_child_viewport(&self) -> bool {
+        true
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1297,6 +1360,63 @@ mod tests {
     use crate::state::generate_state_id;
     use crate::view::View;
     use crate::views::Text;
+
+    #[test]
+    fn active_trackpad_axis_survives_diagonal_jitter_and_resets_after_the_gesture() {
+        let view = ScrollView::new(Text::new("content"))
+            .vertical()
+            .wheel_sensitivity(1.0)
+            .content_size(300.0, 3000.0);
+        let mut object = ScrollViewRenderObject::<Text>::from_view(&view);
+        object.layout(LayoutConstraints::tight(100.0, 100.0));
+        let event = |x, y, phase, source| {
+            Event::Mouse(MouseEvent::Wheel {
+                delta_x: x,
+                delta_y: y,
+                x: 10,
+                y: 10,
+                phase,
+                source,
+            })
+        };
+        assert!(object.handle_event(
+            &event(0, -20, WheelPhase::Started, ScrollSource::Trackpad),
+            Phase::Target
+        ));
+        for _ in 0..10 {
+            assert!(object.handle_event(
+                &event(4, -8, WheelPhase::Moved, ScrollSource::Trackpad),
+                Phase::Target
+            ));
+        }
+        assert_eq!(object.offset(), (0.0, 100.0));
+        // Discrete wheels still use per-event axis matching.
+        assert!(!object.handle_event(
+            &event(4, -8, WheelPhase::Moved, ScrollSource::Wheel),
+            Phase::Target
+        ));
+        object.handle_event(
+            &event(0, 0, WheelPhase::Ended, ScrollSource::Trackpad),
+            Phase::Target,
+        );
+        assert!(!object.handle_event(
+            &event(4, -8, WheelPhase::Started, ScrollSource::Trackpad),
+            Phase::Target
+        ));
+        assert_eq!(object.offset(), (0.0, 100.0));
+        assert!(object.handle_event(
+            &event(0, -20, WheelPhase::Moved, ScrollSource::Trackpad),
+            Phase::Target
+        ));
+        object.handle_event(
+            &event(0, 0, WheelPhase::Cancelled, ScrollSource::Trackpad),
+            Phase::Target,
+        );
+        assert!(!object.handle_event(
+            &event(4, -8, WheelPhase::Moved, ScrollSource::Trackpad),
+            Phase::Target
+        ));
+    }
 
     #[test]
     fn wheel_content_direction_updates_vertical_offset_and_clamps() {

@@ -249,6 +249,7 @@ struct WinitEventState {
     pending_empty_preedit: Option<(u32, u32)>,
     modifiers: KeyModifiers,
     click_state: ClickState,
+    wheel_delta: WheelDeltaAccumulator,
     pending_trackpad_end: Option<PendingTrackpadEnd>,
     pending_trackpad_moved: Option<PendingTrackpadMoved>,
     last_trackpad_moved_emit_at: Option<Instant>,
@@ -373,6 +374,7 @@ impl WinitEventState {
             pending_empty_preedit: None,
             modifiers: KeyModifiers::empty(),
             click_state: ClickState::default(),
+            wheel_delta: WheelDeltaAccumulator::default(),
             pending_trackpad_end: None,
             pending_trackpad_moved: None,
             last_trackpad_moved_emit_at: None,
@@ -859,6 +861,7 @@ impl ApplicationHandler for WinitPumpHandler {
                 state.window_focused = focused;
                 if !focused {
                     state.cancel_native_touches();
+                    state.wheel_delta = WheelDeltaAccumulator::default();
                     self.shared.clear_pointer_lock_owner(window_id);
                     release_native_pointer_lock(&window, &mut state);
                     state.manual_move_active = false;
@@ -958,7 +961,8 @@ impl ApplicationHandler for WinitPumpHandler {
                 state.push(Event::Mouse(event));
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
-                let (delta_x, delta_y, source) = map_winit_wheel_delta(delta, state.scale_factor);
+                let scale_factor = state.scale_factor;
+                let (delta_x, delta_y, source) = state.wheel_delta.map(delta, phase, scale_factor);
                 let x = state.cursor_x;
                 let y = state.cursor_y;
                 let mapped_phase = map_wheel_phase(phase);
@@ -1670,17 +1674,60 @@ fn physical_to_logical_pos(value: f64, scale_factor: f64) -> i32 {
     (value / scale_factor.max(0.001)).round() as i32
 }
 
-fn map_winit_wheel_delta(delta: MouseScrollDelta, scale_factor: f64) -> (i32, i32, ScrollSource) {
-    match delta {
-        MouseScrollDelta::LineDelta(x, y) => {
-            ((x * 32.0) as i32, (y * 32.0) as i32, ScrollSource::Wheel)
+// The portable wheel event has integer logical deltas. Preserve the fractional
+// remainder between native trackpad samples: rounding each sample separately
+// can erase an entire slow gesture, especially on HiDPI displays.
+#[derive(Default)]
+struct WheelDeltaAccumulator {
+    remainder: [f64; 2],
+    scale: Option<f64>,
+}
+
+impl WheelDeltaAccumulator {
+    fn map(
+        &mut self,
+        delta: MouseScrollDelta,
+        phase: TouchPhase,
+        scale: f64,
+    ) -> (i32, i32, ScrollSource) {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        if matches!(phase, TouchPhase::Started) || self.scale != Some(scale) {
+            self.remainder = [0.0; 2];
         }
-        MouseScrollDelta::PixelDelta(delta) => (
-            physical_to_logical_pos(delta.x, scale_factor),
-            physical_to_logical_pos(delta.y, scale_factor),
-            ScrollSource::Trackpad,
-        ),
+        self.scale = Some(scale);
+        let result = match delta {
+            MouseScrollDelta::LineDelta(x, y) => {
+                self.remainder = [0.0; 2];
+                ((x * 32.0) as i32, (y * 32.0) as i32, ScrollSource::Wheel)
+            }
+            MouseScrollDelta::PixelDelta(delta) => {
+                let mut values = [0; 2];
+                for (axis, physical) in [delta.x, delta.y].into_iter().enumerate() {
+                    let total = physical / scale + self.remainder[axis];
+                    if total.is_finite() {
+                        values[axis] = total.round() as i32;
+                        self.remainder[axis] = (total - f64::from(values[axis])).clamp(-0.5, 0.5);
+                    } else {
+                        self.remainder[axis] = 0.0;
+                    }
+                }
+                (values[0], values[1], ScrollSource::Trackpad)
+            }
+        };
+        if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+            self.remainder = [0.0; 2];
+        }
+        result
     }
+}
+
+#[cfg(test)]
+fn map_winit_wheel_delta(delta: MouseScrollDelta, scale_factor: f64) -> (i32, i32, ScrollSource) {
+    WheelDeltaAccumulator::default().map(delta, TouchPhase::Moved, scale_factor)
 }
 
 fn f64_to_i32_saturated(value: f64) -> i32 {
@@ -1986,6 +2033,54 @@ mod tests {
         assert_eq!(cancel.changes.len(), 1);
         assert_eq!(cancel.changes[0].id, second.changes[0].id);
         assert_eq!(cancel.changes[0].phase, UiTouchPhase::Cancel);
+    }
+
+    #[test]
+    fn slow_hidpi_trackpad_gestures_preserve_motion_in_both_directions() {
+        for sign in [-1.0, 1.0] {
+            let mut state = WheelDeltaAccumulator::default();
+            let mut sum = (0, 0);
+            for _ in 0..100 {
+                let delta =
+                    MouseScrollDelta::PixelDelta(PhysicalPosition::new(sign * 0.4, sign * 0.2));
+                let (x, y, source) = state.map(delta, TouchPhase::Moved, 2.0);
+                assert_eq!(source, ScrollSource::Trackpad);
+                sum.0 += x;
+                sum.1 += y;
+            }
+            assert_eq!(sum, ((sign * 20.0) as i32, (sign * 10.0) as i32));
+        }
+    }
+
+    #[test]
+    fn wheel_fraction_changes_direction_without_drift_and_resets_at_boundaries() {
+        let sample = |x| MouseScrollDelta::PixelDelta(PhysicalPosition::new(x, 0.0));
+        let mut state = WheelDeltaAccumulator::default();
+        assert_eq!(state.map(sample(0.4), TouchPhase::Started, 1.0).0, 0);
+        assert_eq!(state.map(sample(-0.4), TouchPhase::Moved, 1.0).0, 0);
+        assert_eq!(state.remainder, [0.0; 2]);
+        state.map(sample(0.4), TouchPhase::Moved, 1.0);
+        assert_eq!(state.map(sample(0.4), TouchPhase::Started, 1.0).0, 0);
+        state.map(sample(0.0), TouchPhase::Cancelled, 1.0);
+        assert_eq!(state.remainder, [0.0; 2]);
+        state.map(sample(0.4), TouchPhase::Moved, 1.0);
+        assert_eq!(state.map(sample(0.4), TouchPhase::Moved, 2.0).0, 0);
+        assert_eq!(
+            state
+                .map(
+                    MouseScrollDelta::LineDelta(0.0, 1.0),
+                    TouchPhase::Moved,
+                    2.0
+                )
+                .1,
+            32
+        );
+        assert_eq!(state.remainder, [0.0; 2]);
+        assert_eq!(state.map(sample(f64::NAN), TouchPhase::Moved, 2.0).0, 0);
+        assert_eq!(state.remainder, [0.0; 2]);
+        state.map(sample(0.4), TouchPhase::Moved, 1.0);
+        state.map(sample(0.0), TouchPhase::Ended, 1.0);
+        assert_eq!(state.remainder, [0.0; 2]);
     }
 
     #[test]
