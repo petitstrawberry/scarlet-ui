@@ -74,3 +74,18 @@ pub fn frame_log_enabled() -> bool {
         false
     }
 }
+
+/// Disable retained GPU paint for controlled A/B measurements.
+pub fn retained_paint_enabled() -> bool {
+    #[cfg(feature = "std")]
+    {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("SCARLET_UI_RETAINED_PAINT").map_or(true, |value| value != "0")
+        })
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        true
+    }
+}

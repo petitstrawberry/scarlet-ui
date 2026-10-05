@@ -1,4 +1,5 @@
 //! Paint-command to persistent SGFX IR lowering.
+mod retained;
 
 use alloc::rc::Rc;
 use alloc::sync::Arc;
@@ -57,12 +58,16 @@ enum DrawSource {
     Texture(TextureId),
     PixelTexture(TextureId),
     Glyph(TextureId),
+    IconGlyph(TextureId),
 }
 
 #[derive(Clone, Copy)]
 struct Draw {
     geometry: GeometryRange,
     source: DrawSource,
+    vertex_buffer: Option<BufferId>,
+    offset: [f32; 2],
+    snap_phase: [f32; 2],
 }
 
 enum UploadBytes<'frame> {
@@ -154,6 +159,7 @@ struct GlyphAtlas {
     cursor_y: u32,
     row_height: u32,
     used_frame: u64,
+    generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,10 +185,12 @@ impl GlyphAtlas {
             cursor_y: 0,
             row_height: 0,
             used_frame: 0,
+            generation: 0,
         }
     }
 
     fn reset(&mut self, frame_serial: u64) {
+        self.generation = self.generation.wrapping_add(1);
         self.entries.clear();
         self.icon_entries.clear();
         self.cursor_x = 0;
@@ -431,6 +439,8 @@ pub struct SgfxPaintEncoder {
     width: u32,
     height: u32,
     supports_depth: bool,
+    retained_meshes: Vec<retained::RetainedMesh>,
+    recording_mesh: bool,
 }
 
 impl SgfxPaintEncoder {
@@ -567,6 +577,8 @@ impl SgfxPaintEncoder {
             .id();
 
         Ok(Self {
+            retained_meshes: Vec::new(),
+            recording_mesh: false,
             table,
             targets,
             vertex_buffer,
@@ -606,6 +618,13 @@ impl SgfxPaintEncoder {
     /// External slots no longer referenced by this frame. A bound slot must
     /// be detached only after accepted GPU work retires, before recycling it.
     pub fn unused_external_textures(&self, paint: &PaintContext<'_>) -> Vec<(TextureId, bool)> {
+        if paint
+            .commands()
+            .iter()
+            .any(|command| matches!(command, PaintCommand::DrawDisplayList { .. }))
+        {
+            return self.unused_external_textures(&extension_context(paint));
+        }
         let mut active = Vec::new();
         for command in paint.commands() {
             let PaintCommand::Extension { payload, .. } = command else {
@@ -659,6 +678,13 @@ impl SgfxPaintEncoder {
         &mut self,
         paint: &PaintContext<'_>,
     ) -> Result<Vec<SgfxExternalTextureBinding>> {
+        if paint
+            .commands()
+            .iter()
+            .any(|command| matches!(command, PaintCommand::DrawDisplayList { .. }))
+        {
+            return self.prepare_external_textures(&extension_context(paint));
+        }
         let mut pending = Vec::new();
         for command in paint.commands() {
             let PaintCommand::Extension { payload, .. } = command else {
@@ -810,17 +836,36 @@ impl SgfxPaintEncoder {
         }
         let render_bounds = bounding_area(&render_areas).ok_or(Error::InvalidFrame)?;
         self.advance_frame_serial();
-        self.prepare_canvases(executor, paint, scale_milli)?;
-        let lowered = self.lower(paint, scale_milli, render_bounds)?;
+        let retained = paint
+            .commands()
+            .iter()
+            .any(|command| matches!(command, PaintCommand::DrawDisplayList { .. }));
+        if retained {
+            // Canvas payloads keep their existing preparation and import path.
+            self.prepare_canvases(executor, &extension_context(paint), scale_milli)?;
+        } else {
+            self.prepare_canvases(executor, paint, scale_milli)?;
+        }
+        let lowered = if retained {
+            self.lower_retained(executor, paint, scale_milli, render_bounds)?
+        } else {
+            self.lower(paint, scale_milli, render_bounds)?
+        };
         #[cfg(feature = "std")]
         let lower_us = started.map(|start| start.elapsed().as_micros());
         let result = self.submit(executor, target, background, &render_areas, &lowered);
         #[cfg(feature = "std")]
         if let Some(start) = started {
             eprintln!(
-                "[ScrollTiming] lower_us={} encode_us={}",
+                "[ScrollTiming] lower_us={} encode_us={} retained_draws={} frame_vertex_bytes={}",
                 lower_us.unwrap_or_default(),
-                start.elapsed().as_micros()
+                start.elapsed().as_micros(),
+                lowered
+                    .draws
+                    .iter()
+                    .filter(|draw| draw.vertex_buffer.is_some())
+                    .count(),
+                lowered.vertex_bytes.len()
             );
         }
         result
@@ -962,6 +1007,7 @@ impl SgfxPaintEncoder {
 
         for command in paint.commands() {
             match command {
+                PaintCommand::DrawDisplayList { .. } => return Err(Error::InvalidFrame),
                 PaintCommand::FillPath { path, color } => {
                     if let Some(geometry) = tessellator.fill_path(path)? {
                         push_draw(
@@ -1175,12 +1221,17 @@ impl SgfxPaintEncoder {
                         if let Some(geometry) = tessellator
                             .textured_rect(destination, atlas_tex_coords(atlas_bounds))?
                         {
-                            push_draw(
+                            push_draw_phase(
                                 &mut draws,
                                 &mut tessellator,
                                 geometry,
                                 color,
                                 DrawSource::Glyph(texture),
+                                if self.recording_mesh {
+                                    [fractional(position.x), fractional(position.y)]
+                                } else {
+                                    [0., 0.]
+                                },
                             )?;
                         }
                     }
@@ -1226,12 +1277,21 @@ impl SgfxPaintEncoder {
                     if let Some(geometry) =
                         tessellator.textured_rect(destination, atlas_tex_coords(atlas_bounds))?
                     {
-                        push_draw(
+                        push_draw_phase(
                             &mut draws,
                             &mut tessellator,
                             geometry,
                             ui_color(*color, opacity)?,
-                            DrawSource::Glyph(texture),
+                            if self.recording_mesh {
+                                DrawSource::IconGlyph(texture)
+                            } else {
+                                DrawSource::Glyph(texture)
+                            },
+                            if self.recording_mesh {
+                                [fractional(rect.origin.x), fractional(rect.origin.y)]
+                            } else {
+                                [0., 0.]
+                            },
                         )?;
                     }
                 }
@@ -1252,12 +1312,17 @@ impl SgfxPaintEncoder {
                         ),
                     )? {
                         uploads.extend(upload);
-                        push_draw(
+                        push_draw_phase(
                             &mut draws,
                             &mut tessellator,
                             geometry,
                             [1.0, 1.0, 1.0, opacity],
                             DrawSource::Texture(texture),
+                            if self.recording_mesh {
+                                [fractional(dst.origin.x), fractional(dst.origin.y)]
+                            } else {
+                                [0., 0.]
+                            },
                         )?;
                     }
                 }
@@ -1293,12 +1358,17 @@ impl SgfxPaintEncoder {
                     )? {
                         uploads.extend(upload);
                         let combined_opacity = finite_unit(*command_opacity)? * opacity;
-                        push_draw(
+                        push_draw_phase(
                             &mut draws,
                             &mut tessellator,
                             geometry,
                             [1.0, 1.0, 1.0, combined_opacity],
                             DrawSource::Texture(texture),
+                            if self.recording_mesh {
+                                [fractional(dst.origin.x), fractional(dst.origin.y)]
+                            } else {
+                                [0., 0.]
+                            },
                         )?;
                     }
                 }
@@ -2444,7 +2514,7 @@ impl SgfxPaintEncoder {
                 // Each draw remains intact. Split only to respect SGFX IR's
                 // fixed command capacity, preserving order with LoadOp::Load.
                 let mut encoder = CommandEncoder::new(&table);
-                if first_submission {
+                if first_submission && !frame.vertex_bytes.is_empty() {
                     encoder
                         .write_buffer(vertex_buffer, 0, &frame.vertex_bytes)
                         .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -2477,11 +2547,19 @@ impl SgfxPaintEncoder {
                         DrawSource::Texture(texture) | DrawSource::PixelTexture(texture) => {
                             (texture_pipeline, Some(texture))
                         }
-                        DrawSource::Glyph(texture) => (glyph_pipeline, Some(texture)),
+                        DrawSource::Glyph(texture) | DrawSource::IconGlyph(texture) => {
+                            (glyph_pipeline, Some(texture))
+                        }
                     };
                     pass.set_pipeline(pipeline)
                         .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                    pass.set_vertex_buffer(vertex_buffer, 0)
+                    let selected_buffer = match draw.vertex_buffer {
+                        Some(id) => table
+                            .buffer_ref(id)
+                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?,
+                        None => vertex_buffer,
+                    };
+                    pass.set_vertex_buffer(selected_buffer, 0)
                         .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                     if let Some(texture) = texture {
                         let texture = table
@@ -2500,8 +2578,15 @@ impl SgfxPaintEncoder {
                         pass.set_sampler(selected_sampler)
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                     }
-                    pass.set_uniforms(DrawUniforms::new(transform, white))
-                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                    pass.set_uniforms(DrawUniforms::new(
+                        if draw.offset == [0., 0.] {
+                            transform
+                        } else {
+                            translated_pixel_transform(self.width, self.height, draw.offset)?
+                        },
+                        white,
+                    ))
+                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                     let scissor =
                         PixelRect::new(scissor.x, scissor.y, scissor.width, scissor.height)
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -2599,6 +2684,25 @@ impl SgfxPaintEncoder {
             }
         }
     }
+}
+
+fn extension_context(paint: &PaintContext<'_>) -> PaintContext<'static> {
+    let mut extensions = PaintContext::new();
+    paint.visit_commands(&mut |command, origin| {
+        if let PaintCommand::Extension { rect, payload } = command {
+            extensions.draw_extension(
+                scarlet_ui_core::geometry::Rect::new(
+                    scarlet_ui_core::geometry::Point::new(
+                        rect.origin.x + origin.x,
+                        rect.origin.y + origin.y,
+                    ),
+                    rect.size,
+                ),
+                Arc::clone(payload),
+            );
+        }
+    });
+    extensions
 }
 
 fn bounding_area(areas: &[PixelBounds]) -> Option<PixelBounds> {
@@ -2793,6 +2897,17 @@ fn push_draw(
     color: [f32; 4],
     source: DrawSource,
 ) -> Result<()> {
+    push_draw_phase(draws, tessellator, geometry, color, source, [0., 0.])
+}
+
+fn push_draw_phase(
+    draws: &mut Vec<Draw>,
+    tessellator: &mut Tessellator,
+    geometry: GeometryRange,
+    color: [f32; 4],
+    source: DrawSource,
+    snap_phase: [f32; 2],
+) -> Result<()> {
     tessellator.color_geometry(geometry, color)?;
     if let Some(previous) = draws.last_mut() {
         let previous_end = previous
@@ -2800,6 +2915,7 @@ fn push_draw(
             .first_vertex
             .checked_add(previous.geometry.vertex_count);
         if previous.source == source
+            && previous.snap_phase == snap_phase
             && previous.geometry.scissor == geometry.scissor
             && previous_end == Some(geometry.first_vertex)
         {
@@ -2812,7 +2928,13 @@ fn push_draw(
         }
     }
     draws.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
-    draws.push(Draw { geometry, source });
+    draws.push(Draw {
+        geometry,
+        source,
+        vertex_buffer: None,
+        offset: [0., 0.],
+        snap_phase,
+    });
     Ok(())
 }
 
@@ -2998,9 +3120,38 @@ fn pixel_transform(width: u32, height: u32) -> Result<Transform> {
     .map_err(|_| Error::InvalidFrame)
 }
 
+fn translated_pixel_transform(width: u32, height: u32, offset: [f32; 2]) -> Result<Transform> {
+    if width == 0 || height == 0 {
+        return Err(Error::InvalidFrame);
+    }
+    Transform::from_columns([
+        2. / width as f32,
+        0.,
+        0.,
+        0.,
+        0.,
+        -2. / height as f32,
+        0.,
+        0.,
+        0.,
+        0.,
+        1.,
+        0.,
+        -1. + 2. * offset[0] / width as f32,
+        1. - 2. * offset[1] / height as f32,
+        0.,
+        1.,
+    ])
+    .map_err(|_| Error::InvalidFrame)
+}
+
 fn scale_text_origin(value: f32, scale_milli: u32) -> i32 {
     let logical = value as i32;
     ((logical as i64).saturating_mul(scale_milli.max(1) as i64) / 1000) as i32
+}
+
+fn fractional(value: f32) -> f32 {
+    value - libm::truncf(value)
 }
 
 fn truncated_scaled(value: f32, scale: f32) -> f32 {

@@ -1,0 +1,2443 @@
+{
+  "scope": "native SGFX/wgpu; measured dispatch/submission work excludes OS event pumping; physical scanout and platform event-queue latency are not measured",
+  "command": {
+    "binary": "target/release/examples/scroll-benchmark",
+    "output": "artifacts/scroll-retained-pooled",
+    "seconds": 8.0,
+    "delta": 128,
+    "repeats": 2,
+    "case": "all"
+  },
+  "results": [
+    {
+      "case": "artwork",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 480,
+      "median_ms": 16.377,
+      "p95_ms": 16.939,
+      "p99_ms": 17.367,
+      "max_ms": 18.801,
+      "over_8_33_percent": 99.58,
+      "over_16_67_percent": 16.67,
+      "update_p95_ms": 0.0,
+      "work_rate_per_s": 61.64,
+      "accepted_including_warmup": 537,
+      "input_us": {
+        "median": 48,
+        "p95": 138,
+        "p99": 171,
+        "max": 195
+      },
+      "layout_us": {
+        "median": 28,
+        "p95": 94,
+        "p99": 117,
+        "max": 227
+      },
+      "prepare_us": {
+        "median": 89,
+        "p95": 251,
+        "p99": 286,
+        "max": 311
+      },
+      "lower_us": {
+        "median": 191,
+        "p95": 535,
+        "p99": 605,
+        "max": 645
+      },
+      "encode_us": {
+        "median": 2713,
+        "p95": 5779,
+        "p99": 6637,
+        "max": 7228
+      },
+      "backend_us": {
+        "median": 16140,
+        "p95": 16680,
+        "p99": 17059,
+        "max": 18593
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 499320,
+        "p95": 510360,
+        "p99": 510360,
+        "max": 510360
+      },
+      "log": "artifacts/scroll-retained-pooled/artwork-updates-0-retained-0-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "artwork",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 480,
+      "median_ms": 16.484,
+      "p95_ms": 16.941,
+      "p99_ms": 17.312,
+      "max_ms": 17.885,
+      "over_8_33_percent": 99.58,
+      "over_16_67_percent": 26.88,
+      "update_p95_ms": 0.0,
+      "work_rate_per_s": 60.91,
+      "accepted_including_warmup": 534,
+      "input_us": {
+        "median": 42,
+        "p95": 89,
+        "p99": 115,
+        "max": 156
+      },
+      "layout_us": {
+        "median": 21,
+        "p95": 60,
+        "p99": 91,
+        "max": 108
+      },
+      "prepare_us": {
+        "median": 80,
+        "p95": 194,
+        "p99": 257,
+        "max": 294
+      },
+      "lower_us": {
+        "median": 183,
+        "p95": 515,
+        "p99": 545,
+        "max": 579
+      },
+      "encode_us": {
+        "median": 2678,
+        "p95": 4803,
+        "p99": 5123,
+        "max": 6070
+      },
+      "backend_us": {
+        "median": 16247,
+        "p95": 16775,
+        "p99": 17092,
+        "max": 17704
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 499320,
+        "p95": 510360,
+        "p99": 510360,
+        "max": 510360
+      },
+      "log": "artifacts/scroll-retained-pooled/artwork-updates-0-retained-0-run-1.log",
+      "repeat": 1
+    },
+    {
+      "case": "artwork",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 480,
+      "median_ms": 16.226,
+      "p95_ms": 16.764,
+      "p99_ms": 17.26,
+      "max_ms": 17.407,
+      "over_8_33_percent": 99.58,
+      "over_16_67_percent": 6.88,
+      "update_p95_ms": 0.0,
+      "work_rate_per_s": 61.9,
+      "accepted_including_warmup": 532,
+      "input_us": {
+        "median": 106,
+        "p95": 181,
+        "p99": 219,
+        "max": 265
+      },
+      "layout_us": {
+        "median": 78,
+        "p95": 116,
+        "p99": 146,
+        "max": 171
+      },
+      "prepare_us": {
+        "median": 417,
+        "p95": 632,
+        "p99": 775,
+        "max": 952
+      },
+      "lower_us": {
+        "median": 662,
+        "p95": 1136,
+        "p99": 1345,
+        "max": 1465
+      },
+      "encode_us": {
+        "median": 1970,
+        "p95": 2645,
+        "p99": 2841,
+        "max": 3047
+      },
+      "backend_us": {
+        "median": 15506,
+        "p95": 16353,
+        "p99": 16787,
+        "max": 17057
+      },
+      "retained_draws": {
+        "median": 40,
+        "p95": 40,
+        "p99": 42,
+        "max": 42
+      },
+      "frame_vertex_bytes": {
+        "median": 11160,
+        "p95": 11160,
+        "p99": 11160,
+        "max": 11160
+      },
+      "log": "artifacts/scroll-retained-pooled/artwork-updates-0-retained-1-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "artwork",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 478,
+      "median_ms": 16.452,
+      "p95_ms": 16.774,
+      "p99_ms": 19.077,
+      "max_ms": 27.732,
+      "over_8_33_percent": 99.16,
+      "over_16_67_percent": 11.51,
+      "update_p95_ms": 0.0,
+      "work_rate_per_s": 61.32,
+      "accepted_including_warmup": 533,
+      "input_us": {
+        "median": 50,
+        "p95": 100,
+        "p99": 116,
+        "max": 133
+      },
+      "layout_us": {
+        "median": 50,
+        "p95": 70,
+        "p99": 82,
+        "max": 89
+      },
+      "prepare_us": {
+        "median": 318,
+        "p95": 434,
+        "p99": 478,
+        "max": 530
+      },
+      "lower_us": {
+        "median": 374,
+        "p95": 852,
+        "p99": 1070,
+        "max": 1170
+      },
+      "encode_us": {
+        "median": 1354,
+        "p95": 2122,
+        "p99": 2287,
+        "max": 2509
+      },
+      "backend_us": {
+        "median": 15966,
+        "p95": 16490,
+        "p99": 18762,
+        "max": 27471
+      },
+      "retained_draws": {
+        "median": 40,
+        "p95": 40,
+        "p99": 42,
+        "max": 42
+      },
+      "frame_vertex_bytes": {
+        "median": 11160,
+        "p95": 11160,
+        "p99": 11160,
+        "max": 11160
+      },
+      "log": "artifacts/scroll-retained-pooled/artwork-updates-0-retained-1-run-1.log",
+      "repeat": 1
+    },
+    {
+      "case": "artwork",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 480,
+      "median_ms": 16.414,
+      "p95_ms": 16.925,
+      "p99_ms": 17.453,
+      "max_ms": 20.913,
+      "over_8_33_percent": 100.0,
+      "over_16_67_percent": 15.83,
+      "update_p95_ms": 16.516,
+      "work_rate_per_s": 61.26,
+      "accepted_including_warmup": 534,
+      "input_us": {
+        "median": 46,
+        "p95": 121,
+        "p99": 161,
+        "max": 203
+      },
+      "layout_us": {
+        "median": 26,
+        "p95": 91,
+        "p99": 741,
+        "max": 1742
+      },
+      "prepare_us": {
+        "median": 86,
+        "p95": 244,
+        "p99": 296,
+        "max": 349
+      },
+      "lower_us": {
+        "median": 183,
+        "p95": 540,
+        "p99": 591,
+        "max": 632
+      },
+      "encode_us": {
+        "median": 2777,
+        "p95": 6273,
+        "p99": 6711,
+        "max": 7270
+      },
+      "backend_us": {
+        "median": 16169,
+        "p95": 16746,
+        "p99": 17150,
+        "max": 20727
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 499320,
+        "p95": 510360,
+        "p99": 510360,
+        "max": 510360
+      },
+      "log": "artifacts/scroll-retained-pooled/artwork-updates-60-retained-0-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "artwork",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 480,
+      "median_ms": 16.488,
+      "p95_ms": 16.927,
+      "p99_ms": 17.415,
+      "max_ms": 23.515,
+      "over_8_33_percent": 99.58,
+      "over_16_67_percent": 25.0,
+      "update_p95_ms": 16.724,
+      "work_rate_per_s": 61.01,
+      "accepted_including_warmup": 533,
+      "input_us": {
+        "median": 41,
+        "p95": 84,
+        "p99": 105,
+        "max": 118
+      },
+      "layout_us": {
+        "median": 19,
+        "p95": 58,
+        "p99": 639,
+        "max": 1457
+      },
+      "prepare_us": {
+        "median": 80,
+        "p95": 185,
+        "p99": 209,
+        "max": 416
+      },
+      "lower_us": {
+        "median": 179,
+        "p95": 516,
+        "p99": 574,
+        "max": 643
+      },
+      "encode_us": {
+        "median": 2680,
+        "p95": 4930,
+        "p99": 5263,
+        "max": 6846
+      },
+      "backend_us": {
+        "median": 16232,
+        "p95": 16747,
+        "p99": 17029,
+        "max": 23151
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 499320,
+        "p95": 510360,
+        "p99": 510360,
+        "max": 510360
+      },
+      "log": "artifacts/scroll-retained-pooled/artwork-updates-60-retained-0-run-1.log",
+      "repeat": 1
+    },
+    {
+      "case": "artwork",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 480,
+      "median_ms": 16.232,
+      "p95_ms": 16.792,
+      "p99_ms": 17.155,
+      "max_ms": 21.07,
+      "over_8_33_percent": 99.58,
+      "over_16_67_percent": 8.54,
+      "update_p95_ms": 16.357,
+      "work_rate_per_s": 62.14,
+      "accepted_including_warmup": 535,
+      "input_us": {
+        "median": 99,
+        "p95": 183,
+        "p99": 241,
+        "max": 272
+      },
+      "layout_us": {
+        "median": 76,
+        "p95": 124,
+        "p99": 1533,
+        "max": 2892
+      },
+      "prepare_us": {
+        "median": 406,
+        "p95": 649,
+        "p99": 1671,
+        "max": 2731
+      },
+      "lower_us": {
+        "median": 598,
+        "p95": 1098,
+        "p99": 3833,
+        "max": 7114
+      },
+      "encode_us": {
+        "median": 1857,
+        "p95": 2601,
+        "p99": 4704,
+        "max": 8244
+      },
+      "backend_us": {
+        "median": 15549,
+        "p95": 16416,
+        "p99": 16738,
+        "max": 18105
+      },
+      "retained_draws": {
+        "median": 40,
+        "p95": 40,
+        "p99": 42,
+        "max": 42
+      },
+      "frame_vertex_bytes": {
+        "median": 11160,
+        "p95": 11160,
+        "p99": 11160,
+        "max": 11160
+      },
+      "log": "artifacts/scroll-retained-pooled/artwork-updates-60-retained-1-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "artwork",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 480,
+      "median_ms": 16.434,
+      "p95_ms": 16.823,
+      "p99_ms": 17.104,
+      "max_ms": 21.528,
+      "over_8_33_percent": 99.79,
+      "over_16_67_percent": 15.62,
+      "update_p95_ms": 16.662,
+      "work_rate_per_s": 60.98,
+      "accepted_including_warmup": 537,
+      "input_us": {
+        "median": 53,
+        "p95": 103,
+        "p99": 144,
+        "max": 1474
+      },
+      "layout_us": {
+        "median": 51,
+        "p95": 90,
+        "p99": 1416,
+        "max": 1841
+      },
+      "prepare_us": {
+        "median": 330,
+        "p95": 506,
+        "p99": 1436,
+        "max": 2178
+      },
+      "lower_us": {
+        "median": 408,
+        "p95": 954,
+        "p99": 4043,
+        "max": 4490
+      },
+      "encode_us": {
+        "median": 1436,
+        "p95": 2159,
+        "p99": 4578,
+        "max": 5188
+      },
+      "backend_us": {
+        "median": 15918,
+        "p95": 16517,
+        "p99": 16755,
+        "max": 21025
+      },
+      "retained_draws": {
+        "median": 40,
+        "p95": 42,
+        "p99": 42,
+        "max": 42
+      },
+      "frame_vertex_bytes": {
+        "median": 11160,
+        "p95": 11160,
+        "p99": 11160,
+        "max": 11160
+      },
+      "log": "artifacts/scroll-retained-pooled/artwork-updates-60-retained-1-run-1.log",
+      "repeat": 1
+    },
+    {
+      "case": "complex",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 480,
+      "median_ms": 16.454,
+      "p95_ms": 17.411,
+      "p99_ms": 17.803,
+      "max_ms": 19.429,
+      "over_8_33_percent": 99.79,
+      "over_16_67_percent": 26.25,
+      "update_p95_ms": 0.0,
+      "work_rate_per_s": 61.16,
+      "accepted_including_warmup": 535,
+      "input_us": {
+        "median": 54,
+        "p95": 126,
+        "p99": 172,
+        "max": 211
+      },
+      "layout_us": {
+        "median": 30,
+        "p95": 91,
+        "p99": 124,
+        "max": 138
+      },
+      "prepare_us": {
+        "median": 127,
+        "p95": 323,
+        "p99": 385,
+        "max": 443
+      },
+      "lower_us": {
+        "median": 582,
+        "p95": 1427,
+        "p99": 1579,
+        "max": 1791
+      },
+      "encode_us": {
+        "median": 2970,
+        "p95": 6898,
+        "p99": 7456,
+        "max": 11381
+      },
+      "backend_us": {
+        "median": 16207,
+        "p95": 17120,
+        "p99": 17456,
+        "max": 19180
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 1028520,
+        "p95": 1051320,
+        "p99": 1051320,
+        "max": 1051560
+      },
+      "log": "artifacts/scroll-retained-pooled/complex-updates-0-retained-0-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "complex",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 480,
+      "median_ms": 16.53,
+      "p95_ms": 17.22,
+      "p99_ms": 17.897,
+      "max_ms": 32.417,
+      "over_8_33_percent": 99.38,
+      "over_16_67_percent": 29.58,
+      "update_p95_ms": 0.0,
+      "work_rate_per_s": 60.63,
+      "accepted_including_warmup": 534,
+      "input_us": {
+        "median": 52,
+        "p95": 86,
+        "p99": 120,
+        "max": 134
+      },
+      "layout_us": {
+        "median": 27,
+        "p95": 66,
+        "p99": 87,
+        "max": 150
+      },
+      "prepare_us": {
+        "median": 125,
+        "p95": 263,
+        "p99": 307,
+        "max": 377
+      },
+      "lower_us": {
+        "median": 572,
+        "p95": 1031,
+        "p99": 1581,
+        "max": 2194
+      },
+      "encode_us": {
+        "median": 2509,
+        "p95": 5832,
+        "p99": 7059,
+        "max": 11059
+      },
+      "backend_us": {
+        "median": 16278,
+        "p95": 16963,
+        "p99": 17617,
+        "max": 32189
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 1028520,
+        "p95": 1051320,
+        "p99": 1051320,
+        "max": 1051560
+      },
+      "log": "artifacts/scroll-retained-pooled/complex-updates-0-retained-0-run-1.log",
+      "repeat": 1
+    },
+    {
+      "case": "complex",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 480,
+      "median_ms": 16.267,
+      "p95_ms": 17.183,
+      "p99_ms": 17.465,
+      "max_ms": 23.316,
+      "over_8_33_percent": 99.58,
+      "over_16_67_percent": 14.79,
+      "update_p95_ms": 0.0,
+      "work_rate_per_s": 61.77,
+      "accepted_including_warmup": 537,
+      "input_us": {
+        "median": 119,
+        "p95": 193,
+        "p99": 218,
+        "max": 252
+      },
+      "layout_us": {
+        "median": 96,
+        "p95": 146,
+        "p99": 169,
+        "max": 198
+      },
+      "prepare_us": {
+        "median": 503,
+        "p95": 672,
+        "p99": 747,
+        "max": 823
+      },
+      "lower_us": {
+        "median": 473,
+        "p95": 1127,
+        "p99": 1224,
+        "max": 1313
+      },
+      "encode_us": {
+        "median": 1714,
+        "p95": 3473,
+        "p99": 3770,
+        "max": 4737
+      },
+      "backend_us": {
+        "median": 15436,
+        "p95": 16640,
+        "p99": 16920,
+        "max": 22374
+      },
+      "retained_draws": {
+        "median": 121,
+        "p95": 129,
+        "p99": 131,
+        "max": 133
+      },
+      "frame_vertex_bytes": {
+        "median": 22920,
+        "p95": 22920,
+        "p99": 23160,
+        "max": 23160
+      },
+      "log": "artifacts/scroll-retained-pooled/complex-updates-0-retained-1-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "complex",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 480,
+      "median_ms": 16.459,
+      "p95_ms": 17.003,
+      "p99_ms": 17.117,
+      "max_ms": 32.545,
+      "over_8_33_percent": 99.58,
+      "over_16_67_percent": 26.46,
+      "update_p95_ms": 0.0,
+      "work_rate_per_s": 60.87,
+      "accepted_including_warmup": 536,
+      "input_us": {
+        "median": 56,
+        "p95": 111,
+        "p99": 130,
+        "max": 142
+      },
+      "layout_us": {
+        "median": 33,
+        "p95": 83,
+        "p99": 96,
+        "max": 105
+      },
+      "prepare_us": {
+        "median": 260,
+        "p95": 543,
+        "p99": 591,
+        "max": 653
+      },
+      "lower_us": {
+        "median": 324,
+        "p95": 902,
+        "p99": 1015,
+        "max": 1506
+      },
+      "encode_us": {
+        "median": 1196,
+        "p95": 3128,
+        "p99": 3430,
+        "max": 3675
+      },
+      "backend_us": {
+        "median": 15936,
+        "p95": 16628,
+        "p99": 16756,
+        "max": 32188
+      },
+      "retained_draws": {
+        "median": 121,
+        "p95": 129,
+        "p99": 131,
+        "max": 133
+      },
+      "frame_vertex_bytes": {
+        "median": 22920,
+        "p95": 22920,
+        "p99": 23160,
+        "max": 23160
+      },
+      "log": "artifacts/scroll-retained-pooled/complex-updates-0-retained-1-run-1.log",
+      "repeat": 1
+    },
+    {
+      "case": "complex",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 480,
+      "median_ms": 16.48,
+      "p95_ms": 17.519,
+      "p99_ms": 17.76,
+      "max_ms": 19.049,
+      "over_8_33_percent": 99.79,
+      "over_16_67_percent": 25.0,
+      "update_p95_ms": 16.487,
+      "work_rate_per_s": 60.98,
+      "accepted_including_warmup": 536,
+      "input_us": {
+        "median": 51,
+        "p95": 120,
+        "p99": 158,
+        "max": 170
+      },
+      "layout_us": {
+        "median": 29,
+        "p95": 105,
+        "p99": 967,
+        "max": 1588
+      },
+      "prepare_us": {
+        "median": 124,
+        "p95": 316,
+        "p99": 381,
+        "max": 535
+      },
+      "lower_us": {
+        "median": 584,
+        "p95": 1376,
+        "p99": 1582,
+        "max": 1712
+      },
+      "encode_us": {
+        "median": 2943,
+        "p95": 6742,
+        "p99": 7023,
+        "max": 7941
+      },
+      "backend_us": {
+        "median": 16239,
+        "p95": 17233,
+        "p99": 17429,
+        "max": 18830
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 1028520,
+        "p95": 1051320,
+        "p99": 1051320,
+        "max": 1051560
+      },
+      "log": "artifacts/scroll-retained-pooled/complex-updates-60-retained-0-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "complex",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 481,
+      "median_ms": 16.517,
+      "p95_ms": 17.223,
+      "p99_ms": 33.102,
+      "max_ms": 34.11,
+      "over_8_33_percent": 98.75,
+      "over_16_67_percent": 27.03,
+      "update_p95_ms": 17.042,
+      "work_rate_per_s": 60.64,
+      "accepted_including_warmup": 532,
+      "input_us": {
+        "median": 53,
+        "p95": 83,
+        "p99": 109,
+        "max": 128
+      },
+      "layout_us": {
+        "median": 29,
+        "p95": 66,
+        "p99": 1018,
+        "max": 1180
+      },
+      "prepare_us": {
+        "median": 136,
+        "p95": 251,
+        "p99": 290,
+        "max": 310
+      },
+      "lower_us": {
+        "median": 594,
+        "p95": 843,
+        "p99": 1445,
+        "max": 1571
+      },
+      "encode_us": {
+        "median": 2939,
+        "p95": 5789,
+        "p99": 6202,
+        "max": 6465
+      },
+      "backend_us": {
+        "median": 16237,
+        "p95": 16924,
+        "p99": 32795,
+        "max": 33737
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 1028520,
+        "p95": 1051320,
+        "p99": 1051320,
+        "max": 1051560
+      },
+      "log": "artifacts/scroll-retained-pooled/complex-updates-60-retained-0-run-1.log",
+      "repeat": 1
+    },
+    {
+      "case": "complex",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 480,
+      "median_ms": 16.362,
+      "p95_ms": 17.0,
+      "p99_ms": 17.57,
+      "max_ms": 17.87,
+      "over_8_33_percent": 99.79,
+      "over_16_67_percent": 13.75,
+      "update_p95_ms": 17.157,
+      "work_rate_per_s": 61.48,
+      "accepted_including_warmup": 537,
+      "input_us": {
+        "median": 83,
+        "p95": 164,
+        "p99": 187,
+        "max": 202
+      },
+      "layout_us": {
+        "median": 75,
+        "p95": 127,
+        "p99": 1090,
+        "max": 2821
+      },
+      "prepare_us": {
+        "median": 489,
+        "p95": 713,
+        "p99": 1414,
+        "max": 2405
+      },
+      "lower_us": {
+        "median": 451,
+        "p95": 1039,
+        "p99": 4375,
+        "max": 4804
+      },
+      "encode_us": {
+        "median": 1609,
+        "p95": 3602,
+        "p99": 5507,
+        "max": 6363
+      },
+      "backend_us": {
+        "median": 15612,
+        "p95": 16543,
+        "p99": 17015,
+        "max": 17448
+      },
+      "retained_draws": {
+        "median": 121,
+        "p95": 129,
+        "p99": 131,
+        "max": 133
+      },
+      "frame_vertex_bytes": {
+        "median": 22920,
+        "p95": 22920,
+        "p99": 23160,
+        "max": 23160
+      },
+      "log": "artifacts/scroll-retained-pooled/complex-updates-60-retained-1-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "complex",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 475,
+      "median_ms": 16.431,
+      "p95_ms": 17.019,
+      "p99_ms": 33.452,
+      "max_ms": 49.772,
+      "over_8_33_percent": 97.26,
+      "over_16_67_percent": 20.42,
+      "update_p95_ms": 17.211,
+      "work_rate_per_s": 60.35,
+      "accepted_including_warmup": 532,
+      "input_us": {
+        "median": 60,
+        "p95": 104,
+        "p99": 110,
+        "max": 146
+      },
+      "layout_us": {
+        "median": 36,
+        "p95": 82,
+        "p99": 961,
+        "max": 2169
+      },
+      "prepare_us": {
+        "median": 284,
+        "p95": 525,
+        "p99": 933,
+        "max": 1952
+      },
+      "lower_us": {
+        "median": 329,
+        "p95": 841,
+        "p99": 2812,
+        "max": 3640
+      },
+      "encode_us": {
+        "median": 1360,
+        "p95": 3002,
+        "p99": 3666,
+        "max": 4847
+      },
+      "backend_us": {
+        "median": 15874,
+        "p95": 16599,
+        "p99": 32962,
+        "max": 49408
+      },
+      "retained_draws": {
+        "median": 121,
+        "p95": 129,
+        "p99": 131,
+        "max": 133
+      },
+      "frame_vertex_bytes": {
+        "median": 22920,
+        "p95": 22920,
+        "p99": 23160,
+        "max": 23160
+      },
+      "log": "artifacts/scroll-retained-pooled/complex-updates-60-retained-1-run-1.log",
+      "repeat": 1
+    },
+    {
+      "case": "plain",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 480,
+      "median_ms": 16.182,
+      "p95_ms": 16.732,
+      "p99_ms": 17.181,
+      "max_ms": 18.37,
+      "over_8_33_percent": 100.0,
+      "over_16_67_percent": 6.88,
+      "update_p95_ms": 0.0,
+      "work_rate_per_s": 61.88,
+      "accepted_including_warmup": 532,
+      "input_us": {
+        "median": 123,
+        "p95": 208,
+        "p99": 278,
+        "max": 304
+      },
+      "layout_us": {
+        "median": 81,
+        "p95": 134,
+        "p99": 159,
+        "max": 242
+      },
+      "prepare_us": {
+        "median": 228,
+        "p95": 376,
+        "p99": 415,
+        "max": 500
+      },
+      "lower_us": {
+        "median": 637,
+        "p95": 1005,
+        "p99": 1242,
+        "max": 1402
+      },
+      "encode_us": {
+        "median": 1574,
+        "p95": 1957,
+        "p99": 2303,
+        "max": 2447
+      },
+      "backend_us": {
+        "median": 15554,
+        "p95": 16485,
+        "p99": 16854,
+        "max": 17247
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 488520,
+        "p95": 499320,
+        "p99": 499320,
+        "max": 499320
+      },
+      "log": "artifacts/scroll-retained-pooled/plain-updates-0-retained-0-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "plain",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 479,
+      "median_ms": 16.21,
+      "p95_ms": 16.972,
+      "p99_ms": 19.078,
+      "max_ms": 32.683,
+      "over_8_33_percent": 99.37,
+      "over_16_67_percent": 9.19,
+      "update_p95_ms": 0.0,
+      "work_rate_per_s": 62.0,
+      "accepted_including_warmup": 534,
+      "input_us": {
+        "median": 106,
+        "p95": 209,
+        "p99": 247,
+        "max": 272
+      },
+      "layout_us": {
+        "median": 71,
+        "p95": 114,
+        "p99": 130,
+        "max": 173
+      },
+      "prepare_us": {
+        "median": 217,
+        "p95": 375,
+        "p99": 428,
+        "max": 450
+      },
+      "lower_us": {
+        "median": 600,
+        "p95": 1016,
+        "p99": 1373,
+        "max": 1496
+      },
+      "encode_us": {
+        "median": 1483,
+        "p95": 2064,
+        "p99": 2275,
+        "max": 2472
+      },
+      "backend_us": {
+        "median": 15611,
+        "p95": 16634,
+        "p99": 18524,
+        "max": 32247
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 488520,
+        "p95": 499320,
+        "p99": 499320,
+        "max": 499320
+      },
+      "log": "artifacts/scroll-retained-pooled/plain-updates-0-retained-0-run-1.log",
+      "repeat": 1
+    },
+    {
+      "case": "plain",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 480,
+      "median_ms": 16.159,
+      "p95_ms": 16.738,
+      "p99_ms": 17.084,
+      "max_ms": 18.07,
+      "over_8_33_percent": 100.0,
+      "over_16_67_percent": 7.71,
+      "update_p95_ms": 0.0,
+      "work_rate_per_s": 61.98,
+      "accepted_including_warmup": 537,
+      "input_us": {
+        "median": 114,
+        "p95": 206,
+        "p99": 276,
+        "max": 326
+      },
+      "layout_us": {
+        "median": 73,
+        "p95": 129,
+        "p99": 171,
+        "max": 197
+      },
+      "prepare_us": {
+        "median": 401,
+        "p95": 662,
+        "p99": 789,
+        "max": 835
+      },
+      "lower_us": {
+        "median": 567,
+        "p95": 834,
+        "p99": 997,
+        "max": 1158
+      },
+      "encode_us": {
+        "median": 1505,
+        "p95": 1907,
+        "p99": 2079,
+        "max": 2288
+      },
+      "backend_us": {
+        "median": 15422,
+        "p95": 16406,
+        "p99": 16814,
+        "max": 17282
+      },
+      "retained_draws": {
+        "median": 21,
+        "p95": 22,
+        "p99": 22,
+        "max": 22
+      },
+      "frame_vertex_bytes": {
+        "median": 10920,
+        "p95": 10920,
+        "p99": 10920,
+        "max": 10920
+      },
+      "log": "artifacts/scroll-retained-pooled/plain-updates-0-retained-1-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "plain",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 480,
+      "median_ms": 16.163,
+      "p95_ms": 16.992,
+      "p99_ms": 18.127,
+      "max_ms": 22.405,
+      "over_8_33_percent": 99.79,
+      "over_16_67_percent": 10.62,
+      "update_p95_ms": 0.0,
+      "work_rate_per_s": 62.17,
+      "accepted_including_warmup": 536,
+      "input_us": {
+        "median": 116,
+        "p95": 206,
+        "p99": 229,
+        "max": 256
+      },
+      "layout_us": {
+        "median": 70,
+        "p95": 106,
+        "p99": 126,
+        "max": 184
+      },
+      "prepare_us": {
+        "median": 414,
+        "p95": 752,
+        "p99": 810,
+        "max": 829
+      },
+      "lower_us": {
+        "median": 576,
+        "p95": 848,
+        "p99": 974,
+        "max": 1108
+      },
+      "encode_us": {
+        "median": 1492,
+        "p95": 1873,
+        "p99": 2044,
+        "max": 2385
+      },
+      "backend_us": {
+        "median": 15415,
+        "p95": 16453,
+        "p99": 17535,
+        "max": 21806
+      },
+      "retained_draws": {
+        "median": 21,
+        "p95": 21,
+        "p99": 22,
+        "max": 22
+      },
+      "frame_vertex_bytes": {
+        "median": 10920,
+        "p95": 10920,
+        "p99": 10920,
+        "max": 10920
+      },
+      "log": "artifacts/scroll-retained-pooled/plain-updates-0-retained-1-run-1.log",
+      "repeat": 1
+    },
+    {
+      "case": "plain",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 480,
+      "median_ms": 16.146,
+      "p95_ms": 16.746,
+      "p99_ms": 17.146,
+      "max_ms": 19.125,
+      "over_8_33_percent": 100.0,
+      "over_16_67_percent": 6.04,
+      "update_p95_ms": 17.944,
+      "work_rate_per_s": 62.27,
+      "accepted_including_warmup": 537,
+      "input_us": {
+        "median": 116,
+        "p95": 220,
+        "p99": 254,
+        "max": 318
+      },
+      "layout_us": {
+        "median": 71,
+        "p95": 124,
+        "p99": 1874,
+        "max": 2431
+      },
+      "prepare_us": {
+        "median": 217,
+        "p95": 368,
+        "p99": 409,
+        "max": 419
+      },
+      "lower_us": {
+        "median": 601,
+        "p95": 988,
+        "p99": 1269,
+        "max": 1373
+      },
+      "encode_us": {
+        "median": 1551,
+        "p95": 2023,
+        "p99": 2223,
+        "max": 2294
+      },
+      "backend_us": {
+        "median": 15524,
+        "p95": 16392,
+        "p99": 16764,
+        "max": 17130
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 488520,
+        "p95": 499320,
+        "p99": 499320,
+        "max": 499320
+      },
+      "log": "artifacts/scroll-retained-pooled/plain-updates-60-retained-0-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "plain",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 570,
+      "median_ms": 8.647,
+      "p95_ms": 16.899,
+      "p99_ms": 48.117,
+      "max_ms": 1128.139,
+      "over_8_33_percent": 69.65,
+      "over_16_67_percent": 6.84,
+      "update_p95_ms": 24.801,
+      "work_rate_per_s": 73.08,
+      "accepted_including_warmup": 627,
+      "input_us": {
+        "median": 45,
+        "p95": 150,
+        "p99": 194,
+        "max": 288
+      },
+      "layout_us": {
+        "median": 32,
+        "p95": 82,
+        "p99": 1005,
+        "max": 2540
+      },
+      "prepare_us": {
+        "median": 117,
+        "p95": 285,
+        "p99": 390,
+        "max": 409
+      },
+      "lower_us": {
+        "median": 274,
+        "p95": 779,
+        "p99": 1255,
+        "max": 1438
+      },
+      "encode_us": {
+        "median": 707,
+        "p95": 1720,
+        "p99": 2136,
+        "max": 2530
+      },
+      "backend_us": {
+        "median": 8498,
+        "p95": 16531,
+        "p99": 47755,
+        "max": 1127963
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 488520,
+        "p95": 499320,
+        "p99": 499320,
+        "max": 499320
+      },
+      "log": "artifacts/scroll-retained-pooled/plain-updates-60-retained-0-run-1.log",
+      "repeat": 1
+    },
+    {
+      "case": "plain",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 480,
+      "median_ms": 16.15,
+      "p95_ms": 16.735,
+      "p99_ms": 17.084,
+      "max_ms": 17.754,
+      "over_8_33_percent": 99.58,
+      "over_16_67_percent": 6.67,
+      "update_p95_ms": 16.154,
+      "work_rate_per_s": 62.35,
+      "accepted_including_warmup": 536,
+      "input_us": {
+        "median": 118,
+        "p95": 205,
+        "p99": 248,
+        "max": 281
+      },
+      "layout_us": {
+        "median": 74,
+        "p95": 133,
+        "p99": 1825,
+        "max": 2540
+      },
+      "prepare_us": {
+        "median": 397,
+        "p95": 726,
+        "p99": 848,
+        "max": 891
+      },
+      "lower_us": {
+        "median": 570,
+        "p95": 841,
+        "p99": 2961,
+        "max": 3909
+      },
+      "encode_us": {
+        "median": 1474,
+        "p95": 1864,
+        "p99": 3820,
+        "max": 4936
+      },
+      "backend_us": {
+        "median": 15384,
+        "p95": 16330,
+        "p99": 16702,
+        "max": 17497
+      },
+      "retained_draws": {
+        "median": 21,
+        "p95": 21,
+        "p99": 22,
+        "max": 22
+      },
+      "frame_vertex_bytes": {
+        "median": 10920,
+        "p95": 10920,
+        "p99": 10920,
+        "max": 10920
+      },
+      "log": "artifacts/scroll-retained-pooled/plain-updates-60-retained-1-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "plain",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 480,
+      "median_ms": 16.261,
+      "p95_ms": 16.858,
+      "p99_ms": 17.211,
+      "max_ms": 17.645,
+      "over_8_33_percent": 99.79,
+      "over_16_67_percent": 10.0,
+      "update_p95_ms": 16.577,
+      "work_rate_per_s": 61.9,
+      "accepted_including_warmup": 536,
+      "input_us": {
+        "median": 94,
+        "p95": 201,
+        "p99": 228,
+        "max": 276
+      },
+      "layout_us": {
+        "median": 64,
+        "p95": 112,
+        "p99": 1422,
+        "max": 1877
+      },
+      "prepare_us": {
+        "median": 345,
+        "p95": 736,
+        "p99": 795,
+        "max": 810
+      },
+      "lower_us": {
+        "median": 507,
+        "p95": 866,
+        "p99": 2245,
+        "max": 2895
+      },
+      "encode_us": {
+        "median": 1320,
+        "p95": 1875,
+        "p99": 2860,
+        "max": 3559
+      },
+      "backend_us": {
+        "median": 15612,
+        "p95": 16520,
+        "p99": 16860,
+        "max": 17433
+      },
+      "retained_draws": {
+        "median": 21,
+        "p95": 21,
+        "p99": 22,
+        "max": 22
+      },
+      "frame_vertex_bytes": {
+        "median": 10920,
+        "p95": 10920,
+        "p99": 10920,
+        "max": 10920
+      },
+      "log": "artifacts/scroll-retained-pooled/plain-updates-60-retained-1-run-1.log",
+      "repeat": 1
+    }
+  ],
+  "host": {
+    "date": "2026-10-05",
+    "gpu": "Apple M3 Pro / Metal",
+    "scale_milli": 2000,
+    "rows": 50000,
+    "covers": 64,
+    "cover_size": [
+      256,
+      256
+    ],
+    "window_logical_size": [
+      1200,
+      800
+    ]
+  },
+  "final_clip_regression_repeat": [
+    {
+      "case": "plain",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 480,
+      "accepted_including_warmup": 536,
+      "work_rate_per_s": 61.02,
+      "median_ms": 16.346,
+      "p95_ms": 16.799,
+      "p99_ms": 32.943,
+      "max_ms": 33.255,
+      "over_8_33_percent": 98.12,
+      "over_16_67_percent": 8.33,
+      "update_p95_ms": 0.0,
+      "input_us": {
+        "median": 79,
+        "p95": 130,
+        "p99": 168,
+        "max": 199
+      },
+      "layout_us": {
+        "median": 40,
+        "p95": 68,
+        "p99": 84,
+        "max": 91
+      },
+      "prepare_us": {
+        "median": 151,
+        "p95": 230,
+        "p99": 285,
+        "max": 381
+      },
+      "lower_us": {
+        "median": 444,
+        "p95": 721,
+        "p99": 940,
+        "max": 1141
+      },
+      "encode_us": {
+        "median": 1163,
+        "p95": 1602,
+        "p99": 1835,
+        "max": 1995
+      },
+      "backend_us": {
+        "median": 15976,
+        "p95": 16573,
+        "p99": 32538,
+        "max": 32981
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 488520,
+        "p95": 499320,
+        "p99": 499320,
+        "max": 499320
+      },
+      "log": "artifacts/scroll-retained-final/plain-updates-0-retained-0-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "plain",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 480,
+      "accepted_including_warmup": 533,
+      "work_rate_per_s": 61.18,
+      "median_ms": 16.336,
+      "p95_ms": 16.932,
+      "p99_ms": 32.979,
+      "max_ms": 33.299,
+      "over_8_33_percent": 98.96,
+      "over_16_67_percent": 15.21,
+      "update_p95_ms": 0.0,
+      "input_us": {
+        "median": 61,
+        "p95": 129,
+        "p99": 161,
+        "max": 224
+      },
+      "layout_us": {
+        "median": 42,
+        "p95": 72,
+        "p99": 94,
+        "max": 106
+      },
+      "prepare_us": {
+        "median": 246,
+        "p95": 344,
+        "p99": 407,
+        "max": 419
+      },
+      "lower_us": {
+        "median": 383,
+        "p95": 701,
+        "p99": 798,
+        "max": 847
+      },
+      "encode_us": {
+        "median": 1038,
+        "p95": 1474,
+        "p99": 1617,
+        "max": 1790
+      },
+      "backend_us": {
+        "median": 15911,
+        "p95": 16638,
+        "p99": 32556,
+        "max": 33025
+      },
+      "retained_draws": {
+        "median": 21,
+        "p95": 21,
+        "p99": 22,
+        "max": 22
+      },
+      "frame_vertex_bytes": {
+        "median": 10920,
+        "p95": 10920,
+        "p99": 10920,
+        "max": 10920
+      },
+      "log": "artifacts/scroll-retained-final/plain-updates-0-retained-1-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "plain",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 480,
+      "accepted_including_warmup": 534,
+      "work_rate_per_s": 61.21,
+      "median_ms": 16.366,
+      "p95_ms": 16.832,
+      "p99_ms": 33.211,
+      "max_ms": 33.435,
+      "over_8_33_percent": 96.88,
+      "over_16_67_percent": 9.38,
+      "update_p95_ms": 16.969,
+      "input_us": {
+        "median": 69,
+        "p95": 128,
+        "p99": 188,
+        "max": 265
+      },
+      "layout_us": {
+        "median": 41,
+        "p95": 72,
+        "p99": 599,
+        "max": 2037
+      },
+      "prepare_us": {
+        "median": 137,
+        "p95": 208,
+        "p99": 276,
+        "max": 361
+      },
+      "lower_us": {
+        "median": 394,
+        "p95": 690,
+        "p99": 795,
+        "max": 1139
+      },
+      "encode_us": {
+        "median": 1041,
+        "p95": 1519,
+        "p99": 1717,
+        "max": 1866
+      },
+      "backend_us": {
+        "median": 16026,
+        "p95": 16581,
+        "p99": 32968,
+        "max": 33179
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 488520,
+        "p95": 499320,
+        "p99": 499320,
+        "max": 499320
+      },
+      "log": "artifacts/scroll-retained-final/plain-updates-60-retained-0-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "plain",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 480,
+      "accepted_including_warmup": 535,
+      "work_rate_per_s": 61.18,
+      "median_ms": 16.372,
+      "p95_ms": 16.92,
+      "p99_ms": 17.687,
+      "max_ms": 32.826,
+      "over_8_33_percent": 99.58,
+      "over_16_67_percent": 12.08,
+      "update_p95_ms": 32.826,
+      "input_us": {
+        "median": 58,
+        "p95": 139,
+        "p99": 165,
+        "max": 194
+      },
+      "layout_us": {
+        "median": 45,
+        "p95": 81,
+        "p99": 1298,
+        "max": 1979
+      },
+      "prepare_us": {
+        "median": 249,
+        "p95": 414,
+        "p99": 591,
+        "max": 723
+      },
+      "lower_us": {
+        "median": 373,
+        "p95": 702,
+        "p99": 1607,
+        "max": 2720
+      },
+      "encode_us": {
+        "median": 966,
+        "p95": 1522,
+        "p99": 1899,
+        "max": 3494
+      },
+      "backend_us": {
+        "median": 15938,
+        "p95": 16593,
+        "p99": 17019,
+        "max": 31775
+      },
+      "retained_draws": {
+        "median": 21,
+        "p95": 21,
+        "p99": 22,
+        "max": 22
+      },
+      "frame_vertex_bytes": {
+        "median": 10920,
+        "p95": 10920,
+        "p99": 10920,
+        "max": 10920
+      },
+      "log": "artifacts/scroll-retained-final/plain-updates-60-retained-1-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "artwork",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 479,
+      "accepted_including_warmup": 534,
+      "work_rate_per_s": 60.73,
+      "median_ms": 16.44,
+      "p95_ms": 16.961,
+      "p99_ms": 32.759,
+      "max_ms": 33.93,
+      "over_8_33_percent": 98.96,
+      "over_16_67_percent": 23.38,
+      "update_p95_ms": 0.0,
+      "input_us": {
+        "median": 45,
+        "p95": 90,
+        "p99": 111,
+        "max": 127
+      },
+      "layout_us": {
+        "median": 20,
+        "p95": 53,
+        "p99": 58,
+        "max": 71
+      },
+      "prepare_us": {
+        "median": 79,
+        "p95": 188,
+        "p99": 208,
+        "max": 226
+      },
+      "lower_us": {
+        "median": 178,
+        "p95": 484,
+        "p99": 524,
+        "max": 538
+      },
+      "encode_us": {
+        "median": 2599,
+        "p95": 4944,
+        "p99": 5759,
+        "max": 8796
+      },
+      "backend_us": {
+        "median": 16208,
+        "p95": 16756,
+        "p99": 32560,
+        "max": 33736
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 499320,
+        "p95": 510360,
+        "p99": 510360,
+        "max": 510360
+      },
+      "log": "artifacts/scroll-retained-final/artwork-updates-0-retained-0-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "artwork",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 479,
+      "accepted_including_warmup": 534,
+      "work_rate_per_s": 60.97,
+      "median_ms": 16.378,
+      "p95_ms": 16.943,
+      "p99_ms": 32.267,
+      "max_ms": 33.275,
+      "over_8_33_percent": 98.75,
+      "over_16_67_percent": 20.04,
+      "update_p95_ms": 0.0,
+      "input_us": {
+        "median": 60,
+        "p95": 109,
+        "p99": 158,
+        "max": 207
+      },
+      "layout_us": {
+        "median": 44,
+        "p95": 75,
+        "p99": 99,
+        "max": 117
+      },
+      "prepare_us": {
+        "median": 286,
+        "p95": 478,
+        "p99": 559,
+        "max": 604
+      },
+      "lower_us": {
+        "median": 349,
+        "p95": 963,
+        "p99": 1108,
+        "max": 1185
+      },
+      "encode_us": {
+        "median": 1097,
+        "p95": 2251,
+        "p99": 2467,
+        "max": 2614
+      },
+      "backend_us": {
+        "median": 15910,
+        "p95": 16616,
+        "p99": 31645,
+        "max": 32998
+      },
+      "retained_draws": {
+        "median": 40,
+        "p95": 40,
+        "p99": 42,
+        "max": 42
+      },
+      "frame_vertex_bytes": {
+        "median": 11160,
+        "p95": 11160,
+        "p99": 11160,
+        "max": 11160
+      },
+      "log": "artifacts/scroll-retained-final/artwork-updates-0-retained-1-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "artwork",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 480,
+      "accepted_including_warmup": 534,
+      "work_rate_per_s": 60.84,
+      "median_ms": 16.453,
+      "p95_ms": 16.955,
+      "p99_ms": 17.34,
+      "max_ms": 33.017,
+      "over_8_33_percent": 99.38,
+      "over_16_67_percent": 25.0,
+      "update_p95_ms": 16.929,
+      "input_us": {
+        "median": 42,
+        "p95": 93,
+        "p99": 117,
+        "max": 195
+      },
+      "layout_us": {
+        "median": 18,
+        "p95": 60,
+        "p99": 656,
+        "max": 1487
+      },
+      "prepare_us": {
+        "median": 80,
+        "p95": 206,
+        "p99": 274,
+        "max": 307
+      },
+      "lower_us": {
+        "median": 177,
+        "p95": 495,
+        "p99": 565,
+        "max": 689
+      },
+      "encode_us": {
+        "median": 2375,
+        "p95": 4877,
+        "p99": 5044,
+        "max": 6173
+      },
+      "backend_us": {
+        "median": 16239,
+        "p95": 16786,
+        "p99": 17123,
+        "max": 32834
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 499320,
+        "p95": 510360,
+        "p99": 510360,
+        "max": 510360
+      },
+      "log": "artifacts/scroll-retained-final/artwork-updates-60-retained-0-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "artwork",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 480,
+      "accepted_including_warmup": 535,
+      "work_rate_per_s": 61.09,
+      "median_ms": 16.399,
+      "p95_ms": 16.959,
+      "p99_ms": 32.851,
+      "max_ms": 33.289,
+      "over_8_33_percent": 98.75,
+      "over_16_67_percent": 18.33,
+      "update_p95_ms": 16.97,
+      "input_us": {
+        "median": 59,
+        "p95": 118,
+        "p99": 157,
+        "max": 291
+      },
+      "layout_us": {
+        "median": 30,
+        "p95": 94,
+        "p99": 848,
+        "max": 1733
+      },
+      "prepare_us": {
+        "median": 207,
+        "p95": 510,
+        "p99": 1226,
+        "max": 2399
+      },
+      "lower_us": {
+        "median": 325,
+        "p95": 1044,
+        "p99": 3360,
+        "max": 3809
+      },
+      "encode_us": {
+        "median": 821,
+        "p95": 2322,
+        "p99": 3969,
+        "max": 4720
+      },
+      "backend_us": {
+        "median": 15959,
+        "p95": 16587,
+        "p99": 32438,
+        "max": 32982
+      },
+      "retained_draws": {
+        "median": 40,
+        "p95": 40,
+        "p99": 42,
+        "max": 42
+      },
+      "frame_vertex_bytes": {
+        "median": 11160,
+        "p95": 11160,
+        "p99": 11160,
+        "max": 11160
+      },
+      "log": "artifacts/scroll-retained-final/artwork-updates-60-retained-1-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "complex",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 479,
+      "accepted_including_warmup": 533,
+      "work_rate_per_s": 60.6,
+      "median_ms": 16.471,
+      "p95_ms": 17.103,
+      "p99_ms": 18.256,
+      "max_ms": 33.752,
+      "over_8_33_percent": 99.37,
+      "over_16_67_percent": 27.56,
+      "update_p95_ms": 0.0,
+      "input_us": {
+        "median": 51,
+        "p95": 74,
+        "p99": 119,
+        "max": 131
+      },
+      "layout_us": {
+        "median": 27,
+        "p95": 62,
+        "p99": 88,
+        "max": 103
+      },
+      "prepare_us": {
+        "median": 123,
+        "p95": 246,
+        "p99": 301,
+        "max": 322
+      },
+      "lower_us": {
+        "median": 579,
+        "p95": 818,
+        "p99": 1566,
+        "max": 1795
+      },
+      "encode_us": {
+        "median": 2643,
+        "p95": 5834,
+        "p99": 6318,
+        "max": 9535
+      },
+      "backend_us": {
+        "median": 16238,
+        "p95": 16857,
+        "p99": 17977,
+        "max": 33527
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 1028520,
+        "p95": 1051320,
+        "p99": 1051320,
+        "max": 1051560
+      },
+      "log": "artifacts/scroll-retained-final/complex-updates-0-retained-0-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "complex",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 0,
+      "samples": 480,
+      "accepted_including_warmup": 533,
+      "work_rate_per_s": 60.98,
+      "median_ms": 16.433,
+      "p95_ms": 17.045,
+      "p99_ms": 17.412,
+      "max_ms": 18.132,
+      "over_8_33_percent": 100.0,
+      "over_16_67_percent": 25.62,
+      "update_p95_ms": 0.0,
+      "input_us": {
+        "median": 65,
+        "p95": 162,
+        "p99": 234,
+        "max": 279
+      },
+      "layout_us": {
+        "median": 37,
+        "p95": 124,
+        "p99": 160,
+        "max": 197
+      },
+      "prepare_us": {
+        "median": 258,
+        "p95": 640,
+        "p99": 717,
+        "max": 821
+      },
+      "lower_us": {
+        "median": 338,
+        "p95": 1024,
+        "p99": 1322,
+        "max": 1545
+      },
+      "encode_us": {
+        "median": 1287,
+        "p95": 3161,
+        "p99": 3443,
+        "max": 3919
+      },
+      "backend_us": {
+        "median": 16016,
+        "p95": 16632,
+        "p99": 17043,
+        "max": 17774
+      },
+      "retained_draws": {
+        "median": 121,
+        "p95": 129,
+        "p99": 131,
+        "max": 133
+      },
+      "frame_vertex_bytes": {
+        "median": 22920,
+        "p95": 22920,
+        "p99": 23160,
+        "max": 23160
+      },
+      "log": "artifacts/scroll-retained-final/complex-updates-0-retained-1-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "complex",
+      "retained": 0,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 478,
+      "accepted_including_warmup": 533,
+      "work_rate_per_s": 60.47,
+      "median_ms": 16.491,
+      "p95_ms": 17.254,
+      "p99_ms": 33.246,
+      "max_ms": 33.988,
+      "over_8_33_percent": 98.54,
+      "over_16_67_percent": 27.41,
+      "update_p95_ms": 16.641,
+      "input_us": {
+        "median": 50,
+        "p95": 70,
+        "p99": 117,
+        "max": 149
+      },
+      "layout_us": {
+        "median": 27,
+        "p95": 76,
+        "p99": 901,
+        "max": 1031
+      },
+      "prepare_us": {
+        "median": 127,
+        "p95": 264,
+        "p99": 303,
+        "max": 328
+      },
+      "lower_us": {
+        "median": 580,
+        "p95": 986,
+        "p99": 1438,
+        "max": 1579
+      },
+      "encode_us": {
+        "median": 2599,
+        "p95": 5884,
+        "p99": 6449,
+        "max": 8887
+      },
+      "backend_us": {
+        "median": 16239,
+        "p95": 16965,
+        "p99": 33008,
+        "max": 33762
+      },
+      "retained_draws": {
+        "median": 0,
+        "p95": 0,
+        "p99": 0,
+        "max": 0
+      },
+      "frame_vertex_bytes": {
+        "median": 1028520,
+        "p95": 1051320,
+        "p99": 1051320,
+        "max": 1051560
+      },
+      "log": "artifacts/scroll-retained-final/complex-updates-60-retained-0-run-0.log",
+      "repeat": 0
+    },
+    {
+      "case": "complex",
+      "retained": 1,
+      "scale_milli": 2000,
+      "wheel_delta": 128,
+      "update_every": 60,
+      "samples": 480,
+      "accepted_including_warmup": 535,
+      "work_rate_per_s": 60.95,
+      "median_ms": 16.444,
+      "p95_ms": 17.026,
+      "p99_ms": 33.24,
+      "max_ms": 33.474,
+      "over_8_33_percent": 98.75,
+      "over_16_67_percent": 22.5,
+      "update_p95_ms": 17.254,
+      "input_us": {
+        "median": 66,
+        "p95": 143,
+        "p99": 207,
+        "max": 251
+      },
+      "layout_us": {
+        "median": 36,
+        "p95": 128,
+        "p99": 1013,
+        "max": 2232
+      },
+      "prepare_us": {
+        "median": 267,
+        "p95": 652,
+        "p99": 1134,
+        "max": 2040
+      },
+      "lower_us": {
+        "median": 332,
+        "p95": 1046,
+        "p99": 3497,
+        "max": 4365
+      },
+      "encode_us": {
+        "median": 1251,
+        "p95": 3076,
+        "p99": 4340,
+        "max": 6228
+      },
+      "backend_us": {
+        "median": 15993,
+        "p95": 16613,
+        "p99": 32535,
+        "max": 33071
+      },
+      "retained_draws": {
+        "median": 121,
+        "p95": 129,
+        "p99": 131,
+        "max": 133
+      },
+      "frame_vertex_bytes": {
+        "median": 22920,
+        "p95": 22920,
+        "p99": 23160,
+        "max": 23160
+      },
+      "log": "artifacts/scroll-retained-final/complex-updates-60-retained-1-run-0.log",
+      "repeat": 0
+    }
+  ],
+  "note": "The main two-repetition comparison preceded the clear-only partial-clip fix. A full additional comparison after that fix is included. Self-contained recording eligibility was subsequently hardened for opacity/clip state spanning list boundaries; the listed benchmark rows do not use such state."
+}

@@ -25,6 +25,7 @@ pub struct LazyVStack {
     spacing: f32,
     cache_extent: f32,
     builder: LazyItemBuilder,
+    item_key: Option<Rc<dyn Fn(usize) -> crate::view::ViewKey>>,
 }
 
 impl LazyVStack {
@@ -45,7 +46,15 @@ impl LazyVStack {
             spacing: 0.0,
             cache_extent: DEFAULT_CACHE_EXTENT,
             builder: Rc::new(move |index| Box::new(builder(index))),
+            item_key: None,
         }
+    }
+
+    /// Stable model keys preserve the visible item when content is inserted or
+    /// removed above it. Keys must be unique and independent of the item index.
+    pub fn item_key(mut self, key: impl Fn(usize) -> crate::view::ViewKey + 'static) -> Self {
+        self.item_key = Some(Rc::new(key));
+        self
     }
 
     /// Set spacing between items.
@@ -250,6 +259,25 @@ impl Element for LazyVStackElement {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn retains_virtual_items(&self) -> bool {
+        true
+    }
+
+    fn scroll_anchor(&self, viewport: Rect) -> Option<crate::element::ScrollAnchor> {
+        let key = self.view.item_key.as_ref()?;
+        let index = (libm::floorf(viewport.origin.y / self.view.stride()).max(0.) as usize)
+            .min(self.view.item_count.checked_sub(1)?);
+        Some(crate::element::ScrollAnchor {
+            key: key(index),
+            position: Point::new(0., index as f32 * self.view.stride()),
+        })
+    }
+    fn resolve_scroll_anchor(&self, key: &crate::view::ViewKey) -> Option<Point> {
+        let key_for = self.view.item_key.as_ref()?;
+        let index = (0..self.view.item_count).find(|index| key_for(*index) == *key)?;
+        Some(Point::new(0., index as f32 * self.view.stride()))
     }
 
     fn children(&self) -> &[Box<dyn Element>] {

@@ -12,6 +12,13 @@ use crate::view::{View, ViewKey};
 
 use super::id::ElementId;
 
+/// Stable content identity and its origin within a scrolling content element.
+#[derive(Clone, Debug)]
+pub struct ScrollAnchor {
+    pub key: ViewKey,
+    pub position: Point,
+}
+
 /// Result of an Element update operation
 ///
 /// Indicates whether the Element was updated, replaced, or unchanged
@@ -173,6 +180,73 @@ pub trait Element {
 
     /// Get this Element as Any mut for downcasting (mutable)
     fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    /// Whether children are independently retained virtual items.
+    fn retains_virtual_items(&self) -> bool {
+        false
+    }
+
+    /// Select a keyed visible item. Nested scrolling viewports are isolated.
+    fn scroll_anchor(&self, viewport: Rect) -> Option<ScrollAnchor> {
+        if self
+            .render_object()
+            .is_some_and(|object| object.owns_child_viewport())
+        {
+            return None;
+        }
+        if let Some(key) = self.view_key() {
+            return Some(ScrollAnchor {
+                key: key.clone(),
+                position: Point::ZERO,
+            });
+        }
+        for child in self.children() {
+            let position = child.position();
+            let size = child.bounds().size;
+            if position.x + size.width <= viewport.origin.x
+                || position.y + size.height <= viewport.origin.y
+                || position.x >= viewport.origin.x + viewport.size.width
+                || position.y >= viewport.origin.y + viewport.size.height
+            {
+                continue;
+            }
+            let local = Rect::new(
+                Point::new(
+                    viewport.origin.x - position.x,
+                    viewport.origin.y - position.y,
+                ),
+                viewport.size,
+            );
+            if let Some(mut anchor) = child.scroll_anchor(local) {
+                anchor.position.x += position.x;
+                anchor.position.y += position.y;
+                return Some(anchor);
+            }
+        }
+        None
+    }
+    /// Resolve a key after the model/layout changed. Virtual collections can
+    /// override this to find an offscreen item without building its view.
+    fn resolve_scroll_anchor(&self, key: &ViewKey) -> Option<Point> {
+        if self
+            .render_object()
+            .is_some_and(|object| object.owns_child_viewport())
+        {
+            return None;
+        }
+        if self.view_key() == Some(key) {
+            return Some(Point::ZERO);
+        }
+        for child in self.children() {
+            if let Some(point) = child.resolve_scroll_anchor(key) {
+                return Some(Point::new(
+                    point.x + child.position().x,
+                    point.y + child.position().y,
+                ));
+            }
+        }
+        None
+    }
 
     /// Get child Elements
     fn children(&self) -> &[Box<dyn Element>];

@@ -14,7 +14,7 @@ mod vstack;
 pub use component::ComponentElement;
 pub use dirty::DirtyFlags;
 pub use element::{
-    Element, LayoutConstraints, TextInputElementState, UpdateResult, WindowSizeLimits,
+    Element, LayoutConstraints, ScrollAnchor, TextInputElementState, UpdateResult, WindowSizeLimits,
 };
 pub(crate) use focus::{focused_descendant_path, restore_focus_at_path};
 pub use hstack::HStackElement;

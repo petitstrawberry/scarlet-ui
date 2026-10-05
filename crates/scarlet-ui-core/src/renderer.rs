@@ -118,6 +118,11 @@ where
 
 #[derive(Debug, Clone)]
 pub enum PaintCommand {
+    /// Replay an immutable local-coordinate display list at a new position.
+    DrawDisplayList {
+        origin: Point,
+        list: Arc<DisplayList>,
+    },
     FillPath {
         path: Path,
         color: Color,
@@ -206,6 +211,41 @@ pub enum PaintCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferHandle(pub usize);
 
+/// Immutable paint commands and owned resources, independent of live Elements.
+/// A new identity is allocated only when the recorded content changes.
+pub struct DisplayList {
+    identity: u64,
+    context: PaintContext<'static>,
+    self_contained: bool,
+}
+
+impl Debug for DisplayList {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DisplayList")
+            .field("identity", &self.identity)
+            .field("commands", &self.context.commands.len())
+            .finish()
+    }
+}
+
+impl DisplayList {
+    /// Stable identity of this immutable recording.
+    pub fn identity(&self) -> u64 {
+        self.identity
+    }
+
+    /// Whether clip/opacity state stays inside the recording.
+    /// Stateful recordings must be lowered together with their surrounding commands.
+    pub fn is_self_contained(&self) -> bool {
+        self.self_contained
+    }
+
+    /// Commands and resources retained by this recording.
+    pub fn context(&self) -> &PaintContext<'static> {
+        &self.context
+    }
+}
+
 /// A buffer referenced by the current paint list.
 ///
 /// Borrowed buffers are owned by render objects and are valid only for the
@@ -249,6 +289,89 @@ impl Default for PaintContext<'_> {
 impl<'a> PaintContext<'a> {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Adopt a recording's commands and resources without borrowing its element.
+    /// Immutable images share their pixels. Legacy borrowed pixel buffers are
+    /// snapshotted once when their paint content changes, never on replay.
+    pub fn into_display_list(self) -> Arc<DisplayList> {
+        static NEXT_LIST_ID: crate::id::IdAllocator = crate::id::IdAllocator::new();
+        let mut depth = 0usize;
+        let mut self_contained = true;
+        for command in &self.commands {
+            match command {
+                PaintCommand::PushClip { .. } => depth += 1,
+                PaintCommand::PopClip if depth > 0 => depth -= 1,
+                PaintCommand::PopClip | PaintCommand::SetOpacity { .. } => self_contained = false,
+                PaintCommand::DrawDisplayList { list, .. } if !list.is_self_contained() => {
+                    self_contained = false
+                }
+                _ => {}
+            }
+        }
+        Arc::new(DisplayList {
+            self_contained: self_contained && depth == 0,
+            identity: NEXT_LIST_ID.allocate(),
+            context: PaintContext {
+                commands: self.commands,
+                buffers: self
+                    .buffers
+                    .into_iter()
+                    .map(|buffer| match buffer {
+                        PaintBuffer::Shared(buffer) => PaintBuffer::Shared(buffer),
+                        PaintBuffer::Temporary(buffer) => PaintBuffer::Temporary(buffer),
+                        PaintBuffer::Borrowed(buffer) => PaintBuffer::Temporary(buffer.clone()),
+                    })
+                    .collect(),
+            },
+        })
+    }
+
+    /// Replay unchanged paint content without cloning strings, paths, or pixels.
+    pub fn draw_display_list(&mut self, origin: Point, list: Arc<DisplayList>) {
+        self.commands
+            .push(PaintCommand::DrawDisplayList { origin, list });
+    }
+
+    /// Expand retained recordings for a backend that consumes flat commands.
+    pub fn flattened(&self) -> PaintContext<'_> {
+        let mut result = PaintContext::new();
+        self.append_flattened(&mut result, Point::ZERO);
+        result
+    }
+
+    fn append_flattened<'b>(&'b self, result: &mut PaintContext<'b>, offset: Point) {
+        for command in &self.commands {
+            if let PaintCommand::DrawDisplayList { origin, list } = command {
+                list.context
+                    .append_flattened(result, Point::new(offset.x + origin.x, offset.y + origin.y));
+                continue;
+            }
+            let mut translated = PaintContext::new();
+            translated.commands.push(command.clone());
+            translated.translate(offset);
+            if let (
+                PaintCommand::DrawText {
+                    position: original, ..
+                },
+                Some(PaintCommand::DrawText { position, .. }),
+            ) = (command, translated.commands.last_mut())
+            {
+                *position = Point::new(original.x + offset.x, original.y + offset.y);
+            }
+            let mut command = translated.commands.pop().unwrap();
+            if let PaintCommand::DrawBuffer { buffer_idx, .. }
+            | PaintCommand::DrawBufferRect { buffer_idx, .. } = &mut command
+            {
+                if let Some(buffer) = self.buffer(BufferHandle(*buffer_idx)) {
+                    *buffer_idx = result.buffers.len();
+                    result.buffers.push(PaintBuffer::Borrowed(buffer));
+                } else {
+                    continue;
+                }
+            }
+            result.commands.push(command);
+        }
     }
 
     pub fn fill_path(&mut self, path: impl Into<Path>, color: Color) {
@@ -518,6 +641,13 @@ impl<'a> PaintContext<'a> {
     /// Bound CPU raster work by the painted geometry, not a virtual list's
     /// full layout extent. Clip commands do not paint any pixels themselves.
     pub(crate) fn raster_bounds(&self, size: Size, scale_milli: u32) -> Rect {
+        if self
+            .commands
+            .iter()
+            .any(|command| matches!(command, PaintCommand::DrawDisplayList { .. }))
+        {
+            return self.flattened().raster_bounds(size, scale_milli);
+        }
         let mut bounds: Option<Rect> = None;
         let scale = scale_milli.max(1) as f32 / 1000.0;
         let mut include = |rect: Rect| {
@@ -621,6 +751,7 @@ impl<'a> PaintContext<'a> {
                     position.x = position.x as i32 as f32 + offset.x;
                     position.y = position.y as i32 as f32 + offset.y;
                 }
+                PaintCommand::DrawDisplayList { origin, .. } => shift(origin),
                 PaintCommand::DrawBuffer { dst, .. } | PaintCommand::DrawBufferRect { dst, .. } => {
                     shift(&mut dst.origin)
                 }
@@ -635,6 +766,45 @@ impl<'a> PaintContext<'a> {
                 _ => {}
             }
         }
+    }
+
+    /// Visit retained commands without cloning their paths, strings or buffers.
+    /// Positions supplied here are the accumulated logical replay origin.
+    pub fn visit_commands(&self, visit: &mut impl FnMut(&PaintCommand, Point)) {
+        self.visit_commands_at(Point::ZERO, visit);
+    }
+    fn visit_commands_at(&self, offset: Point, visit: &mut impl FnMut(&PaintCommand, Point)) {
+        for command in &self.commands {
+            if let PaintCommand::DrawDisplayList { origin, list } = command {
+                list.context
+                    .visit_commands_at(Point::new(offset.x + origin.x, offset.y + origin.y), visit);
+            } else {
+                visit(command, offset);
+            }
+        }
+    }
+
+    /// Extract one command and its borrowed resource for backend lowering.
+    pub fn command_context(&self, index: usize) -> PaintContext<'_> {
+        let mut context = PaintContext::new();
+        if let Some(command) = self.commands.get(index) {
+            let mut command = command.clone();
+            if let PaintCommand::DrawBuffer { buffer_idx, .. }
+            | PaintCommand::DrawBufferRect { buffer_idx, .. } = &mut command
+            {
+                let Some(buffer) = self.buffer(BufferHandle(*buffer_idx)) else {
+                    return context;
+                };
+                *buffer_idx = 0;
+                context.buffers.push(PaintBuffer::Borrowed(buffer));
+            }
+            context.commands.push(command);
+        }
+        context
+    }
+    /// Append a context, remapping buffer handles and expanding nested lists.
+    pub fn append(&mut self, other: &'a PaintContext<'_>) {
+        other.append_flattened(self, Point::ZERO);
     }
 
     pub fn commands(&self) -> &[PaintCommand] {
@@ -692,6 +862,10 @@ pub enum BackendFrame<'a> {
 /// backends own the presentation lifecycle and return [`BackendFrame::External`]
 /// only after the frame has been submitted successfully.
 pub trait PaintBackend {
+    /// Whether the backend can consume immutable display-list replay commands.
+    fn supports_retained_display_lists(&self) -> bool {
+        false
+    }
     /// CPU backends benefit from retained raster pictures. GPU backends consume
     /// the original paint commands directly and must not pre-rasterize UI on
     /// the CPU before encoding their frame.
@@ -1289,6 +1463,13 @@ impl CpuPaintRenderer {
     }
 
     pub fn execute_with_damage(&mut self, ctx: &PaintContext<'_>, damage_rects: Option<&[Rect]>) {
+        if ctx
+            .commands()
+            .iter()
+            .any(|command| matches!(command, PaintCommand::DrawDisplayList { .. }))
+        {
+            return self.execute_with_damage(&ctx.flattened(), damage_rects);
+        }
         match damage_rects {
             Some(rects) => {
                 for rect in rects {
@@ -1307,6 +1488,7 @@ impl CpuPaintRenderer {
 
         for cmd in ctx.commands() {
             match cmd {
+                PaintCommand::DrawDisplayList { .. } => unreachable!("recordings expanded above"),
                 PaintCommand::FillPath { path, color } => {
                     let color = color.with_opacity(color.a * opacity);
                     self.rebuild_scaled_points(path);

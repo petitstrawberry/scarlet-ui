@@ -523,7 +523,7 @@ impl ElementRenderObject for ImageRenderObject {
                     }
                     ImageFit::Fill => {}
                 }
-                ctx.draw_buffer_rect_ref(dst, src, &image.data, 1.0);
+                ctx.draw_buffer_rect_shared(dst, src, Arc::clone(&image.data), 1.0);
             }
         }
         true

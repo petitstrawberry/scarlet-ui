@@ -602,6 +602,7 @@ pub struct ScrollViewRenderObject<V: View> {
     trackpad_axis_engaged: bool,
     selection_target: Option<SelectionScrollTarget>,
     selection_scroll_pending: bool,
+    anchor: Option<crate::element::ScrollAnchor>,
     _marker: PhantomData<V>,
 }
 
@@ -638,6 +639,7 @@ impl<V: View> ScrollViewRenderObject<V> {
             trackpad_axis_engaged: false,
             selection_target: None,
             selection_scroll_pending: false,
+            anchor: None,
             _marker: PhantomData,
         }
     }
@@ -1031,6 +1033,18 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
                 self.viewport_size.height,
             ));
             self.content_size = child.layout(child_constraints);
+            if !self.selection_scroll_pending {
+                if let Some(anchor) = &self.anchor {
+                    if let Some(position) = child.resolve_scroll_anchor(&anchor.key) {
+                        if self.axes.allows_x() {
+                            self.offset_x += position.x - anchor.position.x;
+                        }
+                        if self.axes.allows_y() {
+                            self.offset_y += position.y - anchor.position.y;
+                        }
+                    }
+                }
+            }
             self.content_size.width = self.content_size.width.max(content_width);
             self.content_size.height = self.content_size.height.max(content_height);
             self.clamp_offsets();
@@ -1044,9 +1058,22 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
                     self.viewport_size.height,
                 ));
             }
+            child.set_viewport_hint(Rect::from_xywh(
+                self.offset_x,
+                self.offset_y,
+                self.viewport_size.width,
+                self.viewport_size.height,
+            ));
+            self.anchor = child.scroll_anchor(Rect::from_xywh(
+                self.offset_x,
+                self.offset_y,
+                self.viewport_size.width,
+                self.viewport_size.height,
+            ));
             child.set_position(Point::new(-self.offset_x, -self.offset_y));
         } else {
             self.content_size = Size::ZERO;
+            self.anchor = None;
             self.clamp_offsets();
         }
 
@@ -1288,10 +1315,16 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
                 self.viewport_size.width,
                 self.viewport_size.height,
             ));
+            self.anchor = child.scroll_anchor(Rect::from_xywh(
+                self.offset_x,
+                self.offset_y,
+                self.viewport_size.width,
+                self.viewport_size.height,
+            ));
             if materialized {
                 // Newly visible virtual rows have new paint content. Moving
                 // the old retained scene alone leaves those rows blank.
-                return ScrollOffsetUpdate::NeedsPaint;
+                return ScrollOffsetUpdate::ChildrenChanged;
             }
         }
         ScrollOffsetUpdate::NeedsComposite

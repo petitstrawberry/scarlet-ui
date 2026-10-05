@@ -121,6 +121,8 @@ pub enum ScrollOffsetUpdate {
     NeedsPaint,
     /// Child positions changed and retained layers only need recomposition.
     NeedsComposite,
+    /// Mounted virtual children changed; existing paint content remains valid.
+    ChildrenChanged,
 }
 
 /// RenderObject trait for leaf rendering nodes
@@ -1485,6 +1487,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             }
             if self.render_object.handle_event(_event, _phase) {
                 match self.render_object.apply_scroll_offset(&mut self.children) {
+                    ScrollOffsetUpdate::ChildrenChanged => {
+                        crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id);
+                    }
                     ScrollOffsetUpdate::NeedsPaint => {
                         crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         for child in &self.children {
@@ -1616,6 +1621,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
         if self.render_object.handle_event(_event, _phase) {
             match self.render_object.apply_scroll_offset(&mut self.children) {
+                ScrollOffsetUpdate::ChildrenChanged => {
+                    crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id);
+                }
                 ScrollOffsetUpdate::NeedsPaint => {
                     crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                     for child in &self.children {

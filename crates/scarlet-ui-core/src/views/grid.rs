@@ -37,6 +37,7 @@ pub struct GridView<T: Clone + 'static> {
     row_spacing: f32,
     minimum_cell_width: Option<f32>,
     cell_builder: CellBuilder<T>,
+    item_key: Option<Rc<dyn Fn(&T) -> crate::view::ViewKey>>,
 }
 
 impl<T: Clone + 'static> GridView<T> {
@@ -74,7 +75,14 @@ impl<T: Clone + 'static> GridView<T> {
             cell_builder: Rc::new(move |index, item, selected| {
                 Box::new(cell_builder(index, item, selected))
             }),
+            item_key: None,
         }
+    }
+
+    /// Stable model identities for scroll anchoring through collection changes.
+    pub fn item_key(mut self, key: impl Fn(&T) -> crate::view::ViewKey + 'static) -> Self {
+        self.item_key = Some(Rc::new(key));
+        self
     }
 
     /// Set the horizontal spacing between cells.
@@ -565,6 +573,29 @@ impl<T: Clone + 'static> Element for GridContentElement<T> {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn retains_virtual_items(&self) -> bool {
+        true
+    }
+
+    fn scroll_anchor(&self, viewport: Rect) -> Option<crate::element::ScrollAnchor> {
+        let key = self.view.item_key.as_ref()?;
+        let columns = self.current_columns.max(1);
+        let row = libm::floorf(viewport.origin.y / self.row_stride()).max(0.) as usize;
+        let index = (row * columns).min(self.items.len().checked_sub(1)?);
+        Some(crate::element::ScrollAnchor {
+            key: key(&self.items[index]),
+            position: Point::new(0., (index / columns) as f32 * self.row_stride()),
+        })
+    }
+    fn resolve_scroll_anchor(&self, key: &crate::view::ViewKey) -> Option<Point> {
+        let key_for = self.view.item_key.as_ref()?;
+        let index = self.items.iter().position(|item| key_for(item) == *key)?;
+        Some(Point::new(
+            0.,
+            (index / self.current_columns.max(1)) as f32 * self.row_stride(),
+        ))
     }
 
     fn children(&self) -> &[Box<dyn Element>] {

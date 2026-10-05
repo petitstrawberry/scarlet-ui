@@ -27,6 +27,7 @@ pub struct ListView<T: Clone + 'static> {
     selected: State<Option<usize>>,
     row_height: f32,
     row_builder: RowBuilder<T>,
+    item_key: Option<Rc<dyn Fn(&T) -> crate::view::ViewKey>>,
 }
 
 impl<T: Clone + 'static> ListView<T> {
@@ -58,7 +59,14 @@ impl<T: Clone + 'static> ListView<T> {
             row_builder: Rc::new(move |index, item, selected| {
                 Box::new(row_builder(index, item, selected))
             }),
+            item_key: None,
         }
+    }
+
+    /// Preserve a visible model item through insertions/removals above it.
+    pub fn item_key(mut self, key: impl Fn(&T) -> crate::view::ViewKey + 'static) -> Self {
+        self.item_key = Some(Rc::new(key));
+        self
     }
 
     /// Return the item state used by this list.
@@ -118,25 +126,30 @@ struct ListContentView<T: Clone + 'static> {
     selected: State<Option<usize>>,
     row_height: f32,
     row_builder: RowBuilder<T>,
+    item_key: Option<Rc<dyn Fn(&T) -> crate::view::ViewKey>>,
 }
 
 fn build_list_content<T: Clone + 'static>(view: &ListContentView<T>) -> Box<dyn View> {
     // Snapshot once per collection/selection change. State::get clones the
     // entire Vec, so doing it in the row builder made every newly visible row
     // copy the whole library during scrolling.
-    let items = view.items.get();
+    let items = Rc::new(view.items.get());
     let selected = view.selected.clone();
     let row_builder = view.row_builder.clone();
     let row_height = view.row_height;
     let item_count = items.len();
 
-    let rows = LazyVStack::new(item_count, row_height, move |index| {
+    let key_items = items.clone();
+    let mut rows = LazyVStack::new(item_count, row_height, move |index| {
         let item = items
             .get(index)
             .cloned()
             .expect("ListView row index must be within item count");
         AnyView::new((row_builder)(index, item, selected.get()))
     });
+    if let Some(key) = view.item_key.clone() {
+        rows = rows.item_key(move |index| key(&key_items[index]));
+    }
     Box::new(rows)
 }
 
@@ -164,6 +177,7 @@ fn build_list_child<T: Clone + 'static>(view: &ListView<T>) -> Box<dyn View> {
         selected: view.selected.clone(),
         row_height,
         row_builder: view.row_builder.clone(),
+        item_key: view.item_key.clone(),
     };
     Box::new(
         ScrollView::new(content)
@@ -465,5 +479,64 @@ mod tests {
             .position()
             .y;
         assert!((offset_after - offset_before).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+    use crate::{
+        event::{Event, MouseEvent, ScrollSource, WheelPhase},
+        geometry::Size,
+        pipeline::RenderingPipeline,
+        prelude::*,
+    };
+    #[test]
+    fn stable_keys_preserve_visible_item_through_prepend_and_removal() {
+        let items = State::new(
+            crate::generate_state_id(),
+            (0..100usize).collect::<Vec<_>>(),
+        );
+        let list = ListView::new(
+            items.clone(),
+            State::new(crate::generate_state_id(), None),
+            20.,
+            |_, id, _| {
+                Rectangle::new()
+                    .fill(Color::rgb(id as u8, 20, 50))
+                    .frame(200., 20.)
+            },
+        )
+        .item_key(|id| (*id).into());
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new("Anchor", list.frame(200., 100.))
+                .decorated(false)
+                .size(Size::new(200., 100.))
+                .create_element(),
+        );
+        pipeline.resize(Size::new(200., 100.));
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            x: 20,
+            y: 20,
+            delta_x: 0,
+            delta_y: -400,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
+        }));
+        let before = pipeline.render_with_damage().unwrap().0.get_pixel(20, 1);
+        items.set((200..210).chain(0..100).collect());
+        let after = pipeline.render_with_damage().unwrap().0.get_pixel(20, 1);
+        assert_eq!(
+            before, after,
+            "Insertion above the viewport should preserve its visible item"
+        );
+        items.set((0..100).collect());
+        assert_eq!(
+            before,
+            pipeline.render_with_damage().unwrap().0.get_pixel(20, 1)
+        );
     }
 }

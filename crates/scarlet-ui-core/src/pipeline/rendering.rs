@@ -94,6 +94,8 @@ pub struct RenderingPipeline {
     layer_store: LayerStore,
     retained_ctx: PaintContext<'static>,
     dirty_scratch: DirtyScratch,
+    retained_paint: super::retained_paint::RetainedPaint,
+    retained_backdrop: Option<(WindowBackdrop, Point, Arc<crate::renderer::DisplayList>)>,
     #[cfg(test)]
     paint_test_counters: PaintTestCounters,
 }
@@ -129,6 +131,8 @@ impl RenderingPipeline {
             layer_store: LayerStore::new(),
             retained_ctx: PaintContext::new(),
             dirty_scratch: DirtyScratch::default(),
+            retained_paint: Default::default(),
+            retained_backdrop: None,
             #[cfg(test)]
             paint_test_counters: PaintTestCounters::default(),
         }
@@ -162,6 +166,8 @@ impl RenderingPipeline {
         self.window_backdrop_cache = None;
         self.layer_store.clear();
         self.retained_ctx.clear();
+        self.retained_paint.clear();
+        self.retained_backdrop = None;
     }
 
     /// Return this pipeline's owner ID.
@@ -203,6 +209,8 @@ impl RenderingPipeline {
         self.window_backdrop_cache = None;
         self.layer_store.clear();
         self.retained_ctx.clear();
+        self.retained_paint.clear();
+        self.retained_backdrop = None;
     }
 
     /// Set the output scale in milli-units.
@@ -228,6 +236,8 @@ impl RenderingPipeline {
         self.window_backdrop_cache = None;
         self.layer_store.clear();
         self.retained_ctx.clear();
+        self.retained_paint.clear();
+        self.retained_backdrop = None;
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
         }
@@ -244,6 +254,9 @@ impl RenderingPipeline {
     /// Set the root Element
     pub fn set_root(&mut self, root_element: Box<dyn Element>) {
         self.element_tree.set_root(root_element);
+        self.retained_paint.clear();
+        self.retained_backdrop = None;
+        self.paint_needs_full = true;
         self.paint_caches.clear();
         self.window_backdrop_cache = None;
         self.layer_store.clear();
@@ -309,6 +322,8 @@ impl RenderingPipeline {
         self.window_backdrop_cache = None;
         self.layer_store.clear();
         self.retained_ctx.clear();
+        self.retained_paint.clear();
+        self.retained_backdrop = None;
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
         }
@@ -547,6 +562,8 @@ impl RenderingPipeline {
         self.window_backdrop_cache = None;
         self.layer_store.clear();
         self.retained_ctx.clear();
+        self.retained_paint.clear();
+        self.retained_backdrop = None;
 
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
@@ -880,6 +897,24 @@ impl RenderingPipeline {
             );
             self.store_paint_damage(partial);
         }
+        if self.paint_backend.supports_retained_display_lists() {
+            if let Some(root) = self.element_tree.root() {
+                if force_full || !self.pipeline_owner.last_paint_ids().is_empty() {
+                    self.retained_paint.sync_tree(
+                        root,
+                        self.pipeline_owner.last_paint_ids(),
+                        self.pipeline_owner.last_self_paint_ids(),
+                        self.pipeline_owner.last_children_ids(),
+                        force_full,
+                    );
+                }
+                for id in self.pipeline_owner.last_composite_ids() {
+                    if let Some(element) = self.element_tree.find_element(*id) {
+                        self.retained_paint.sync_composite(element);
+                    }
+                }
+            }
+        }
         if self.paint_damage.as_ref().is_some_and(Vec::is_empty) {
             return Ok(PresentedFrame::Idle);
         }
@@ -891,13 +926,39 @@ impl RenderingPipeline {
         if let Some(root) = self.element_tree.root() {
             if let Some((backdrop, origin)) = Self::find_deferred_window_backdrop(root, Point::ZERO)
             {
-                backdrop.paint(&mut ctx, origin);
+                if self.paint_backend.supports_retained_display_lists() {
+                    if self
+                        .retained_backdrop
+                        .as_ref()
+                        .is_none_or(|(old, old_origin, _)| {
+                            *old != backdrop || *old_origin != origin
+                        })
+                    {
+                        let mut context = PaintContext::new();
+                        backdrop.paint(&mut context, Point::ZERO);
+                        self.retained_backdrop =
+                            Some((backdrop, origin, context.into_display_list()));
+                    }
+                    ctx.draw_display_list(
+                        origin,
+                        Arc::clone(&self.retained_backdrop.as_ref().unwrap().2),
+                    );
+                } else {
+                    backdrop.paint(&mut ctx, origin);
+                }
             }
-            Self::walk_direct_paint(&mut ctx, root, Point::ZERO, damage);
+            if self.paint_backend.supports_retained_display_lists() {
+                self.retained_paint.replay(&mut ctx, damage);
+            } else {
+                Self::walk_direct_paint(&mut ctx, root, Point::ZERO, damage);
+            }
             Self::paint_select_overlays(&mut ctx, root, Point::ZERO, damage);
         }
         self.last_paint_bounds.clear();
-        if let Some(root) = self.element_tree.root() {
+        if self.paint_backend.supports_retained_display_lists() {
+            self.retained_paint
+                .collect_bounds(&mut self.last_paint_bounds);
+        } else if let Some(root) = self.element_tree.root() {
             Self::collect_paint_bounds(root, Point::ZERO, None, &mut self.last_paint_bounds);
         }
         self.paint_needs_full = false;
@@ -2499,7 +2560,7 @@ impl RenderingPipeline {
         painted
     }
 
-    fn clip_for_element(element: &dyn Element, abs: Point) -> Option<(Rect, f32)> {
+    pub(super) fn clip_for_element(element: &dyn Element, abs: Point) -> Option<(Rect, f32)> {
         element
             .render_object()
             .and_then(|render_object| render_object.clip_bounds(abs))
@@ -2516,7 +2577,7 @@ impl RenderingPipeline {
             .is_some_and(|select| select.is_expanded())
     }
 
-    fn paint_element_self<'a>(
+    pub(super) fn paint_element_self<'a>(
         ctx: &mut PaintContext<'a>,
         element: &'a dyn Element,
         abs: Point,
@@ -2552,7 +2613,7 @@ impl RenderingPipeline {
                 .any(|child| Self::subtree_emits_paint_extension(child.as_ref()))
     }
 
-    fn paint_element_overlay<'a>(
+    pub(super) fn paint_element_overlay<'a>(
         ctx: &mut PaintContext<'a>,
         element: &'a dyn Element,
         abs: Point,
@@ -2615,7 +2676,7 @@ impl RenderingPipeline {
         }
     }
 
-    fn element_paint_bounds(element: &dyn Element, absolute_origin: Point) -> Rect {
+    pub(super) fn element_paint_bounds(element: &dyn Element, absolute_origin: Point) -> Rect {
         let bounds = element.bounds();
         let mut width = bounds.size.width;
         let mut height = bounds.size.height;
@@ -2852,7 +2913,7 @@ impl RenderingPipeline {
         }
     }
 
-    fn overlaps_any(rect: Rect, rects: &[Rect]) -> bool {
+    pub(super) fn overlaps_any(rect: Rect, rects: &[Rect]) -> bool {
         rects.iter().any(|r| rect.overlaps(r))
     }
 

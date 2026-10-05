@@ -45,3 +45,7 @@ required-features = ["platform-winit"]
 [[example]]
 name = "scroll-stress"
 required-features = ["platform-winit"]
+
+[[example]]
+name = "scroll-benchmark"
+required-features = ["platform-winit"]
