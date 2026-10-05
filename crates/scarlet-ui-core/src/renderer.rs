@@ -319,8 +319,10 @@ impl<'a> PaintContext<'a> {
                     .into_iter()
                     .map(|buffer| match buffer {
                         PaintBuffer::Shared(buffer) => PaintBuffer::Shared(buffer),
-                        PaintBuffer::Temporary(buffer) => PaintBuffer::Temporary(buffer),
-                        PaintBuffer::Borrowed(buffer) => PaintBuffer::Temporary(buffer.clone()),
+                        PaintBuffer::Temporary(buffer) => PaintBuffer::Shared(Arc::new(buffer)),
+                        PaintBuffer::Borrowed(buffer) => {
+                            PaintBuffer::Shared(Arc::new(buffer.clone()))
+                        }
                     })
                     .collect(),
             },
@@ -363,9 +365,12 @@ impl<'a> PaintContext<'a> {
             if let PaintCommand::DrawBuffer { buffer_idx, .. }
             | PaintCommand::DrawBufferRect { buffer_idx, .. } = &mut command
             {
-                if let Some(buffer) = self.buffer(BufferHandle(*buffer_idx)) {
+                if let Some(buffer) = self.buffers.get(*buffer_idx) {
                     *buffer_idx = result.buffers.len();
-                    result.buffers.push(PaintBuffer::Borrowed(buffer));
+                    result.buffers.push(match buffer {
+                        PaintBuffer::Shared(buffer) => PaintBuffer::Shared(Arc::clone(buffer)),
+                        other => PaintBuffer::Borrowed(other.as_buffer()),
+                    });
                 } else {
                     continue;
                 }
@@ -2345,6 +2350,20 @@ mod tests {
     use super::*;
     use crate::testing::alloc_counter::measure_allocations;
 
+    #[test]
+    fn grouped_display_lists_preserve_shared_image_identity() {
+        let buffer = Arc::new(Buffer::new(Size::new(32., 32.)));
+        let mut local = PaintContext::new();
+        let rect = Rect::from_xywh(0., 0., 32., 32.);
+        local.draw_buffer_rect_shared(rect, rect, Arc::clone(&buffer), 1.);
+        let mut group = PaintContext::new();
+        group.draw_display_list(Point::new(10., 20.), local.into_display_list());
+        let recording = group.flattened().into_display_list();
+        assert!(
+            matches!(&recording.context().buffers()[0],PaintBuffer::Shared(shared) if Arc::ptr_eq(shared,&buffer)),
+            "grouping must share image pixels and resource identity, rather than clone a borrowed snapshot again"
+        );
+    }
     #[test]
     fn path_helpers() {
         let r = path_rect(Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 20.0)));

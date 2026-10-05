@@ -164,7 +164,7 @@ compare both repetitions and phase measurements, not one average FPS. Do not
 run other builds or GPU tests concurrently. Cold startup outliers remain in the
 raw logs; warm measured results are not a guarantee of cold-frame latency.
 
-Regression checks for this change: 409 core tests, 23 doctests, 74 SGFX renderer
+Regression checks for this change: 410 core tests, 23 doctests, 74 SGFX renderer
 tests and 26 Winit tests passed serially. SGFX WGPU's 42 tests passed on Apple M3
 Pro/Metal, including pixel readback after 100 queued submissions with differing
 draw uniforms and two render targets. Scarlet AArch64/RISC-V64 release checks
@@ -216,3 +216,8 @@ median frame time 3.406 ms, p95 25.312 ms, p99 32.895 ms and max 130.281 ms;
 input dispatch median 59 us / p95 493 us. This mixed session is not a gesture-only
 FPS or latency claim. The clear-only clip regression found during GUI startup
 was fixed and covered by a dedicated test before this successful session.
+
+Grouped recordings also preserve the original shared image `Arc<Buffer>` through
+flattening. A resource-identity regression test prevents grouping from turning
+shared covers back into copied borrowed snapshots. The recorded comparisons
+precede this last sharing fix; it does not change geometry or the cache limits.
