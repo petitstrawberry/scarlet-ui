@@ -27,6 +27,7 @@ pub struct ListView<T: Clone + 'static> {
     selected: State<Option<usize>>,
     row_height: f32,
     row_builder: RowBuilder<T>,
+    content_bottom_inset: f32,
     item_key: Option<Rc<dyn Fn(&T) -> crate::view::ViewKey>>,
 }
 
@@ -59,6 +60,7 @@ impl<T: Clone + 'static> ListView<T> {
             row_builder: Rc::new(move |index, item, selected| {
                 Box::new(row_builder(index, item, selected))
             }),
+            content_bottom_inset: 0.0,
             item_key: None,
         }
     }
@@ -66,6 +68,17 @@ impl<T: Clone + 'static> ListView<T> {
     /// Preserve a visible model item through insertions/removals above it.
     pub fn item_key(mut self, key: impl Fn(&T) -> crate::view::ViewKey + 'static) -> Self {
         self.item_key = Some(Rc::new(key));
+        self
+    }
+
+    /// Add scrollable space below the final item for floating controls.
+    /// Unlike outer padding, this keeps the viewport behind the overlay.
+    pub fn content_bottom_inset(mut self, inset: f32) -> Self {
+        self.content_bottom_inset = if inset.is_finite() {
+            inset.max(0.0)
+        } else {
+            0.0
+        };
         self
     }
 
@@ -181,6 +194,7 @@ fn build_list_child<T: Clone + 'static>(view: &ListView<T>) -> Box<dyn View> {
     };
     Box::new(
         ScrollView::new(content)
+            .content_bottom_inset(view.content_bottom_inset)
             .scroll_to_index_state(view.selected.clone(), row_height)
             .scrollbar_visibility(ScrollbarVisibility::Automatic),
     )
@@ -304,6 +318,56 @@ mod tests {
         }));
         pipeline.render_with_damage();
         assert_eq!(scroll_geometry::<usize>(&pipeline).2.1, 2900.);
+    }
+
+    #[test]
+    fn floating_overlay_clearance_reveals_final_row_and_clamps_after_shrink() {
+        let items = State::new(
+            crate::state::generate_state_id(),
+            (0usize..100).collect::<Vec<_>>(),
+        );
+        let selected = State::new(crate::state::generate_state_id(), None);
+        let list = ListView::new(items.clone(), selected.clone(), 20., |_, item, _| {
+            crate::views::Rectangle::new()
+                .fill(Color::rgb(item as u8, 20, 50))
+                .frame(f32::INFINITY, 20.)
+        })
+        .content_bottom_inset(40.);
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new("Inset", list.frame(200., 100.))
+                .decorated(false)
+                .size(Size::new(200., 100.))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: -100_000,
+            x: 20,
+            y: 20,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
+        }));
+        let last_pixel = pipeline.render_with_damage().unwrap().0.get_pixel(20, 50);
+        for _ in 0..4 {
+            pipeline.render_with_damage();
+        }
+        let (viewport, content, offset) = scroll_geometry::<usize>(&pipeline);
+        assert_eq!(viewport.height, 100.);
+        assert_eq!(content.height, 2040.);
+        assert_eq!(offset.1, 1940.);
+        // Row 99 ends exactly above the 40px overlay, rather than underneath it.
+        assert_eq!(last_pixel, Some(Color::rgb(99, 20, 50).to_bgra()));
+        selected.set(None);
+        items.set((0..3).collect());
+        for _ in 0..4 {
+            pipeline.render_with_damage();
+        }
+        assert_eq!(scroll_geometry::<usize>(&pipeline).1.height, 100.);
+        assert_eq!(scroll_geometry::<usize>(&pipeline).2.1, 0.);
+        pipeline.teardown();
     }
 
     #[test]

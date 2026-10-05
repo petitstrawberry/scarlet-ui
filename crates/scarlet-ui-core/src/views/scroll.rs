@@ -103,6 +103,7 @@ pub struct ScrollView<V: View> {
     inner: V,
     axes: ScrollAxis,
     content_size: Option<Size>,
+    content_bottom_inset: f32,
     wheel_scale: f32,
     horizontal_wheel_direction: ScrollWheelDirection,
     vertical_wheel_direction: ScrollWheelDirection,
@@ -132,6 +133,7 @@ impl<V: View> ScrollView<V> {
             inner,
             axes: ScrollAxis::Vertical,
             content_size: None,
+            content_bottom_inset: 0.0,
             wheel_scale: DEFAULT_WHEEL_SENSITIVITY,
             horizontal_wheel_direction: ScrollWheelDirection::Normal,
             vertical_wheel_direction: ScrollWheelDirection::Normal,
@@ -207,6 +209,13 @@ impl<V: View> ScrollView<V> {
     /// Updated scroll view.
     pub fn content_size(mut self, width: f32, height: f32) -> Self {
         self.content_size = Some(Size::new(width.max(0.0), height.max(0.0)));
+        self
+    }
+
+    /// Scrollable clearance below the final item for a floating overlay.
+    /// The viewport and virtual child geometry remain unchanged.
+    pub fn content_bottom_inset(mut self, inset: f32) -> Self {
+        self.content_bottom_inset = sanitize_non_negative(inset, 0.0);
         self
     }
 
@@ -585,6 +594,7 @@ impl<V: View + Clone + 'static> View for ScrollView<V> {
 pub struct ScrollViewRenderObject<V: View> {
     axes: ScrollAxis,
     configured_content_size: Option<Size>,
+    content_bottom_inset: f32,
     wheel_scale: f32,
     horizontal_wheel_direction: ScrollWheelDirection,
     vertical_wheel_direction: ScrollWheelDirection,
@@ -622,6 +632,7 @@ impl<V: View> ScrollViewRenderObject<V> {
         Self {
             axes,
             configured_content_size: content_size,
+            content_bottom_inset: 0.0,
             wheel_scale,
             horizontal_wheel_direction: ScrollWheelDirection::Normal,
             vertical_wheel_direction: ScrollWheelDirection::Normal,
@@ -671,6 +682,7 @@ impl<V: View> ScrollViewRenderObject<V> {
             render_object.exclusive_axis_lock_ratio,
             render_object.exclusive_axis_lock_min_delta,
         ) = view.exclusive_wheel_axis_lock_values();
+        render_object.content_bottom_inset = view.content_bottom_inset;
         render_object.scrollbar_visibility = view.scrollbar_visibility_value();
         render_object.scrollbar_color = view.scrollbar_color_value();
         render_object.selection_target = view.current_selection_target();
@@ -744,7 +756,7 @@ impl<V: View> ScrollViewRenderObject<V> {
         let viewport_extent = if horizontal {
             self.viewport_size.width
         } else {
-            self.viewport_size.height
+            (self.viewport_size.height - self.content_bottom_inset).max(1.0)
         };
         let viewport_bottom = viewport_top + viewport_extent;
         let next_offset = if item_top < viewport_top {
@@ -1006,6 +1018,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let height = finite_viewport_axis(constraints.min_height, constraints.max_height);
         self.viewport_size = Size::new(width, height);
         self.content_size = self.configured_content_size.unwrap_or(self.viewport_size);
+        self.content_size.height += self.content_bottom_inset;
         self.clamp_offsets();
         self.viewport_size
     }
@@ -1033,6 +1046,11 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
                 self.viewport_size.height,
             ));
             self.content_size = child.layout(child_constraints);
+            self.content_size.height = self.content_size.height.max(
+                self.configured_content_size
+                    .map(|size| size.height)
+                    .unwrap_or(0.0),
+            ) + self.content_bottom_inset;
             if !self.selection_scroll_pending {
                 if let Some(anchor) = &self.anchor {
                     if let Some(position) = child.resolve_scroll_anchor(&anchor.key) {
@@ -1095,6 +1113,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
 
         let old_axes = self.axes;
         let old_content_size = self.configured_content_size;
+        let old_bottom_inset = self.content_bottom_inset;
         let old_wheel_scale = self.wheel_scale;
         let old_horizontal_wheel_direction = self.horizontal_wheel_direction;
         let old_vertical_wheel_direction = self.vertical_wheel_direction;
@@ -1109,6 +1128,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
 
         self.axes = scroll_view.scroll_axes();
         self.configured_content_size = scroll_view.configured_content_size();
+        self.content_bottom_inset = scroll_view.content_bottom_inset;
         self.wheel_scale = scroll_view.wheel_scale_value();
         (
             self.horizontal_wheel_direction,
@@ -1122,7 +1142,10 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         self.scrollbar_visibility = scroll_view.scrollbar_visibility_value();
         self.scrollbar_color = scroll_view.scrollbar_color_value();
         self.selection_target = scroll_view.current_selection_target();
-        if self.selection_target != old_selection_target && self.selection_target.is_some() {
+        if (self.selection_target != old_selection_target
+            || self.content_bottom_inset != old_bottom_inset)
+            && self.selection_target.is_some()
+        {
             self.selection_scroll_pending = true;
         }
         // A visible selection does not require layout. Keep the request pending
@@ -1138,6 +1161,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
 
         if self.axes != old_axes
             || self.configured_content_size != old_content_size
+            || self.content_bottom_inset != old_bottom_inset
             || (self.wheel_scale - old_wheel_scale).abs() > 0.001
             || self.horizontal_wheel_direction != old_horizontal_wheel_direction
             || self.vertical_wheel_direction != old_vertical_wheel_direction
@@ -1780,6 +1804,27 @@ mod tests {
             Phase::Target,
         ));
         assert_eq!(render_object.offset(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn selected_item_is_revealed_above_floating_overlay_with_explicit_content_size() {
+        let view = ScrollView::new(Text::new("content"))
+            .content_size(100., 2000.)
+            .content_bottom_inset(40.)
+            .scroll_to_index(Some(99), 20.);
+        let mut render = ScrollViewRenderObject::<Text>::from_view(&view);
+        let mut children = alloc::vec![Text::new("content").create_element()];
+        render.layout_with_children(LayoutConstraints::tight(100., 100.), &mut children);
+        assert_eq!(render.content_size().height, 2040.);
+        assert_eq!(render.offset().1, 1940.);
+        let wider_overlay = view.clone().content_bottom_inset(60.);
+        assert!(matches!(
+            render.update(&wider_overlay),
+            crate::element::UpdateResult::Updated
+        ));
+        render.layout_with_children(LayoutConstraints::tight(100., 100.), &mut children);
+        assert_eq!(render.content_size().height, 2060.);
+        assert_eq!(render.offset().1, 1960.);
     }
 
     #[test]

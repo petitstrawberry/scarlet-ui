@@ -37,6 +37,7 @@ pub struct GridView<T: Clone + 'static> {
     row_spacing: f32,
     minimum_cell_width: Option<f32>,
     cell_builder: CellBuilder<T>,
+    content_bottom_inset: f32,
     item_key: Option<Rc<dyn Fn(&T) -> crate::view::ViewKey>>,
 }
 
@@ -75,6 +76,7 @@ impl<T: Clone + 'static> GridView<T> {
             cell_builder: Rc::new(move |index, item, selected| {
                 Box::new(cell_builder(index, item, selected))
             }),
+            content_bottom_inset: 0.0,
             item_key: None,
         }
     }
@@ -82,6 +84,17 @@ impl<T: Clone + 'static> GridView<T> {
     /// Stable model identities for scroll anchoring through collection changes.
     pub fn item_key(mut self, key: impl Fn(&T) -> crate::view::ViewKey + 'static) -> Self {
         self.item_key = Some(Rc::new(key));
+        self
+    }
+
+    /// Add scrollable space below the final item for floating controls.
+    /// Unlike outer padding, this keeps the viewport behind the overlay.
+    pub fn content_bottom_inset(mut self, inset: f32) -> Self {
+        self.content_bottom_inset = if inset.is_finite() {
+            inset.max(0.0)
+        } else {
+            0.0
+        };
         self
     }
 
@@ -695,6 +708,7 @@ impl<T: Clone + 'static> Element for GridContentElement<T> {
 fn build_grid_child<T: Clone + 'static>(view: &GridView<T>) -> Box<dyn View> {
     Box::new(
         ScrollView::new(GridContentView { grid: view.clone() })
+            .content_bottom_inset(view.content_bottom_inset)
             .scrollbar_visibility(ScrollbarVisibility::Automatic),
     )
 }
@@ -790,6 +804,72 @@ mod tests {
         pipeline.request_redraw();
         let expected = pipeline.render_with_damage().unwrap().0.get_pixel(20, 120);
         assert_eq!(expected, Some(Color::rgb(96, 20, 50).to_bgra()));
+    }
+
+    #[test]
+    fn floating_clearance_exposes_the_last_grid_row_and_clamps_after_shrink() {
+        use super::GridContentView;
+        use crate::views::scroll::ScrollViewRenderObject;
+        fn offset(element: &dyn crate::element::Element) -> Option<f32> {
+            element
+                .render_object()
+                .and_then(|render| {
+                    render
+                        .as_any()
+                        .downcast_ref::<ScrollViewRenderObject<GridContentView<usize>>>()
+                })
+                .map(|render| render.offset().1)
+                .or_else(|| {
+                    element
+                        .children()
+                        .iter()
+                        .find_map(|child| offset(child.as_ref()))
+                })
+        }
+        let items = State::new(
+            crate::state::generate_state_id(),
+            (0usize..100).collect::<Vec<_>>(),
+        );
+        let grid = GridView::new(
+            items.clone(),
+            State::new(crate::state::generate_state_id(), None),
+            3,
+            40.,
+            |_, item, _| {
+                crate::views::Rectangle::new()
+                    .fill(Color::rgb(item as u8, 20, 50))
+                    .frame(f32::INFINITY, 40.)
+            },
+        )
+        .row_spacing(4.)
+        .content_bottom_inset(60.)
+        .frame(240., 180.);
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            crate::views::Window::new("Inset grid", grid)
+                .decorated(false)
+                .size(crate::geometry::Size::new(240., 180.))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: -100_000,
+            x: 20,
+            y: 20,
+            phase: crate::event::WheelPhase::Moved,
+            source: crate::event::ScrollSource::Trackpad,
+        }));
+        let pixel = pipeline.render_with_damage().unwrap().0.get_pixel(20, 100);
+        assert_eq!(pixel, Some(Color::rgb(99, 20, 50).to_bgra()));
+        assert_eq!(offset(pipeline.element_tree().root().unwrap()), Some(1372.));
+        items.set((0..4).collect());
+        for _ in 0..4 {
+            pipeline.render_with_damage();
+        }
+        assert_eq!(offset(pipeline.element_tree().root().unwrap()), Some(0.));
+        pipeline.teardown();
     }
 
     #[test]
