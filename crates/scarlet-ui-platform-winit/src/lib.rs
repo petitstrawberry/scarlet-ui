@@ -24,7 +24,7 @@ use scarlet_ui_core::input_environment::{
     InputEnvironment, WindowingMode, current_input_environment,
 };
 use scarlet_ui_core::platform::{
-    PlatformBackend, PlatformWindow, WindowCreateRequest, WindowDecoration,
+    PlatformBackend, PlatformWindow, PlatformWindowDefaults, WindowCreateRequest, WindowDecoration,
 };
 #[cfg(feature = "sgfx")]
 use scarlet_ui_core::renderer::PaintBackend;
@@ -204,7 +204,14 @@ fn configure_sgfx_surface_alpha(window: &WinitWindow, transparent: bool) {
 #[cfg(all(feature = "sgfx", not(target_os = "macos")))]
 fn configure_sgfx_surface_alpha(_window: &WinitWindow, _transparent: bool) {}
 
+const WINIT_WINDOW_DEFAULTS: PlatformWindowDefaults =
+    PlatformWindowDefaults::new(false).with_decoration(WindowDecoration::SYSTEM);
+
 impl PlatformBackend for WinitBackend {
+    fn window_defaults(&mut self) -> PlatformWindowDefaults {
+        WINIT_WINDOW_DEFAULTS
+    }
+
     fn initial_input_environment(&mut self) -> InputEnvironment {
         startup_input_environment()
     }
@@ -1173,8 +1180,29 @@ fn apply_platform_window_decoration(
     attributes
 }
 
+fn window_attributes(request: &WindowCreateRequest) -> Result<WindowAttributes> {
+    let decoration = request
+        .decoration
+        .resolve_with(WINIT_WINDOW_DEFAULTS.decoration);
+    validate_window_decoration(decoration)?;
+    let mut attributes = WindowAttributes::default()
+        .with_title(request.title.clone())
+        .with_decorations(system_window_decorations_enabled(decoration))
+        .with_transparent(!request.opaque)
+        .with_inner_size(LogicalSize::new(request.size.width, request.size.height))
+        .with_resizable(request.size_limits.resizable);
+    if let Some(size) = request.size_limits.min {
+        attributes = attributes.with_min_inner_size(LogicalSize::new(size.width, size.height));
+    }
+    if let Some(size) = request.size_limits.max {
+        attributes = attributes.with_max_inner_size(LogicalSize::new(size.width, size.height));
+    }
+    Ok(apply_platform_window_decoration(attributes, decoration))
+}
+
 impl WinitPlatformWindow {
-    fn create(shared: Rc<WinitSharedState>, request: WindowCreateRequest) -> Result<Self> {
+    fn create(shared: Rc<WinitSharedState>, mut request: WindowCreateRequest) -> Result<Self> {
+        request.decoration = request.decoration.resolve_with(WindowDecoration::SYSTEM);
         validate_window_decoration(request.decoration)?;
         let placement = request.placement;
         let requested_position = match request.placement {
@@ -1184,12 +1212,7 @@ impl WinitPlatformWindow {
                 Some(Position::Logical(LogicalPosition::new(x as f64, y as f64)))
             }
         };
-        let attributes = WindowAttributes::default()
-            .with_title(request.title)
-            .with_decorations(system_window_decorations_enabled(request.decoration))
-            .with_transparent(!request.opaque)
-            .with_inner_size(LogicalSize::new(request.size.width, request.size.height));
-        let mut attributes = apply_platform_window_decoration(attributes, request.decoration);
+        let mut attributes = window_attributes(&request)?;
         if let Some(position) = requested_position {
             attributes = attributes.with_position(position);
         }
@@ -1340,7 +1363,7 @@ impl PlatformWindow for WinitPlatformWindow {
                 focus_on_create: true,
                 active_on_focus: true,
                 opaque: true,
-                decoration: WindowDecoration::CUSTOM,
+                decoration: WindowDecoration::SYSTEM,
                 placement: scarlet_ui_core::platform::WindowPlacement::Default,
                 window_geometry_insets: scarlet_ui_core::geometry::EdgeInsets::ZERO,
             },
@@ -1844,6 +1867,44 @@ mod tests {
             Some(Event::Keyboard(KeyEvent::Released { .. }))
         ));
         assert!(state.pop().is_none());
+    }
+
+    #[test]
+    fn platform_defaults_and_window_limits_reach_native_attributes() {
+        assert_eq!(WINIT_WINDOW_DEFAULTS.decoration, WindowDecoration::SYSTEM);
+        let mut request = WindowCreateRequest {
+            app_id: "test.window".into(),
+            title: "Native".into(),
+            size: Size::new(800., 600.),
+            size_limits: scarlet_ui_core::element::WindowSizeLimits {
+                min: Some(Size::new(300., 200.)),
+                max: Some(Size::new(1200., 900.)),
+                resizable: false,
+            },
+            window_type: 0,
+            menu_titles: String::new(),
+            focus_on_create: true,
+            active_on_focus: true,
+            opaque: true,
+            decoration: WindowDecoration::DEFAULT,
+            placement: scarlet_ui_core::platform::WindowPlacement::Default,
+            window_geometry_insets: scarlet_ui_core::geometry::EdgeInsets::ZERO,
+        };
+        let attributes = window_attributes(&request).unwrap();
+        assert!(attributes.decorations);
+        assert!(!attributes.resizable);
+        assert_eq!(
+            attributes.min_inner_size,
+            Some(LogicalSize::new(300f32, 200f32).into())
+        );
+        assert_eq!(
+            attributes.max_inner_size,
+            Some(LogicalSize::new(1200f32, 900f32).into())
+        );
+        for explicit in [WindowDecoration::CUSTOM, WindowDecoration::NONE] {
+            request.decoration = explicit;
+            assert!(!window_attributes(&request).unwrap().decorations);
+        }
     }
 
     #[test]

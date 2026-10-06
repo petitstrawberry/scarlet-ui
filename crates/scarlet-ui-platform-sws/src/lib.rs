@@ -854,7 +854,11 @@ impl PlatformBackend for SwsBackend {
             .unwrap_or(DEFAULT_SCALE_MILLI)
     }
 
-    fn create_window(&mut self, request: WindowCreateRequest) -> Result<Box<dyn PlatformWindow>> {
+    fn create_window(
+        &mut self,
+        mut request: WindowCreateRequest,
+    ) -> Result<Box<dyn PlatformWindow>> {
+        request.decoration = request.decoration.resolve_with(WindowDecoration::CUSTOM);
         validate_window_decoration(request.decoration)?;
         let conn = self.connection()?;
         Ok(Box::new(

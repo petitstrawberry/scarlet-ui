@@ -12,14 +12,16 @@ use crate::renderer::{CompositorBackendKind, PaintBackend, RendererBackendKind};
 use alloc::boxed::Box;
 use alloc::string::String;
 use core::any::Any;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 /// Platform-specific defaults applied while building top-level windows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlatformWindowDefaults {
     /// Whether ordinary custom-framed windows receive ScarletUI's standard shadow.
     pub standard_shadow: bool,
+    /// Concrete frame and titlebar ownership preferred by this backend.
+    pub decoration: WindowDecoration,
 }
 
 impl PlatformWindowDefaults {
@@ -33,14 +35,57 @@ impl PlatformWindowDefaults {
     ///
     /// A platform-default snapshot.
     pub const fn new(standard_shadow: bool) -> Self {
-        Self { standard_shadow }
+        Self {
+            standard_shadow,
+            decoration: WindowDecoration::CUSTOM,
+        }
+    }
+
+    /// Select the backend's preferred decoration without changing explicit app choices.
+    pub const fn with_decoration(mut self, decoration: WindowDecoration) -> Self {
+        self.decoration = decoration.resolve_with(WindowDecoration::CUSTOM);
+        self
+    }
+}
+
+impl Default for PlatformWindowDefaults {
+    fn default() -> Self {
+        Self::new(false)
     }
 }
 
 static PLATFORM_STANDARD_WINDOW_SHADOW: AtomicBool = AtomicBool::new(false);
+static PLATFORM_WINDOW_DECORATION: AtomicU8 = AtomicU8::new(0);
 
 pub(crate) fn install_platform_window_defaults(defaults: PlatformWindowDefaults) {
     PLATFORM_STANDARD_WINDOW_SHADOW.store(defaults.standard_shadow, Ordering::Release);
+    let concrete = defaults.decoration.resolve_with(WindowDecoration::CUSTOM);
+    let frame = match concrete.frame {
+        WindowFrame::System => 1,
+        WindowFrame::None => 2,
+        _ => 0,
+    };
+    let title = match concrete.title_bar {
+        WindowTitleBar::System => 1,
+        WindowTitleBar::None => 2,
+        _ => 0,
+    };
+    PLATFORM_WINDOW_DECORATION.store(frame | (title << 2), Ordering::Release);
+}
+
+fn platform_window_decoration() -> WindowDecoration {
+    let bits = PLATFORM_WINDOW_DECORATION.load(Ordering::Acquire);
+    let frame = match bits & 3 {
+        1 => WindowFrame::System,
+        2 => WindowFrame::None,
+        _ => WindowFrame::Custom,
+    };
+    let title = match (bits >> 2) & 3 {
+        1 => WindowTitleBar::System,
+        2 => WindowTitleBar::None,
+        _ => WindowTitleBar::Custom,
+    };
+    WindowDecoration::new(frame, title)
 }
 
 pub(crate) fn platform_standard_window_shadow() -> bool {
@@ -66,8 +111,10 @@ pub enum WindowPlacement {
 /// Selects who owns the outer frame around a top-level window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WindowFrame {
-    /// ScarletUI draws the frame inside the window surface.
+    /// Use the current backend's preferred frame.
     #[default]
+    PlatformDefault,
+    /// ScarletUI draws the frame inside the window surface.
     Custom,
     /// The platform window manager draws its standard frame.
     System,
@@ -77,21 +124,27 @@ pub enum WindowFrame {
 
 impl WindowFrame {
     /// Return whether ScarletUI owns and draws the frame.
-    pub const fn is_custom(self) -> bool {
+    pub fn is_custom(self) -> bool {
         matches!(self, Self::Custom)
+            || matches!(self, Self::PlatformDefault)
+                && platform_window_decoration().frame.is_custom()
     }
 
     /// Return whether the platform window manager owns the frame.
-    pub const fn is_system(self) -> bool {
+    pub fn is_system(self) -> bool {
         matches!(self, Self::System)
+            || matches!(self, Self::PlatformDefault)
+                && platform_window_decoration().frame.is_system()
     }
 }
 
 /// Selects who owns the titlebar of a top-level window.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WindowTitleBar {
-    /// ScarletUI draws the titlebar and window controls.
+    /// Use the current backend's preferred titlebar.
     #[default]
+    PlatformDefault,
+    /// ScarletUI draws the titlebar and window controls.
     Custom,
     /// The platform window manager draws its standard titlebar and controls.
     System,
@@ -101,13 +154,17 @@ pub enum WindowTitleBar {
 
 impl WindowTitleBar {
     /// Return whether ScarletUI owns and draws the titlebar.
-    pub const fn is_custom(self) -> bool {
+    pub fn is_custom(self) -> bool {
         matches!(self, Self::Custom)
+            || matches!(self, Self::PlatformDefault)
+                && platform_window_decoration().title_bar.is_custom()
     }
 
     /// Return whether the platform window manager owns the titlebar.
-    pub const fn is_system(self) -> bool {
+    pub fn is_system(self) -> bool {
         matches!(self, Self::System)
+            || matches!(self, Self::PlatformDefault)
+                && platform_window_decoration().title_bar.is_system()
     }
 }
 
@@ -119,6 +176,11 @@ pub struct WindowDecoration {
 }
 
 impl WindowDecoration {
+    /// Resolve ownership when the Window is built for its backend.
+    pub const DEFAULT: Self = Self::new(
+        WindowFrame::PlatformDefault,
+        WindowTitleBar::PlatformDefault,
+    );
     /// ScarletUI draws both the frame and titlebar.
     pub const CUSTOM: Self = Self::new(WindowFrame::Custom, WindowTitleBar::Custom);
     /// The platform window manager draws both the frame and titlebar.
@@ -131,20 +193,46 @@ impl WindowDecoration {
         Self { frame, title_bar }
     }
 
+    /// Resolve backend-dependent fields, retaining all explicit ownership choices.
+    pub const fn resolve_with(self, defaults: Self) -> Self {
+        let frame = match self.frame {
+            WindowFrame::PlatformDefault => match defaults.frame {
+                WindowFrame::PlatformDefault => WindowFrame::Custom,
+                other => other,
+            },
+            other => other,
+        };
+        let title_bar = match self.title_bar {
+            WindowTitleBar::PlatformDefault => match defaults.title_bar {
+                WindowTitleBar::PlatformDefault => WindowTitleBar::Custom,
+                other => other,
+            },
+            other => other,
+        };
+        Self::new(frame, title_bar)
+    }
+
+    /// Resolve ownership using the active application backend.
+    pub fn resolved(self) -> Self {
+        self.resolve_with(platform_window_decoration())
+    }
+
     /// Return whether ScarletUI draws any window chrome.
-    pub const fn has_custom_chrome(self) -> bool {
+    pub fn has_custom_chrome(self) -> bool {
         self.frame.is_custom() || self.title_bar.is_custom()
     }
 
     /// Return whether any visible frame or titlebar is configured.
-    pub const fn is_visible(self) -> bool {
-        !matches!(self.frame, WindowFrame::None) || !matches!(self.title_bar, WindowTitleBar::None)
+    pub fn is_visible(self) -> bool {
+        let concrete = self.resolved();
+        !matches!(concrete.frame, WindowFrame::None)
+            || !matches!(concrete.title_bar, WindowTitleBar::None)
     }
 }
 
 impl Default for WindowDecoration {
     fn default() -> Self {
-        Self::CUSTOM
+        Self::DEFAULT
     }
 }
 

@@ -73,6 +73,23 @@ selected platform backend.
 
 ## Application Model
 
+
+Window decoration defaults are selected by the backend: winit uses system
+frames and titlebars, while SWS uses ScarletUI decorations. The selection is
+resolved when a scene is built, so windows created before `app.run()` also
+receive the backend policy. Explicit `WindowDecoration::CUSTOM`, `SYSTEM`,
+and `NONE` choices remain authoritative.
+
+Window children receive the content area's layout constraints. To track the
+available viewport, expand the content with `.frame(f32::INFINITY, f32::INFINITY)`
+and observe it with `.on_geometry_change(|geometry| geometry.size(), ...)`.
+Geometry callbacks run after layout and report only changed values. Do not
+subtract titlebar heights from `PlatformWindow::size()`: that is the platform
+surface size, including client-rendered chrome and any shadow outsets, whereas
+the child geometry already excludes those. Native decorations are outside the
+winit client surface. Min/max sizes and resizability are forwarded to winit.
+
+
 SWS windows support native gamepad events and optional menu navigation.
 See [gamepad input](docs/GAMEPAD_INPUT.md) for game controls, reset handling,
 and per-window policy.
