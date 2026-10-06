@@ -367,8 +367,8 @@ impl ElementRenderObject for SliderRenderObject {
 
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
         // Slider has fixed height (20px), flexible width
-        let width = if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
-            constraints.max_width.max(constraints.min_width).max(100.0) // Min 100px width
+        let width = if constraints.max_width.is_finite() {
+            constraints.max_width.max(constraints.min_width).max(0.0)
         } else {
             constraints.min_width.max(200.0)
         };
@@ -503,6 +503,20 @@ mod tests {
     use super::*;
     use crate::element::LayoutConstraints;
     use crate::renderer::PaintCommand;
+
+    #[test]
+    fn narrow_sliders_respect_allocated_width_and_keep_their_value() {
+        let mut slider = SliderRenderObject::new(0.5, 0.0, 1.0, false);
+        for width in [200.0, 72.0, 24.0, 0.0, 200.0] {
+            let size = slider.layout(LayoutConstraints::tight(width, style::metrics().slider_height));
+            assert_eq!(size.width, width);
+            assert_eq!(slider.value, 0.5);
+            if width >= 24.0 {
+                let (start, track_width) = slider.track_metrics();
+                assert!(start >= 0.0 && start + track_width <= width);
+            }
+        }
+    }
 
     #[test]
     fn thumb_hairline_is_opaque_on_arbitrary_parent_surfaces() {
