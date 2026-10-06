@@ -7,7 +7,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::any::Any;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::num::NonZeroU32;
 use core::sync::atomic::{AtomicU32, Ordering};
 use scarlet_ui_core::buffer::Buffer;
@@ -48,6 +48,8 @@ use ::winit::keyboard::{Key, ModifiersState, NamedKey};
 #[cfg(target_os = "macos")]
 use ::winit::platform::macos::WindowAttributesExtMacOS;
 use ::winit::platform::pump_events::EventLoopExtPumpEvents;
+#[cfg(target_os = "macos")]
+use ::winit::platform::run_on_demand::EventLoopExtRunOnDemand;
 use ::winit::window::{
     CursorGrabMode, Fullscreen, Window as WinitWindow, WindowAttributes, WindowId,
 };
@@ -225,6 +227,33 @@ impl PlatformBackend for WinitBackend {
             self.shared.clone(),
             request,
         )?))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn run_event_loop(
+        &mut self,
+        tick: &mut dyn FnMut(&mut dyn PlatformBackend) -> Result<Option<Duration>>,
+    ) -> Result<bool> {
+        let mut handler = WinitNativeHandler {
+            pump: WinitPumpHandler {
+                shared: self.shared.clone(),
+            },
+            tick,
+            error: None,
+            exited: false,
+        };
+        self.shared.native_loop_active.set(true);
+        let result = self
+            .shared
+            .event_loop
+            .borrow_mut()
+            .run_app_on_demand(&mut handler);
+        self.shared.native_loop_active.set(false);
+        result.map_err(|_| Error::EventDispatchError)?;
+        if let Some(error) = handler.error {
+            return Err(error);
+        }
+        Ok(true)
     }
 }
 
@@ -761,6 +790,7 @@ struct WinitWindowEntry {
 
 struct WinitSharedState {
     event_loop: RefCell<EventLoop<()>>,
+    native_loop_active: Cell<bool>,
     windows: RefCell<BTreeMap<WindowId, WinitWindowEntry>>,
     pointer_lock_owner: RefCell<Option<WindowId>>,
 }
@@ -770,6 +800,7 @@ impl WinitSharedState {
         let event_loop = EventLoop::new().expect("winit event loop creation must succeed");
         Self {
             event_loop: RefCell::new(event_loop),
+            native_loop_active: Cell::new(false),
             windows: RefCell::new(BTreeMap::new()),
             pointer_lock_owner: RefCell::new(None),
         }
@@ -829,6 +860,109 @@ fn clear_exclusive_owner<T: Copy + Eq>(owner: &mut Option<T>, expected_owner: T)
 
 struct WinitPumpHandler {
     shared: Rc<WinitSharedState>,
+}
+
+#[cfg(target_os = "macos")]
+struct WinitCallbackBackend<'a> {
+    shared: Rc<WinitSharedState>,
+    event_loop: &'a ActiveEventLoop,
+}
+
+#[cfg(target_os = "macos")]
+impl PlatformBackend for WinitCallbackBackend<'_> {
+    fn window_defaults(&mut self) -> PlatformWindowDefaults {
+        WINIT_WINDOW_DEFAULTS
+    }
+    fn output_scale_milli(&mut self) -> u32 {
+        1000
+    }
+    fn create_window(&mut self, request: WindowCreateRequest) -> Result<Box<dyn PlatformWindow>> {
+        Ok(Box::new(WinitPlatformWindow::create_with_active_loop(
+            self.shared.clone(),
+            request,
+            Some(self.event_loop),
+        )?))
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct WinitNativeHandler<'a> {
+    pump: WinitPumpHandler,
+    tick: &'a mut dyn FnMut(&mut dyn PlatformBackend) -> Result<Option<Duration>>,
+    error: Option<Error>,
+    exited: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl WinitNativeHandler<'_> {
+    fn run_tick(&mut self, event_loop: &ActiveEventLoop) {
+        if self.exited {
+            return;
+        }
+        let mut backend = WinitCallbackBackend {
+            shared: self.pump.shared.clone(),
+            event_loop,
+        };
+        match (self.tick)(&mut backend) {
+            Ok(Some(delay)) => {
+                event_loop.set_control_flow(if delay.is_zero() {
+                    ::winit::event_loop::ControlFlow::Poll
+                } else {
+                    ::winit::event_loop::ControlFlow::WaitUntil(Instant::now() + delay)
+                });
+            }
+            Ok(None) => {
+                self.exited = true;
+                event_loop.exit();
+            }
+            Err(error) => {
+                self.error = Some(error);
+                self.exited = true;
+                event_loop.exit();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl ApplicationHandler for WinitNativeHandler<'_> {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.run_tick(event_loop);
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let synchronous = matches!(
+            event,
+            WindowEvent::RedrawRequested
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::CloseRequested
+        );
+        self.pump.window_event(event_loop, window_id, event);
+        // In particular RedrawRequested is delivered synchronously by AppKit
+        // drawRect during live resize. Finish rendering before it returns.
+        if synchronous {
+            self.run_tick(event_loop);
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        self.pump.device_event(event_loop, device_id, event);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.run_tick(event_loop);
+    }
 }
 
 impl ApplicationHandler for WinitPumpHandler {
@@ -1227,7 +1361,20 @@ fn window_attributes(request: &WindowCreateRequest) -> Result<WindowAttributes> 
 }
 
 impl WinitPlatformWindow {
-    fn create(shared: Rc<WinitSharedState>, mut request: WindowCreateRequest) -> Result<Self> {
+    fn create(shared: Rc<WinitSharedState>, request: WindowCreateRequest) -> Result<Self> {
+        Self::create_with_active_loop(shared, request, None)
+    }
+
+    fn create_with_active_loop(
+        shared: Rc<WinitSharedState>,
+        mut request: WindowCreateRequest,
+        active_loop: Option<&ActiveEventLoop>,
+    ) -> Result<Self> {
+        // Window creation while the native loop is borrowed must use the
+        // scoped callback backend and its ActiveEventLoop.
+        if active_loop.is_none() && shared.native_loop_active.get() {
+            return Err(Error::WindowCreationFailed);
+        }
         request.decoration = request.decoration.resolve_with(WindowDecoration::SYSTEM);
         validate_window_decoration(request.decoration)?;
         let placement = request.placement;
@@ -1242,12 +1389,21 @@ impl WinitPlatformWindow {
         if let Some(position) = requested_position {
             attributes = attributes.with_position(position);
         }
-        let context = {
+        let context = if let Some(active_loop) = active_loop {
+            SoftbufferContext::new(active_loop.owned_display_handle())
+                .map_err(|_| Error::IoError)?
+        } else {
             let event_loop = shared.event_loop.borrow();
             SoftbufferContext::new(event_loop.owned_display_handle()).map_err(|_| Error::IoError)?
         };
         #[allow(deprecated)]
-        let window = {
+        let window = if let Some(active_loop) = active_loop {
+            Rc::new(
+                active_loop
+                    .create_window(attributes)
+                    .map_err(|_| Error::WindowCreationFailed)?,
+            )
+        } else {
             let event_loop = shared.event_loop.borrow();
             Rc::new(
                 event_loop
@@ -1329,6 +1485,9 @@ impl WinitPlatformWindow {
     }
 
     fn pump_events(&mut self) {
+        if self.shared.native_loop_active.get() {
+            return;
+        }
         let mut handler = WinitPumpHandler {
             shared: self.shared.clone(),
         };
@@ -1340,9 +1499,6 @@ impl WinitPlatformWindow {
         let mut state = self.state.borrow_mut();
         state.flush_pending_empty_preedit();
         state.flush_expired_trackpad_end();
-        // SAFETY: AppKit's event pump and this class query run on the UI thread.
-        #[cfg(target_os = "macos")]
-        state.reconcile_pointer_buttons(unsafe { objc2_app_kit::NSEvent::pressedMouseButtons() });
     }
 
     fn resize_surface(&mut self, width: u32, height: u32) -> Result<()> {
@@ -1400,6 +1556,7 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn poll_event(&mut self) -> Option<Event> {
+        self.state.borrow_mut().flush_pending_empty_preedit();
         let mut event = self.state.borrow_mut().pop();
         if event.is_none() {
             if self.event_batch_open {
@@ -1423,6 +1580,9 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn wait_for_event(&mut self, timeout: Duration) {
+        if self.shared.native_loop_active.get() {
+            return;
+        }
         let mut handler = WinitPumpHandler {
             shared: self.shared.clone(),
         };
@@ -1435,9 +1595,6 @@ impl PlatformWindow for WinitPlatformWindow {
         let mut state = self.state.borrow_mut();
         state.flush_pending_empty_preedit();
         state.flush_expired_trackpad_end();
-        // SAFETY: AppKit's event pump and this class query run on the UI thread.
-        #[cfg(target_os = "macos")]
-        state.reconcile_pointer_buttons(unsafe { objc2_app_kit::NSEvent::pressedMouseButtons() });
     }
 
     fn output_scale_milli(&self) -> u32 {
@@ -1507,6 +1664,9 @@ impl PlatformWindow for WinitPlatformWindow {
     fn close(&mut self) -> Result<()> {
         self.release_pointer_lock();
         self.window.set_visible(false);
+        if self.shared.native_loop_active.get() {
+            return Ok(());
+        }
         let mut handler = WinitPumpHandler {
             shared: self.shared.clone(),
         };

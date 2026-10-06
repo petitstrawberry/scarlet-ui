@@ -298,6 +298,17 @@ pub trait PlatformBackend {
 
     /// Create a new platform window for the supplied request.
     fn create_window(&mut self, request: WindowCreateRequest) -> Result<Box<dyn PlatformWindow>>;
+
+    /// Drive application ticks inside the native event loop when required by
+    /// the window system. A tick returns its next wake delay, or `None` to exit.
+    /// The callback receives a backend valid for creating windows in that
+    /// native callback. Return `false` to retain the portable polling runner.
+    fn run_event_loop(
+        &mut self,
+        _tick: &mut dyn FnMut(&mut dyn PlatformBackend) -> Result<Option<core::time::Duration>>,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Platform-independent window interface

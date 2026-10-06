@@ -95,9 +95,13 @@ Platform resize notifications update layout and presentation through
 its existing backing-buffer negotiation through the default implementation.
 The runner also reconciles the native extent with the rendered extent each
 tick, covering native restoration or resize changes whose notification was
-not delivered. On macOS, mouse-button state is reconciled after the event pump
-so a mouse-up consumed by native window tracking cancels stale view capture.
+not delivered. Losing window focus cancels stale view capture without synthesizing a click.
 
+On macOS, the application runner stays inside winit's native event loop and
+finishes resize layout and presentation before the native redraw callback
+returns. This preserves AppKit's live-resize tracking and avoids stretching a
+stale frame after the mouse is released. Other backends retain the polling
+runner. New scenes created during callbacks use the active event loop.
 
 SWS windows support native gamepad events and optional menu navigation.
 See [gamepad input](docs/GAMEPAD_INPUT.md) for game controls, reset handling,
