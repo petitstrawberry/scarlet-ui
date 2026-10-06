@@ -448,6 +448,18 @@ pub trait PlatformWindow: Any {
     /// `Ok(())` when the platform accepted the surface resize.
     fn resize(&mut self, width: u32, height: u32) -> Result<()>;
 
+    /// Apply a size reported by the platform, without requesting another
+    /// native window resize.
+    ///
+    /// The runner calls this for [`crate::event::Event::Resize`]. Native
+    /// backends should update only their local backing state here: a queued
+    /// notification can describe an older size than the current OS window.
+    /// The default preserves the backing-allocation handshake of legacy
+    /// backends whose `resize` also applies a configure.
+    fn apply_resize(&mut self, width: u32, height: u32) -> Result<()> {
+        self.resize(width, height)
+    }
+
     /// Resize the managed visible window body.
     ///
     /// Backends with client-side decoration add their configured outsets before

@@ -1462,6 +1462,16 @@ impl PlatformWindow for WinitPlatformWindow {
         Ok(())
     }
 
+    fn apply_resize(&mut self, width: u32, height: u32) -> Result<()> {
+        if width == 0 || height == 0 {
+            return Err(Error::InvalidSize { width, height });
+        }
+        // The OS has already resized. Re-requesting a queued event's size can
+        // undo a newer resize (and generate another native notification).
+        self.set_observed_logical_size(Size::new(width as f32, height as f32));
+        Ok(())
+    }
+
     fn close(&mut self) -> Result<()> {
         self.release_pointer_lock();
         self.window.set_visible(false);

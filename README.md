@@ -89,6 +89,11 @@ surface size, including client-rendered chrome and any shadow outsets, whereas
 the child geometry already excludes those. Native decorations are outside the
 winit client surface. Min/max sizes and resizability are forwarded to winit.
 
+Platform resize notifications update layout and presentation through
+`PlatformWindow::apply_resize`; winit does not echo their size back to the OS.
+`PlatformWindow::resize` remains the explicit application request. SWS keeps
+its existing backing-buffer negotiation through the default implementation.
+
 
 SWS windows support native gamepad events and optional menu navigation.
 See [gamepad input](docs/GAMEPAD_INPUT.md) for game controls, reset handling,

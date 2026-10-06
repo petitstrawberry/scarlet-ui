@@ -926,7 +926,7 @@ fn handle_window_event<A: Application>(
         }
         Event::Resize { width, height } => {
             let new_size = Size::new(width as f32, height as f32);
-            if slot.window.resize(width, height).is_ok() {
+            if slot.window.apply_resize(width, height).is_ok() {
                 sync_output_scale(&mut slot.pipeline, slot.window.as_ref());
                 slot.pipeline.resize(new_size);
                 // A configure replaces the backing buffer. Permit one redraw
@@ -1600,6 +1600,8 @@ mod tests {
     struct EnvironmentRunnerProbe {
         presents: [Vec<InputEnvironment>; 2],
         present_sizes: [Vec<(u32, u32)>; 2],
+        resize_requests: [Vec<(u32, u32)>; 2],
+        applied_resizes: [Vec<(u32, u32)>; 2],
         environment_emitted: bool,
         quit_emitted: [bool; 2],
         poll_calls: [usize; 2],
@@ -1779,6 +1781,16 @@ mod tests {
         }
 
         fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+            self.probe.borrow_mut().resize_requests[self.index].push((width, height));
+            self.size = Size::new(width as f32, height as f32);
+            Ok(())
+        }
+
+        fn apply_resize(&mut self, width: u32, height: u32) -> Result<()> {
+            if width == 0 || height == 0 {
+                return Err(crate::Error::InvalidSize { width, height });
+            }
+            self.probe.borrow_mut().applied_resizes[self.index].push((width, height));
             self.size = Size::new(width as f32, height as f32);
             Ok(())
         }
@@ -2271,6 +2283,66 @@ mod tests {
         assert!(slot.pipeline.has_dirty());
         request_next_frame(&mut slot);
         assert!(!slot.frame_ready, "resize grant must only permit one frame");
+    }
+
+    #[test]
+    fn native_resize_notifications_update_layout_without_requesting_window_size() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        let mut app = RenderFailureApp(Rc::new(RefCell::new(Vec::new())));
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: probe.clone(),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slot = runner.create_slot(&mut app, declaration, true).unwrap();
+        let mut closed = Vec::new();
+        // Drag smaller/larger, then zoom and restore. Several notifications
+        // may have been queued before the runner gets control again.
+        let sizes = [(500, 300), (780, 640), (640, 480), (1200, 800), (640, 480)];
+        for (width, height) in sizes {
+            handle_window_event(
+                &mut app,
+                &mut slot,
+                Event::Resize { width, height },
+                &mut closed,
+            )
+            .unwrap();
+            assert_eq!(
+                present_window(&mut app, &mut slot).unwrap(),
+                Presentation::Cpu
+            );
+            assert_eq!(
+                probe.borrow().present_sizes[0].last(),
+                Some(&(width, height))
+            );
+            assert!(!slot.pipeline.has_dirty());
+        }
+        assert_eq!(probe.borrow().applied_resizes[0], sizes);
+        assert!(
+            probe.borrow().resize_requests[0].is_empty(),
+            "native notifications must not be echoed to the OS"
+        );
+
+        handle_window_event(
+            &mut app,
+            &mut slot,
+            Event::Resize {
+                width: 0,
+                height: 0,
+            },
+            &mut closed,
+        )
+        .unwrap();
+        assert!(
+            !slot.pipeline.has_dirty(),
+            "zero-sized minimized windows must not replace the usable layout"
+        );
+
+        // An explicit application request still uses the native request path.
+        slot.window.resize(900, 600).unwrap();
+        assert_eq!(probe.borrow().resize_requests[0], [(900, 600)]);
     }
 
     #[test]
