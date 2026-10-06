@@ -584,6 +584,31 @@ impl WinitEventState {
         self.queue.pop_front()
     }
 
+    fn reconcile_pointer_buttons(&mut self, pressed_buttons: usize) {
+        if pressed_buttons & 1 == 0 {
+            self.manual_move_active = false;
+        }
+        let Some(button) = self.click_state.active_button else {
+            return;
+        };
+        let mask = match button {
+            MouseButton::Left => 1,
+            MouseButton::Right => 2,
+            MouseButton::Middle => 4,
+        };
+        if pressed_buttons & mask != 0 {
+            return;
+        }
+        self.click_state.release_count(button);
+        // A native tracking loop can consume mouse-up. Cancel capture rather
+        // than synthesize a click at the last content coordinate.
+        self.push(Event::Mouse(MouseEvent::ButtonCancelled {
+            button,
+            x: self.cursor_x,
+            y: self.cursor_y,
+        }));
+    }
+
     fn flush_expired_trackpad_end(&mut self) {
         let Some(pending) = self.pending_trackpad_end.as_ref() else {
             return;
@@ -867,6 +892,7 @@ impl ApplicationHandler for WinitPumpHandler {
             WindowEvent::Focused(focused) => {
                 state.window_focused = focused;
                 if !focused {
+                    state.reconcile_pointer_buttons(0);
                     state.cancel_native_touches();
                     state.wheel_delta = WheelDeltaAccumulator::default();
                     self.shared.clear_pointer_lock_owner(window_id);
@@ -1314,6 +1340,9 @@ impl WinitPlatformWindow {
         let mut state = self.state.borrow_mut();
         state.flush_pending_empty_preedit();
         state.flush_expired_trackpad_end();
+        // SAFETY: AppKit's event pump and this class query run on the UI thread.
+        #[cfg(target_os = "macos")]
+        state.reconcile_pointer_buttons(unsafe { objc2_app_kit::NSEvent::pressedMouseButtons() });
     }
 
     fn resize_surface(&mut self, width: u32, height: u32) -> Result<()> {
@@ -1406,6 +1435,9 @@ impl PlatformWindow for WinitPlatformWindow {
         let mut state = self.state.borrow_mut();
         state.flush_pending_empty_preedit();
         state.flush_expired_trackpad_end();
+        // SAFETY: AppKit's event pump and this class query run on the UI thread.
+        #[cfg(target_os = "macos")]
+        state.reconcile_pointer_buttons(unsafe { objc2_app_kit::NSEvent::pressedMouseButtons() });
     }
 
     fn output_scale_milli(&self) -> u32 {
@@ -1946,6 +1978,52 @@ mod tests {
         assert!(!state.set_cursor_inside(true));
         assert!(state.set_cursor_inside(false));
         assert!(!state.set_cursor_inside(false));
+    }
+
+    #[test]
+    fn native_tracking_mouse_up_cancels_capture_and_manual_move_once() {
+        let mut state = WinitEventState::new_with_wheel_coalesce(2.0, false);
+        state.cursor_x = 100;
+        state.cursor_y = 200;
+        state.click_state.press_count(MouseButton::Left, 100, 200);
+        state.manual_move_active = true;
+        state.reconcile_pointer_buttons(1);
+        assert!(state.manual_move_active);
+        assert!(state.pop().is_none());
+
+        state.reconcile_pointer_buttons(0);
+        assert!(!state.manual_move_active);
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Mouse(MouseEvent::ButtonCancelled {
+                button: MouseButton::Left,
+                x: 100,
+                y: 200,
+            }))
+        ));
+        assert!(state.click_state.active_button.is_none());
+        state.reconcile_pointer_buttons(0);
+        assert!(
+            state.pop().is_none(),
+            "cancel must not synthesize clicks or repeat"
+        );
+    }
+
+    #[test]
+    fn pointer_reconciliation_keeps_other_held_buttons() {
+        let mut state = WinitEventState::new_with_wheel_coalesce(1.0, false);
+        state.click_state.press_count(MouseButton::Right, 0, 0);
+        state.reconcile_pointer_buttons(2);
+        assert_eq!(state.click_state.active_button, Some(MouseButton::Right));
+        assert!(state.pop().is_none());
+        state.reconcile_pointer_buttons(0);
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Mouse(MouseEvent::ButtonCancelled {
+                button: MouseButton::Right,
+                ..
+            }))
+        ));
     }
 
     #[test]

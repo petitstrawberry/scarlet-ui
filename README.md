@@ -93,6 +93,10 @@ Platform resize notifications update layout and presentation through
 `PlatformWindow::apply_resize`; winit does not echo their size back to the OS.
 `PlatformWindow::resize` remains the explicit application request. SWS keeps
 its existing backing-buffer negotiation through the default implementation.
+The runner also reconciles the native extent with the rendered extent each
+tick, covering native restoration or resize changes whose notification was
+not delivered. On macOS, mouse-button state is reconciled after the event pump
+so a mouse-up consumed by native window tracking cancels stale view capture.
 
 
 SWS windows support native gamepad events and optional menu navigation.

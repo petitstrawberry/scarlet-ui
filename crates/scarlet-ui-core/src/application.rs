@@ -884,15 +884,23 @@ fn sync_output_scale(pipeline: &mut RenderingPipeline, window: &dyn PlatformWind
 }
 
 fn sync_application_window<A: Application>(app: &mut A, slot: &mut WindowSlot<A>) {
-    let previous_size = slot.window.size();
     app.on_window_sync(&slot.context, slot.window.as_mut());
     let size = slot.window.size();
     sync_output_scale(&mut slot.pipeline, slot.window.as_ref());
-    if size != previous_size {
-        // Client-managed panels need not receive a configure event after
-        // resize(). Keep layout, retained caches, damage and backend extent
-        // in step with the surface, including secondary scene windows.
+    if size.width > 0.0 && size.height > 0.0 && size != slot.pipeline.window_size() {
+        // Compare with the rendered extent, not two native size reads around
+        // the application hook. The native surface may have changed before
+        // this tick (including AppKit live resize and window restoration),
+        // even when no configure notification is available to the runner.
+        if crate::debug::frame_log_enabled() {
+            crate::logln!(
+                "[WindowSize] reconcile rendered={:?} native={:?}",
+                slot.pipeline.window_size(),
+                size
+            );
+        }
         slot.pipeline.resize(size);
+        slot.frame_ready = true;
         app.on_window_resize(&slot.context, size.width as u32, size.height as u32);
     }
 }
@@ -2343,6 +2351,47 @@ mod tests {
         // An explicit application request still uses the native request path.
         slot.window.resize(900, 600).unwrap();
         assert_eq!(probe.borrow().resize_requests[0], [(900, 600)]);
+    }
+
+    #[test]
+    fn native_size_changes_before_sync_update_rendered_extent_without_an_event() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        let mut app = RenderFailureApp(Rc::new(RefCell::new(Vec::new())));
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: probe.clone(),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slot = runner.create_slot(&mut app, declaration, true).unwrap();
+        present_window(&mut app, &mut slot).unwrap();
+        for (width, height) in [(900, 600), (740, 800), (1200, 650), (740, 600)] {
+            // Simulate an OS resize before on_window_sync; deliberately do
+            // not deliver Event::Resize and do not change size in the hook.
+            slot.window.apply_resize(width, height).unwrap();
+            slot.frame_ready = false;
+            sync_application_window(&mut app, &mut slot);
+            assert_eq!(
+                slot.pipeline.window_size(),
+                Size::new(width as f32, height as f32)
+            );
+            assert!(slot.frame_ready);
+            assert_eq!(
+                present_window(&mut app, &mut slot).unwrap(),
+                Presentation::Cpu
+            );
+            assert_eq!(
+                probe.borrow().present_sizes[0].last(),
+                Some(&(width, height))
+            );
+            sync_application_window(&mut app, &mut slot);
+            assert!(
+                !slot.pipeline.has_dirty(),
+                "unchanged native size must stay idle"
+            );
+        }
+        assert!(probe.borrow().resize_requests[0].is_empty());
     }
 
     #[test]
