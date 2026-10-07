@@ -564,7 +564,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1810,7 +1810,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2113,14 +2113,14 @@ dependencies = [
 [[package]]
 name = "sgfx"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=34978dc2dac21df458da47d5d1de32bcc57a0cdb#34978dc2dac21df458da47d5d1de32bcc57a0cdb"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=20bb5b8cc19445520d08c31c3971ac06244bc1d9#20bb5b8cc19445520d08c31c3971ac06244bc1d9"
 dependencies = [
  "gpu-raw",
  "pollster",
  "raw-window-handle",
  "scarlet-os",
  "scarlet-std",
- "sgfx-backend-abi 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=34978dc2dac21df458da47d5d1de32bcc57a0cdb)",
+ "sgfx-backend-abi 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=20bb5b8cc19445520d08c31c3971ac06244bc1d9)",
  "sgfx-backend-loader",
  "sgfx-backend-scarlet-adreno",
  "sgfx-backend-scarlet-virgl-compat",
@@ -2137,15 +2137,15 @@ source = "git+https://github.com/petitstrawberry/sgfx?rev=040dbb5cf42b75489504e1
 [[package]]
 name = "sgfx-backend-abi"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=34978dc2dac21df458da47d5d1de32bcc57a0cdb#34978dc2dac21df458da47d5d1de32bcc57a0cdb"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=20bb5b8cc19445520d08c31c3971ac06244bc1d9#20bb5b8cc19445520d08c31c3971ac06244bc1d9"
 
 [[package]]
 name = "sgfx-backend-loader"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=34978dc2dac21df458da47d5d1de32bcc57a0cdb#34978dc2dac21df458da47d5d1de32bcc57a0cdb"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=20bb5b8cc19445520d08c31c3971ac06244bc1d9#20bb5b8cc19445520d08c31c3971ac06244bc1d9"
 dependencies = [
  "scarlet-std",
- "sgfx-backend-abi 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=34978dc2dac21df458da47d5d1de32bcc57a0cdb)",
+ "sgfx-backend-abi 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=20bb5b8cc19445520d08c31c3971ac06244bc1d9)",
 ]
 
 [[package]]
@@ -2165,7 +2165,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-scarlet-virgl"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=34978dc2dac21df458da47d5d1de32bcc57a0cdb#34978dc2dac21df458da47d5d1de32bcc57a0cdb"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=20bb5b8cc19445520d08c31c3971ac06244bc1d9#20bb5b8cc19445520d08c31c3971ac06244bc1d9"
 dependencies = [
  "gpu-raw",
  "scarlet-os",
@@ -2177,7 +2177,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-scarlet-virgl-compat"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=34978dc2dac21df458da47d5d1de32bcc57a0cdb#34978dc2dac21df458da47d5d1de32bcc57a0cdb"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=20bb5b8cc19445520d08c31c3971ac06244bc1d9#20bb5b8cc19445520d08c31c3971ac06244bc1d9"
 dependencies = [
  "sgfx-backend-scarlet-virgl",
 ]
@@ -2185,7 +2185,7 @@ dependencies = [
 [[package]]
 name = "sgfx-backend-wgpu"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=34978dc2dac21df458da47d5d1de32bcc57a0cdb#34978dc2dac21df458da47d5d1de32bcc57a0cdb"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=20bb5b8cc19445520d08c31c3971ac06244bc1d9#20bb5b8cc19445520d08c31c3971ac06244bc1d9"
 dependencies = [
  "bytemuck",
  "naga",
@@ -2209,7 +2209,7 @@ dependencies = [
 [[package]]
 name = "sgfx-codegen-virgl"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=34978dc2dac21df458da47d5d1de32bcc57a0cdb#34978dc2dac21df458da47d5d1de32bcc57a0cdb"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=20bb5b8cc19445520d08c31c3971ac06244bc1d9#20bb5b8cc19445520d08c31c3971ac06244bc1d9"
 dependencies = [
  "naga",
  "sgfx-core",
@@ -2958,7 +2958,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
