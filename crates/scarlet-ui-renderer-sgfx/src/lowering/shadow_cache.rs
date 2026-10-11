@@ -113,13 +113,14 @@ mod tests {
 
     #[test]
     fn clipped_shadow_recording_is_cached_and_unbalanced_state_is_rejected() {
+        let shadow = stack(UiColor::BLACK);
         let mut clipped = PaintContext::new();
         for rect in [
             Rect::from_xywh(0., 0., 80., 10.),
             Rect::from_xywh(0., 60., 80., 10.),
         ] {
             clipped.push_clip(rect);
-            clipped.append(stack(UiColor::BLACK).context());
+            clipped.append(shadow.context());
             clipped.pop_clip();
         }
         let list = clipped.into_display_list();
@@ -150,7 +151,7 @@ mod tests {
         assert_eq!(warm.uploads, 0);
         let mut invalid = PaintContext::new();
         invalid.push_clip(Rect::from_xywh(0., 0., 80., 10.));
-        invalid.append(stack(UiColor::BLACK).context());
+        invalid.append(shadow.context());
         assert!(mask_color(&invalid.into_display_list()).is_none());
     }
 
