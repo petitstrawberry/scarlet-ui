@@ -37,6 +37,8 @@ pub struct GridView<T: Clone + 'static> {
     row_spacing: f32,
     minimum_cell_width: Option<f32>,
     cell_builder: CellBuilder<T>,
+    content_bottom_inset: f32,
+    item_key: Option<Rc<dyn Fn(&T) -> crate::view::ViewKey>>,
 }
 
 impl<T: Clone + 'static> GridView<T> {
@@ -74,7 +76,26 @@ impl<T: Clone + 'static> GridView<T> {
             cell_builder: Rc::new(move |index, item, selected| {
                 Box::new(cell_builder(index, item, selected))
             }),
+            content_bottom_inset: 0.0,
+            item_key: None,
         }
+    }
+
+    /// Stable model identities for scroll anchoring through collection changes.
+    pub fn item_key(mut self, key: impl Fn(&T) -> crate::view::ViewKey + 'static) -> Self {
+        self.item_key = Some(Rc::new(key));
+        self
+    }
+
+    /// Add scrollable space below the final item for floating controls.
+    /// Unlike outer padding, this keeps the viewport behind the overlay.
+    pub fn content_bottom_inset(mut self, inset: f32) -> Self {
+        self.content_bottom_inset = if inset.is_finite() {
+            inset.max(0.0)
+        } else {
+            0.0
+        };
+        self
     }
 
     /// Set the horizontal spacing between cells.
@@ -335,6 +356,7 @@ impl<T: Clone + 'static> View for GridContentView<T> {
 struct GridContentElement<T: Clone + 'static> {
     id: ElementId,
     view: GridView<T>,
+    items: Vec<T>,
     children: Vec<Box<dyn Element>>,
     child_indices: Vec<usize>,
     position: Point,
@@ -345,13 +367,16 @@ struct GridContentElement<T: Clone + 'static> {
     last_constraints: Option<LayoutConstraints>,
     mount_context: Option<MountContext>,
     children_need_update: bool,
+    children_needing_layout: Vec<usize>,
 }
 
 impl<T: Clone + 'static> GridContentElement<T> {
     fn new(view: GridView<T>) -> Self {
+        let items = view.items.get();
         Self {
             id: ElementId::generate(),
             view,
+            items,
             children: Vec::new(),
             child_indices: Vec::new(),
             position: Point::ZERO,
@@ -362,6 +387,7 @@ impl<T: Clone + 'static> GridContentElement<T> {
             last_constraints: None,
             mount_context: None,
             children_need_update: false,
+            children_needing_layout: Vec::new(),
         }
     }
 
@@ -391,7 +417,7 @@ impl<T: Clone + 'static> GridContentElement<T> {
     }
 
     fn row_count(&self, columns: usize) -> usize {
-        self.view.items.get().len().div_ceil(columns.max(1))
+        self.items.len().div_ceil(columns.max(1))
     }
 
     fn row_stride(&self) -> f32 {
@@ -408,7 +434,7 @@ impl<T: Clone + 'static> GridContentElement<T> {
     }
 
     fn build_row(&self, row_index: usize, columns: usize) -> Box<dyn View> {
-        let items = self.view.items.get();
+        let items = &self.items;
         let selected = self.view.selected.get();
         let mut cells = Vec::with_capacity(columns);
         for column in 0..columns {
@@ -453,23 +479,35 @@ impl<T: Clone + 'static> GridContentElement<T> {
     fn materialize_visible_children(&mut self) -> bool {
         let columns = self.current_columns.max(1);
         let range = self.visible_range(self.row_count(columns));
-        let desired_indices: Vec<usize> = range.clone().collect();
         let columns_changed = self.materialized_columns != columns;
-        if self.child_indices == desired_indices && !columns_changed && !self.children_need_update {
+        if self.child_indices.len() == range.len()
+            && self.child_indices.first().copied() == range.clone().next()
+            && !columns_changed
+            && !self.children_need_update
+        {
             return false;
         }
         let update_existing = columns_changed || self.children_need_update;
-        let mut old_children = core::mem::take(&mut self.children);
-        let mut old_indices = core::mem::take(&mut self.child_indices);
+        let old_children = core::mem::take(&mut self.children);
+        let old_indices = core::mem::take(&mut self.child_indices);
+        let mut old = old_indices.into_iter().zip(old_children).peekable();
+        self.children_needing_layout.clear();
 
-        let mut new_children = Vec::with_capacity(desired_indices.len());
-        let mut new_indices = Vec::with_capacity(desired_indices.len());
+        let mut new_children = Vec::with_capacity(range.len());
+        let mut new_indices = Vec::with_capacity(range.len());
         let mut changed = columns_changed;
-        for index in desired_indices {
-            if let Some(position) = old_indices.iter().position(|old| *old == index) {
-                let old_child = old_children.remove(position);
-                old_indices.remove(position);
+        // Both index streams are sorted. Merge them without repeatedly shifting
+        // or searching every retained row when the viewport advances.
+        for index in range {
+            while old.peek().is_some_and(|(old_index, _)| *old_index < index) {
+                let (_, mut child) = old.next().unwrap();
+                child.unmount();
+                changed = true;
+            }
+            if old.peek().is_some_and(|(old_index, _)| *old_index == index) {
+                let (_, old_child) = old.next().unwrap();
                 if update_existing {
+                    self.children_needing_layout.push(index);
                     let row_view = self.build_row(index, columns);
                     let mut child = Some(old_child);
                     let result = crate::element::update_child(
@@ -487,6 +525,7 @@ impl<T: Clone + 'static> GridContentElement<T> {
                     new_children.push(old_child);
                 }
             } else {
+                self.children_needing_layout.push(index);
                 let row_view = self.build_row(index, columns);
                 let mut child = row_view.create_element();
                 if let Some(context) = self.mount_context {
@@ -498,10 +537,8 @@ impl<T: Clone + 'static> GridContentElement<T> {
             new_indices.push(index);
         }
 
-        if !old_children.is_empty() {
+        for (_, mut child) in old {
             changed = true;
-        }
-        for mut child in old_children {
             child.unmount();
         }
         self.children = new_children;
@@ -511,17 +548,24 @@ impl<T: Clone + 'static> GridContentElement<T> {
         changed
     }
 
-    fn layout_visible_children(&mut self) {
+    fn layout_visible_children(&mut self, only_new: bool) {
         let row_stride = self.row_stride();
         for (child, row_index) in self
             .children
             .iter_mut()
             .zip(self.child_indices.iter().copied())
         {
-            child.layout(LayoutConstraints::tight(
-                self.size.width,
-                self.view.row_height,
-            ));
+            if !only_new
+                || self
+                    .children_needing_layout
+                    .binary_search(&row_index)
+                    .is_ok()
+            {
+                child.layout(LayoutConstraints::tight(
+                    self.size.width,
+                    self.view.row_height,
+                ));
+            }
             child.set_position(Point::new(0.0, row_index as f32 * row_stride));
         }
     }
@@ -544,6 +588,29 @@ impl<T: Clone + 'static> Element for GridContentElement<T> {
         self
     }
 
+    fn retains_virtual_items(&self) -> bool {
+        true
+    }
+
+    fn scroll_anchor(&self, viewport: Rect) -> Option<crate::element::ScrollAnchor> {
+        let key = self.view.item_key.as_ref()?;
+        let columns = self.current_columns.max(1);
+        let row = libm::floorf(viewport.origin.y / self.row_stride()).max(0.) as usize;
+        let index = (row * columns).min(self.items.len().checked_sub(1)?);
+        Some(crate::element::ScrollAnchor {
+            key: key(&self.items[index]),
+            position: Point::new(0., (index / columns) as f32 * self.row_stride()),
+        })
+    }
+    fn resolve_scroll_anchor(&self, key: &crate::view::ViewKey) -> Option<Point> {
+        let key_for = self.view.item_key.as_ref()?;
+        let index = self.items.iter().position(|item| key_for(item) == *key)?;
+        Some(Point::new(
+            0.,
+            (index / self.current_columns.max(1)) as f32 * self.row_stride(),
+        ))
+    }
+
     fn children(&self) -> &[Box<dyn Element>] {
         &self.children
     }
@@ -557,6 +624,7 @@ impl<T: Clone + 'static> Element for GridContentElement<T> {
             return UpdateResult::Replaced;
         };
         self.view = new_view.grid.clone();
+        self.items = self.view.items.get();
         self.children_need_update = true;
         if let Some(constraints) = self.last_constraints {
             self.layout(constraints);
@@ -589,7 +657,7 @@ impl<T: Clone + 'static> Element for GridContentElement<T> {
         let row_count = self.row_count(self.current_columns);
         self.size = Size::new(width, self.content_height(row_count));
         self.materialize_visible_children();
-        self.layout_visible_children();
+        self.layout_visible_children(false);
         self.size
     }
 
@@ -616,7 +684,8 @@ impl<T: Clone + 'static> Element for GridContentElement<T> {
         self.viewport_hint = Some(viewport);
         let changed = self.materialize_visible_children();
         if changed {
-            self.layout_visible_children();
+            // Scrolling changes position, not the constraints of retained rows.
+            self.layout_visible_children(true);
         }
         changed
     }
@@ -639,6 +708,7 @@ impl<T: Clone + 'static> Element for GridContentElement<T> {
 fn build_grid_child<T: Clone + 'static>(view: &GridView<T>) -> Box<dyn View> {
     Box::new(
         ScrollView::new(GridContentView { grid: view.clone() })
+            .content_bottom_inset(view.content_bottom_inset)
             .scrollbar_visibility(ScrollbarVisibility::Automatic),
     )
 }
@@ -668,6 +738,139 @@ mod tests {
     use crate::pipeline::RenderingPipeline;
     use crate::state::{State, StateId};
     use crate::view::{View, ViewExt};
+
+    #[test]
+    fn loading_items_after_mount_exposes_every_grid_row() {
+        use super::GridContentElement;
+        fn content(element: &dyn crate::element::Element) -> Option<&GridContentElement<usize>> {
+            element.as_any().downcast_ref().or_else(|| {
+                element
+                    .children()
+                    .iter()
+                    .find_map(|child| content(child.as_ref()))
+            })
+        }
+        let items = State::new(crate::state::generate_state_id(), Vec::<usize>::new());
+        let grid = GridView::new(
+            items.clone(),
+            State::new(crate::state::generate_state_id(), None),
+            4,
+            100.,
+            |_, item, _| {
+                crate::views::Rectangle::new()
+                    .fill(Color::rgb(item as u8, 20, 50))
+                    .frame(f32::INFINITY, 100.)
+            },
+        )
+        .row_spacing(10.)
+        .frame(400., 200.);
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            crate::views::Window::new("Albums", crate::views::RepaintBoundary::new(grid))
+                .decorated(false)
+                .size(crate::geometry::Size::new(400., 200.))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+        items.set((0..100).collect());
+        for _ in 0..4 {
+            pipeline.render_with_damage();
+        }
+        let grid = content(pipeline.element_tree().root().unwrap()).unwrap();
+        assert_eq!(grid.items.len(), 100);
+        assert_eq!(grid.size.height, 2740.);
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: -100_000,
+            x: 20,
+            y: 20,
+            phase: crate::event::WheelPhase::Moved,
+            source: crate::event::ScrollSource::Trackpad,
+        }));
+        let mut last_pixel = None;
+        for _ in 0..4 {
+            if let Some((frame, _)) = pipeline.render_with_damage() {
+                last_pixel = frame.get_pixel(20, 120);
+            }
+        }
+        assert_eq!(last_pixel, Some(Color::rgb(96, 20, 50).to_bgra()));
+        let grid = content(pipeline.element_tree().root().unwrap()).unwrap();
+        assert!(
+            grid.child_indices.contains(&24),
+            "Final album row is unreachable: {:?}",
+            grid.child_indices
+        );
+        pipeline.request_redraw();
+        let expected = pipeline.render_with_damage().unwrap().0.get_pixel(20, 120);
+        assert_eq!(expected, Some(Color::rgb(96, 20, 50).to_bgra()));
+    }
+
+    #[test]
+    fn floating_clearance_exposes_the_last_grid_row_and_clamps_after_shrink() {
+        use super::GridContentView;
+        use crate::views::scroll::ScrollViewRenderObject;
+        fn offset(element: &dyn crate::element::Element) -> Option<f32> {
+            element
+                .render_object()
+                .and_then(|render| {
+                    render
+                        .as_any()
+                        .downcast_ref::<ScrollViewRenderObject<GridContentView<usize>>>()
+                })
+                .map(|render| render.offset().1)
+                .or_else(|| {
+                    element
+                        .children()
+                        .iter()
+                        .find_map(|child| offset(child.as_ref()))
+                })
+        }
+        let items = State::new(
+            crate::state::generate_state_id(),
+            (0usize..100).collect::<Vec<_>>(),
+        );
+        let grid = GridView::new(
+            items.clone(),
+            State::new(crate::state::generate_state_id(), None),
+            3,
+            40.,
+            |_, item, _| {
+                crate::views::Rectangle::new()
+                    .fill(Color::rgb(item as u8, 20, 50))
+                    .frame(f32::INFINITY, 40.)
+            },
+        )
+        .row_spacing(4.)
+        .content_bottom_inset(60.)
+        .frame(240., 180.);
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            crate::views::Window::new("Inset grid", grid)
+                .decorated(false)
+                .size(crate::geometry::Size::new(240., 180.))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: -100_000,
+            x: 20,
+            y: 20,
+            phase: crate::event::WheelPhase::Moved,
+            source: crate::event::ScrollSource::Trackpad,
+        }));
+        let pixel = pipeline.render_with_damage().unwrap().0.get_pixel(20, 100);
+        assert_eq!(pixel, Some(Color::rgb(99, 20, 50).to_bgra()));
+        assert_eq!(offset(pipeline.element_tree().root().unwrap()), Some(1372.));
+        items.set((0..4).collect());
+        for _ in 0..4 {
+            pipeline.render_with_damage();
+        }
+        assert_eq!(offset(pipeline.element_tree().root().unwrap()), Some(0.));
+        pipeline.teardown();
+    }
 
     #[test]
     fn paints_all_columns_on_initial_layout() {
@@ -946,5 +1149,50 @@ mod tests {
             }))
         );
         assert_eq!(activated.get(), Some(4));
+    }
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+    use crate::testing::layout_probe::LayoutProbe;
+    use core::cell::Cell;
+    #[test]
+    fn scrolling_lays_out_only_entering_grid_cells_and_resize_reflows_all_cells() {
+        let calls = Rc::new(Cell::new(0));
+        let layouts = calls.clone();
+        let items = State::new(
+            crate::state::generate_state_id(),
+            (0..50_000).collect::<Vec<usize>>(),
+        );
+        let grid = GridView::new(
+            items,
+            State::new(crate::state::generate_state_id(), None),
+            4,
+            100.,
+            move |_, _, _| LayoutProbe(layouts.clone()),
+        )
+        .spacing(0.)
+        .minimum_cell_width(100.);
+        let mut element = GridContentElement::new(grid);
+        element.set_viewport_hint(Rect::from_xywh(0., 1000., 400., 200.));
+        element.layout(LayoutConstraints::tight(400., 200.));
+        let previous = element.child_indices.clone();
+        calls.set(0);
+        element.set_viewport_hint(Rect::from_xywh(0., 1100., 400., 200.));
+        let entering = element
+            .child_indices
+            .iter()
+            .filter(|index| !previous.contains(index))
+            .count();
+        assert_eq!(
+            calls.get(),
+            entering * element.current_columns,
+            "Retained grid cells were unnecessarily measured"
+        );
+        calls.set(0);
+        element.layout(LayoutConstraints::tight(200., 200.));
+        assert_eq!(element.current_columns, 2);
+        assert!(calls.get() >= element.children.len() * 2);
     }
 }

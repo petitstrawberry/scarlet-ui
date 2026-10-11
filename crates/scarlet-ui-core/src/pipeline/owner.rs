@@ -70,6 +70,7 @@ struct DirtyQueues {
     layout: BTreeSet<ElementId>,
     paint: BTreeSet<ElementId>,
     self_paint: BTreeSet<ElementId>,
+    children: BTreeSet<ElementId>,
     composite: alloc::vec::Vec<ElementId>,
 }
 
@@ -100,6 +101,16 @@ pub fn mark_element_dirty(owner: PipelineId, id: ElementId) {
 pub fn mark_element_needs_paint(owner: PipelineId, id: ElementId) {
     let mut queues = GLOBAL_DIRTY.lock();
     queues.entry(owner).or_default().paint.insert(id);
+}
+
+/// Virtualization changed the mounted children without changing retained rows.
+pub fn mark_element_children_changed(owner: PipelineId, id: ElementId) {
+    GLOBAL_DIRTY
+        .lock()
+        .entry(owner)
+        .or_default()
+        .children
+        .insert(id);
 }
 
 /// Mark an element as needing retained recomposition only.
@@ -136,6 +147,7 @@ pub(crate) fn has_global_dirty(owner: PipelineId) -> bool {
             || !queue.layout.is_empty()
             || !queue.paint.is_empty()
             || !queue.self_paint.is_empty()
+            || !queue.children.is_empty()
             || !queue.composite.is_empty()
     })
 }
@@ -166,6 +178,8 @@ pub struct PipelineOwner {
     dirty_paint: BTreeSet<ElementId>,
     /// Elements whose own buffers need repainting without repainting descendants
     dirty_self_paint: BTreeSet<ElementId>,
+    dirty_children: BTreeSet<ElementId>,
+    last_children_ids: alloc::vec::Vec<ElementId>,
     /// Elements whose retained layers only need recomposition.
     dirty_composite: alloc::vec::Vec<ElementId>,
     /// Elements repainted in the last flush
@@ -192,6 +206,8 @@ impl PipelineOwner {
             dirty_layout: BTreeSet::new(),
             dirty_paint: BTreeSet::new(),
             dirty_self_paint: BTreeSet::new(),
+            dirty_children: BTreeSet::new(),
+            last_children_ids: alloc::vec::Vec::new(),
             dirty_composite: alloc::vec::Vec::new(),
             last_paint_ids: alloc::vec::Vec::new(),
             last_self_paint_ids: alloc::vec::Vec::new(),
@@ -251,6 +267,7 @@ impl PipelineOwner {
             || !self.dirty_layout.is_empty()
             || !self.dirty_paint.is_empty()
             || !self.dirty_self_paint.is_empty()
+            || !self.dirty_children.is_empty()
             || !self.dirty_composite.is_empty()
     }
 
@@ -288,6 +305,7 @@ impl PipelineOwner {
         let dirty_layout = core::mem::take(&mut queue.layout);
         let dirty_paint = core::mem::take(&mut queue.paint);
         let dirty_self_paint = core::mem::take(&mut queue.self_paint);
+        self.dirty_children.append(&mut queue.children);
 
         for id in dirty_build {
             self.mark_needs_build(id);
@@ -374,7 +392,18 @@ impl PipelineOwner {
                 chosen_id = *ancestor_id;
                 has_constraints = true;
 
-                if ancestor_constraints.is_tight() {
+                // Virtual content deliberately exceeds tight viewport
+                // constraints. Its size changes must reach ScrollView so the
+                // content extent and offsets are remeasured and clamped.
+                let size = element_tree
+                    .find_element(*ancestor_id)
+                    .map(|element| element.bounds().size);
+                if ancestor_constraints.is_tight()
+                    && size.is_some_and(|size| {
+                        size.width == ancestor_constraints.max_width
+                            && size.height == ancestor_constraints.max_height
+                    })
+                {
                     break;
                 }
             }
@@ -399,7 +428,18 @@ impl PipelineOwner {
         for id in layout_roots.iter().copied() {
             if let Some(element) = element_tree.find_element_mut(id) {
                 if let Some(local_constraints) = element.last_layout_constraints() {
-                    element.layout(local_constraints);
+                    let before = element.bounds().size;
+                    let after = element.layout(local_constraints);
+                    if before != after
+                        && local_constraints.is_tight()
+                        && (after.width != local_constraints.max_width
+                            || after.height != local_constraints.max_height)
+                    {
+                        // Content that previously fit may have grown. A full
+                        // layout propagates this new extent to its scroll owner.
+                        fallback_full = true;
+                        break;
+                    }
                     self.dirty_paint.insert(id);
                 } else {
                     fallback_full = true;
@@ -425,7 +465,22 @@ impl PipelineOwner {
 
     /// Flush the paint phase
     fn flush_paint(&mut self, element_tree: &mut ElementTree, render_legacy_paint: bool) {
-        let dirty_paint = core::mem::take(&mut self.dirty_paint);
+        let mut dirty_paint = core::mem::take(&mut self.dirty_paint);
+        self.last_children_ids.clear();
+        let mut children_changed = core::mem::take(&mut self.dirty_children);
+        let owners: alloc::vec::Vec<_> = children_changed.iter().copied().collect();
+        for id in owners {
+            if let Some(element) = element_tree.find_element(id) {
+                children_changed.extend(element.children().iter().map(|child| child.id()));
+            }
+        }
+        self.last_children_ids.extend(
+            children_changed
+                .iter()
+                .copied()
+                .filter(|id| !dirty_paint.contains(id) && !self.dirty_self_paint.contains(id)),
+        );
+        dirty_paint.append(&mut children_changed);
         let dirty_self_paint = core::mem::take(&mut self.dirty_self_paint);
         self.last_paint_ids.clear();
         self.last_self_paint_ids.clear();
@@ -579,12 +634,19 @@ impl PipelineOwner {
 
     /// Check if there are any dirty paint elements
     pub fn has_dirty_paint(&self) -> bool {
-        !self.dirty_paint.is_empty() || !self.dirty_self_paint.is_empty()
+        !self.dirty_paint.is_empty()
+            || !self.dirty_self_paint.is_empty()
+            || !self.dirty_children.is_empty()
     }
 
     /// Check if there are any composite-only dirty elements.
     pub fn has_dirty_composite(&self) -> bool {
         !self.dirty_composite.is_empty()
+    }
+
+    /// Structural updates that can reuse existing children's display lists.
+    pub fn last_children_ids(&self) -> &[ElementId] {
+        &self.last_children_ids
     }
 
     /// Get the IDs repainted in the last flush.

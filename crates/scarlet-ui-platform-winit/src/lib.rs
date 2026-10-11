@@ -7,7 +7,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::any::Any;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::num::NonZeroU32;
 use core::sync::atomic::{AtomicU32, Ordering};
 use scarlet_ui_core::buffer::Buffer;
@@ -24,7 +24,7 @@ use scarlet_ui_core::input_environment::{
     InputEnvironment, WindowingMode, current_input_environment,
 };
 use scarlet_ui_core::platform::{
-    PlatformBackend, PlatformWindow, WindowCreateRequest, WindowDecoration,
+    PlatformBackend, PlatformWindow, PlatformWindowDefaults, WindowCreateRequest, WindowDecoration,
 };
 #[cfg(feature = "sgfx")]
 use scarlet_ui_core::renderer::PaintBackend;
@@ -48,6 +48,8 @@ use ::winit::keyboard::{Key, ModifiersState, NamedKey};
 #[cfg(target_os = "macos")]
 use ::winit::platform::macos::WindowAttributesExtMacOS;
 use ::winit::platform::pump_events::EventLoopExtPumpEvents;
+#[cfg(target_os = "macos")]
+use ::winit::platform::run_on_demand::EventLoopExtRunOnDemand;
 use ::winit::window::{
     CursorGrabMode, Fullscreen, Window as WinitWindow, WindowAttributes, WindowId,
 };
@@ -204,7 +206,14 @@ fn configure_sgfx_surface_alpha(window: &WinitWindow, transparent: bool) {
 #[cfg(all(feature = "sgfx", not(target_os = "macos")))]
 fn configure_sgfx_surface_alpha(_window: &WinitWindow, _transparent: bool) {}
 
+const WINIT_WINDOW_DEFAULTS: PlatformWindowDefaults =
+    PlatformWindowDefaults::new(false).with_decoration(WindowDecoration::SYSTEM);
+
 impl PlatformBackend for WinitBackend {
+    fn window_defaults(&mut self) -> PlatformWindowDefaults {
+        WINIT_WINDOW_DEFAULTS
+    }
+
     fn initial_input_environment(&mut self) -> InputEnvironment {
         startup_input_environment()
     }
@@ -218,6 +227,33 @@ impl PlatformBackend for WinitBackend {
             self.shared.clone(),
             request,
         )?))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn run_event_loop(
+        &mut self,
+        tick: &mut dyn FnMut(&mut dyn PlatformBackend) -> Result<Option<Duration>>,
+    ) -> Result<bool> {
+        let mut handler = WinitNativeHandler {
+            pump: WinitPumpHandler {
+                shared: self.shared.clone(),
+            },
+            tick,
+            error: None,
+            exited: false,
+        };
+        self.shared.native_loop_active.set(true);
+        let result = self
+            .shared
+            .event_loop
+            .borrow_mut()
+            .run_app_on_demand(&mut handler);
+        self.shared.native_loop_active.set(false);
+        result.map_err(|_| Error::EventDispatchError)?;
+        if let Some(error) = handler.error {
+            return Err(error);
+        }
+        Ok(true)
     }
 }
 
@@ -249,6 +285,7 @@ struct WinitEventState {
     pending_empty_preedit: Option<(u32, u32)>,
     modifiers: KeyModifiers,
     click_state: ClickState,
+    wheel_delta: WheelDeltaAccumulator,
     pending_trackpad_end: Option<PendingTrackpadEnd>,
     pending_trackpad_moved: Option<PendingTrackpadMoved>,
     last_trackpad_moved_emit_at: Option<Instant>,
@@ -373,6 +410,7 @@ impl WinitEventState {
             pending_empty_preedit: None,
             modifiers: KeyModifiers::empty(),
             click_state: ClickState::default(),
+            wheel_delta: WheelDeltaAccumulator::default(),
             pending_trackpad_end: None,
             pending_trackpad_moved: None,
             last_trackpad_moved_emit_at: None,
@@ -575,6 +613,31 @@ impl WinitEventState {
         self.queue.pop_front()
     }
 
+    fn reconcile_pointer_buttons(&mut self, pressed_buttons: usize) {
+        if pressed_buttons & 1 == 0 {
+            self.manual_move_active = false;
+        }
+        let Some(button) = self.click_state.active_button else {
+            return;
+        };
+        let mask = match button {
+            MouseButton::Left => 1,
+            MouseButton::Right => 2,
+            MouseButton::Middle => 4,
+        };
+        if pressed_buttons & mask != 0 {
+            return;
+        }
+        self.click_state.release_count(button);
+        // A native tracking loop can consume mouse-up. Cancel capture rather
+        // than synthesize a click at the last content coordinate.
+        self.push(Event::Mouse(MouseEvent::ButtonCancelled {
+            button,
+            x: self.cursor_x,
+            y: self.cursor_y,
+        }));
+    }
+
     fn flush_expired_trackpad_end(&mut self) {
         let Some(pending) = self.pending_trackpad_end.as_ref() else {
             return;
@@ -727,6 +790,7 @@ struct WinitWindowEntry {
 
 struct WinitSharedState {
     event_loop: RefCell<EventLoop<()>>,
+    native_loop_active: Cell<bool>,
     windows: RefCell<BTreeMap<WindowId, WinitWindowEntry>>,
     pointer_lock_owner: RefCell<Option<WindowId>>,
 }
@@ -736,6 +800,7 @@ impl WinitSharedState {
         let event_loop = EventLoop::new().expect("winit event loop creation must succeed");
         Self {
             event_loop: RefCell::new(event_loop),
+            native_loop_active: Cell::new(false),
             windows: RefCell::new(BTreeMap::new()),
             pointer_lock_owner: RefCell::new(None),
         }
@@ -795,6 +860,109 @@ fn clear_exclusive_owner<T: Copy + Eq>(owner: &mut Option<T>, expected_owner: T)
 
 struct WinitPumpHandler {
     shared: Rc<WinitSharedState>,
+}
+
+#[cfg(target_os = "macos")]
+struct WinitCallbackBackend<'a> {
+    shared: Rc<WinitSharedState>,
+    event_loop: &'a ActiveEventLoop,
+}
+
+#[cfg(target_os = "macos")]
+impl PlatformBackend for WinitCallbackBackend<'_> {
+    fn window_defaults(&mut self) -> PlatformWindowDefaults {
+        WINIT_WINDOW_DEFAULTS
+    }
+    fn output_scale_milli(&mut self) -> u32 {
+        1000
+    }
+    fn create_window(&mut self, request: WindowCreateRequest) -> Result<Box<dyn PlatformWindow>> {
+        Ok(Box::new(WinitPlatformWindow::create_with_active_loop(
+            self.shared.clone(),
+            request,
+            Some(self.event_loop),
+        )?))
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct WinitNativeHandler<'a> {
+    pump: WinitPumpHandler,
+    tick: &'a mut dyn FnMut(&mut dyn PlatformBackend) -> Result<Option<Duration>>,
+    error: Option<Error>,
+    exited: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl WinitNativeHandler<'_> {
+    fn run_tick(&mut self, event_loop: &ActiveEventLoop) {
+        if self.exited {
+            return;
+        }
+        let mut backend = WinitCallbackBackend {
+            shared: self.pump.shared.clone(),
+            event_loop,
+        };
+        match (self.tick)(&mut backend) {
+            Ok(Some(delay)) => {
+                event_loop.set_control_flow(if delay.is_zero() {
+                    ::winit::event_loop::ControlFlow::Poll
+                } else {
+                    ::winit::event_loop::ControlFlow::WaitUntil(Instant::now() + delay)
+                });
+            }
+            Ok(None) => {
+                self.exited = true;
+                event_loop.exit();
+            }
+            Err(error) => {
+                self.error = Some(error);
+                self.exited = true;
+                event_loop.exit();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl ApplicationHandler for WinitNativeHandler<'_> {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.run_tick(event_loop);
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let synchronous = matches!(
+            event,
+            WindowEvent::RedrawRequested
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::CloseRequested
+        );
+        self.pump.window_event(event_loop, window_id, event);
+        // In particular RedrawRequested is delivered synchronously by AppKit
+        // drawRect during live resize. Finish rendering before it returns.
+        if synchronous {
+            self.run_tick(event_loop);
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        self.pump.device_event(event_loop, device_id, event);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.run_tick(event_loop);
+    }
 }
 
 impl ApplicationHandler for WinitPumpHandler {
@@ -858,7 +1026,9 @@ impl ApplicationHandler for WinitPumpHandler {
             WindowEvent::Focused(focused) => {
                 state.window_focused = focused;
                 if !focused {
+                    state.reconcile_pointer_buttons(0);
                     state.cancel_native_touches();
+                    state.wheel_delta = WheelDeltaAccumulator::default();
                     self.shared.clear_pointer_lock_owner(window_id);
                     release_native_pointer_lock(&window, &mut state);
                     state.manual_move_active = false;
@@ -958,7 +1128,8 @@ impl ApplicationHandler for WinitPumpHandler {
                 state.push(Event::Mouse(event));
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
-                let (delta_x, delta_y, source) = map_winit_wheel_delta(delta, state.scale_factor);
+                let scale_factor = state.scale_factor;
+                let (delta_x, delta_y, source) = state.wheel_delta.map(delta, phase, scale_factor);
                 let x = state.cursor_x;
                 let y = state.cursor_y;
                 let mapped_phase = map_wheel_phase(phase);
@@ -1169,8 +1340,42 @@ fn apply_platform_window_decoration(
     attributes
 }
 
+fn window_attributes(request: &WindowCreateRequest) -> Result<WindowAttributes> {
+    let decoration = request
+        .decoration
+        .resolve_with(WINIT_WINDOW_DEFAULTS.decoration);
+    validate_window_decoration(decoration)?;
+    let mut attributes = WindowAttributes::default()
+        .with_title(request.title.clone())
+        .with_decorations(system_window_decorations_enabled(decoration))
+        .with_transparent(!request.opaque)
+        .with_inner_size(LogicalSize::new(request.size.width, request.size.height))
+        .with_resizable(request.size_limits.resizable);
+    if let Some(size) = request.size_limits.min {
+        attributes = attributes.with_min_inner_size(LogicalSize::new(size.width, size.height));
+    }
+    if let Some(size) = request.size_limits.max {
+        attributes = attributes.with_max_inner_size(LogicalSize::new(size.width, size.height));
+    }
+    Ok(apply_platform_window_decoration(attributes, decoration))
+}
+
 impl WinitPlatformWindow {
     fn create(shared: Rc<WinitSharedState>, request: WindowCreateRequest) -> Result<Self> {
+        Self::create_with_active_loop(shared, request, None)
+    }
+
+    fn create_with_active_loop(
+        shared: Rc<WinitSharedState>,
+        mut request: WindowCreateRequest,
+        active_loop: Option<&ActiveEventLoop>,
+    ) -> Result<Self> {
+        // Window creation while the native loop is borrowed must use the
+        // scoped callback backend and its ActiveEventLoop.
+        if active_loop.is_none() && shared.native_loop_active.get() {
+            return Err(Error::WindowCreationFailed);
+        }
+        request.decoration = request.decoration.resolve_with(WindowDecoration::SYSTEM);
         validate_window_decoration(request.decoration)?;
         let placement = request.placement;
         let requested_position = match request.placement {
@@ -1180,21 +1385,25 @@ impl WinitPlatformWindow {
                 Some(Position::Logical(LogicalPosition::new(x as f64, y as f64)))
             }
         };
-        let attributes = WindowAttributes::default()
-            .with_title(request.title)
-            .with_decorations(system_window_decorations_enabled(request.decoration))
-            .with_transparent(!request.opaque)
-            .with_inner_size(LogicalSize::new(request.size.width, request.size.height));
-        let mut attributes = apply_platform_window_decoration(attributes, request.decoration);
+        let mut attributes = window_attributes(&request)?;
         if let Some(position) = requested_position {
             attributes = attributes.with_position(position);
         }
-        let context = {
+        let context = if let Some(active_loop) = active_loop {
+            SoftbufferContext::new(active_loop.owned_display_handle())
+                .map_err(|_| Error::IoError)?
+        } else {
             let event_loop = shared.event_loop.borrow();
             SoftbufferContext::new(event_loop.owned_display_handle()).map_err(|_| Error::IoError)?
         };
         #[allow(deprecated)]
-        let window = {
+        let window = if let Some(active_loop) = active_loop {
+            Rc::new(
+                active_loop
+                    .create_window(attributes)
+                    .map_err(|_| Error::WindowCreationFailed)?,
+            )
+        } else {
             let event_loop = shared.event_loop.borrow();
             Rc::new(
                 event_loop
@@ -1276,6 +1485,9 @@ impl WinitPlatformWindow {
     }
 
     fn pump_events(&mut self) {
+        if self.shared.native_loop_active.get() {
+            return;
+        }
         let mut handler = WinitPumpHandler {
             shared: self.shared.clone(),
         };
@@ -1336,7 +1548,7 @@ impl PlatformWindow for WinitPlatformWindow {
                 focus_on_create: true,
                 active_on_focus: true,
                 opaque: true,
-                decoration: WindowDecoration::CUSTOM,
+                decoration: WindowDecoration::SYSTEM,
                 placement: scarlet_ui_core::platform::WindowPlacement::Default,
                 window_geometry_insets: scarlet_ui_core::geometry::EdgeInsets::ZERO,
             },
@@ -1344,6 +1556,7 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn poll_event(&mut self) -> Option<Event> {
+        self.state.borrow_mut().flush_pending_empty_preedit();
         let mut event = self.state.borrow_mut().pop();
         if event.is_none() {
             if self.event_batch_open {
@@ -1367,6 +1580,9 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn wait_for_event(&mut self, timeout: Duration) {
+        if self.shared.native_loop_active.get() {
+            return;
+        }
         let mut handler = WinitPumpHandler {
             shared: self.shared.clone(),
         };
@@ -1435,9 +1651,22 @@ impl PlatformWindow for WinitPlatformWindow {
         Ok(())
     }
 
+    fn apply_resize(&mut self, width: u32, height: u32) -> Result<()> {
+        if width == 0 || height == 0 {
+            return Err(Error::InvalidSize { width, height });
+        }
+        // The OS has already resized. Re-requesting a queued event's size can
+        // undo a newer resize (and generate another native notification).
+        self.set_observed_logical_size(Size::new(width as f32, height as f32));
+        Ok(())
+    }
+
     fn close(&mut self) -> Result<()> {
         self.release_pointer_lock();
         self.window.set_visible(false);
+        if self.shared.native_loop_active.get() {
+            return Ok(());
+        }
         let mut handler = WinitPumpHandler {
             shared: self.shared.clone(),
         };
@@ -1670,17 +1899,60 @@ fn physical_to_logical_pos(value: f64, scale_factor: f64) -> i32 {
     (value / scale_factor.max(0.001)).round() as i32
 }
 
-fn map_winit_wheel_delta(delta: MouseScrollDelta, scale_factor: f64) -> (i32, i32, ScrollSource) {
-    match delta {
-        MouseScrollDelta::LineDelta(x, y) => {
-            ((x * 32.0) as i32, (y * 32.0) as i32, ScrollSource::Wheel)
+// The portable wheel event has integer logical deltas. Preserve the fractional
+// remainder between native trackpad samples: rounding each sample separately
+// can erase an entire slow gesture, especially on HiDPI displays.
+#[derive(Default)]
+struct WheelDeltaAccumulator {
+    remainder: [f64; 2],
+    scale: Option<f64>,
+}
+
+impl WheelDeltaAccumulator {
+    fn map(
+        &mut self,
+        delta: MouseScrollDelta,
+        phase: TouchPhase,
+        scale: f64,
+    ) -> (i32, i32, ScrollSource) {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        if matches!(phase, TouchPhase::Started) || self.scale != Some(scale) {
+            self.remainder = [0.0; 2];
         }
-        MouseScrollDelta::PixelDelta(delta) => (
-            physical_to_logical_pos(delta.x, scale_factor),
-            physical_to_logical_pos(delta.y, scale_factor),
-            ScrollSource::Trackpad,
-        ),
+        self.scale = Some(scale);
+        let result = match delta {
+            MouseScrollDelta::LineDelta(x, y) => {
+                self.remainder = [0.0; 2];
+                ((x * 32.0) as i32, (y * 32.0) as i32, ScrollSource::Wheel)
+            }
+            MouseScrollDelta::PixelDelta(delta) => {
+                let mut values = [0; 2];
+                for (axis, physical) in [delta.x, delta.y].into_iter().enumerate() {
+                    let total = physical / scale + self.remainder[axis];
+                    if total.is_finite() {
+                        values[axis] = total.round() as i32;
+                        self.remainder[axis] = (total - f64::from(values[axis])).clamp(-0.5, 0.5);
+                    } else {
+                        self.remainder[axis] = 0.0;
+                    }
+                }
+                (values[0], values[1], ScrollSource::Trackpad)
+            }
+        };
+        if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+            self.remainder = [0.0; 2];
+        }
+        result
     }
+}
+
+#[cfg(test)]
+fn map_winit_wheel_delta(delta: MouseScrollDelta, scale_factor: f64) -> (i32, i32, ScrollSource) {
+    WheelDeltaAccumulator::default().map(delta, TouchPhase::Moved, scale_factor)
 }
 
 fn f64_to_i32_saturated(value: f64) -> i32 {
@@ -1800,6 +2072,44 @@ mod tests {
     }
 
     #[test]
+    fn platform_defaults_and_window_limits_reach_native_attributes() {
+        assert_eq!(WINIT_WINDOW_DEFAULTS.decoration, WindowDecoration::SYSTEM);
+        let mut request = WindowCreateRequest {
+            app_id: "test.window".into(),
+            title: "Native".into(),
+            size: Size::new(800., 600.),
+            size_limits: scarlet_ui_core::element::WindowSizeLimits {
+                min: Some(Size::new(300., 200.)),
+                max: Some(Size::new(1200., 900.)),
+                resizable: false,
+            },
+            window_type: 0,
+            menu_titles: String::new(),
+            focus_on_create: true,
+            active_on_focus: true,
+            opaque: true,
+            decoration: WindowDecoration::DEFAULT,
+            placement: scarlet_ui_core::platform::WindowPlacement::Default,
+            window_geometry_insets: scarlet_ui_core::geometry::EdgeInsets::ZERO,
+        };
+        let attributes = window_attributes(&request).unwrap();
+        assert!(attributes.decorations);
+        assert!(!attributes.resizable);
+        assert_eq!(
+            attributes.min_inner_size,
+            Some(LogicalSize::new(300f32, 200f32).into())
+        );
+        assert_eq!(
+            attributes.max_inner_size,
+            Some(LogicalSize::new(1200f32, 900f32).into())
+        );
+        for explicit in [WindowDecoration::CUSTOM, WindowDecoration::NONE] {
+            request.decoration = explicit;
+            assert!(!window_attributes(&request).unwrap().decorations);
+        }
+    }
+
+    #[test]
     fn system_owned_frame_or_titlebar_enables_platform_window_decorations() {
         assert!(system_window_decorations_enabled(WindowDecoration::SYSTEM));
         assert!(system_window_decorations_enabled(WindowDecoration::new(
@@ -1828,6 +2138,52 @@ mod tests {
         assert!(!state.set_cursor_inside(true));
         assert!(state.set_cursor_inside(false));
         assert!(!state.set_cursor_inside(false));
+    }
+
+    #[test]
+    fn native_tracking_mouse_up_cancels_capture_and_manual_move_once() {
+        let mut state = WinitEventState::new_with_wheel_coalesce(2.0, false);
+        state.cursor_x = 100;
+        state.cursor_y = 200;
+        state.click_state.press_count(MouseButton::Left, 100, 200);
+        state.manual_move_active = true;
+        state.reconcile_pointer_buttons(1);
+        assert!(state.manual_move_active);
+        assert!(state.pop().is_none());
+
+        state.reconcile_pointer_buttons(0);
+        assert!(!state.manual_move_active);
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Mouse(MouseEvent::ButtonCancelled {
+                button: MouseButton::Left,
+                x: 100,
+                y: 200,
+            }))
+        ));
+        assert!(state.click_state.active_button.is_none());
+        state.reconcile_pointer_buttons(0);
+        assert!(
+            state.pop().is_none(),
+            "cancel must not synthesize clicks or repeat"
+        );
+    }
+
+    #[test]
+    fn pointer_reconciliation_keeps_other_held_buttons() {
+        let mut state = WinitEventState::new_with_wheel_coalesce(1.0, false);
+        state.click_state.press_count(MouseButton::Right, 0, 0);
+        state.reconcile_pointer_buttons(2);
+        assert_eq!(state.click_state.active_button, Some(MouseButton::Right));
+        assert!(state.pop().is_none());
+        state.reconcile_pointer_buttons(0);
+        assert!(matches!(
+            state.pop(),
+            Some(Event::Mouse(MouseEvent::ButtonCancelled {
+                button: MouseButton::Right,
+                ..
+            }))
+        ));
     }
 
     #[test]
@@ -1986,6 +2342,54 @@ mod tests {
         assert_eq!(cancel.changes.len(), 1);
         assert_eq!(cancel.changes[0].id, second.changes[0].id);
         assert_eq!(cancel.changes[0].phase, UiTouchPhase::Cancel);
+    }
+
+    #[test]
+    fn slow_hidpi_trackpad_gestures_preserve_motion_in_both_directions() {
+        for sign in [-1.0, 1.0] {
+            let mut state = WheelDeltaAccumulator::default();
+            let mut sum = (0, 0);
+            for _ in 0..100 {
+                let delta =
+                    MouseScrollDelta::PixelDelta(PhysicalPosition::new(sign * 0.4, sign * 0.2));
+                let (x, y, source) = state.map(delta, TouchPhase::Moved, 2.0);
+                assert_eq!(source, ScrollSource::Trackpad);
+                sum.0 += x;
+                sum.1 += y;
+            }
+            assert_eq!(sum, ((sign * 20.0) as i32, (sign * 10.0) as i32));
+        }
+    }
+
+    #[test]
+    fn wheel_fraction_changes_direction_without_drift_and_resets_at_boundaries() {
+        let sample = |x| MouseScrollDelta::PixelDelta(PhysicalPosition::new(x, 0.0));
+        let mut state = WheelDeltaAccumulator::default();
+        assert_eq!(state.map(sample(0.4), TouchPhase::Started, 1.0).0, 0);
+        assert_eq!(state.map(sample(-0.4), TouchPhase::Moved, 1.0).0, 0);
+        assert_eq!(state.remainder, [0.0; 2]);
+        state.map(sample(0.4), TouchPhase::Moved, 1.0);
+        assert_eq!(state.map(sample(0.4), TouchPhase::Started, 1.0).0, 0);
+        state.map(sample(0.0), TouchPhase::Cancelled, 1.0);
+        assert_eq!(state.remainder, [0.0; 2]);
+        state.map(sample(0.4), TouchPhase::Moved, 1.0);
+        assert_eq!(state.map(sample(0.4), TouchPhase::Moved, 2.0).0, 0);
+        assert_eq!(
+            state
+                .map(
+                    MouseScrollDelta::LineDelta(0.0, 1.0),
+                    TouchPhase::Moved,
+                    2.0
+                )
+                .1,
+            32
+        );
+        assert_eq!(state.remainder, [0.0; 2]);
+        assert_eq!(state.map(sample(f64::NAN), TouchPhase::Moved, 2.0).0, 0);
+        assert_eq!(state.remainder, [0.0; 2]);
+        state.map(sample(0.4), TouchPhase::Moved, 1.0);
+        state.map(sample(0.0), TouchPhase::Ended, 1.0);
+        assert_eq!(state.remainder, [0.0; 2]);
     }
 
     #[test]

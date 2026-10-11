@@ -96,7 +96,7 @@ impl WindowInfo {
             active_on_focus,
             background_color,
             opaque,
-            decoration: WindowDecoration::CUSTOM,
+            decoration: WindowDecoration::DEFAULT.resolved(),
             corner_radius: style::metrics().window_radius,
             placement,
             window_geometry_insets: EdgeInsets::ZERO,
@@ -326,7 +326,7 @@ pub trait WindowViewInfo {
     ///
     /// The frame mode used by the platform and ScarletUI render tree.
     fn window_decoration(&self) -> WindowDecoration {
-        WindowDecoration::CUSTOM
+        WindowDecoration::DEFAULT.resolved()
     }
 
     /// Return whether ScarletUI draws the titlebar.
@@ -384,7 +384,7 @@ impl<V: View> Window<V> {
             max_size: None,
             resizable: true,
             movable: true,
-            decoration: WindowDecoration::CUSTOM,
+            decoration: WindowDecoration::DEFAULT,
             corner_radius: style::metrics().window_radius,
             background_color: ColorPalette::light().window_background(),
             opaque: true,
@@ -699,7 +699,7 @@ impl<V: View> Window<V> {
 
     /// Return the selected owner of the visible window frame.
     pub fn get_decoration(&self) -> WindowDecoration {
-        self.decoration
+        self.decoration.resolved()
     }
 
     /// Return the configured custom-frame corner radius.
@@ -756,7 +756,7 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
             self.opaque,
             self.placement,
         )
-        .with_decoration(self.decoration)
+        .with_decoration(self.decoration.resolved())
         .with_corner_radius(self.corner_radius)
         .with_window_geometry_insets(insets)
         .with_shadow_elevation(shadow_elevation)
@@ -784,7 +784,7 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
     }
 
     fn window_decoration(&self) -> WindowDecoration {
-        self.decoration
+        self.decoration.resolved()
     }
 
     fn content_view(&self) -> Option<&dyn View> {
@@ -1819,7 +1819,7 @@ impl WindowRenderObject {
     ) -> Self {
         Self {
             size,
-            decoration,
+            decoration: decoration.resolved(),
             corner_radius: corner_radius.max(0.0),
             background_color,
             window_geometry_insets: EdgeInsets::ZERO,
@@ -1841,7 +1841,7 @@ impl WindowRenderObject {
     pub fn from_window_info(info: &WindowInfo) -> Self {
         Self {
             size: info.size,
-            decoration: info.decoration,
+            decoration: info.decoration.resolved(),
             corner_radius: info.corner_radius.max(0.0),
             background_color: info.background_color,
             window_geometry_insets: info.window_geometry_insets,
@@ -2457,8 +2457,9 @@ mod tests {
     use crate::views::Text;
 
     #[test]
-    fn window_decoration_defaults_to_custom_and_legacy_api_remains_explicit() {
+    fn window_decoration_defers_to_backend_and_legacy_api_remains_explicit() {
         let default_window = Window::new("Default", Text::new("Content"));
+        assert_eq!(default_window.decoration, WindowDecoration::DEFAULT);
         assert_eq!(default_window.get_decoration(), WindowDecoration::CUSTOM);
         assert!(default_window.is_decorated());
 
@@ -2691,6 +2692,77 @@ mod tests {
 
         let element = window.create_element();
         assert_eq!(element.children().len(), 1);
+    }
+
+    #[test]
+    fn geometry_observes_content_viewport_for_every_decoration_and_resize() {
+        use crate::{element::ElementTree, view::ViewExt};
+        use alloc::rc::Rc;
+        use core::cell::RefCell;
+        for decoration in [
+            WindowDecoration::SYSTEM,
+            WindowDecoration::CUSTOM,
+            WindowDecoration::NONE,
+            WindowDecoration::new(WindowFrame::System, WindowTitleBar::Custom),
+        ] {
+            for shadow in [false, true] {
+                let observed = Rc::new(RefCell::new(Vec::new()));
+                let values = observed.clone();
+                let content = Text::new("Small content")
+                    .frame(f32::INFINITY, f32::INFINITY)
+                    .on_geometry_change(
+                        |geometry| geometry.size(),
+                        move |size| values.borrow_mut().push(size),
+                    );
+                let window = Window::new("Geometry", content)
+                    .decoration(decoration)
+                    .shadow(shadow);
+                let mut tree = ElementTree::new();
+                tree.set_root(window.create_element());
+                let insets = window.window_info().window_geometry_insets;
+                let chrome = WindowContentLayout::for_decoration(decoration).decoration_size();
+                for surface in [
+                    Size::new(800., 600.),
+                    Size::new(430., 270.),
+                    Size::new(1024., 768.),
+                ] {
+                    let expected = Size::new(
+                        surface.width - insets.left - insets.right - chrome.width,
+                        surface.height - insets.top - insets.bottom - chrome.height,
+                    );
+                    tree.layout(LayoutConstraints::tight(surface.width, surface.height));
+                    assert_eq!(observed.borrow().last(), Some(&expected));
+                    let notifications = observed.borrow().len();
+                    tree.layout(LayoutConstraints::tight(surface.width, surface.height));
+                    assert_eq!(observed.borrow().len(), notifications);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn platform_default_resolves_without_overwriting_explicit_ownership() {
+        for backend in [WindowDecoration::SYSTEM, WindowDecoration::CUSTOM] {
+            assert_eq!(WindowDecoration::DEFAULT.resolve_with(backend), backend);
+            for explicit in [
+                WindowDecoration::CUSTOM,
+                WindowDecoration::SYSTEM,
+                WindowDecoration::NONE,
+            ] {
+                assert_eq!(explicit.resolve_with(backend), explicit);
+            }
+            assert_eq!(
+                WindowDecoration::new(WindowFrame::PlatformDefault, WindowTitleBar::None)
+                    .resolve_with(backend),
+                WindowDecoration::new(backend.frame, WindowTitleBar::None)
+            );
+            assert_eq!(
+                WindowDecoration::new(WindowFrame::None, WindowTitleBar::PlatformDefault)
+                    .resolve_with(backend),
+                WindowDecoration::new(WindowFrame::None, backend.title_bar)
+            );
+        }
+        assert_eq!(WindowDecoration::default(), WindowDecoration::DEFAULT);
     }
 
     #[test]

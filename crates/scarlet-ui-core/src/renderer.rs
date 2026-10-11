@@ -118,6 +118,11 @@ where
 
 #[derive(Debug, Clone)]
 pub enum PaintCommand {
+    /// Replay an immutable local-coordinate display list at a new position.
+    DrawDisplayList {
+        origin: Point,
+        list: Arc<DisplayList>,
+    },
     FillPath {
         path: Path,
         color: Color,
@@ -206,6 +211,41 @@ pub enum PaintCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferHandle(pub usize);
 
+/// Immutable paint commands and owned resources, independent of live Elements.
+/// A new identity is allocated only when the recorded content changes.
+pub struct DisplayList {
+    identity: u64,
+    context: PaintContext<'static>,
+    self_contained: bool,
+}
+
+impl Debug for DisplayList {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DisplayList")
+            .field("identity", &self.identity)
+            .field("commands", &self.context.commands.len())
+            .finish()
+    }
+}
+
+impl DisplayList {
+    /// Stable identity of this immutable recording.
+    pub fn identity(&self) -> u64 {
+        self.identity
+    }
+
+    /// Whether clip/opacity state stays inside the recording.
+    /// Stateful recordings must be lowered together with their surrounding commands.
+    pub fn is_self_contained(&self) -> bool {
+        self.self_contained
+    }
+
+    /// Commands and resources retained by this recording.
+    pub fn context(&self) -> &PaintContext<'static> {
+        &self.context
+    }
+}
+
 /// A buffer referenced by the current paint list.
 ///
 /// Borrowed buffers are owned by render objects and are valid only for the
@@ -249,6 +289,94 @@ impl Default for PaintContext<'_> {
 impl<'a> PaintContext<'a> {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Adopt a recording's commands and resources without borrowing its element.
+    /// Immutable images share their pixels. Legacy borrowed pixel buffers are
+    /// snapshotted once when their paint content changes, never on replay.
+    pub fn into_display_list(self) -> Arc<DisplayList> {
+        static NEXT_LIST_ID: crate::id::IdAllocator = crate::id::IdAllocator::new();
+        let mut depth = 0usize;
+        let mut self_contained = true;
+        for command in &self.commands {
+            match command {
+                PaintCommand::PushClip { .. } => depth += 1,
+                PaintCommand::PopClip if depth > 0 => depth -= 1,
+                PaintCommand::PopClip | PaintCommand::SetOpacity { .. } => self_contained = false,
+                PaintCommand::DrawDisplayList { list, .. } if !list.is_self_contained() => {
+                    self_contained = false
+                }
+                _ => {}
+            }
+        }
+        Arc::new(DisplayList {
+            self_contained: self_contained && depth == 0,
+            identity: NEXT_LIST_ID.allocate(),
+            context: PaintContext {
+                commands: self.commands,
+                buffers: self
+                    .buffers
+                    .into_iter()
+                    .map(|buffer| match buffer {
+                        PaintBuffer::Shared(buffer) => PaintBuffer::Shared(buffer),
+                        PaintBuffer::Temporary(buffer) => PaintBuffer::Shared(Arc::new(buffer)),
+                        PaintBuffer::Borrowed(buffer) => {
+                            PaintBuffer::Shared(Arc::new(buffer.clone()))
+                        }
+                    })
+                    .collect(),
+            },
+        })
+    }
+
+    /// Replay unchanged paint content without cloning strings, paths, or pixels.
+    pub fn draw_display_list(&mut self, origin: Point, list: Arc<DisplayList>) {
+        self.commands
+            .push(PaintCommand::DrawDisplayList { origin, list });
+    }
+
+    /// Expand retained recordings for a backend that consumes flat commands.
+    pub fn flattened(&self) -> PaintContext<'_> {
+        let mut result = PaintContext::new();
+        self.append_flattened(&mut result, Point::ZERO);
+        result
+    }
+
+    fn append_flattened<'b>(&'b self, result: &mut PaintContext<'b>, offset: Point) {
+        for command in &self.commands {
+            if let PaintCommand::DrawDisplayList { origin, list } = command {
+                list.context
+                    .append_flattened(result, Point::new(offset.x + origin.x, offset.y + origin.y));
+                continue;
+            }
+            let mut translated = PaintContext::new();
+            translated.commands.push(command.clone());
+            translated.translate(offset);
+            if let (
+                PaintCommand::DrawText {
+                    position: original, ..
+                },
+                Some(PaintCommand::DrawText { position, .. }),
+            ) = (command, translated.commands.last_mut())
+            {
+                *position = Point::new(original.x + offset.x, original.y + offset.y);
+            }
+            let mut command = translated.commands.pop().unwrap();
+            if let PaintCommand::DrawBuffer { buffer_idx, .. }
+            | PaintCommand::DrawBufferRect { buffer_idx, .. } = &mut command
+            {
+                if let Some(buffer) = self.buffers.get(*buffer_idx) {
+                    *buffer_idx = result.buffers.len();
+                    result.buffers.push(match buffer {
+                        PaintBuffer::Shared(buffer) => PaintBuffer::Shared(Arc::clone(buffer)),
+                        other => PaintBuffer::Borrowed(other.as_buffer()),
+                    });
+                } else {
+                    continue;
+                }
+            }
+            result.commands.push(command);
+        }
     }
 
     pub fn fill_path(&mut self, path: impl Into<Path>, color: Color) {
@@ -515,6 +643,175 @@ impl<'a> PaintContext<'a> {
             .push(PaintCommand::Extension { rect, payload });
     }
 
+    /// Bound CPU raster work by the painted geometry, not a virtual list's
+    /// full layout extent. Clip commands do not paint any pixels themselves.
+    pub(crate) fn raster_bounds(&self, size: Size, scale_milli: u32) -> Rect {
+        if self
+            .commands
+            .iter()
+            .any(|command| matches!(command, PaintCommand::DrawDisplayList { .. }))
+        {
+            return self.flattened().raster_bounds(size, scale_milli);
+        }
+        let mut bounds: Option<Rect> = None;
+        let scale = scale_milli.max(1) as f32 / 1000.0;
+        let mut include = |rect: Rect| {
+            if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+                return;
+            }
+            bounds = Some(match bounds {
+                None => rect,
+                Some(old) => {
+                    let x = old.origin.x.min(rect.origin.x);
+                    let y = old.origin.y.min(rect.origin.y);
+                    Rect::from_xywh(
+                        x,
+                        y,
+                        (old.origin.x + old.size.width).max(rect.origin.x + rect.size.width) - x,
+                        (old.origin.y + old.size.height).max(rect.origin.y + rect.size.height) - y,
+                    )
+                }
+            });
+        };
+        for command in &self.commands {
+            match command {
+                PaintCommand::FillPath { path, .. } | PaintCommand::StrokePath { path, .. } => {
+                    if let Some(first) = path.first() {
+                        let mut left = first.x;
+                        let mut top = first.y;
+                        let mut right = first.x;
+                        let mut bottom = first.y;
+                        for point in path {
+                            left = left.min(point.x);
+                            top = top.min(point.y);
+                            right = right.max(point.x);
+                            bottom = bottom.max(point.y);
+                        }
+                        let pad = match command {
+                            PaintCommand::StrokePath { stroke_width, .. } => stroke_width.max(1.0),
+                            _ => 1.0 / scale,
+                        };
+                        include(Rect::from_xywh(
+                            left - pad,
+                            top - pad,
+                            right - left + 2.0 * pad,
+                            bottom - top + 2.0 * pad,
+                        ));
+                    }
+                }
+                PaintCommand::FillRoundedRect { rect, .. }
+                | PaintCommand::FillVerticalGradientRoundedRect { rect, .. }
+                | PaintCommand::StrokeRect { rect, .. }
+                | PaintCommand::StrokeRoundedRect { rect, .. }
+                | PaintCommand::DrawIcon { rect, .. } => include(*rect),
+                PaintCommand::DrawBuffer { dst, .. } | PaintCommand::DrawBufferRect { dst, .. } => {
+                    include(*dst)
+                }
+                PaintCommand::DrawText {
+                    position,
+                    text,
+                    font_size_px,
+                    ..
+                } => {
+                    // Use the same glyph masks and integer origins as Canvas;
+                    // font advance alone misses italic and fallback overhangs.
+                    let x = libm::floorf(position.x as i32 as f32 * scale);
+                    let y = libm::floorf(position.y as i32 as f32 * scale);
+                    for glyph in crate::graphics::rasterize_text(text, *font_size_px, scale_milli) {
+                        include(Rect::from_xywh(
+                            (x + glyph.x as f32) / scale,
+                            (y + glyph.y as f32) / scale,
+                            glyph.width as f32 / scale,
+                            glyph.height as f32 / scale,
+                        ));
+                    }
+                }
+                // CPU fallback intentionally ignores shadows and extensions.
+                _ => {}
+            }
+        }
+        let Some(bounds) = bounds else {
+            return Rect::new(Point::ZERO, Size::ZERO);
+        };
+        let left = bounds.origin.x.max(0.0);
+        let top = bounds.origin.y.max(0.0);
+        let right = (bounds.origin.x + bounds.size.width).min(size.width);
+        let bottom = (bounds.origin.y + bounds.size.height).min(size.height);
+        Rect::from_xywh(left, top, (right - left).max(0.0), (bottom - top).max(0.0))
+    }
+
+    pub(crate) fn translate(&mut self, offset: Point) {
+        let shift = |point: &mut Point| {
+            point.x += offset.x;
+            point.y += offset.y;
+        };
+        for command in &mut self.commands {
+            match command {
+                PaintCommand::FillPath { path, .. } | PaintCommand::StrokePath { path, .. } => {
+                    for point in path {
+                        shift(point);
+                    }
+                }
+                PaintCommand::DrawText { position, .. } => {
+                    position.x = position.x as i32 as f32 + offset.x;
+                    position.y = position.y as i32 as f32 + offset.y;
+                }
+                PaintCommand::DrawDisplayList { origin, .. } => shift(origin),
+                PaintCommand::DrawBuffer { dst, .. } | PaintCommand::DrawBufferRect { dst, .. } => {
+                    shift(&mut dst.origin)
+                }
+                PaintCommand::FillRoundedRect { rect, .. }
+                | PaintCommand::FillVerticalGradientRoundedRect { rect, .. }
+                | PaintCommand::DrawRoundedRectShadow { rect, .. }
+                | PaintCommand::StrokeRect { rect, .. }
+                | PaintCommand::StrokeRoundedRect { rect, .. }
+                | PaintCommand::DrawIcon { rect, .. }
+                | PaintCommand::PushClip { rect, .. }
+                | PaintCommand::Extension { rect, .. } => shift(&mut rect.origin),
+                _ => {}
+            }
+        }
+    }
+
+    /// Visit retained commands without cloning their paths, strings or buffers.
+    /// Positions supplied here are the accumulated logical replay origin.
+    pub fn visit_commands(&self, visit: &mut impl FnMut(&PaintCommand, Point)) {
+        self.visit_commands_at(Point::ZERO, visit);
+    }
+    fn visit_commands_at(&self, offset: Point, visit: &mut impl FnMut(&PaintCommand, Point)) {
+        for command in &self.commands {
+            if let PaintCommand::DrawDisplayList { origin, list } = command {
+                list.context
+                    .visit_commands_at(Point::new(offset.x + origin.x, offset.y + origin.y), visit);
+            } else {
+                visit(command, offset);
+            }
+        }
+    }
+
+    /// Extract one command and its borrowed resource for backend lowering.
+    pub fn command_context(&self, index: usize) -> PaintContext<'_> {
+        let mut context = PaintContext::new();
+        if let Some(command) = self.commands.get(index) {
+            let mut command = command.clone();
+            if let PaintCommand::DrawBuffer { buffer_idx, .. }
+            | PaintCommand::DrawBufferRect { buffer_idx, .. } = &mut command
+            {
+                let Some(buffer) = self.buffer(BufferHandle(*buffer_idx)) else {
+                    return context;
+                };
+                *buffer_idx = 0;
+                context.buffers.push(PaintBuffer::Borrowed(buffer));
+            }
+            context.commands.push(command);
+        }
+        context
+    }
+    /// Append a context, remapping buffer handles and expanding nested lists.
+    pub fn append(&mut self, other: &'a PaintContext<'_>) {
+        other.append_flattened(self, Point::ZERO);
+    }
+
     pub fn commands(&self) -> &[PaintCommand] {
         &self.commands
     }
@@ -570,6 +867,17 @@ pub enum BackendFrame<'a> {
 /// backends own the presentation lifecycle and return [`BackendFrame::External`]
 /// only after the frame has been submitted successfully.
 pub trait PaintBackend {
+    /// Whether the backend can consume immutable display-list replay commands.
+    fn supports_retained_display_lists(&self) -> bool {
+        false
+    }
+    /// CPU backends benefit from retained raster pictures. GPU backends consume
+    /// the original paint commands directly and must not pre-rasterize UI on
+    /// the CPU before encoding their frame.
+    fn uses_cpu_picture_cache(&self) -> bool {
+        false
+    }
+
     /// Resize the backend render target.
     ///
     /// # Arguments
@@ -632,6 +940,10 @@ impl CpuPaintBackend {
 }
 
 impl PaintBackend for CpuPaintBackend {
+    fn uses_cpu_picture_cache(&self) -> bool {
+        true
+    }
+
     fn resize(&mut self, size: Size, scale_milli: u32) {
         self.renderer.resize(size, scale_milli);
     }
@@ -1156,6 +1468,13 @@ impl CpuPaintRenderer {
     }
 
     pub fn execute_with_damage(&mut self, ctx: &PaintContext<'_>, damage_rects: Option<&[Rect]>) {
+        if ctx
+            .commands()
+            .iter()
+            .any(|command| matches!(command, PaintCommand::DrawDisplayList { .. }))
+        {
+            return self.execute_with_damage(&ctx.flattened(), damage_rects);
+        }
         match damage_rects {
             Some(rects) => {
                 for rect in rects {
@@ -1174,6 +1493,7 @@ impl CpuPaintRenderer {
 
         for cmd in ctx.commands() {
             match cmd {
+                PaintCommand::DrawDisplayList { .. } => unreachable!("recordings expanded above"),
                 PaintCommand::FillPath { path, color } => {
                     let color = color.with_opacity(color.a * opacity);
                     self.rebuild_scaled_points(path);
@@ -1468,44 +1788,33 @@ impl CpuPaintRenderer {
                 } => {
                     if let Some(buf) = ctx.buffer(BufferHandle(*buffer_idx)) {
                         let dst = self.scale_rect(*dst);
-                        let src = self.scale_rect(*src);
-                        let dst_x = dst.origin.x as i32;
-                        let dst_y = dst.origin.y as i32;
-                        let src_x = src.origin.x as i32;
-                        let src_y = src.origin.y as i32;
-                        let src_w = src.size.width as i32;
-                        let src_h = src.size.height as i32;
+                        let source_scale = buf.scale_milli() as f32 / 1000.0;
+                        let src = Rect::from_xywh(
+                            src.origin.x * source_scale,
+                            src.origin.y * source_scale,
+                            src.size.width * source_scale,
+                            src.size.height * source_scale,
+                        );
                         match self.rebuild_effective_clip_rects(damage_rects) {
-                            EffectiveClipRects::Unclipped => {
-                                self.current_buffer_mut().composite_rect(
-                                    buf,
-                                    src_x,
-                                    src_y,
-                                    src_w,
-                                    src_h,
-                                    dst_x,
-                                    dst_y,
-                                    *command_opacity * opacity,
-                                );
-                            }
+                            EffectiveClipRects::Unclipped => composite_scaled_buffer(
+                                self.current_buffer_mut(),
+                                buf,
+                                dst,
+                                src,
+                                *command_opacity * opacity,
+                                None,
+                            ),
                             EffectiveClipRects::Empty => {}
                             EffectiveClipRects::Rects => {
                                 for index in 0..self.scratch.clip_rects.len() {
-                                    let rect = self.scratch.clip_rects[index];
-                                    let clip = self.scale_rect(rect);
-                                    self.current_buffer_mut().composite_rect_clipped(
+                                    let clip = self.scale_rect(self.scratch.clip_rects[index]);
+                                    composite_scaled_buffer(
+                                        self.current_buffer_mut(),
                                         buf,
-                                        src_x,
-                                        src_y,
-                                        src_w,
-                                        src_h,
-                                        dst_x,
-                                        dst_y,
+                                        dst,
+                                        src,
                                         *command_opacity * opacity,
-                                        clip.origin.x as i32,
-                                        clip.origin.y as i32,
-                                        clip.size.width as i32,
-                                        clip.size.height as i32,
+                                        Some(clip),
                                     );
                                 }
                             }
@@ -1910,6 +2219,77 @@ fn stroke_rounded_rect(
     }
 }
 
+fn composite_scaled_buffer(
+    target: &mut Buffer,
+    source: &Buffer,
+    dst: Rect,
+    src: Rect,
+    opacity: f32,
+    clip: Option<Rect>,
+) {
+    let (dx, dy, dw, dh) = (
+        dst.origin.x as i32,
+        dst.origin.y as i32,
+        dst.size.width as i32,
+        dst.size.height as i32,
+    );
+    let (sx, sy, sw, sh) = (
+        src.origin.x as i32,
+        src.origin.y as i32,
+        src.size.width as i32,
+        src.size.height as i32,
+    );
+    if dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0 {
+        return;
+    }
+    let clip = clip.unwrap_or(Rect::from_xywh(
+        0.0,
+        0.0,
+        target.width() as f32,
+        target.height() as f32,
+    ));
+    if dw == sw && dh == sh {
+        target.composite_rect_clipped(
+            source,
+            sx,
+            sy,
+            sw,
+            sh,
+            dx,
+            dy,
+            opacity,
+            clip.origin.x as i32,
+            clip.origin.y as i32,
+            clip.size.width as i32,
+            clip.size.height as i32,
+        );
+        return;
+    }
+    let left = dx.max(0).max(clip.origin.x as i32);
+    let top = dy.max(0).max(clip.origin.y as i32);
+    let right = (dx + dw)
+        .min(target.width() as i32)
+        .min((clip.origin.x + clip.size.width) as i32);
+    let bottom = (dy + dh)
+        .min(target.height() as i32)
+        .min((clip.origin.y + clip.size.height) as i32);
+    let stride = target.width() as usize;
+    let pixels = target.as_mut_slice();
+    for y in top..bottom {
+        let source_y = sy + (((y - dy) as f64 + 0.5) * sh as f64 / dh as f64) as i32;
+        for x in left..right {
+            let source_x = sx + (((x - dx) as f64 + 0.5) * sw as f64 / dw as f64) as i32;
+            if source_x < 0 || source_y < 0 {
+                continue;
+            }
+            if let Some(pixel) = source.get_pixel(source_x as u32, source_y as u32) {
+                let index = y as usize * stride + x as usize;
+                pixels[index] = Buffer::blend_pixels(pixels[index], pixel, opacity);
+            }
+        }
+    }
+}
+
 fn raster_bounds(buffer: &Buffer, rect: Rect, clip: Option<Rect>) -> (i32, i32, i32, i32) {
     let mut left = libm::floorf(rect.origin.x) as i32;
     let mut top = libm::floorf(rect.origin.y) as i32;
@@ -1970,6 +2350,20 @@ mod tests {
     use super::*;
     use crate::testing::alloc_counter::measure_allocations;
 
+    #[test]
+    fn grouped_display_lists_preserve_shared_image_identity() {
+        let buffer = Arc::new(Buffer::new(Size::new(32., 32.)));
+        let mut local = PaintContext::new();
+        let rect = Rect::from_xywh(0., 0., 32., 32.);
+        local.draw_buffer_rect_shared(rect, rect, Arc::clone(&buffer), 1.);
+        let mut group = PaintContext::new();
+        group.draw_display_list(Point::new(10., 20.), local.into_display_list());
+        let recording = group.flattened().into_display_list();
+        assert!(
+            matches!(&recording.context().buffers()[0],PaintBuffer::Shared(shared) if Arc::ptr_eq(shared,&buffer)),
+            "grouping must share image pixels and resource identity, rather than clone a borrowed snapshot again"
+        );
+    }
     #[test]
     fn path_helpers() {
         let r = path_rect(Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 20.0)));
@@ -2366,6 +2760,30 @@ mod tests {
         let mut r = CpuPaintRenderer::new(Size::new(100.0, 100.0), 1000, Color::rgb(0, 0, 0));
         r.execute(&ctx);
         assert!(r.buffer().get_pixel(12, 12).unwrap() > 0);
+    }
+
+    #[test]
+    fn draw_buffer_rect_respects_destination_size_and_source_dpi() {
+        let mut image = Buffer::from_dimensions(2, 1);
+        image.set_pixel(0, 0, Color::RED.to_bgra());
+        image.set_pixel(1, 0, Color::BLUE.to_bgra());
+        let mut ctx = PaintContext::new();
+        ctx.draw_buffer_rect_ref(
+            Rect::from_xywh(0.0, 0.0, 4.0, 2.0),
+            Rect::from_xywh(0.0, 0.0, 2.0, 1.0),
+            &image,
+            1.0,
+        );
+        let mut renderer = CpuPaintRenderer::new(Size::new(4.0, 2.0), 2000, Color::WHITE);
+        renderer.execute(&ctx);
+        for y in 0..4 {
+            for x in 0..8 {
+                assert_eq!(
+                    renderer.buffer().get_pixel(x, y),
+                    Some(if x < 4 { Color::RED } else { Color::BLUE }.to_bgra())
+                );
+            }
+        }
     }
 
     #[test]

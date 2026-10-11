@@ -130,6 +130,9 @@ impl SgfxWindowPaintBackend {
 }
 
 impl PaintBackend for SgfxWindowPaintBackend {
+    fn supports_retained_display_lists(&self) -> bool {
+        scarlet_ui_core::debug::retained_paint_enabled()
+    }
     fn resize(&mut self, size: Size, scale_milli: u32) {
         self.scale_milli = scale_milli.max(1);
         self.resize_physical(

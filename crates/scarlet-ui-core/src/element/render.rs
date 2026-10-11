@@ -121,6 +121,8 @@ pub enum ScrollOffsetUpdate {
     NeedsPaint,
     /// Child positions changed and retained layers only need recomposition.
     NeedsComposite,
+    /// Mounted virtual children changed; existing paint content remains valid.
+    ChildrenChanged,
 }
 
 /// RenderObject trait for leaf rendering nodes
@@ -420,6 +422,12 @@ pub trait RenderObject: Any {
     /// [`ElementRenderObject::update_needs_layout`].
     fn apply_scroll_offset(&mut self, _children: &mut [Box<dyn Element>]) -> ScrollOffsetUpdate {
         ScrollOffsetUpdate::None
+    }
+
+    /// Scroll containers provide their own content-local viewport during
+    /// layout and scrolling; an ancestor's hint must not replace it.
+    fn owns_child_viewport(&self) -> bool {
+        false
     }
 }
 
@@ -947,6 +955,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn set_viewport_hint(&mut self, viewport: Rect) -> bool {
+        if self.render_object.owns_child_viewport() {
+            return false;
+        }
         let mut changed = false;
         for child in self.children.iter_mut() {
             let child_pos = child.position();
@@ -1476,8 +1487,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             }
             if self.render_object.handle_event(_event, _phase) {
                 match self.render_object.apply_scroll_offset(&mut self.children) {
+                    ScrollOffsetUpdate::ChildrenChanged => {
+                        crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id);
+                    }
                     ScrollOffsetUpdate::NeedsPaint => {
-                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id)
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        for child in &self.children {
+                            crate::pipeline::mark_element_needs_paint(self.pipeline_id, child.id());
+                        }
                     }
                     ScrollOffsetUpdate::NeedsComposite => {
                         crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id)
@@ -1604,8 +1621,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
         if self.render_object.handle_event(_event, _phase) {
             match self.render_object.apply_scroll_offset(&mut self.children) {
+                ScrollOffsetUpdate::ChildrenChanged => {
+                    crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id);
+                }
                 ScrollOffsetUpdate::NeedsPaint => {
                     crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                    for child in &self.children {
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, child.id());
+                    }
                 }
                 ScrollOffsetUpdate::NeedsComposite => {
                     crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id);

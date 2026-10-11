@@ -77,6 +77,90 @@ pub struct RasterizedGlyph {
     pub mask: Arc<[u8]>,
 }
 
+// Retain positioned text runs, not just isolated glyph masks. A visible page
+// can exceed the small glyph-cache capacity, especially with CJK text. Without
+// this cache the GPU atlas can be warm while every frame rerasterizes its text.
+const TEXT_RUN_CACHE_ENTRIES: usize = 512;
+const TEXT_RUN_CACHE_BYTES: usize = 4 * 1024 * 1024;
+struct TextRunEntry {
+    text: alloc::string::String,
+    font_size_bits: u32,
+    scale_milli: u32,
+    font_stack_id: usize,
+    glyphs: Arc<[RasterizedGlyph]>,
+    bytes: usize,
+}
+struct TextRunCache {
+    entries: Vec<TextRunEntry>,
+    bytes: usize,
+}
+impl TextRunCache {
+    const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            bytes: 0,
+        }
+    }
+    fn get(
+        &self,
+        text: &str,
+        font_size: f32,
+        scale: u32,
+        font_stack_id: usize,
+    ) -> Option<Arc<[RasterizedGlyph]>> {
+        self.entries
+            .iter()
+            .find(|entry| {
+                entry.font_size_bits == font_size.to_bits()
+                    && entry.scale_milli == scale.max(1)
+                    && entry.font_stack_id == font_stack_id
+                    && entry.text == text
+            })
+            .map(|entry| Arc::clone(&entry.glyphs))
+    }
+    fn insert(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        scale: u32,
+        font_stack_id: usize,
+        glyphs: Arc<[RasterizedGlyph]>,
+    ) {
+        // Conservatively count shared masks for every reference. This bounds
+        // retained memory even when the glyph cache evicts its original owner.
+        let bytes = glyphs.iter().fold(
+            text.len()
+                .saturating_add(core::mem::size_of::<TextRunEntry>())
+                .saturating_add(core::mem::size_of_val(glyphs.as_ref())),
+            |sum, glyph| sum.saturating_add(glyph.mask.len()),
+        );
+        if bytes > TEXT_RUN_CACHE_BYTES {
+            return;
+        }
+        while !self.entries.is_empty()
+            && (self.entries.len() >= TEXT_RUN_CACHE_ENTRIES
+                || self.bytes.saturating_add(bytes) > TEXT_RUN_CACHE_BYTES)
+        {
+            let old = self.entries.remove(0);
+            self.bytes -= old.bytes;
+        }
+        self.entries.push(TextRunEntry {
+            text: text.into(),
+            font_size_bits: font_size.to_bits(),
+            scale_milli: scale.max(1),
+            font_stack_id,
+            glyphs,
+            bytes,
+        });
+        self.bytes += bytes;
+    }
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+}
+static TEXT_RUN_CACHE: Mutex<TextRunCache> = Mutex::new(TextRunCache::new());
+
 /// Glyph cache state
 struct GlyphCacheState {
     entries: Vec<GlyphMask>,
@@ -355,6 +439,7 @@ fn clear_text_caches() {
     glyph_cache.entries.clear();
     glyph_cache.next_evict = 0;
     TEXT_METRICS_CACHE.lock().entries.clear();
+    TEXT_RUN_CACHE.lock().clear();
 }
 
 /// Set the default UI font
@@ -681,6 +766,42 @@ pub fn rasterize_text(text: &str, font_size_px: f32, scale_milli: u32) -> Vec<Ra
         return Vec::new();
     };
     rasterize_text_with_font_stack(text, font_size_px, scale_milli, &font_stack)
+}
+
+/// Return shared positioned glyphs for the default font stack.
+///
+/// Repeated painting of unchanged text reuses its layout and masks even after
+/// individual glyphs are evicted. The cache is bounded to 512 runs and 4 MiB;
+/// larger runs are returned without retention. Font identity, exact font size,
+/// output scale and text are part of the key. The owned rasterization APIs
+/// remain available for callers that need to modify individual glyphs.
+pub fn rasterize_text_cached(
+    text: &str,
+    font_size_px: f32,
+    scale_milli: u32,
+) -> Arc<[RasterizedGlyph]> {
+    let font_stack_id = DEFAULT_FONT.lock().cache_id;
+    if let Some(glyphs) = TEXT_RUN_CACHE
+        .lock()
+        .get(text, font_size_px, scale_milli, font_stack_id)
+    {
+        return glyphs;
+    }
+    let Some(font_stack) = default_font_stack_for_text(text) else {
+        return Arc::from([]);
+    };
+    let glyphs: Arc<[RasterizedGlyph]> =
+        rasterize_text_with_font_stack(text, font_size_px, scale_milli, &font_stack).into();
+    // The captured stack's identity remains valid if another thread changes
+    // the default font while this run is being rasterized.
+    TEXT_RUN_CACHE.lock().insert(
+        text,
+        font_size_px,
+        scale_milli,
+        font_stack.cache_id(),
+        Arc::clone(&glyphs),
+    );
+    glyphs
 }
 
 /// Rasterize text with an explicit font stack.
@@ -1257,4 +1378,104 @@ fn contains_rounded_rect(rect: Rect, corner_radius: f32, px: f32, py: f32) -> bo
     let dx = px - cx;
     let dy = py - cy;
     dx * dx + dy * dy <= radius * radius
+}
+
+#[cfg(test)]
+mod text_run_tests {
+    use super::*;
+    fn glyph(bytes: usize) -> RasterizedGlyph {
+        RasterizedGlyph {
+            key: GlyphRasterKey {
+                codepoint: 65,
+                size_px: 13,
+                font_stack_id: 1,
+                font_slot: 0,
+            },
+            x: 2,
+            y: 3,
+            width: bytes as u32,
+            height: 1,
+            mask: alloc::vec![255; bytes].into(),
+        }
+    }
+    #[test]
+    fn text_runs_share_positions_and_masks_and_distinguish_font_scale_size_and_text() {
+        let mut cache = TextRunCache::new();
+        let original: Arc<[RasterizedGlyph]> = alloc::vec![glyph(20)].into();
+        cache.insert("曲名", 13., 1000, 1, original.clone());
+        let hit = cache.get("曲名", 13., 1000, 1).unwrap();
+        assert!(Arc::ptr_eq(&original, &hit));
+        assert_eq!(hit[0].x, 2);
+        for (text, size, scale, font) in [
+            ("別の曲", 13., 1000, 1),
+            ("曲名", 14., 1000, 1),
+            ("曲名", 13., 2000, 1),
+            ("曲名", 13., 1000, 2),
+        ] {
+            assert!(cache.get(text, size, scale, font).is_none());
+        }
+        cache.clear();
+        assert!(cache.get("曲名", 13., 1000, 1).is_none());
+        assert_eq!(cache.bytes, 0);
+    }
+    #[test]
+    fn text_run_retention_is_bounded_and_oversized_runs_do_not_flush_visible_text() {
+        let mut cache = TextRunCache::new();
+        for i in 0..600 {
+            cache.insert(
+                &alloc::format!("Track {i}"),
+                13.,
+                1000,
+                1,
+                alloc::vec![glyph(10)].into(),
+            );
+        }
+        assert_eq!(cache.entries.len(), TEXT_RUN_CACHE_ENTRIES);
+        assert!(cache.get("Track 0", 13., 1000, 1).is_none());
+        let before = cache.entries.len();
+        cache.insert(
+            "huge",
+            13.,
+            1000,
+            1,
+            alloc::vec![glyph(TEXT_RUN_CACHE_BYTES)].into(),
+        );
+        assert_eq!(cache.entries.len(), before);
+        for i in 0..8 {
+            cache.insert(
+                &alloc::format!("Large {i}"),
+                13.,
+                1000,
+                1,
+                alloc::vec![glyph(1024 * 1024)].into(),
+            );
+        }
+        assert!(cache.bytes <= TEXT_RUN_CACHE_BYTES);
+        assert!(cache.entries.len() < 8);
+    }
+    #[test]
+    fn warm_text_runs_do_not_depend_on_individual_glyph_cache_retention() {
+        let text = "GPU cache 日本語 カバー album";
+        let first = rasterize_text_cached(text, 13., 1000);
+        if first.is_empty() {
+            return;
+        }
+        GLYPH_CACHE.lock().entries.clear();
+        let second = rasterize_text_cached(text, 13., 1000);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(
+            GLYPH_CACHE.lock().entries.is_empty(),
+            "Warm text should not rerasterize evicted masks"
+        );
+        let work = crate::testing::alloc_counter::measure_allocations(|| {
+            for _ in 0..100 {
+                assert!(Arc::ptr_eq(&first, &rasterize_text_cached(text, 13., 1000)));
+            }
+        });
+        assert_eq!(
+            work.allocations, 0,
+            "Warm runs must not allocate glyph arrays or masks"
+        );
+        assert_eq!(first.as_ref(), rasterize_text(text, 13., 1000).as_slice());
+    }
 }

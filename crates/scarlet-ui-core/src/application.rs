@@ -38,7 +38,8 @@ fn wheel_log_env_enabled() -> bool {
 
 #[cfg(feature = "std")]
 fn app_wheel_coalesce_env_enabled() -> bool {
-    std::env::var("SCARLET_UI_APP_WHEEL_COALESCE").is_ok_and(|value| env_flag_enabled(&value))
+    let value = std::env::var("SCARLET_UI_APP_WHEEL_COALESCE").ok();
+    app_wheel_coalesce_setting(value.as_deref())
 }
 
 #[cfg(not(feature = "std"))]
@@ -48,7 +49,12 @@ fn wheel_log_env_enabled() -> bool {
 
 #[cfg(not(feature = "std"))]
 fn app_wheel_coalesce_env_enabled() -> bool {
-    false
+    true
+}
+
+#[cfg(feature = "std")]
+fn app_wheel_coalesce_setting(value: Option<&str>) -> bool {
+    value.is_none_or(env_flag_enabled)
 }
 
 #[cfg(feature = "std")]
@@ -331,6 +337,13 @@ impl ApplicationRunner {
             return Ok(());
         }
 
+        let mut state = RunnerLoopState::new();
+        let driven = self
+            .backend
+            .run_event_loop(&mut |backend| Self::run_cycle(backend, app, &mut slots, &mut state))?;
+        if driven {
+            return Ok(());
+        }
         self.run_loop(app, &mut slots)
     }
 
@@ -350,6 +363,15 @@ impl ApplicationRunner {
 
     fn create_slot<A: Application + View>(
         &mut self,
+        app: &mut A,
+        declaration: WindowDeclaration,
+        is_primary: bool,
+    ) -> Result<WindowSlot<A>> {
+        Self::create_slot_with_backend(self.backend.as_mut(), app, declaration, is_primary)
+    }
+
+    fn create_slot_with_backend<A: Application + View>(
+        backend: &mut dyn PlatformBackend,
         app: &mut A,
         declaration: WindowDeclaration,
         is_primary: bool,
@@ -392,7 +414,7 @@ impl ApplicationRunner {
             window_geometry_insets: window_info.window_geometry_insets,
         };
 
-        let mut window = self.backend.create_window(request)?;
+        let mut window = backend.create_window(request)?;
         sync_output_scale(&mut pipeline, window.as_ref());
         let negotiated_size = window.size();
         if negotiated_size != window_info.size {
@@ -447,166 +469,183 @@ impl ApplicationRunner {
         app: &mut A,
         slots: &mut Vec<WindowSlot<A>>,
     ) -> Result<()> {
-        let app_wheel_coalesce_enabled = app_wheel_coalesce_env_enabled();
-        let mut applied_environment = current_input_environment();
-        // Counts consecutive iterations that processed events (or had a dirty
-        // pipeline) without actually presenting a frame. A few of these are
-        // normal during an event burst; a long run means the compositor or
-        // transport is degraded and the loop would otherwise pin a full core.
-        let mut spin_without_present: u32 = 0;
-        loop {
-            let cycle_started = Instant::now();
-            let mut any_event = false;
-            let mut any_presented = false;
-            let mut application_paced_present = false;
-            let mut close_ids = Vec::new();
+        let mut state = RunnerLoopState::new();
+        while let Some(delay) = Self::run_cycle(self.backend.as_mut(), app, slots, &mut state)? {
+            if !delay.is_zero() {
+                wait_for_next_event(slots, delay);
+            }
+        }
+        Ok(())
+    }
 
-            for slot in slots.iter_mut() {
-                slot.presented_this_cycle = false;
-                let mut pending_mouse_motion = None;
-                let mut slot_closing = false;
-                for _ in 0..MAX_EVENTS_PER_WINDOW_PER_TICK {
-                    let Some(event) = slot.window.poll_event() else {
-                        break;
-                    };
-                    any_event = true;
-                    let Some(event) = coalesce_trackpad_moved_for_batch(
-                        &mut pending_mouse_motion,
-                        event,
-                        app_wheel_coalesce_enabled,
-                    ) else {
-                        continue;
-                    };
-                    let Some(event) =
-                        coalesce_relative_motion_for_batch(&mut pending_mouse_motion, event)
-                    else {
-                        continue;
-                    };
-                    if let Some(pending) = pending_mouse_motion.take() {
-                        if handle_window_event(app, slot, pending, &mut close_ids)? {
-                            slot_closing = true;
-                            break;
-                        }
-                    }
-                    if handle_window_event(app, slot, event, &mut close_ids)? {
+    fn run_cycle<A: Application + View>(
+        backend: &mut dyn PlatformBackend,
+        app: &mut A,
+        slots: &mut Vec<WindowSlot<A>>,
+        state: &mut RunnerLoopState,
+    ) -> Result<Option<Duration>> {
+        let cycle_started = Instant::now();
+        let mut any_event = false;
+        let mut any_presented = false;
+        let mut application_paced_present = false;
+        let mut close_ids = Vec::new();
+
+        for slot in slots.iter_mut() {
+            slot.presented_this_cycle = false;
+            let mut pending_mouse_motion = None;
+            let mut slot_closing = false;
+            for _ in 0..MAX_EVENTS_PER_WINDOW_PER_TICK {
+                let Some(event) = slot.window.poll_event() else {
+                    break;
+                };
+                any_event = true;
+                let Some(event) = coalesce_trackpad_moved_for_batch(
+                    &mut pending_mouse_motion,
+                    event,
+                    state.app_wheel_coalesce_enabled,
+                ) else {
+                    continue;
+                };
+                let Some(event) =
+                    coalesce_relative_motion_for_batch(&mut pending_mouse_motion, event)
+                else {
+                    continue;
+                };
+                if let Some(pending) = pending_mouse_motion.take() {
+                    if handle_window_event(app, slot, pending, &mut close_ids)? {
                         slot_closing = true;
                         break;
                     }
                 }
-                if !slot_closing && let Some(pending) = pending_mouse_motion.take() {
-                    let _ = handle_window_event(app, slot, pending, &mut close_ids)?;
+                if handle_window_event(app, slot, event, &mut close_ids)? {
+                    slot_closing = true;
+                    break;
                 }
             }
-
-            let current_environment = current_input_environment();
-            if current_environment != applied_environment {
-                for slot in slots.iter_mut() {
-                    slot.pipeline.invalidate_input_environment();
-                }
-                applied_environment = current_environment;
-            }
-
-            remove_closed_slots(slots, &close_ids);
-            handle_file_dialog_requests(slots);
-            if slots.is_empty() && app.exit_when_all_windows_closed() {
-                app.on_shutdown();
-                return Ok(());
-            }
-
-            poll_file_dialogs(slots);
-            app.on_idle();
-            handle_file_dialog_requests(slots);
-            self.handle_application_commands(app, slots)?;
-            if slots.is_empty() && app.exit_when_all_windows_closed() {
-                app.on_shutdown();
-                return Ok(());
-            }
-
-            for slot in slots.iter_mut() {
-                sync_application_window(app, slot);
-                sync_text_input(slot.window.as_mut(), &slot.pipeline);
-                let elapsed = slot.animation_tick.elapsed();
-                slot.animation_tick = Instant::now();
-                if !slot.suspended && slot.pipeline.has_active_animation() {
-                    // Legacy no-std builds have no Instant; their render loop is
-                    // already paced by frame grants or the fallback timer.
-                    let elapsed = if elapsed.is_zero() && cfg!(not(feature = "std")) {
-                        if slot.frame_ready {
-                            PRESENT_INTERVAL
-                        } else {
-                            Duration::ZERO
-                        }
-                    } else {
-                        elapsed
-                    };
-                    slot.pipeline.advance_animations(elapsed);
-                }
-                let frame_granted = !slot.frame_pacing_enabled || slot.frame_ready;
-                if (slot.pipeline.has_dirty() || slot.retry_render)
-                    && !slot.presented_this_cycle
-                    && !slot.suspended
-                    && frame_granted
-                {
-                    let presentation = present_window(app, slot)?;
-                    match presentation {
-                        Presentation::Cpu => {
-                            slot.presented_this_cycle = true;
-                            any_presented = true;
-                            request_next_frame(slot);
-                            application_paced_present |= !slot.frame_pacing_enabled;
-                            app.on_frame_presented(&slot.context);
-                        }
-                        Presentation::External => {
-                            slot.presented_this_cycle = true;
-                            any_presented = true;
-                            request_next_frame(slot);
-                            app.on_frame_presented(&slot.context);
-                        }
-                        Presentation::Idle => {}
-                    }
-                }
-            }
-
-            if !any_event && !any_presented {
-                spin_without_present = 0;
-                wait_for_next_event(slots, Duration::from_millis(16));
-            } else if application_paced_present {
-                // A frame was presented. Cap the presentation rate at ~60 fps
-                // so a pipeline that keeps marking itself dirty (e.g. during
-                // window close when SWS echoes frame acknowledgements) cannot
-                // pin a full core. Rendering time counts toward the frame
-                // interval instead of being followed by an unconditional
-                // extra 16 ms delay.
-                spin_without_present = 0;
-                let remaining = PRESENT_INTERVAL.saturating_sub(cycle_started.elapsed());
-                if !remaining.is_zero() {
-                    wait_for_next_event(slots, remaining);
-                }
-            } else if any_presented {
-                // External backends own a bounded presentation queue. Their
-                // buffer-release protocol supplies the backpressure and is
-                // synchronized to the compositor/display, so an additional
-                // application-side frame sleep can make every frame miss the
-                // next vblank. Start preparing the next frame immediately.
-                spin_without_present = 0;
-            } else {
-                // Events arrived (or the pipeline stayed dirty) but nothing
-                // was presented. Give a brief grace window for the next frame
-                // to land, then back off exponentially up to the normal idle
-                // sleep so a stuck compositor cannot monopolize a core.
-                spin_without_present = spin_without_present.saturating_add(1);
-                let backoff_ms = if spin_without_present <= 3 {
-                    1u64
-                } else {
-                    (1u64 << (spin_without_present - 4).min(4)).min(16)
-                };
-                wait_for_next_event(slots, Duration::from_millis(backoff_ms));
+            if !slot_closing && let Some(pending) = pending_mouse_motion.take() {
+                let _ = handle_window_event(app, slot, pending, &mut close_ids)?;
             }
         }
+
+        let events_us = state
+            .timing_enabled
+            .then(|| cycle_started.elapsed().as_micros());
+        let current_environment = current_input_environment();
+        if current_environment != state.applied_environment {
+            for slot in slots.iter_mut() {
+                slot.pipeline.invalidate_input_environment();
+            }
+            state.applied_environment = current_environment;
+        }
+
+        remove_closed_slots(slots, &close_ids);
+        handle_file_dialog_requests(slots);
+        if slots.is_empty() && app.exit_when_all_windows_closed() {
+            app.on_shutdown();
+            return Ok(None);
+        }
+
+        poll_file_dialogs(slots);
+        app.on_idle();
+        handle_file_dialog_requests(slots);
+        Self::handle_application_commands_with_backend(backend, app, slots)?;
+        if slots.is_empty() && app.exit_when_all_windows_closed() {
+            app.on_shutdown();
+            return Ok(None);
+        }
+
+        let idle_us = state.timing_enabled.then(|| {
+            cycle_started
+                .elapsed()
+                .as_micros()
+                .saturating_sub(events_us.unwrap_or_default())
+        });
+        for slot in slots.iter_mut() {
+            sync_application_window(app, slot);
+            sync_text_input(slot.window.as_mut(), &slot.pipeline);
+            let elapsed = slot.animation_tick.elapsed();
+            slot.animation_tick = Instant::now();
+            if !slot.suspended && slot.pipeline.has_active_animation() {
+                // Legacy no-std builds have no Instant; their render loop is
+                // already paced by frame grants or the fallback timer.
+                let elapsed = if elapsed.is_zero() && cfg!(not(feature = "std")) {
+                    if slot.frame_ready {
+                        PRESENT_INTERVAL
+                    } else {
+                        Duration::ZERO
+                    }
+                } else {
+                    elapsed
+                };
+                slot.pipeline.advance_animations(elapsed);
+            }
+            let frame_granted = !slot.frame_pacing_enabled || slot.frame_ready;
+            if (slot.pipeline.has_dirty() || slot.retry_render)
+                && !slot.presented_this_cycle
+                && !slot.suspended
+                && frame_granted
+            {
+                let presentation = present_window(app, slot)?;
+                match presentation {
+                    Presentation::Cpu => {
+                        slot.presented_this_cycle = true;
+                        any_presented = true;
+                        request_next_frame(slot);
+                        application_paced_present |= !slot.frame_pacing_enabled;
+                        app.on_frame_presented(&slot.context);
+                    }
+                    Presentation::External => {
+                        slot.presented_this_cycle = true;
+                        any_presented = true;
+                        request_next_frame(slot);
+                        app.on_frame_presented(&slot.context);
+                    }
+                    Presentation::Idle => {}
+                }
+            }
+        }
+
+        if state.timing_enabled && (any_event || any_presented) {
+            crate::logln!(
+                "[ScrollCycle] events_us={} idle_us={} cycle_us={} presented={any_presented}",
+                events_us.unwrap_or_default(),
+                idle_us.unwrap_or_default(),
+                cycle_started.elapsed().as_micros()
+            );
+        }
+        let delay = if !any_event && !any_presented {
+            state.spin_without_present = 0;
+            Duration::from_millis(16)
+        } else if application_paced_present {
+            state.spin_without_present = 0;
+            PRESENT_INTERVAL.saturating_sub(cycle_started.elapsed())
+        } else if any_presented {
+            // External presentation owns GPU/compositor backpressure.
+            state.spin_without_present = 0;
+            Duration::ZERO
+        } else {
+            state.spin_without_present = state.spin_without_present.saturating_add(1);
+            let backoff_ms = if state.spin_without_present <= 3 {
+                1u64
+            } else {
+                (1u64 << (state.spin_without_present - 4).min(4)).min(16)
+            };
+            Duration::from_millis(backoff_ms)
+        };
+        Ok(Some(delay))
     }
 
+    #[cfg(test)]
     fn handle_application_commands<A: Application + View>(
         &mut self,
+        app: &mut A,
+        slots: &mut Vec<WindowSlot<A>>,
+    ) -> Result<()> {
+        Self::handle_application_commands_with_backend(self.backend.as_mut(), app, slots)
+    }
+
+    fn handle_application_commands_with_backend<A: Application + View>(
+        backend: &mut dyn PlatformBackend,
         app: &mut A,
         slots: &mut Vec<WindowSlot<A>>,
     ) -> Result<()> {
@@ -620,7 +659,12 @@ impl ApplicationRunner {
                         .into_iter()
                         .find(|declaration| declaration.key == key)
                     {
-                        slots.push(self.create_slot(app, declaration, slots.is_empty())?);
+                        slots.push(Self::create_slot_with_backend(
+                            backend,
+                            app,
+                            declaration,
+                            slots.is_empty(),
+                        )?);
                     }
                 }
                 ApplicationCommand::OpenNewWindow(key) => {
@@ -628,7 +672,12 @@ impl ApplicationRunner {
                         .into_iter()
                         .find(|declaration| declaration.key == key)
                     {
-                        slots.push(self.create_slot(app, declaration, slots.is_empty())?);
+                        slots.push(Self::create_slot_with_backend(
+                            backend,
+                            app,
+                            declaration,
+                            slots.is_empty(),
+                        )?);
                     }
                 }
                 ApplicationCommand::DismissWindow(key) => {
@@ -649,6 +698,24 @@ impl ApplicationRunner {
         }
 
         Ok(())
+    }
+}
+
+struct RunnerLoopState {
+    app_wheel_coalesce_enabled: bool,
+    timing_enabled: bool,
+    applied_environment: InputEnvironment,
+    spin_without_present: u32,
+}
+
+impl RunnerLoopState {
+    fn new() -> Self {
+        Self {
+            app_wheel_coalesce_enabled: app_wheel_coalesce_env_enabled(),
+            timing_enabled: crate::debug::frame_log_enabled(),
+            applied_environment: current_input_environment(),
+            spin_without_present: 0,
+        }
     }
 }
 
@@ -859,15 +926,23 @@ fn sync_output_scale(pipeline: &mut RenderingPipeline, window: &dyn PlatformWind
 }
 
 fn sync_application_window<A: Application>(app: &mut A, slot: &mut WindowSlot<A>) {
-    let previous_size = slot.window.size();
     app.on_window_sync(&slot.context, slot.window.as_mut());
     let size = slot.window.size();
     sync_output_scale(&mut slot.pipeline, slot.window.as_ref());
-    if size != previous_size {
-        // Client-managed panels need not receive a configure event after
-        // resize(). Keep layout, retained caches, damage and backend extent
-        // in step with the surface, including secondary scene windows.
+    if size.width > 0.0 && size.height > 0.0 && size != slot.pipeline.window_size() {
+        // Compare with the rendered extent, not two native size reads around
+        // the application hook. The native surface may have changed before
+        // this tick (including AppKit live resize and window restoration),
+        // even when no configure notification is available to the runner.
+        if crate::debug::frame_log_enabled() {
+            crate::logln!(
+                "[WindowSize] reconcile rendered={:?} native={:?}",
+                slot.pipeline.window_size(),
+                size
+            );
+        }
         slot.pipeline.resize(size);
+        slot.frame_ready = true;
         app.on_window_resize(&slot.context, size.width as u32, size.height as u32);
     }
 }
@@ -901,7 +976,7 @@ fn handle_window_event<A: Application>(
         }
         Event::Resize { width, height } => {
             let new_size = Size::new(width as f32, height as f32);
-            if slot.window.resize(width, height).is_ok() {
+            if slot.window.apply_resize(width, height).is_ok() {
                 sync_output_scale(&mut slot.pipeline, slot.window.as_ref());
                 slot.pipeline.resize(new_size);
                 // A configure replaces the backing buffer. Permit one redraw
@@ -1575,6 +1650,13 @@ mod tests {
     struct EnvironmentRunnerProbe {
         presents: [Vec<InputEnvironment>; 2],
         present_sizes: [Vec<(u32, u32)>; 2],
+        resize_requests: [Vec<(u32, u32)>; 2],
+        applied_resizes: [Vec<(u32, u32)>; 2],
+        native_drive: bool,
+        native_ticks: usize,
+        in_native_tick: bool,
+        native_created: Vec<usize>,
+        wait_calls: usize,
         environment_emitted: bool,
         quit_emitted: [bool; 2],
         poll_calls: [usize; 2],
@@ -1611,11 +1693,33 @@ mod tests {
         ) -> Result<Box<dyn PlatformWindow>> {
             let index = self.next_window;
             self.next_window += 1;
+            if self.probe.borrow().in_native_tick {
+                self.probe.borrow_mut().native_created.push(index);
+            }
             Ok(Box::new(EnvironmentTestWindow {
                 index,
                 size: self.negotiated_size.unwrap_or(request.size),
                 probe: self.probe.clone(),
             }))
+        }
+
+        fn run_event_loop(
+            &mut self,
+            tick: &mut dyn FnMut(&mut dyn PlatformBackend) -> Result<Option<Duration>>,
+        ) -> Result<bool> {
+            if !self.probe.borrow().native_drive {
+                return Ok(false);
+            }
+            for _ in 0..200 {
+                self.probe.borrow_mut().native_ticks += 1;
+                self.probe.borrow_mut().in_native_tick = true;
+                let result = tick(self);
+                self.probe.borrow_mut().in_native_tick = false;
+                if result?.is_none() {
+                    return Ok(true);
+                }
+            }
+            Err(Error::EventDispatchError)
         }
     }
 
@@ -1727,6 +1831,7 @@ mod tests {
 
         fn wait_for_event(&mut self, _timeout: Duration) {
             let mut probe = self.probe.borrow_mut();
+            probe.wait_calls += 1;
             if probe.frame_pacing {
                 probe.pacing_waits += 1;
             }
@@ -1754,6 +1859,16 @@ mod tests {
         }
 
         fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+            self.probe.borrow_mut().resize_requests[self.index].push((width, height));
+            self.size = Size::new(width as f32, height as f32);
+            Ok(())
+        }
+
+        fn apply_resize(&mut self, width: u32, height: u32) -> Result<()> {
+            if width == 0 || height == 0 {
+                return Err(crate::Error::InvalidSize { width, height });
+            }
+            self.probe.borrow_mut().applied_resizes[self.index].push((width, height));
             self.size = Size::new(width as f32, height as f32);
             Ok(())
         }
@@ -2101,6 +2216,44 @@ mod tests {
     }
 
     #[test]
+    fn native_driver_renders_and_creates_secondary_windows_inside_callbacks_without_pumping() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe {
+            native_drive: true,
+            ..Default::default()
+        }));
+        let hook_count = Rc::new(Cell::new(0));
+        let mut app = EnvironmentRunnerApp {
+            hook_count: hook_count.clone(),
+            observed: Rc::new(Cell::new(None)),
+        };
+        ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: probe.clone(),
+            next_window: 0,
+            negotiated_size: None,
+        }))
+        .run(&mut app)
+        .unwrap();
+        let probe = probe.borrow();
+        assert!(probe.native_ticks >= 3);
+        assert_eq!(
+            probe.wait_calls, 0,
+            "native callbacks must not enter the polling pump"
+        );
+        assert_eq!(
+            probe.native_created,
+            [1],
+            "scene commands must use the callback's active backend"
+        );
+        assert_eq!(hook_count.get(), 1);
+        assert!(probe.presents.iter().all(|frames| {
+            frames
+                .iter()
+                .any(|environment| environment.interaction_mode() == crate::InteractionMode::Touch)
+        }));
+    }
+
+    #[test]
     fn negotiated_platform_size_is_used_for_the_first_present() {
         let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
         let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
@@ -2246,6 +2399,107 @@ mod tests {
         assert!(slot.pipeline.has_dirty());
         request_next_frame(&mut slot);
         assert!(!slot.frame_ready, "resize grant must only permit one frame");
+    }
+
+    #[test]
+    fn native_resize_notifications_update_layout_without_requesting_window_size() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        let mut app = RenderFailureApp(Rc::new(RefCell::new(Vec::new())));
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: probe.clone(),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slot = runner.create_slot(&mut app, declaration, true).unwrap();
+        let mut closed = Vec::new();
+        // Drag smaller/larger, then zoom and restore. Several notifications
+        // may have been queued before the runner gets control again.
+        let sizes = [(500, 300), (780, 640), (640, 480), (1200, 800), (640, 480)];
+        for (width, height) in sizes {
+            handle_window_event(
+                &mut app,
+                &mut slot,
+                Event::Resize { width, height },
+                &mut closed,
+            )
+            .unwrap();
+            assert_eq!(
+                present_window(&mut app, &mut slot).unwrap(),
+                Presentation::Cpu
+            );
+            assert_eq!(
+                probe.borrow().present_sizes[0].last(),
+                Some(&(width, height))
+            );
+            assert!(!slot.pipeline.has_dirty());
+        }
+        assert_eq!(probe.borrow().applied_resizes[0], sizes);
+        assert!(
+            probe.borrow().resize_requests[0].is_empty(),
+            "native notifications must not be echoed to the OS"
+        );
+
+        handle_window_event(
+            &mut app,
+            &mut slot,
+            Event::Resize {
+                width: 0,
+                height: 0,
+            },
+            &mut closed,
+        )
+        .unwrap();
+        assert!(
+            !slot.pipeline.has_dirty(),
+            "zero-sized minimized windows must not replace the usable layout"
+        );
+
+        // An explicit application request still uses the native request path.
+        slot.window.resize(900, 600).unwrap();
+        assert_eq!(probe.borrow().resize_requests[0], [(900, 600)]);
+    }
+
+    #[test]
+    fn native_size_changes_before_sync_update_rendered_extent_without_an_event() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        let mut app = RenderFailureApp(Rc::new(RefCell::new(Vec::new())));
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: probe.clone(),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slot = runner.create_slot(&mut app, declaration, true).unwrap();
+        present_window(&mut app, &mut slot).unwrap();
+        for (width, height) in [(900, 600), (740, 800), (1200, 650), (740, 600)] {
+            // Simulate an OS resize before on_window_sync; deliberately do
+            // not deliver Event::Resize and do not change size in the hook.
+            slot.window.apply_resize(width, height).unwrap();
+            slot.frame_ready = false;
+            sync_application_window(&mut app, &mut slot);
+            assert_eq!(
+                slot.pipeline.window_size(),
+                Size::new(width as f32, height as f32)
+            );
+            assert!(slot.frame_ready);
+            assert_eq!(
+                present_window(&mut app, &mut slot).unwrap(),
+                Presentation::Cpu
+            );
+            assert_eq!(
+                probe.borrow().present_sizes[0].last(),
+                Some(&(width, height))
+            );
+            sync_application_window(&mut app, &mut slot);
+            assert!(
+                !slot.pipeline.has_dirty(),
+                "unchanged native size must stay idle"
+            );
+        }
+        assert!(probe.borrow().resize_requests[0].is_empty());
     }
 
     #[test]
@@ -2480,7 +2734,11 @@ mod tests {
     }
 
     #[test]
-    fn app_wheel_coalesce_env_flag_defaults_off_and_one_enables() {
+    fn app_wheel_coalesce_defaults_on_without_a_rate_limit_and_can_be_disabled() {
+        assert!(app_wheel_coalesce_setting(None));
+        assert!(app_wheel_coalesce_setting(Some("1")));
+        assert!(!app_wheel_coalesce_setting(Some("0")));
+        assert!(!app_wheel_coalesce_setting(Some("off")));
         assert!(env_flag_enabled("1"));
         assert!(env_flag_enabled("true"));
         assert!(env_flag_enabled("on"));

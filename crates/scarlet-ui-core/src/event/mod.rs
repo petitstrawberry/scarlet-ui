@@ -28,7 +28,7 @@ pub enum Event {
     /// The platform's runtime input-device environment changed.
     InputEnvironmentChanged(InputEnvironment),
 
-    /// Window resize event
+    /// Platform notification of a new logical surface size (not a resize request).
     Resize { width: u32, height: u32 },
 
     /// Window fullscreen state changed on the platform.

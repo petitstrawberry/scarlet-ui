@@ -73,6 +73,36 @@ selected platform backend.
 
 ## Application Model
 
+
+Window decoration defaults are selected by the backend: winit uses system
+frames and titlebars, while SWS uses ScarletUI decorations. The selection is
+resolved when a scene is built, so windows created before `app.run()` also
+receive the backend policy. Explicit `WindowDecoration::CUSTOM`, `SYSTEM`,
+and `NONE` choices remain authoritative.
+
+Window children receive the content area's layout constraints. To track the
+available viewport, expand the content with `.frame(f32::INFINITY, f32::INFINITY)`
+and observe it with `.on_geometry_change(|geometry| geometry.size(), ...)`.
+Geometry callbacks run after layout and report only changed values. Do not
+subtract titlebar heights from `PlatformWindow::size()`: that is the platform
+surface size, including client-rendered chrome and any shadow outsets, whereas
+the child geometry already excludes those. Native decorations are outside the
+winit client surface. Min/max sizes and resizability are forwarded to winit.
+
+Platform resize notifications update layout and presentation through
+`PlatformWindow::apply_resize`; winit does not echo their size back to the OS.
+`PlatformWindow::resize` remains the explicit application request. SWS keeps
+its existing backing-buffer negotiation through the default implementation.
+The runner also reconciles the native extent with the rendered extent each
+tick, covering native restoration or resize changes whose notification was
+not delivered. Losing window focus cancels stale view capture without synthesizing a click.
+
+On macOS, the application runner stays inside winit's native event loop and
+finishes resize layout and presentation before the native redraw callback
+returns. This preserves AppKit's live-resize tracking and avoids stretching a
+stale frame after the mouse is released. Other backends retain the polling
+runner. New scenes created during callbacks use the active event loop.
+
 SWS windows support native gamepad events and optional menu navigation.
 See [gamepad input](docs/GAMEPAD_INPUT.md) for game controls, reset handling,
 and per-window policy.

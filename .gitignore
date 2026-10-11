@@ -26,3 +26,7 @@ target
 # Local OS state and validation artifacts
 .DS_Store
 /.omo/
+
+# Generated native scroll measurement logs and Python bytecode
+/artifacts/
+__pycache__/

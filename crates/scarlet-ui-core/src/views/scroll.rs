@@ -8,7 +8,7 @@ use crate::color::{Color, ColorPalette};
 use crate::element::{
     Element, ElementRenderObject, LayoutConstraints, RenderElement, ScrollOffsetUpdate,
 };
-use crate::event::{Event, MouseEvent, Phase, WheelPhase};
+use crate::event::{Event, MouseEvent, Phase, ScrollSource, WheelPhase};
 use crate::geometry::{Point, Rect, Size};
 use crate::pipeline::layers::{LayerClip, LayerPrimitive, LayerPrimitiveKind};
 use crate::renderer::PaintContext;
@@ -103,6 +103,7 @@ pub struct ScrollView<V: View> {
     inner: V,
     axes: ScrollAxis,
     content_size: Option<Size>,
+    content_bottom_inset: f32,
     wheel_scale: f32,
     horizontal_wheel_direction: ScrollWheelDirection,
     vertical_wheel_direction: ScrollWheelDirection,
@@ -132,6 +133,7 @@ impl<V: View> ScrollView<V> {
             inner,
             axes: ScrollAxis::Vertical,
             content_size: None,
+            content_bottom_inset: 0.0,
             wheel_scale: DEFAULT_WHEEL_SENSITIVITY,
             horizontal_wheel_direction: ScrollWheelDirection::Normal,
             vertical_wheel_direction: ScrollWheelDirection::Normal,
@@ -207,6 +209,13 @@ impl<V: View> ScrollView<V> {
     /// Updated scroll view.
     pub fn content_size(mut self, width: f32, height: f32) -> Self {
         self.content_size = Some(Size::new(width.max(0.0), height.max(0.0)));
+        self
+    }
+
+    /// Scrollable clearance below the final item for a floating overlay.
+    /// The viewport and virtual child geometry remain unchanged.
+    pub fn content_bottom_inset(mut self, inset: f32) -> Self {
+        self.content_bottom_inset = sanitize_non_negative(inset, 0.0);
         self
     }
 
@@ -585,6 +594,7 @@ impl<V: View + Clone + 'static> View for ScrollView<V> {
 pub struct ScrollViewRenderObject<V: View> {
     axes: ScrollAxis,
     configured_content_size: Option<Size>,
+    content_bottom_inset: f32,
     wheel_scale: f32,
     horizontal_wheel_direction: ScrollWheelDirection,
     vertical_wheel_direction: ScrollWheelDirection,
@@ -599,8 +609,10 @@ pub struct ScrollViewRenderObject<V: View> {
     offset_x: f32,
     offset_y: f32,
     scrollbar_active: bool,
+    trackpad_axis_engaged: bool,
     selection_target: Option<SelectionScrollTarget>,
     selection_scroll_pending: bool,
+    anchor: Option<crate::element::ScrollAnchor>,
     _marker: PhantomData<V>,
 }
 
@@ -620,6 +632,7 @@ impl<V: View> ScrollViewRenderObject<V> {
         Self {
             axes,
             configured_content_size: content_size,
+            content_bottom_inset: 0.0,
             wheel_scale,
             horizontal_wheel_direction: ScrollWheelDirection::Normal,
             vertical_wheel_direction: ScrollWheelDirection::Normal,
@@ -634,8 +647,10 @@ impl<V: View> ScrollViewRenderObject<V> {
             offset_x: 0.0,
             offset_y: 0.0,
             scrollbar_active: false,
+            trackpad_axis_engaged: false,
             selection_target: None,
             selection_scroll_pending: false,
+            anchor: None,
             _marker: PhantomData,
         }
     }
@@ -667,6 +682,7 @@ impl<V: View> ScrollViewRenderObject<V> {
             render_object.exclusive_axis_lock_ratio,
             render_object.exclusive_axis_lock_min_delta,
         ) = view.exclusive_wheel_axis_lock_values();
+        render_object.content_bottom_inset = view.content_bottom_inset;
         render_object.scrollbar_visibility = view.scrollbar_visibility_value();
         render_object.scrollbar_color = view.scrollbar_color_value();
         render_object.selection_target = view.current_selection_target();
@@ -740,7 +756,7 @@ impl<V: View> ScrollViewRenderObject<V> {
         let viewport_extent = if horizontal {
             self.viewport_size.width
         } else {
-            self.viewport_size.height
+            (self.viewport_size.height - self.content_bottom_inset).max(1.0)
         };
         let viewport_bottom = viewport_top + viewport_extent;
         let next_offset = if item_top < viewport_top {
@@ -809,6 +825,47 @@ impl<V: View> ScrollViewRenderObject<V> {
                 self.scale_wheel_axis_delta(raw_y),
             ),
         }
+    }
+
+    fn normalized_wheel_event(&self, event: &MouseEvent) -> (f32, f32) {
+        let MouseEvent::Wheel {
+            delta_x,
+            delta_y,
+            phase,
+            source,
+            ..
+        } = *event
+        else {
+            return (0.0, 0.0);
+        };
+        // Axis discrimination chooses a scroller at gesture start. Once a
+        // trackpad gesture is moving it, small diagonal jitter must not drop
+        // subsequent samples and repeatedly release/reacquire the target.
+        if self.trackpad_axis_engaged
+            && source == ScrollSource::Trackpad
+            && phase != WheelPhase::Started
+        {
+            match self.axes {
+                ScrollAxis::Vertical => {
+                    return (
+                        0.0,
+                        self.scale_wheel_axis_delta(
+                            delta_y as f32 * self.vertical_wheel_direction.multiplier(),
+                        ),
+                    );
+                }
+                ScrollAxis::Horizontal => {
+                    return (
+                        self.scale_wheel_axis_delta(
+                            delta_x as f32 * self.horizontal_wheel_direction.multiplier(),
+                        ),
+                        0.0,
+                    );
+                }
+                ScrollAxis::Both => {}
+            }
+        }
+        self.normalized_wheel_delta(delta_x, delta_y)
     }
 
     fn scale_wheel_axis_delta(&self, delta: f32) -> f32 {
@@ -961,6 +1018,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let height = finite_viewport_axis(constraints.min_height, constraints.max_height);
         self.viewport_size = Size::new(width, height);
         self.content_size = self.configured_content_size.unwrap_or(self.viewport_size);
+        self.content_size.height += self.content_bottom_inset;
         self.clamp_offsets();
         self.viewport_size
     }
@@ -988,6 +1046,23 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
                 self.viewport_size.height,
             ));
             self.content_size = child.layout(child_constraints);
+            self.content_size.height = self.content_size.height.max(
+                self.configured_content_size
+                    .map(|size| size.height)
+                    .unwrap_or(0.0),
+            ) + self.content_bottom_inset;
+            if !self.selection_scroll_pending {
+                if let Some(anchor) = &self.anchor {
+                    if let Some(position) = child.resolve_scroll_anchor(&anchor.key) {
+                        if self.axes.allows_x() {
+                            self.offset_x += position.x - anchor.position.x;
+                        }
+                        if self.axes.allows_y() {
+                            self.offset_y += position.y - anchor.position.y;
+                        }
+                    }
+                }
+            }
             self.content_size.width = self.content_size.width.max(content_width);
             self.content_size.height = self.content_size.height.max(content_height);
             self.clamp_offsets();
@@ -1001,9 +1076,22 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
                     self.viewport_size.height,
                 ));
             }
+            child.set_viewport_hint(Rect::from_xywh(
+                self.offset_x,
+                self.offset_y,
+                self.viewport_size.width,
+                self.viewport_size.height,
+            ));
+            self.anchor = child.scroll_anchor(Rect::from_xywh(
+                self.offset_x,
+                self.offset_y,
+                self.viewport_size.width,
+                self.viewport_size.height,
+            ));
             child.set_position(Point::new(-self.offset_x, -self.offset_y));
         } else {
             self.content_size = Size::ZERO;
+            self.anchor = None;
             self.clamp_offsets();
         }
 
@@ -1025,6 +1113,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
 
         let old_axes = self.axes;
         let old_content_size = self.configured_content_size;
+        let old_bottom_inset = self.content_bottom_inset;
         let old_wheel_scale = self.wheel_scale;
         let old_horizontal_wheel_direction = self.horizontal_wheel_direction;
         let old_vertical_wheel_direction = self.vertical_wheel_direction;
@@ -1039,6 +1128,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
 
         self.axes = scroll_view.scroll_axes();
         self.configured_content_size = scroll_view.configured_content_size();
+        self.content_bottom_inset = scroll_view.content_bottom_inset;
         self.wheel_scale = scroll_view.wheel_scale_value();
         (
             self.horizontal_wheel_direction,
@@ -1052,7 +1142,10 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         self.scrollbar_visibility = scroll_view.scrollbar_visibility_value();
         self.scrollbar_color = scroll_view.scrollbar_color_value();
         self.selection_target = scroll_view.current_selection_target();
-        if self.selection_target != old_selection_target && self.selection_target.is_some() {
+        if (self.selection_target != old_selection_target
+            || self.content_bottom_inset != old_bottom_inset)
+            && self.selection_target.is_some()
+        {
             self.selection_scroll_pending = true;
         }
         // A visible selection does not require layout. Keep the request pending
@@ -1068,6 +1161,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
 
         if self.axes != old_axes
             || self.configured_content_size != old_content_size
+            || self.content_bottom_inset != old_bottom_inset
             || (self.wheel_scale - old_wheel_scale).abs() > 0.001
             || self.horizontal_wheel_direction != old_horizontal_wheel_direction
             || self.vertical_wheel_direction != old_vertical_wheel_direction
@@ -1096,13 +1190,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
     }
 
     fn captures_wheel_event(&self, event: &MouseEvent) -> bool {
-        let MouseEvent::Wheel {
-            delta_x, delta_y, ..
-        } = *event
-        else {
-            return false;
-        };
-        let (scaled_x, scaled_y) = self.normalized_wheel_delta(delta_x, delta_y);
+        let (scaled_x, scaled_y) = self.normalized_wheel_event(event);
         (scaled_x.abs() > 0.01 && self.max_offset_x() > 0.0)
             || (scaled_y.abs() > 0.01 && self.max_offset_y() > 0.0)
     }
@@ -1168,7 +1256,10 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let (scaled_x, scaled_y) = if direct_touch {
             (delta_x as f32, delta_y as f32)
         } else {
-            self.normalized_wheel_delta(delta_x, delta_y)
+            let Event::Mouse(mouse) = event else {
+                return false;
+            };
+            self.normalized_wheel_event(mouse)
         };
         let scrollable = (self.axes.allows_x() && self.max_offset_x() > 0.0)
             || (self.axes.allows_y() && self.max_offset_y() > 0.0);
@@ -1187,6 +1278,20 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let offset_changed = self.set_offset(next_x, next_y);
         if offset_changed {
             self.selection_scroll_pending = false;
+        }
+        if let Event::Mouse(MouseEvent::Wheel {
+            phase,
+            source: ScrollSource::Trackpad,
+            ..
+        }) = event
+        {
+            if matches!(phase, WheelPhase::Ended | WheelPhase::Cancelled) {
+                self.trackpad_axis_engaged = false;
+            } else if offset_changed {
+                self.trackpad_axis_engaged = true;
+            } else if *phase == WheelPhase::Started {
+                self.trackpad_axis_engaged = false;
+            }
         }
         let scrollbar_deactivated = old_scrollbar_active && !self.scrollbar_active;
         offset_changed
@@ -1228,14 +1333,29 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
     fn apply_scroll_offset(&mut self, children: &mut [Box<dyn Element>]) -> ScrollOffsetUpdate {
         if let Some(child) = children.first_mut() {
             child.set_position(Point::new(-self.offset_x, -self.offset_y));
-            child.set_viewport_hint(Rect::from_xywh(
+            let materialized = child.set_viewport_hint(Rect::from_xywh(
                 self.offset_x,
                 self.offset_y,
                 self.viewport_size.width,
                 self.viewport_size.height,
             ));
+            self.anchor = child.scroll_anchor(Rect::from_xywh(
+                self.offset_x,
+                self.offset_y,
+                self.viewport_size.width,
+                self.viewport_size.height,
+            ));
+            if materialized {
+                // Newly visible virtual rows have new paint content. Moving
+                // the old retained scene alone leaves those rows blank.
+                return ScrollOffsetUpdate::ChildrenChanged;
+            }
         }
         ScrollOffsetUpdate::NeedsComposite
+    }
+
+    fn owns_child_viewport(&self) -> bool {
+        true
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1297,6 +1417,63 @@ mod tests {
     use crate::state::generate_state_id;
     use crate::view::View;
     use crate::views::Text;
+
+    #[test]
+    fn active_trackpad_axis_survives_diagonal_jitter_and_resets_after_the_gesture() {
+        let view = ScrollView::new(Text::new("content"))
+            .vertical()
+            .wheel_sensitivity(1.0)
+            .content_size(300.0, 3000.0);
+        let mut object = ScrollViewRenderObject::<Text>::from_view(&view);
+        object.layout(LayoutConstraints::tight(100.0, 100.0));
+        let event = |x, y, phase, source| {
+            Event::Mouse(MouseEvent::Wheel {
+                delta_x: x,
+                delta_y: y,
+                x: 10,
+                y: 10,
+                phase,
+                source,
+            })
+        };
+        assert!(object.handle_event(
+            &event(0, -20, WheelPhase::Started, ScrollSource::Trackpad),
+            Phase::Target
+        ));
+        for _ in 0..10 {
+            assert!(object.handle_event(
+                &event(4, -8, WheelPhase::Moved, ScrollSource::Trackpad),
+                Phase::Target
+            ));
+        }
+        assert_eq!(object.offset(), (0.0, 100.0));
+        // Discrete wheels still use per-event axis matching.
+        assert!(!object.handle_event(
+            &event(4, -8, WheelPhase::Moved, ScrollSource::Wheel),
+            Phase::Target
+        ));
+        object.handle_event(
+            &event(0, 0, WheelPhase::Ended, ScrollSource::Trackpad),
+            Phase::Target,
+        );
+        assert!(!object.handle_event(
+            &event(4, -8, WheelPhase::Started, ScrollSource::Trackpad),
+            Phase::Target
+        ));
+        assert_eq!(object.offset(), (0.0, 100.0));
+        assert!(object.handle_event(
+            &event(0, -20, WheelPhase::Moved, ScrollSource::Trackpad),
+            Phase::Target
+        ));
+        object.handle_event(
+            &event(0, 0, WheelPhase::Cancelled, ScrollSource::Trackpad),
+            Phase::Target,
+        );
+        assert!(!object.handle_event(
+            &event(4, -8, WheelPhase::Moved, ScrollSource::Trackpad),
+            Phase::Target
+        ));
+    }
 
     #[test]
     fn wheel_content_direction_updates_vertical_offset_and_clamps() {
@@ -1627,6 +1804,27 @@ mod tests {
             Phase::Target,
         ));
         assert_eq!(render_object.offset(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn selected_item_is_revealed_above_floating_overlay_with_explicit_content_size() {
+        let view = ScrollView::new(Text::new("content"))
+            .content_size(100., 2000.)
+            .content_bottom_inset(40.)
+            .scroll_to_index(Some(99), 20.);
+        let mut render = ScrollViewRenderObject::<Text>::from_view(&view);
+        let mut children = alloc::vec![Text::new("content").create_element()];
+        render.layout_with_children(LayoutConstraints::tight(100., 100.), &mut children);
+        assert_eq!(render.content_size().height, 2040.);
+        assert_eq!(render.offset().1, 1940.);
+        let wider_overlay = view.clone().content_bottom_inset(60.);
+        assert!(matches!(
+            render.update(&wider_overlay),
+            crate::element::UpdateResult::Updated
+        ));
+        render.layout_with_children(LayoutConstraints::tight(100., 100.), &mut children);
+        assert_eq!(render.content_size().height, 2060.);
+        assert_eq!(render.offset().1, 1960.);
     }
 
     #[test]
