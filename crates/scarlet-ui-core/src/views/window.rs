@@ -10,6 +10,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 
@@ -22,7 +23,7 @@ use crate::geometry::{EdgeInsets, Point, Rect, Size};
 use crate::menu_model::MenuBarModel;
 use crate::pipeline::{MountContext, PipelineId};
 use crate::platform::{WindowDecoration, WindowFrame, WindowPlacement, WindowTitleBar};
-use crate::renderer::PaintContext;
+use crate::renderer::{DisplayList, PaintContext};
 use crate::state::Listenable;
 use crate::view::View;
 use crate::views::style::{self, ElevationRole};
@@ -1724,29 +1725,50 @@ impl WindowBackdrop {
 
     pub(crate) fn paint(self, ctx: &mut PaintContext<'_>, origin: Point) {
         let rect = self.window_geometry_rect(origin);
-        if self.background_color.a == 1.0 && self.shadow_elevation != ElevationRole::Flat {
-            // The opaque body covers the shadow's interior. Keep its rounded
-            // corners and exterior, without blending every shadow layer under
-            // an animated canvas on each GPU frame.
+        self.paint_shadow(ctx, rect);
+        self.paint_body(ctx, origin);
+    }
+
+    pub(crate) fn paint_retained(
+        self,
+        ctx: &mut PaintContext<'_>,
+        origin: Point,
+        damage: Option<&[Rect]>,
+        shadows: &[Arc<DisplayList>],
+        body: &Arc<DisplayList>,
+    ) {
+        if self.background_color.a == 1.0 {
+            // Only the body interior is guaranteed to conceal the shadow.
+            // Keep corners and exterior, with clips outside the recordings so
+            // every shadow mesh remains bounded and reusable.
             for region in self.shadow_visible_regions() {
                 if region.size.width <= 0.0 || region.size.height <= 0.0 {
                     continue;
                 }
-                ctx.push_clip(Rect::new(
+                let destination = Rect::new(
                     Point::new(origin.x + region.origin.x, origin.y + region.origin.y),
                     region.size,
-                ));
-                self.paint_shadow(ctx, rect);
+                );
+                if damage
+                    .is_some_and(|damage| !damage.iter().any(|rect| destination.overlaps(rect)))
+                {
+                    continue;
+                }
+                ctx.push_clip(destination);
+                for shadow in shadows {
+                    ctx.draw_display_list(origin, Arc::clone(shadow));
+                }
                 ctx.pop_clip();
             }
         } else {
-            // A translucent body still shows the shadow beneath it.
-            self.paint_shadow(ctx, rect);
+            for shadow in shadows {
+                ctx.draw_display_list(origin, Arc::clone(shadow));
+            }
         }
-        self.paint_body(ctx, origin);
+        ctx.draw_display_list(origin, Arc::clone(body));
     }
 
-    fn paint_shadow(self, ctx: &mut PaintContext<'_>, rect: Rect) {
+    pub(crate) fn paint_shadow(self, ctx: &mut PaintContext<'_>, rect: Rect) {
         style::elevation_shadow(
             ctx,
             rect,
@@ -2497,7 +2519,20 @@ mod tests {
                     backdrop.paint_shadow(&mut reference, backdrop.window_geometry_rect(origin));
                     backdrop.paint_body(&mut reference, origin);
                     let mut actual = PaintContext::new();
-                    backdrop.paint(&mut actual, origin);
+                    let mut shadow = PaintContext::new();
+                    backdrop.paint_shadow(&mut shadow, backdrop.window_geometry_rect(Point::ZERO));
+                    let shadows: Vec<_> = (0..shadow.commands().len())
+                        .map(|index| shadow.command_context(index).into_display_list())
+                        .collect();
+                    let mut body = PaintContext::new();
+                    backdrop.paint_body(&mut body, Point::ZERO);
+                    backdrop.paint_retained(
+                        &mut actual,
+                        origin,
+                        None,
+                        &shadows,
+                        &body.into_display_list(),
+                    );
                     let render = |context: &PaintContext<'_>| {
                         let mut buffer = Buffer::from_logical_dimensions_with_scale(104, 86, scale);
                         let mut renderer = CpuPaintRenderer::new(
@@ -2525,7 +2560,10 @@ mod tests {
                         }
                     }
                     if alpha < 1.0 {
-                        assert_eq!(actual.commands().len(), reference.commands().len());
+                        assert_eq!(
+                            actual.flattened().commands().len(),
+                            reference.commands().len()
+                        );
                     }
                 }
             }

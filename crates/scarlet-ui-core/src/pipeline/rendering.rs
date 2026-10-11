@@ -42,6 +42,13 @@ struct WindowBackdropCache {
     buffer: Arc<Buffer>,
 }
 
+struct RetainedWindowBackdrop {
+    backdrop: WindowBackdrop,
+    origin: Point,
+    shadows: Vec<Arc<crate::renderer::DisplayList>>,
+    body: Arc<crate::renderer::DisplayList>,
+}
+
 #[derive(Default)]
 struct DirtyScratch {
     ids: Vec<ElementId>,
@@ -95,7 +102,7 @@ pub struct RenderingPipeline {
     retained_ctx: PaintContext<'static>,
     dirty_scratch: DirtyScratch,
     retained_paint: super::retained_paint::RetainedPaint,
-    retained_backdrop: Option<(WindowBackdrop, Point, Arc<crate::renderer::DisplayList>)>,
+    retained_backdrop: Option<RetainedWindowBackdrop>,
     #[cfg(test)]
     paint_test_counters: PaintTestCounters,
 }
@@ -930,18 +937,35 @@ impl RenderingPipeline {
                     if self
                         .retained_backdrop
                         .as_ref()
-                        .is_none_or(|(old, old_origin, _)| {
-                            *old != backdrop || *old_origin != origin
-                        })
+                        .is_none_or(|old| old.backdrop != backdrop || old.origin != origin)
                     {
-                        let mut context = PaintContext::new();
-                        backdrop.paint(&mut context, Point::ZERO);
-                        self.retained_backdrop =
-                            Some((backdrop, origin, context.into_display_list()));
+                        let mut shadow_context = PaintContext::new();
+                        backdrop.paint_shadow(
+                            &mut shadow_context,
+                            backdrop.window_geometry_rect(Point::ZERO),
+                        );
+                        // Each shadow is one bounded reusable mesh. Keep clips
+                        // outside the recordings: embedding all eight clips
+                        // duplicates vertices and prevents retained replay.
+                        let shadows = (0..shadow_context.commands().len())
+                            .map(|index| shadow_context.command_context(index).into_display_list())
+                            .collect();
+                        let mut body = PaintContext::new();
+                        backdrop.paint_body(&mut body, Point::ZERO);
+                        self.retained_backdrop = Some(RetainedWindowBackdrop {
+                            backdrop,
+                            origin,
+                            shadows,
+                            body: body.into_display_list(),
+                        });
                     }
-                    ctx.draw_display_list(
+                    let cached = self.retained_backdrop.as_ref().unwrap();
+                    backdrop.paint_retained(
+                        &mut ctx,
                         origin,
-                        Arc::clone(&self.retained_backdrop.as_ref().unwrap().2),
+                        damage,
+                        &cached.shadows,
+                        &cached.body,
                     );
                 } else {
                     backdrop.paint(&mut ctx, origin);
