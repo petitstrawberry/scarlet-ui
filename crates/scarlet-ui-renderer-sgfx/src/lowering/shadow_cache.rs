@@ -112,6 +112,49 @@ mod tests {
     }
 
     #[test]
+    fn clipped_shadow_recording_is_cached_and_unbalanced_state_is_rejected() {
+        let mut clipped = PaintContext::new();
+        for rect in [
+            Rect::from_xywh(0., 0., 80., 10.),
+            Rect::from_xywh(0., 60., 80., 10.),
+        ] {
+            clipped.push_clip(rect);
+            clipped.append(stack(UiColor::BLACK).context());
+            clipped.pop_clip();
+        }
+        let list = clipped.into_display_list();
+        let mut encoder = SgfxPaintEncoder::new(80, 80, true).unwrap();
+        let full = PixelBounds {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 80,
+        };
+        let mut cold = Trace::default();
+        encoder.advance_frame_serial();
+        assert!(
+            encoder
+                .cached_shadow(&mut cold, &list, Point::ZERO, 1000, full)
+                .unwrap()
+                .is_some()
+        );
+        let mut warm = Trace::default();
+        encoder.advance_frame_serial();
+        assert!(
+            encoder
+                .cached_shadow(&mut warm, &list, Point::ZERO, 1000, full)
+                .unwrap()
+                .is_some()
+        );
+        assert!(warm.passes.is_empty());
+        assert_eq!(warm.uploads, 0);
+        let mut invalid = PaintContext::new();
+        invalid.push_clip(Rect::from_xywh(0., 0., 80., 10.));
+        invalid.append(stack(UiColor::BLACK).context());
+        assert!(mask_color(&invalid.into_display_list()).is_none());
+    }
+
+    #[test]
     fn shadow_identity_origin_scale_and_discard_invalidate_without_reallocating() {
         let mut encoder = SgfxPaintEncoder::new(200, 160, true).unwrap();
         let full = PixelBounds {
@@ -221,19 +264,23 @@ mod tests {
 // pipeline without unpremultiplication. Colored shadows and other primitives
 // retain the original path; their RGB/alpha semantics are never changed.
 fn mask_color(list: &DisplayList) -> Option<[f32; 4]> {
-    if list.context().commands().is_empty() {
-        return None;
-    }
+    let mut depth = 0usize;
+    let mut shadows = 0usize;
     for command in list.context().commands() {
-        let PaintCommand::DrawRoundedRectShadow { color, .. } = command else {
-            return None;
-        };
-        let color = ui_color(*color, 1.).ok()?;
-        if color[..3] != [0., 0., 0.] {
-            return None;
+        match command {
+            PaintCommand::DrawRoundedRectShadow { color, .. } => {
+                let color = ui_color(*color, 1.).ok()?;
+                if color[..3] != [0., 0., 0.] {
+                    return None;
+                }
+                shadows += 1;
+            }
+            PaintCommand::PushClip { corner_radius, .. } if *corner_radius == 0. => depth += 1,
+            PaintCommand::PopClip if depth > 0 => depth -= 1,
+            _ => return None,
         }
     }
-    Some([1.; 4])
+    (shadows > 0 && depth == 0).then_some([1.; 4])
 }
 
 impl SgfxPaintEncoder {

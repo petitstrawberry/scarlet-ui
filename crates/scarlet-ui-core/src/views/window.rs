@@ -1768,6 +1768,37 @@ impl WindowBackdrop {
         ctx.draw_display_list(origin, Arc::clone(body));
     }
 
+    pub(crate) fn retained_shadow_lists(self) -> Vec<Arc<DisplayList>> {
+        let mut shadow = PaintContext::new();
+        self.paint_shadow(&mut shadow, self.window_geometry_rect(Point::ZERO));
+        let black = shadow.commands().iter().all(|command| {
+            matches!(command, crate::renderer::PaintCommand::DrawRoundedRectShadow { color, .. }
+                if color.r == 0. && color.g == 0. && color.b == 0.)
+        });
+        if !black {
+            // Preserve individual bounded meshes for colored themes.
+            return (0..shadow.commands().len())
+                .map(|index| shadow.command_context(index).into_display_list())
+                .collect();
+        }
+        if self.background_color.a == 1. {
+            // The GPU raster cache must not shade the hidden body even on its
+            // first frame. These disjoint clips preserve exterior and corners.
+            let mut visible = PaintContext::new();
+            for region in self.shadow_visible_regions() {
+                if region.size.width <= 0. || region.size.height <= 0. {
+                    continue;
+                }
+                visible.push_clip(region);
+                visible.append(&shadow);
+                visible.pop_clip();
+            }
+            alloc::vec![visible.into_display_list()]
+        } else {
+            alloc::vec![shadow.into_display_list()]
+        }
+    }
+
     pub(crate) fn paint_shadow(self, ctx: &mut PaintContext<'_>, rect: Rect) {
         style::elevation_shadow(
             ctx,
@@ -2519,9 +2550,7 @@ mod tests {
                     backdrop.paint_shadow(&mut reference, backdrop.window_geometry_rect(origin));
                     backdrop.paint_body(&mut reference, origin);
                     let mut actual = PaintContext::new();
-                    let mut shadow = PaintContext::new();
-                    backdrop.paint_shadow(&mut shadow, backdrop.window_geometry_rect(Point::ZERO));
-                    let shadows = alloc::vec![shadow.into_display_list()];
+                    let shadows = backdrop.retained_shadow_lists();
                     let mut body = PaintContext::new();
                     backdrop.paint_body(&mut body, Point::ZERO);
                     backdrop.paint_retained(

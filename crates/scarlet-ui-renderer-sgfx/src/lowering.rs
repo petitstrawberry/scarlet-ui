@@ -3,7 +3,7 @@ mod retained;
 mod shadow_cache;
 
 use alloc::rc::Rc;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
 use scarlet_ui_core::buffer::Buffer;
@@ -308,6 +308,7 @@ struct CanvasTarget {
 }
 
 struct CanvasMesh {
+    source: Weak<SgfxMesh>,
     handle_id: u64,
     revision: u64,
     buffer: BufferId,
@@ -1670,7 +1671,21 @@ impl SgfxPaintEncoder {
         }
     }
 
-    fn canvas_mesh(&mut self, mesh: &SgfxMesh) -> Result<usize> {
+    fn canvas_mesh(&mut self, mesh: &Arc<SgfxMesh>) -> Result<usize> {
+        let existing = self
+            .canvas_meshes
+            .iter()
+            .position(|cached| cached.handle_id == mesh.handle.id());
+        if let Some(index) = existing {
+            let cached = &self.canvas_meshes[index];
+            // A weak reference preserves allocation identity without retaining
+            // CPU vertices. The immutable snapshot was validated on first use.
+            if cached.revision == mesh.revision
+                && core::ptr::eq(cached.source.as_ptr(), Arc::as_ptr(mesh))
+            {
+                return Ok(index);
+            }
+        }
         if mesh.vertices.is_empty() || !mesh.vertices.len().is_multiple_of(3) {
             return Err(Error::FrameTooComplex);
         }
@@ -1683,11 +1698,7 @@ impl SgfxPaintEncoder {
         }
         let vertex_count =
             u32::try_from(mesh.vertices.len()).map_err(|_| Error::FrameTooComplex)?;
-        if let Some(index) = self
-            .canvas_meshes
-            .iter()
-            .position(|cached| cached.handle_id == mesh.handle.id())
-        {
+        if let Some(index) = existing {
             let action = canvas_mesh_cache_action(
                 self.canvas_meshes[index].revision,
                 self.canvas_meshes[index].capacity_vertices,
@@ -1695,6 +1706,7 @@ impl SgfxPaintEncoder {
                 vertex_count,
             )?;
             if action == CanvasMeshCacheAction::Reuse {
+                self.canvas_meshes[index].source = Arc::downgrade(mesh);
                 return Ok(index);
             }
             if let CanvasMeshCacheAction::Reallocate(capacity_vertices) = action {
@@ -1711,6 +1723,7 @@ impl SgfxPaintEncoder {
                     .id();
                 self.canvas_meshes[index].capacity_vertices = capacity_vertices;
             }
+            self.canvas_meshes[index].source = Arc::downgrade(mesh);
             self.canvas_meshes[index].revision = mesh.revision;
             self.canvas_meshes[index].vertex_count = vertex_count;
             self.canvas_meshes[index].uploaded = false;
@@ -1732,6 +1745,7 @@ impl SgfxPaintEncoder {
             .map_err(|_| Error::sgfx(Stage::DefineResources))?
             .id();
         self.canvas_meshes.push(CanvasMesh {
+            source: Arc::downgrade(mesh),
             handle_id: mesh.handle.id(),
             revision: mesh.revision,
             buffer,
@@ -4847,6 +4861,41 @@ mod tests {
 
         let invalid = valid.draw(SgfxCanvasDraw::new(mesh, transform).texture(texture(5)));
         assert!(canvas_frame_has_revision_conflict(&invalid));
+    }
+
+    #[test]
+    fn retained_mesh_validation_tracks_snapshot_identity_and_revision() {
+        let mut encoder = SgfxPaintEncoder::new(64, 48, true).unwrap();
+        let handle = SgfxMeshHandle::new();
+        let mesh = SgfxMesh::with_handle(handle, 1, triangle(0.0));
+        let index = encoder.canvas_mesh(&mesh).unwrap();
+        let buffer = encoder.canvas_meshes[index].buffer;
+        encoder.canvas_meshes[index].uploaded = true;
+        assert_eq!(encoder.canvas_mesh(&mesh).unwrap(), index);
+        assert!(encoder.canvas_meshes[index].uploaded);
+
+        // A new snapshot cannot bypass validation by reusing the revision.
+        let invalid = SgfxMesh::with_handle(handle, 1, triangle(f32::NAN));
+        assert!(matches!(
+            encoder.canvas_mesh(&invalid),
+            Err(Error::InvalidFrame)
+        ));
+        assert!(core::ptr::eq(
+            encoder.canvas_meshes[index].source.as_ptr(),
+            Arc::as_ptr(&mesh)
+        ));
+
+        let updated = SgfxMesh::with_handle(handle, 2, triangle(1.0));
+        assert_eq!(encoder.canvas_mesh(&updated).unwrap(), index);
+        assert_eq!(encoder.canvas_meshes[index].buffer, buffer);
+        assert!(!encoder.canvas_meshes[index].uploaded);
+        assert_eq!(encoder.canvas_meshes[index].revision, 2);
+        let weak = Arc::downgrade(&updated);
+        drop(updated);
+        assert!(
+            weak.upgrade().is_none(),
+            "GPU cache must release CPU mesh storage"
+        );
     }
 
     #[test]

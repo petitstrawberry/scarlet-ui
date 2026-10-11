@@ -939,28 +939,7 @@ impl RenderingPipeline {
                         .as_ref()
                         .is_none_or(|old| old.backdrop != backdrop || old.origin != origin)
                     {
-                        let mut shadow_context = PaintContext::new();
-                        backdrop.paint_shadow(
-                            &mut shadow_context,
-                            backdrop.window_geometry_rect(Point::ZERO),
-                        );
-                        // Retain the complete immutable stack so GPU backends
-                        // can cache its coverage once. Exterior/corner clips
-                        // stay outside the recording and apply during replay.
-                        let black_stack = shadow_context.commands().iter().all(|command| {
-                            matches!(command, crate::renderer::PaintCommand::DrawRoundedRectShadow { color, .. }
-                                if color.r == 0. && color.g == 0. && color.b == 0.)
-                        });
-                        let shadows = if black_stack {
-                            alloc::vec![shadow_context.into_display_list()]
-                        } else {
-                            // Preserve bounded mesh reuse for colored themes.
-                            (0..shadow_context.commands().len())
-                                .map(|index| {
-                                    shadow_context.command_context(index).into_display_list()
-                                })
-                                .collect()
-                        };
+                        let shadows = backdrop.retained_shadow_lists();
                         let mut body = PaintContext::new();
                         backdrop.paint_body(&mut body, Point::ZERO);
                         self.retained_backdrop = Some(RetainedWindowBackdrop {
