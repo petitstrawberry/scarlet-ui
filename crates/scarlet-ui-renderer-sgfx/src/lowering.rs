@@ -1,5 +1,6 @@
 //! Paint-command to persistent SGFX IR lowering.
 mod retained;
+mod shadow_cache;
 
 use alloc::rc::Rc;
 use alloc::sync::Arc;
@@ -441,6 +442,7 @@ pub struct SgfxPaintEncoder {
     supports_depth: bool,
     retained_meshes: Vec<retained::RetainedMesh>,
     recording_mesh: bool,
+    shadow_cache: Option<shadow_cache::ShadowCache>,
 }
 
 impl SgfxPaintEncoder {
@@ -578,6 +580,7 @@ impl SgfxPaintEncoder {
 
         Ok(Self {
             retained_meshes: Vec::new(),
+            shadow_cache: None,
             recording_mesh: false,
             table,
             targets,
@@ -757,6 +760,9 @@ impl SgfxPaintEncoder {
     /// texture uploads remain valid and are not needlessly uploaded again. The
     /// next presentation target must also be fully repainted by the platform.
     pub fn discard_frame(&mut self) {
+        if let Some(cache) = self.shadow_cache.as_mut() {
+            cache.list_id = 0;
+        }
         for target in &mut self.canvas_targets {
             target.initialized = false;
         }

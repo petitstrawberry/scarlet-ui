@@ -2521,9 +2521,7 @@ mod tests {
                     let mut actual = PaintContext::new();
                     let mut shadow = PaintContext::new();
                     backdrop.paint_shadow(&mut shadow, backdrop.window_geometry_rect(Point::ZERO));
-                    let shadows: Vec<_> = (0..shadow.commands().len())
-                        .map(|index| shadow.command_context(index).into_display_list())
-                        .collect();
+                    let shadows = alloc::vec![shadow.into_display_list()];
                     let mut body = PaintContext::new();
                     backdrop.paint_body(&mut body, Point::ZERO);
                     backdrop.paint_retained(
