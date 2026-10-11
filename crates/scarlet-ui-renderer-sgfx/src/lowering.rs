@@ -1599,14 +1599,19 @@ impl SgfxPaintEncoder {
                 )
             })
             .unwrap_or((0, 0));
+        // Bound speculative capacity by the presentation extent. Otherwise
+        // a 2196x1358 canvas allocates and clears 4096x2048 color and depth
+        // attachments each frame. Oversampling retains the requested size.
         let capacity_width = width
             .max(old_capacity.0)
             .checked_next_power_of_two()
-            .ok_or(Error::InvalidFrame)?;
+            .ok_or(Error::InvalidFrame)?
+            .min(self.width.max(width));
         let capacity_height = height
             .max(old_capacity.1)
             .checked_next_power_of_two()
-            .ok_or(Error::InvalidFrame)?;
+            .ok_or(Error::InvalidFrame)?
+            .min(self.height.max(height));
         let extent =
             Extent2D::new(capacity_width, capacity_height).map_err(|_| Error::InvalidFrame)?;
         let texture = self
@@ -4140,6 +4145,20 @@ mod tests {
                     .all(|t| t.width == 1000 - step)
             );
         }
+    }
+
+    #[test]
+    fn canvas_capacity_is_bounded_by_the_presentation_extent() {
+        let mut encoder = SgfxPaintEncoder::new(2244, 1564, true).unwrap();
+        let index = encoder.canvas_target(1, 2196, 1358, true).unwrap();
+        let target = &encoder.canvas_targets[index];
+        assert_eq!((target.capacity_width, target.capacity_height), (2244, 1564));
+        let texture = target.texture;
+        assert_eq!(encoder.canvas_target(1, 2244, 1564, true).unwrap(), index);
+        assert_eq!(encoder.canvas_targets[index].texture, texture);
+        let index = encoder.canvas_target(2, 4488, 3128, true).unwrap();
+        let target = &encoder.canvas_targets[index];
+        assert_eq!((target.capacity_width, target.capacity_height), (4488, 3128));
     }
 
     #[test]
