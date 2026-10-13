@@ -297,6 +297,13 @@ pub trait RenderObject: Any {
         false
     }
 
+    /// Whether a paint-only property update can change descendant painting.
+    /// Clips and opacity use the conservative subtree default; overlays such
+    /// as borders can repaint only themselves and retain their child records.
+    fn update_needs_subtree_paint(&self) -> bool {
+        true
+    }
+
     /// Return the absolute bounds affected by repainting only this render object.
     ///
     /// This hook is used for self-paint invalidations, where descendants and
@@ -421,6 +428,15 @@ pub trait RenderObject: Any {
     /// [`ScrollOffsetUpdate::None`], leaving the layout/paint decision to
     /// [`ElementRenderObject::update_needs_layout`].
     fn apply_scroll_offset(&mut self, _children: &mut [Box<dyn Element>]) -> ScrollOffsetUpdate {
+        ScrollOffsetUpdate::None
+    }
+
+    /// Apply a position-only request from a compatible view update using the
+    /// last measured viewport. Geometry-changing updates still go through layout.
+    fn apply_view_scroll_offset(
+        &mut self,
+        _children: &mut [Box<dyn Element>],
+    ) -> ScrollOffsetUpdate {
         ScrollOffsetUpdate::None
     }
 
@@ -744,11 +760,33 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
         let needs_layout = matches!(child_result, UpdateResult::Updated)
             || (matches!(render_result, UpdateResult::Updated) && render_needs_layout);
+        let scroll_update = if !needs_layout {
+            self.render_object
+                .apply_view_scroll_offset(&mut self.children)
+        } else {
+            ScrollOffsetUpdate::None
+        };
         if self.mounted {
+            match scroll_update {
+                ScrollOffsetUpdate::ChildrenChanged => {
+                    crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id);
+                }
+                ScrollOffsetUpdate::NeedsComposite => {
+                    crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id);
+                }
+                ScrollOffsetUpdate::NeedsPaint => {
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                }
+                ScrollOffsetUpdate::None => {}
+            }
             if needs_layout {
                 crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
             } else if matches!(render_result, UpdateResult::Updated) {
-                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                if self.render_object.update_needs_subtree_paint() {
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                } else {
+                    crate::pipeline::mark_element_needs_self_paint(self.pipeline_id, self.id);
+                }
             }
             UpdateResult::NoChange
         } else if needs_layout || matches!(render_result, UpdateResult::Updated) {
@@ -766,11 +804,33 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         let child_result = self.update_children_from_view();
         let needs_layout = matches!(child_result, UpdateResult::Updated)
             || (matches!(render_result, UpdateResult::Updated) && render_needs_layout);
+        let scroll_update = if !needs_layout {
+            self.render_object
+                .apply_view_scroll_offset(&mut self.children)
+        } else {
+            ScrollOffsetUpdate::None
+        };
         if self.mounted {
+            match scroll_update {
+                ScrollOffsetUpdate::ChildrenChanged => {
+                    crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id);
+                }
+                ScrollOffsetUpdate::NeedsComposite => {
+                    crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id);
+                }
+                ScrollOffsetUpdate::NeedsPaint => {
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                }
+                ScrollOffsetUpdate::None => {}
+            }
             if needs_layout {
                 crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
             } else if matches!(render_result, UpdateResult::Updated) {
-                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                if self.render_object.update_needs_subtree_paint() {
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                } else {
+                    crate::pipeline::mark_element_needs_self_paint(self.pipeline_id, self.id);
+                }
             }
             UpdateResult::NoChange
         } else if needs_layout || matches!(render_result, UpdateResult::Updated) {

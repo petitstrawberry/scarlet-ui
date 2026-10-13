@@ -522,6 +522,145 @@ mod tests {
         }
     }
     #[test]
+    fn changing_border_preserves_child_recordings_and_matches_fresh_pixels() {
+        let size = Size::new(200., 100.);
+        let view = |color, width| {
+            Window::new(
+                "Border",
+                Spacer::new()
+                    .frame(80., 80.)
+                    .background(Color::BLUE)
+                    .clip_radius(10.)
+                    .border_rounded(color, width, 10.),
+            )
+            .decorated(false)
+            .size(size)
+        };
+        let pixels = Rc::new(RefCell::new(Buffer::new(size)));
+        let lists = Rc::new(RefCell::new(Vec::new()));
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_paint_backend(Box::new(Capture {
+            retained: true,
+            renderer: CpuPaintRenderer::new(size, 1000, Color::WHITE),
+            pixels: pixels.clone(),
+            lists: lists.clone(),
+        }));
+        pipeline.set_root(view(Color::RED, 1.).create_element());
+        pipeline.resize(size);
+        pipeline.layout_initial();
+        pipeline.render_for_present().unwrap();
+        let old = lists.borrow().clone();
+        for (color, width) in [(Color::GREEN, 3.), (Color::RED, 1.)] {
+            let updated = view(color, width);
+            pipeline
+                .element_tree_mut()
+                .root_mut()
+                .unwrap()
+                .update(&updated);
+            pipeline.render_for_present().unwrap();
+            assert_eq!(pipeline.pipeline_owner().last_self_paint_ids().len(), 1);
+            let shared = old.iter().filter(|id| lists.borrow().contains(id)).count();
+            assert_eq!(
+                shared,
+                old.len() - 1,
+                "only the border overlay recording may change"
+            );
+            let fresh_pixels = Rc::new(RefCell::new(Buffer::new(size)));
+            let mut fresh = RenderingPipeline::new();
+            fresh.set_paint_backend(Box::new(Capture {
+                retained: false,
+                renderer: CpuPaintRenderer::new(size, 1000, Color::WHITE),
+                pixels: fresh_pixels.clone(),
+                lists: Rc::new(RefCell::new(Vec::new())),
+            }));
+            fresh.set_root(updated.create_element());
+            fresh.resize(size);
+            fresh.layout_initial();
+            fresh.render_for_present().unwrap();
+            assert_eq!(pixels.borrow().data(), fresh_pixels.borrow().data());
+            fresh.teardown();
+        }
+        pipeline.teardown();
+    }
+
+    #[test]
+    fn selection_reveal_reuses_recordings_and_handles_parent_resize() {
+        let view = |target: f32, viewport: f32| {
+            Window::new(
+                "Reveal",
+                ScrollView::new(
+                    HStack::new((
+                        Spacer::new().frame(100., 100.).background(Color::RED),
+                        Spacer::new().frame(100., 100.).background(Color::GREEN),
+                        Spacer::new().frame(100., 100.).background(Color::BLUE),
+                        Spacer::new().frame(100., 100.).background(Color::YELLOW),
+                    ))
+                    .spacing(0.)
+                    .frame(400., 100.),
+                )
+                .horizontal()
+                .scrollbar_visibility(crate::views::ScrollbarVisibility::Never)
+                .content_size(400., 100.)
+                .scroll_to_horizontal_range(target, target + 50.)
+                .frame(viewport, 100.),
+            )
+            .decorated(false)
+            .size(Size::new(100., 100.))
+        };
+        let size = Size::new(100., 100.);
+        let pixels = Rc::new(RefCell::new(Buffer::new(size)));
+        let lists = Rc::new(RefCell::new(Vec::new()));
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_paint_backend(Box::new(Capture {
+            retained: true,
+            renderer: CpuPaintRenderer::new(size, 1000, Color::WHITE),
+            pixels: pixels.clone(),
+            lists: lists.clone(),
+        }));
+        pipeline.set_root(view(0., 100.).create_element());
+        pipeline.resize(size);
+        pipeline.layout_initial();
+        pipeline.render_for_present().unwrap();
+        let old_lists = lists.borrow().clone();
+        pipeline.reset_paint_test_counters();
+        for (target, viewport) in [(310., 100.), (310., 60.), (0., 100.)] {
+            let updated = view(target, viewport);
+            pipeline
+                .element_tree_mut()
+                .root_mut()
+                .unwrap()
+                .update(&updated);
+            pipeline.render_for_present().unwrap();
+            if viewport == 100. && target == 310. {
+                assert!(!pipeline.pipeline_owner().last_composite_ids().is_empty());
+                assert!(pipeline.pipeline_owner().last_paint_ids().is_empty());
+                assert_eq!(pipeline.paint_test_counters().boundary_rebuilds, 0);
+                assert!(
+                    old_lists.iter().any(|id| lists.borrow().contains(id)),
+                    "unchanged visible recordings must survive selection movement"
+                );
+            }
+            let fresh_pixels = Rc::new(RefCell::new(Buffer::new(size)));
+            let mut fresh = RenderingPipeline::new();
+            fresh.set_paint_backend(Box::new(Capture {
+                retained: false,
+                renderer: CpuPaintRenderer::new(size, 1000, Color::WHITE),
+                pixels: fresh_pixels.clone(),
+                lists: Rc::new(RefCell::new(Vec::new())),
+            }));
+            fresh.set_root(updated.create_element());
+            fresh.resize(size);
+            fresh.layout_initial();
+            fresh.render_for_present().unwrap();
+            let equal = pixels.borrow().data() == fresh_pixels.borrow().data();
+            assert!(equal);
+
+            fresh.teardown();
+        }
+        pipeline.teardown();
+    }
+
+    #[test]
     fn offscreen_content_commit_is_not_lost_on_an_idle_frame() {
         let content = State::new(crate::generate_state_id(), "AAA".to_string());
         let mut pipelines = Vec::new();
