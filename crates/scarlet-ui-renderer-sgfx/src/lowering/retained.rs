@@ -140,6 +140,25 @@ impl SgfxPaintEncoder {
             }
             if let PaintCommand::DrawDisplayList { origin, list } = command {
                 if opacity == 1. {
+                    // A static shadow stack is rasterized only on a cache miss.
+                    // Cache all layers together, then sample its alpha coverage.
+                    if clips.iter().all(|(_, radius)| *radius == 0.) {
+                        if let Some(mut draw) =
+                            self.cached_shadow(executor, list, *origin, scale, full)?
+                        {
+                            if let Some(scissor) = replay_scissor(
+                                FloatRect::new(0., 0., full.width as f32, full.height as f32),
+                                [0., 0.],
+                                &clips,
+                                full,
+                                scale,
+                            ) {
+                                draw.geometry.scissor = scissor;
+                                frame.draws.push(draw);
+                                continue;
+                            }
+                        }
+                    }
                     if let Some(offsets) = replay_offset(list, *origin, scale) {
                         let cached = self.retained_meshes.iter().position(|mesh| {
                             mesh.list_id == list.identity()

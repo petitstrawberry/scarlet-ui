@@ -10,6 +10,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 
@@ -22,7 +23,7 @@ use crate::geometry::{EdgeInsets, Point, Rect, Size};
 use crate::menu_model::MenuBarModel;
 use crate::pipeline::{MountContext, PipelineId};
 use crate::platform::{WindowDecoration, WindowFrame, WindowPlacement, WindowTitleBar};
-use crate::renderer::PaintContext;
+use crate::renderer::{DisplayList, PaintContext};
 use crate::state::Listenable;
 use crate::view::View;
 use crate::views::style::{self, ElevationRole};
@@ -1724,6 +1725,81 @@ impl WindowBackdrop {
 
     pub(crate) fn paint(self, ctx: &mut PaintContext<'_>, origin: Point) {
         let rect = self.window_geometry_rect(origin);
+        self.paint_shadow(ctx, rect);
+        self.paint_body(ctx, origin);
+    }
+
+    pub(crate) fn paint_retained(
+        self,
+        ctx: &mut PaintContext<'_>,
+        origin: Point,
+        damage: Option<&[Rect]>,
+        shadows: &[Arc<DisplayList>],
+        body: &Arc<DisplayList>,
+    ) {
+        if self.background_color.a == 1.0 {
+            // Only the body interior is guaranteed to conceal the shadow.
+            // Keep corners and exterior, with clips outside the recordings so
+            // every shadow mesh remains bounded and reusable.
+            for region in self.shadow_visible_regions() {
+                if region.size.width <= 0.0 || region.size.height <= 0.0 {
+                    continue;
+                }
+                let destination = Rect::new(
+                    Point::new(origin.x + region.origin.x, origin.y + region.origin.y),
+                    region.size,
+                );
+                if damage
+                    .is_some_and(|damage| !damage.iter().any(|rect| destination.overlaps(rect)))
+                {
+                    continue;
+                }
+                ctx.push_clip(destination);
+                for shadow in shadows {
+                    ctx.draw_display_list(origin, Arc::clone(shadow));
+                }
+                ctx.pop_clip();
+            }
+        } else {
+            for shadow in shadows {
+                ctx.draw_display_list(origin, Arc::clone(shadow));
+            }
+        }
+        ctx.draw_display_list(origin, Arc::clone(body));
+    }
+
+    pub(crate) fn retained_shadow_lists(self) -> Vec<Arc<DisplayList>> {
+        let mut shadow = PaintContext::new();
+        self.paint_shadow(&mut shadow, self.window_geometry_rect(Point::ZERO));
+        let black = shadow.commands().iter().all(|command| {
+            matches!(command, crate::renderer::PaintCommand::DrawRoundedRectShadow { color, .. }
+                if color.r == 0. && color.g == 0. && color.b == 0.)
+        });
+        if !black {
+            // Preserve individual bounded meshes for colored themes.
+            return (0..shadow.commands().len())
+                .map(|index| shadow.command_context(index).into_display_list())
+                .collect();
+        }
+        if self.background_color.a == 1. {
+            // The GPU raster cache must not shade the hidden body even on its
+            // first frame. These disjoint clips preserve exterior and corners.
+            let mut visible = PaintContext::new();
+            for region in self.shadow_visible_regions() {
+                if region.size.width <= 0. || region.size.height <= 0. {
+                    continue;
+                }
+                visible.push_clip(region);
+                visible.append(&shadow);
+                visible.pop_clip();
+            }
+            alloc::vec![visible.into_display_list()]
+        } else {
+            alloc::vec![shadow.into_display_list()]
+        }
+    }
+
+    pub(crate) fn paint_shadow(self, ctx: &mut PaintContext<'_>, rect: Rect) {
         style::elevation_shadow(
             ctx,
             rect,
@@ -1731,7 +1807,6 @@ impl WindowBackdrop {
             self.shadow_color,
             self.shadow_elevation,
         );
-        self.paint_body(ctx, origin);
     }
 
     pub(crate) fn paint_cached_shadow(self, ctx: &mut PaintContext<'_>, origin: Point) {
@@ -2455,6 +2530,72 @@ mod tests {
     };
     use crate::input_environment::{InputEnvironment, install_test_input_environment};
     use crate::views::Text;
+
+    #[test]
+    fn opaque_backdrop_culls_only_fully_hidden_shadow_pixels() {
+        use crate::renderer::CpuPaintRenderer;
+
+        for scale in [1_000, 1_250, 2_000] {
+            for alpha in [1.0, 0.6] {
+                for origin in [Point::ZERO, Point::new(2.25, 3.5)] {
+                    let backdrop = WindowBackdrop {
+                        size: Size::new(100.0, 80.0),
+                        corner_radius: 12.0,
+                        background_color: Color::rgb(70u8, 110u8, 160u8).with_opacity(alpha),
+                        window_geometry_insets: EdgeInsets::new(12.0, 10.0, 12.0, 14.0),
+                        shadow_elevation: ElevationRole::Window,
+                        shadow_color: Color::BLACK.with_opacity(0.4),
+                    };
+                    let mut reference = PaintContext::new();
+                    backdrop.paint_shadow(&mut reference, backdrop.window_geometry_rect(origin));
+                    backdrop.paint_body(&mut reference, origin);
+                    let mut actual = PaintContext::new();
+                    let shadows = backdrop.retained_shadow_lists();
+                    let mut body = PaintContext::new();
+                    backdrop.paint_body(&mut body, Point::ZERO);
+                    backdrop.paint_retained(
+                        &mut actual,
+                        origin,
+                        None,
+                        &shadows,
+                        &body.into_display_list(),
+                    );
+                    let render = |context: &PaintContext<'_>| {
+                        let mut buffer = Buffer::from_logical_dimensions_with_scale(104, 86, scale);
+                        let mut renderer = CpuPaintRenderer::new(
+                            Size::new(104.0, 86.0),
+                            scale,
+                            Color::TRANSPARENT,
+                        );
+                        renderer.execute_into_external_buffer(
+                            &mut buffer,
+                            Color::TRANSPARENT,
+                            context,
+                            None,
+                        );
+                        buffer
+                    };
+                    let expected = render(&reference);
+                    let rendered = render(&actual);
+                    for y in 0..expected.height() {
+                        for x in 0..expected.width() {
+                            assert_eq!(
+                                rendered.get_pixel(x, y),
+                                expected.get_pixel(x, y),
+                                "scale={scale} alpha={alpha} pixel=({x},{y})"
+                            );
+                        }
+                    }
+                    if alpha < 1.0 {
+                        assert_eq!(
+                            actual.flattened().commands().len(),
+                            reference.commands().len()
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn window_decoration_defers_to_backend_and_legacy_api_remains_explicit() {
