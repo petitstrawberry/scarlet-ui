@@ -116,6 +116,10 @@ impl BorderRenderObject {
 }
 
 impl ElementRenderObject for BorderRenderObject {
+    fn update_needs_subtree_paint(&self) -> bool {
+        false
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         let width = constraints.min_width.max(0.0);
         let height = constraints.min_height.max(0.0);

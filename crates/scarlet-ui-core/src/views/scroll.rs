@@ -1148,15 +1148,9 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         {
             self.selection_scroll_pending = true;
         }
-        // A visible selection does not require layout. Keep the request pending
-        // until the next actual layout, which may have a new viewport or content
-        // extent; applying and clearing it here would use the previous geometry.
-        let selection_needs_layout = self.selection_scroll_pending
-            && (self.viewport_size.width <= 0.0
-                || self.viewport_size.height <= 0.0
-                || self
-                    .selection_offset()
-                    .is_some_and(|offset| offset != self.offset()));
+        // Selection-only updates can reuse the measured viewport and move
+        // retained content just like wheel input. Keep the request pending for
+        // a possible parent resize/content layout in the same frame.
         self.clamp_offsets();
 
         if self.axes != old_axes
@@ -1173,7 +1167,6 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
             || self.scrollbar_visibility != old_scrollbar_visibility
             || self.scrollbar_color != old_scrollbar_color
             || self.offset() != old_offset
-            || selection_needs_layout
         {
             crate::element::UpdateResult::Updated
         } else {
@@ -1352,6 +1345,24 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
             }
         }
         ScrollOffsetUpdate::NeedsComposite
+    }
+
+    fn apply_view_scroll_offset(
+        &mut self,
+        children: &mut [Box<dyn Element>],
+    ) -> ScrollOffsetUpdate {
+        if !self.selection_scroll_pending
+            || self.viewport_size.width <= 0.0
+            || self.viewport_size.height <= 0.0
+        {
+            return ScrollOffsetUpdate::None;
+        }
+        let before = self.offset();
+        self.ensure_selection_visible();
+        if before == self.offset() {
+            return ScrollOffsetUpdate::None;
+        }
+        self.apply_scroll_offset(children)
     }
 
     fn owns_child_viewport(&self) -> bool {

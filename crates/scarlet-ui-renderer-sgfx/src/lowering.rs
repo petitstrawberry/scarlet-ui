@@ -11,7 +11,9 @@ use scarlet_ui_core::color::Color as UiColor;
 use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::graphics::{GlyphRasterKey, rasterize_text_cached};
 use scarlet_ui_core::icon::{IconMaskKey, rasterize_icon};
-use scarlet_ui_core::renderer::{BufferHandle, PaintCommand, PaintContext, PaintExtension};
+use scarlet_ui_core::renderer::{
+    BufferHandle, PaintBuffer, PaintCommand, PaintContext, PaintExtension,
+};
 use sgfx::backend::CommandExecutor;
 use sgfx::ir::{
     AddressMode, BlendState, BufferDesc, BufferId, BufferUsage, Color, CommandEncoder,
@@ -121,7 +123,7 @@ enum TextureUploadState {
     Uploaded,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct BufferTexture {
     texture: TextureId,
     buffer_identity: u64,
@@ -132,6 +134,7 @@ struct BufferTexture {
     capacity_height: u32,
     used_frame: u64,
     upload_state: TextureUploadState,
+    source: Option<Weak<Buffer>>,
 }
 
 struct GlyphTexture {
@@ -959,7 +962,7 @@ impl SgfxPaintEncoder {
         buffer_textures_before
             .try_reserve_exact(self.buffer_textures.len())
             .map_err(|_| Error::FrameTooComplex)?;
-        buffer_textures_before.extend(self.buffer_textures.iter().copied());
+        buffer_textures_before.extend(self.buffer_textures.iter().cloned());
         self.glyph_atlas_rebuild_required = false;
         match self.lower_once(paint, scale_milli, render_area) {
             Err(Error::FrameTooComplex) if self.glyph_atlas_rebuild_required => {
@@ -971,7 +974,7 @@ impl SgfxPaintEncoder {
                 for (texture, previous) in self
                     .buffer_textures
                     .iter_mut()
-                    .zip(buffer_textures_before.iter().copied())
+                    .zip(buffer_textures_before.iter().cloned())
                 {
                     *texture = previous;
                 }
@@ -1318,6 +1321,7 @@ impl SgfxPaintEncoder {
                             buffer.height() as f32,
                         ),
                     )? {
+                        self.retain_buffer_source(texture, paint, *buffer_idx);
                         uploads.extend(upload);
                         push_draw_phase(
                             &mut draws,
@@ -1363,6 +1367,7 @@ impl SgfxPaintEncoder {
                         source,
                         destination,
                     )? {
+                        self.retain_buffer_source(texture, paint, *buffer_idx);
                         uploads.extend(upload);
                         let combined_opacity = finite_unit(*command_opacity)? * opacity;
                         push_draw_phase(
@@ -2298,12 +2303,33 @@ impl SgfxPaintEncoder {
                         texture.used_frame != self.frame_serial
                             && texture.capacity_width >= buffer.width()
                             && texture.capacity_height >= buffer.height()
+                            // A hidden cover is still reusable while its view/model
+                            // owns the source. Recycle it only under slot pressure.
+                            && (self.buffer_textures.len() >= MAX_BUFFER_TEXTURES
+                                || texture.source.as_ref().is_none_or(|source| source.strong_count() == 0))
                     })
                     .min_by_key(|(_, texture)| {
-                        u64::from(texture.capacity_width) * u64::from(texture.capacity_height)
+                        (
+                            texture.source.as_ref().is_some_and(|source| source.strong_count() > 0),
+                            if self.buffer_textures.len() >= MAX_BUFFER_TEXTURES { texture.used_frame } else { 0 },
+                            u64::from(texture.capacity_width) * u64::from(texture.capacity_height),
+                        )
                     })
                     .map(|(index, _)| index)
             })
+    }
+
+    fn retain_buffer_source(&mut self, texture: TextureId, paint: &PaintContext<'_>, index: usize) {
+        if let Some(cached) = self
+            .buffer_textures
+            .iter_mut()
+            .find(|entry| entry.texture == texture)
+        {
+            cached.source = match paint.buffers().get(index) {
+                Some(PaintBuffer::Shared(source)) => Some(Arc::downgrade(source)),
+                _ => None,
+            };
+        }
     }
 
     fn buffer_texture(&mut self, buffer: &Buffer) -> Result<(TextureId, bool)> {
@@ -2318,6 +2344,9 @@ impl SgfxPaintEncoder {
                 || texture.upload_state == TextureUploadState::Pending;
             if upload_required {
                 texture.upload_state = TextureUploadState::Pending;
+            }
+            if texture.buffer_identity != buffer_identity {
+                texture.source = None;
             }
             texture.buffer_identity = buffer_identity;
             texture.revision = revision;
@@ -2346,6 +2375,7 @@ impl SgfxPaintEncoder {
             capacity_height,
             used_frame: self.frame_serial,
             upload_state: TextureUploadState::Pending,
+            source: None,
         });
         Ok((texture, true))
     }
@@ -2524,7 +2554,9 @@ impl SgfxPaintEncoder {
         let transform = pixel_transform(self.width, self.height)?;
         let white = ir_color([1.0, 1.0, 1.0, 1.0])?;
 
-        let mut first_submission = true;
+        let mut encoder = CommandEncoder::new(&table);
+        let mut stream_commands = 0usize;
+        let mut vertices_written = false;
         for render_area in render_areas {
             let area = PixelRect::new(
                 render_area.x,
@@ -2536,13 +2568,24 @@ impl SgfxPaintEncoder {
             let mut draw_index = 0usize;
             let mut first_pass = true;
             while draw_index < frame.draws.len() {
-                // Each draw remains intact. Split only to respect SGFX IR's
-                // fixed command capacity, preserving order with LoadOp::Load.
-                let mut encoder = CommandEncoder::new(&table);
-                if first_submission && !frame.vertex_bytes.is_empty() {
+                // Batch independent damage passes into one stream. Preserve
+                // their original areas and clears; split only at IR capacity.
+                if stream_commands.saturating_add(PASS_COMMANDS + MAX_PAINT_DRAW_COMMANDS)
+                    > MAX_COMMANDS
+                {
+                    let commands = encoder
+                        .finish()
+                        .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                    executor.execute(&commands).map_err(FrameError::Execution)?;
+                    encoder = CommandEncoder::new(&table);
+                    stream_commands = 0;
+                }
+                if !vertices_written && !frame.vertex_bytes.is_empty() {
                     encoder
                         .write_buffer(vertex_buffer, 0, &frame.vertex_bytes)
                         .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                    stream_commands += 1;
+                    vertices_written = true;
                 }
                 let load = if first_pass {
                     LoadOp::Clear(clear_color)
@@ -2554,7 +2597,7 @@ impl SgfxPaintEncoder {
                 let mut pass = encoder
                     .begin_render_pass(descriptor)
                     .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                let initial_command_count = PASS_COMMANDS + usize::from(first_submission);
+                let initial_command_count = stream_commands + PASS_COMMANDS;
                 let mut command_count = initial_command_count;
 
                 while draw_index < frame.draws.len() {
@@ -2626,13 +2669,15 @@ impl SgfxPaintEncoder {
                     return Err(Error::FrameTooComplex.into());
                 }
                 pass.end().map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                let commands = encoder
-                    .finish()
-                    .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                executor.execute(&commands).map_err(FrameError::Execution)?;
-                first_submission = false;
+                stream_commands = command_count;
                 first_pass = false;
             }
+        }
+        if stream_commands > 0 {
+            let commands = encoder
+                .finish()
+                .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+            executor.execute(&commands).map_err(FrameError::Execution)?;
         }
         Ok(())
     }
@@ -3614,6 +3659,96 @@ mod tests {
     }
 
     #[test]
+    fn shared_images_survive_offscreen_frames_without_reupload() {
+        let images = [
+            Arc::new(Buffer::from_dimensions(8, 8)),
+            Arc::new(Buffer::from_dimensions(8, 8)),
+        ];
+        let mut encoder = SgfxPaintEncoder::new(16, 16, false).unwrap();
+        for (frame, index) in [0, 1, 0, 1, 0].into_iter().enumerate() {
+            let mut paint = PaintContext::new();
+            paint.draw_buffer_rect_shared(
+                Rect::from_xywh(0., 0., 8., 8.),
+                Rect::from_xywh(0., 0., 8., 8.),
+                Arc::clone(&images[index]),
+                1.,
+            );
+            let mut executor = RecordingExecutor::default();
+            encoder
+                .encode_frame(
+                    &mut executor,
+                    0,
+                    None,
+                    &paint,
+                    UiColor::BLACK,
+                    1000,
+                    &[(0, 0, 16, 16)],
+                )
+                .unwrap();
+            let uploads = executor
+                .command_kinds
+                .iter()
+                .flatten()
+                .filter(|&&kind| kind == "write-texture")
+                .count();
+            assert_eq!(
+                uploads,
+                usize::from(frame < 2),
+                "a live image returning to view must retain its GPU pixels"
+            );
+        }
+        assert_eq!(encoder.buffer_textures.len(), 2);
+        assert_eq!(
+            Arc::strong_count(&images[0]),
+            1,
+            "the GPU cache must not keep CPU images alive"
+        );
+        drop(images);
+        encoder.advance_frame_serial();
+        let replacement = Buffer::from_dimensions(8, 8);
+        encoder.buffer_texture(&replacement).unwrap();
+        assert_eq!(
+            encoder.buffer_textures.len(),
+            2,
+            "dropped images make their slots reusable"
+        );
+    }
+
+    #[test]
+    fn shared_images_recycle_oldest_live_slot_at_capacity() {
+        let images: Vec<_> = (0..MAX_BUFFER_TEXTURES)
+            .map(|_| Arc::new(Buffer::from_dimensions(4, 4)))
+            .collect();
+        let mut encoder = SgfxPaintEncoder::new(8, 8, false).unwrap();
+        for image in &images {
+            let mut paint = PaintContext::new();
+            paint.draw_buffer_rect_shared(
+                Rect::from_xywh(0., 0., 4., 4.),
+                Rect::from_xywh(0., 0., 4., 4.),
+                Arc::clone(image),
+                1.,
+            );
+            encoder
+                .encode_frame(
+                    &mut RecordingExecutor::default(),
+                    0,
+                    None,
+                    &paint,
+                    UiColor::BLACK,
+                    1000,
+                    &[(0, 0, 8, 8)],
+                )
+                .unwrap();
+        }
+        let oldest = encoder.buffer_textures[0].texture;
+        encoder.advance_frame_serial();
+        let replacement = Buffer::from_dimensions(4, 4);
+        assert_eq!(encoder.buffer_texture(&replacement).unwrap().0, oldest);
+        assert_eq!(encoder.buffer_textures.len(), MAX_BUFFER_TEXTURES);
+        assert!(encoder.buffer_texture_slot(&images[1]).is_some());
+    }
+
+    #[test]
     fn buffer_texture_reuse_selects_the_smallest_unused_capacity() {
         let small = Buffer::from_dimensions(17, 17);
         let large = Buffer::from_dimensions(33, 33);
@@ -4172,13 +4307,19 @@ mod tests {
         let mut encoder = SgfxPaintEncoder::new(2244, 1564, true).unwrap();
         let index = encoder.canvas_target(1, 2196, 1358, true).unwrap();
         let target = &encoder.canvas_targets[index];
-        assert_eq!((target.capacity_width, target.capacity_height), (2244, 1564));
+        assert_eq!(
+            (target.capacity_width, target.capacity_height),
+            (2244, 1564)
+        );
         let texture = target.texture;
         assert_eq!(encoder.canvas_target(1, 2244, 1564, true).unwrap(), index);
         assert_eq!(encoder.canvas_targets[index].texture, texture);
         let index = encoder.canvas_target(2, 4488, 3128, true).unwrap();
         let target = &encoder.canvas_targets[index];
-        assert_eq!((target.capacity_width, target.capacity_height), (4488, 3128));
+        assert_eq!(
+            (target.capacity_width, target.capacity_height),
+            (4488, 3128)
+        );
     }
 
     #[test]
@@ -4364,6 +4505,76 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn damage_passes_share_one_submission_and_vertex_upload() {
+        let mut encoder = SgfxPaintEncoder::new(200, 120, false).unwrap();
+        let mut executor = RecordingExecutor::default();
+        let mut paint = PaintContext::new();
+        paint.fill_rounded_rect(Rect::from_xywh(0., 0., 200., 120.), 0., UiColor::RED);
+        let areas = [
+            (0, 0, 20, 120),
+            (180, 0, 20, 120),
+            (20, 0, 160, 2),
+            (20, 118, 160, 2),
+        ];
+        encoder
+            .encode_frame(&mut executor, 0, None, &paint, UiColor::WHITE, 1000, &areas)
+            .unwrap();
+        assert_eq!(executor.command_kinds.len(), 1);
+        assert_eq!(executor.buffer_write_sizes.len(), 1);
+        assert_eq!(
+            executor
+                .render_areas
+                .iter()
+                .map(|rect| [rect.x(), rect.y(), rect.width(), rect.height()])
+                .collect::<Vec<_>>(),
+            areas
+                .iter()
+                .map(|&(x, y, w, h)| [x, y, w, h])
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn batched_damage_splits_at_ir_capacity_without_reuploading_vertices() {
+        let mut encoder = SgfxPaintEncoder::new(200, 120, false).unwrap();
+        let mut executor = RecordingExecutor::default();
+        let mut paint = PaintContext::new();
+        paint.fill_rounded_rect(Rect::from_xywh(0., 0., 200., 120.), 0., UiColor::RED);
+        let full = PixelBounds {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 120,
+        };
+        let mut frame = encoder.lower(&paint, 1000, full).unwrap();
+        frame.draws = alloc::vec![frame.draws[0]; MAX_COMMANDS / MAX_PAINT_DRAW_COMMANDS + 10];
+        let target = encoder.target_texture(0).unwrap();
+        let areas = [
+            PixelBounds { width: 100, ..full },
+            PixelBounds {
+                x: 100,
+                width: 100,
+                ..full
+            },
+        ];
+        encoder
+            .submit(&mut executor, target, UiColor::WHITE, &areas, &frame)
+            .unwrap();
+        assert!(executor.command_kinds.len() > 1);
+        assert_eq!(executor.buffer_write_sizes.len(), 1);
+        assert_eq!(
+            executor.draw_vertices.len(),
+            frame.draws.len() * areas.len()
+        );
+        assert!(
+            executor
+                .command_kinds
+                .iter()
+                .all(|commands| commands.len() <= MAX_COMMANDS)
+        );
     }
 
     #[test]

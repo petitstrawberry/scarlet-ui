@@ -11,6 +11,7 @@ const RETAINED_BUFFER_BYTES: u64 = 65_536; // At most 16 MiB; slots are recycled
 
 pub(super) struct RetainedMesh {
     list_id: u64,
+    source: Weak<DisplayList>,
     scale: u32,
     buffer: BufferId,
     draws: Vec<Draw>,
@@ -273,13 +274,29 @@ impl SgfxPaintEncoder {
         scale: u32,
         full: PixelBounds,
     ) -> core::result::Result<Option<usize>, FrameError<E::Error>> {
+        // Scrolling can temporarily omit a still-live recording. Keep its
+        // mesh until the cache is full, rather than evicting it on the next
+        // frame and uploading the same vertices when it re-enters the viewport.
         let slot = self
             .retained_meshes
             .iter()
             .enumerate()
             .filter(|(_, mesh)| mesh.used_frame != self.frame_serial)
+            .filter(|(_, mesh)| mesh.source.strong_count() == 0)
             .min_by_key(|(_, mesh)| mesh.used_frame)
-            .map(|(index, _)| index);
+            .map(|(index, _)| index)
+            .or_else(|| {
+                (self.retained_meshes.len() >= MAX_RETAINED_MESHES)
+                    .then(|| {
+                        self.retained_meshes
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, mesh)| mesh.used_frame != self.frame_serial)
+                            .min_by_key(|(_, mesh)| mesh.used_frame)
+                            .map(|(index, _)| index)
+                    })
+                    .flatten()
+            });
         if slot.is_none() && self.retained_meshes.len() >= MAX_RETAINED_MESHES {
             return Ok(None);
         }
@@ -327,6 +344,7 @@ impl SgfxPaintEncoder {
         } else {
             self.retained_meshes.push(RetainedMesh {
                 list_id: 0,
+                source: Weak::new(),
                 scale,
                 buffer,
                 draws: Vec::new(),
@@ -380,6 +398,7 @@ impl SgfxPaintEncoder {
         let bounds = vertex_bounds(&lowered.vertex_bytes);
         let mesh = RetainedMesh {
             list_id: list.identity(),
+            source: Arc::downgrade(list),
             scale,
             buffer,
             draws,
@@ -712,6 +731,42 @@ mod tests {
         assert_eq!(encoder.retained_meshes.len(), 1);
     }
     #[test]
+    fn offscreen_live_recordings_keep_their_gpu_meshes() {
+        let mut encoder = encoder();
+        let mut executor = Executor::default();
+        let lists: Vec<_> = (0..8).map(|_| shape()).collect();
+        for list in &lists {
+            encode(
+                &mut encoder,
+                &mut executor,
+                &paint(list.clone(), Point::new(20., 20.)),
+            )
+            .unwrap();
+        }
+        let cold = executor.writes;
+        for list in lists.iter().rev().chain(lists.iter()) {
+            encode(
+                &mut encoder,
+                &mut executor,
+                &paint(list.clone(), Point::new(20., 15.)),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            executor.writes, cold,
+            "returning live recordings need no vertex upload"
+        );
+        assert_eq!(encoder.retained_meshes.len(), lists.len());
+        drop(lists);
+        encode(&mut encoder, &mut executor, &paint(shape(), Point::ZERO)).unwrap();
+        assert_eq!(
+            encoder.retained_meshes.len(),
+            8,
+            "expired slots must be reused first"
+        );
+    }
+
+    #[test]
     fn changed_list_and_failed_slot_replacement_do_not_reuse_stale_vertices() {
         let mut encoder = encoder();
         let mut executor = Executor::default();
@@ -722,6 +777,17 @@ mod tests {
             &paint(old.clone(), Point::new(20., 20.)),
         )
         .unwrap();
+        // Fill the cache with still-live recordings so the next mesh must
+        // replace the old LRU slot rather than allocate a fresh buffer.
+        let live: Vec<_> = (1..MAX_RETAINED_MESHES).map(|_| shape()).collect();
+        for list in &live {
+            encode(
+                &mut encoder,
+                &mut executor,
+                &paint(list.clone(), Point::ZERO),
+            )
+            .unwrap();
+        }
         executor.fail_write = true;
         assert!(
             encode(
