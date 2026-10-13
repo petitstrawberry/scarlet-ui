@@ -1553,6 +1553,9 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
             return handled;
         }
         if !matches!(event, crate::event::Event::Mouse(_)) {
+            if phase == crate::event::Phase::Capture {
+                return false;
+            }
             for child in self.children.iter_mut() {
                 if child.handle_event(event, phase) {
                     return true;

@@ -275,6 +275,10 @@ impl<V: View + Clone> Element for ComponentElement<V> {
     }
 
     fn handle_event(&mut self, event: &crate::event::Event, phase: crate::event::Phase) -> bool {
+        // Capture already visits the child separately on the dispatch path.
+        if phase == crate::event::Phase::Capture {
+            return false;
+        }
         // Delegate to child
         if let Some(ref mut child) = self.child {
             child.handle_event(event, phase)
