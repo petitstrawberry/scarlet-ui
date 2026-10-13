@@ -950,12 +950,28 @@ pub struct OnKey<V: View, F: Clone + 'static> {
 pub struct OnEvent<V: View, F: Clone + 'static> {
     inner: V,
     callback: F,
+    phase: Phase,
 }
 
 impl<V: View, F: Fn(&Event) -> bool + Clone + 'static> OnEvent<V, F> {
-    /// Create a raw event modifier.
+    /// Create a raw event modifier for target and bubble dispatch.
     pub fn new(inner: V, callback: F) -> Self {
-        Self { inner, callback }
+        Self {
+            inner,
+            callback,
+            phase: Phase::Bubble,
+        }
+    }
+
+    /// Create a raw event modifier for capture dispatch only.
+    ///
+    /// Returning `true` stops dispatch before the target handles the event.
+    pub fn new_capture(inner: V, callback: F) -> Self {
+        Self {
+            inner,
+            callback,
+            phase: Phase::Capture,
+        }
     }
 }
 
@@ -965,6 +981,7 @@ impl<V: View + Clone, F: Fn(&Event) -> bool + Clone + 'static> View for OnEvent<
             self.clone(),
             |view| OnEventRenderObject {
                 callback: Box::new(view.callback.clone()),
+                phase: view.phase,
                 size: Size::ZERO,
             },
             update_on_event_render_object::<V, F>,
@@ -990,12 +1007,14 @@ where
     F: Fn(&Event) -> bool + Clone + 'static,
 {
     render_object.callback = Box::new(view.callback.clone());
+    render_object.phase = view.phase;
     UpdateResult::Updated
 }
 
 /// Render object for [`OnEvent`].
 pub struct OnEventRenderObject {
     callback: Box<dyn Fn(&Event) -> bool>,
+    phase: Phase,
     size: Size,
 }
 
@@ -1032,7 +1051,7 @@ impl ElementRenderObject for OnEventRenderObject {
     }
 
     fn handle_event(&mut self, event: &Event, phase: Phase) -> bool {
-        if matches!(phase, Phase::Target | Phase::Bubble) {
+        if phase == self.phase || (self.phase == Phase::Bubble && phase == Phase::Target) {
             (self.callback)(event)
         } else {
             false
@@ -1204,6 +1223,379 @@ mod tests {
     use crate::views::Text;
     use core::cell::Cell;
     use std::rc::Rc;
+
+    #[test]
+    fn capture_stops_focused_text_field_before_target_and_bubble() {
+        use crate::event::{KeyCode, KeyModifiers};
+        use crate::pipeline::RenderingPipeline;
+        use crate::views::TextField;
+
+        let text = State::new(crate::state::generate_state_id(), "address".into());
+        let phases = Rc::new(core::cell::RefCell::new(Vec::new()));
+        let bubble_phases = phases.clone();
+        let inner_phases = phases.clone();
+        let outer_phases = phases.clone();
+        let view = TextField::new(text.clone())
+            .autofocus(true)
+            .on_event(move |_| {
+                bubble_phases.borrow_mut().push("bubble");
+                true
+            })
+            .on_event_capture(move |event| {
+                inner_phases.borrow_mut().push("inner capture");
+                matches!(
+                    event,
+                    Event::Keyboard(KeyEvent::Char { c: 'r' })
+                        | Event::Keyboard(KeyEvent::Pressed {
+                            keycode: KeyCode::Left,
+                            ..
+                        })
+                )
+            })
+            .padding(4.0)
+            .on_event_capture(move |_| {
+                outer_phases.borrow_mut().push("outer capture");
+                false
+            });
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(Box::new(crate::element::ComponentElement::new(view)));
+        pipeline.layout_initial();
+
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c: 'r' })));
+        assert_eq!(text.get(), "address");
+        assert_eq!(*phases.borrow(), ["outer capture", "inner capture"]);
+
+        phases.borrow_mut().clear();
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Pressed {
+            keycode: KeyCode::Left,
+            modifiers: KeyModifiers::default(),
+        })));
+        assert_eq!(*phases.borrow(), ["outer capture", "inner capture"]);
+
+        phases.borrow_mut().clear();
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c: 'a' })));
+        assert_eq!(
+            text.get(),
+            "addressa",
+            "captured Left must not move the caret"
+        );
+        assert_eq!(*phases.borrow(), ["outer capture", "inner capture"]);
+
+        phases.borrow_mut().clear();
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Released {
+            keycode: KeyCode::Char('a'),
+            modifiers: KeyModifiers::default(),
+        })));
+        assert_eq!(text.get(), "addressa");
+        assert_eq!(
+            *phases.borrow(),
+            ["outer capture", "inner capture", "bubble"]
+        );
+    }
+
+    #[test]
+    fn capture_modifier_preserves_target_only_text_input_commits() {
+        use crate::pipeline::RenderingPipeline;
+        use crate::views::TextField;
+
+        let text = State::new(crate::state::generate_state_id(), String::new());
+        let phases = Rc::new(core::cell::RefCell::new(Vec::new()));
+        let inner_phases = phases.clone();
+        let outer_phases = phases.clone();
+        let view = TextField::new(text.clone())
+            .autofocus(true)
+            .on_event_capture(move |event| {
+                inner_phases.borrow_mut().push("inner capture");
+                matches!(event, Event::TextInputCommit { text, .. } if text == "blocked")
+            })
+            .padding(4.0)
+            .on_event_capture(move |_| {
+                outer_phases.borrow_mut().push("outer capture");
+                false
+            });
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(Box::new(crate::element::ComponentElement::new(view)));
+        pipeline.layout_initial();
+
+        for (serial, commit, expected) in
+            [(1, "blocked", "blocked"), (2, "日本語", "blocked日本語")]
+        {
+            phases.borrow_mut().clear();
+            assert!(pipeline.handle_event(&Event::TextInputCommit {
+                context_id: 1,
+                serial,
+                text: commit.into(),
+            }));
+            assert_eq!(text.get(), expected);
+            assert!(
+                phases.borrow().is_empty(),
+                "IME commits retain target-only dispatch"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_observes_local_pointer_once_without_changing_click_or_tap() {
+        use crate::event::{MouseButton, TouchChange, TouchFrame, TouchPhase};
+        use crate::pipeline::RenderingPipeline;
+        use crate::views::Button;
+
+        let clicks = Rc::new(Cell::new(0));
+        let clicked = clicks.clone();
+        let positions = Rc::new(core::cell::RefCell::new(Vec::new()));
+        let captured_positions = positions.clone();
+        let view = Button::new("target")
+            .on_click(move || clicked.set(clicked.get() + 1))
+            .on_event_capture(move |event| {
+                if let Event::Mouse(
+                    MouseEvent::ButtonPressed { x, y, .. }
+                    | MouseEvent::ButtonReleased { x, y, .. },
+                ) = event
+                {
+                    captured_positions.borrow_mut().push((*x, *y));
+                }
+                false
+            })
+            .padding(4.0);
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(Box::new(crate::element::ComponentElement::new(view)));
+        pipeline.layout_initial();
+        for event in [
+            MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: 10,
+                y: 10,
+                click_count: 1,
+            },
+            MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 10,
+                y: 10,
+                click_count: 1,
+            },
+        ] {
+            pipeline.handle_event(&Event::Mouse(event));
+        }
+        assert_eq!(*positions.borrow(), [(6, 6), (6, 6)]);
+        assert_eq!(clicks.get(), 1);
+
+        for (serial, phase) in [(1, TouchPhase::Down), (2, TouchPhase::Up)] {
+            pipeline.handle_event(&Event::TouchFrame(TouchFrame {
+                seat_id: 0,
+                serial,
+                time_ns: serial * 16_000_000,
+                changes: vec![TouchChange {
+                    seat_id: 0,
+                    serial,
+                    time_ns: serial * 16_000_000,
+                    id: 1,
+                    phase,
+                    x: 10,
+                    y: 10,
+                    pressure: None,
+                    touch_major: None,
+                }],
+            }));
+        }
+        assert_eq!(clicks.get(), 2, "touch release must activate exactly once");
+    }
+
+    #[test]
+    fn capture_consumes_consecutive_wheels_without_becoming_the_target() {
+        use crate::event::{ScrollSource, WheelPhase};
+        use crate::pipeline::RenderingPipeline;
+
+        let count = Rc::new(Cell::new(0));
+        let captured = count.clone();
+        let view = Text::new("wheel target")
+            .frame(100.0, 50.0)
+            .on_event_capture(move |event| {
+                if matches!(event, Event::Mouse(MouseEvent::Wheel { .. })) {
+                    captured.set(captured.get() + 1);
+                    true
+                } else {
+                    false
+                }
+            });
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(view.create_element());
+        pipeline.layout_initial();
+        for expected in 1..=2 {
+            assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+                delta_x: 0,
+                delta_y: -1,
+                x: 10,
+                y: 10,
+                source: ScrollSource::Wheel,
+                phase: WheelPhase::Moved,
+            })));
+            assert_eq!(count.get(), expected);
+        }
+    }
+
+    #[test]
+    fn consumed_mouse_press_keeps_capture_on_motion_and_release_outside_bounds() {
+        use crate::event::MouseButton;
+        use crate::pipeline::RenderingPipeline;
+
+        let count = Rc::new(Cell::new(0));
+        let captured = count.clone();
+        let view = Text::new("pointer target")
+            .frame(100.0, 50.0)
+            .on_event_capture(move |event| {
+                if matches!(
+                    event,
+                    Event::Mouse(
+                        MouseEvent::ButtonPressed { .. }
+                            | MouseEvent::Moved { .. }
+                            | MouseEvent::ButtonReleased { .. }
+                    )
+                ) {
+                    captured.set(captured.get() + 1);
+                    true
+                } else {
+                    false
+                }
+            });
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(view.create_element());
+        pipeline.layout_initial();
+        for (event, expected) in [
+            (
+                MouseEvent::ButtonPressed {
+                    button: MouseButton::Left,
+                    x: 10,
+                    y: 10,
+                    click_count: 1,
+                },
+                1,
+            ),
+            (MouseEvent::Moved { x: 200, y: 200 }, 2),
+            (
+                MouseEvent::ButtonReleased {
+                    button: MouseButton::Left,
+                    x: 200,
+                    y: 200,
+                    click_count: 1,
+                },
+                3,
+            ),
+        ] {
+            assert!(pipeline.handle_event(&Event::Mouse(event)));
+            assert_eq!(count.get(), expected);
+        }
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 200, y: 200 }));
+        assert_eq!(
+            count.get(),
+            3,
+            "release must clear the pointer capture route"
+        );
+    }
+
+    #[test]
+    fn capture_consumes_touch_scroll_without_becoming_the_scroll_target() {
+        use crate::event::{GesturePhase, TouchChange, TouchFrame, TouchGesture, TouchPhase};
+        use crate::pipeline::RenderingPipeline;
+        use crate::views::{ScrollView, ScrollViewRenderObject};
+
+        let phases = Rc::new(core::cell::RefCell::new(Vec::new()));
+        let captured = phases.clone();
+        let view = ScrollView::new(Text::new("scroll target"))
+            .content_size(100.0, 500.0)
+            .frame(100.0, 100.0)
+            .on_event_capture(move |event| {
+                if let Event::TouchGesture(TouchGesture::Scroll { phase, .. }) = event {
+                    captured.borrow_mut().push(*phase);
+                    true
+                } else {
+                    false
+                }
+            });
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(view.create_element());
+        pipeline.layout_initial();
+        for (serial, phase, y) in [
+            (1, TouchPhase::Down, 90),
+            (2, TouchPhase::Move, 70),
+            (3, TouchPhase::Move, 50),
+            (4, TouchPhase::Up, 50),
+        ] {
+            pipeline.handle_event(&Event::TouchFrame(TouchFrame {
+                seat_id: 0,
+                serial,
+                time_ns: serial * 16_000_000,
+                changes: vec![TouchChange {
+                    seat_id: 0,
+                    serial,
+                    time_ns: serial * 16_000_000,
+                    id: 1,
+                    phase,
+                    x: 10,
+                    y,
+                    pressure: None,
+                    touch_major: None,
+                }],
+            }));
+        }
+        assert_eq!(
+            *phases.borrow(),
+            [
+                GesturePhase::Started,
+                GesturePhase::Moved,
+                GesturePhase::Ended
+            ]
+        );
+        let root = pipeline.element_tree().root().unwrap();
+        let scroll = root.children()[0].children()[0]
+            .render_object()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ScrollViewRenderObject<Text>>()
+            .unwrap();
+        assert_eq!(scroll.offset(), (0.0, 0.0));
+        assert!(!pipeline.has_active_animation());
+    }
+
+    #[test]
+    fn raw_event_modifier_preserves_default_phases_and_updates_capture_in_place() {
+        fn event_view(counter: Rc<Cell<u32>>, capture: bool) -> impl View + Clone {
+            let callback = move |_: &Event| {
+                counter.set(counter.get() + 1);
+                true
+            };
+            if capture {
+                OnEvent::new_capture(Text::new("target"), callback)
+            } else {
+                OnEvent::new(Text::new("target"), callback)
+            }
+        }
+
+        let first_count = Rc::new(Cell::new(0));
+        let first = event_view(first_count.clone(), false);
+        let mut element = first.create_element();
+        let element_id = element.id();
+        let render_object_address =
+            element.render_object().unwrap() as *const dyn ElementRenderObject as *const ();
+        let event = Event::Keyboard(KeyEvent::Char { c: 'a' });
+        assert!(!element.handle_event(&event, Phase::Capture));
+        assert!(element.handle_event(&event, Phase::Target));
+        assert!(element.handle_event(&event, Phase::Bubble));
+        assert_eq!(first_count.get(), 2);
+
+        let second_count = Rc::new(Cell::new(0));
+        let second = event_view(second_count.clone(), true);
+        assert!(matches!(element.update(&second), UpdateResult::Updated));
+        assert_eq!(element.id(), element_id);
+        assert_eq!(
+            element.render_object().unwrap() as *const dyn ElementRenderObject as *const (),
+            render_object_address
+        );
+        assert!(!element.handle_event(&event, Phase::Target));
+        assert!(!element.handle_event(&event, Phase::Bubble));
+        assert!(element.handle_event(&event, Phase::Capture));
+        assert_eq!(first_count.get(), 2);
+        assert_eq!(second_count.get(), 1);
+    }
 
     #[test]
     fn focused_raw_event_view_receives_keyboard_and_ime_once() {

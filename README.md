@@ -134,6 +134,14 @@ The [1.0 application and extension contract](docs/1.0-contract.md) specifies
 public features, Scene/Window lifetime, launch/open/close behavior and platform
 extension responsibilities using the current implementation.
 
+Use `ViewExt::on_event_capture` on a container to handle shortcuts before a
+focused descendant, such as a `TextField`, receives them. Its callback runs
+only during capture, from the root to the target's parent. Returning `true`
+stops target and bubble dispatch; returning `false` lets the control handle
+the event normally. Events dispatched only to the target, such as IME commits
+and focus changes, do not invoke capture handlers. `on_event` keeps its target
+and bubble behavior.
+
 Frame admission, safe discard, and application recovery follow the
 [frame-failure contract](docs/FRAME_FAILURES.md). `Application::on_render_error`
 reports transient capacity pressure, rejected frames, and recovery-required GPU

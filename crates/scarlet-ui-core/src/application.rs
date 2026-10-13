@@ -1399,6 +1399,9 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
     }
 
     fn handle_event(&mut self, event: &Event, phase: crate::event::Phase) -> bool {
+        if phase == crate::event::Phase::Capture {
+            return false;
+        }
         self.child
             .as_mut()
             .is_some_and(|child| child.handle_event(event, phase))
@@ -1419,6 +1422,106 @@ mod tests {
 
     use crate::input_environment::install_test_input_environment;
     use crate::views::{Text, Window};
+
+    #[derive(Clone)]
+    struct CaptureSceneApp {
+        text: crate::state::State<String>,
+        captures: Rc<Cell<u32>>,
+        bubbles: Rc<Cell<u32>>,
+    }
+
+    impl CaptureSceneApp {
+        fn content(&self) -> impl View + Clone {
+            use crate::view::ViewExt;
+            let captures = self.captures.clone();
+            let bubbles = self.bubbles.clone();
+            crate::views::TextField::new(self.text.clone())
+                .autofocus(true)
+                .on_event(move |_| {
+                    bubbles.set(bubbles.get() + 1);
+                    true
+                })
+                .on_event_capture(move |event| {
+                    captures.set(captures.get() + 1);
+                    matches!(
+                        event,
+                        Event::Keyboard(crate::event::KeyEvent::Char { c: 'r' })
+                            | Event::Keyboard(crate::event::KeyEvent::Pressed {
+                                keycode: crate::event::KeyCode::Left,
+                                ..
+                            })
+                    )
+                })
+        }
+    }
+
+    impl View for CaptureSceneApp {
+        fn create_element(&self) -> Box<dyn Element> {
+            Box::new(crate::element::ComponentElement::new_with_builder(
+                self.clone(),
+                |app| Box::new(app.content()),
+            ))
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn listenables(&self) -> Vec<&dyn Listenable> {
+            vec![&self.text]
+        }
+    }
+
+    impl Application for CaptureSceneApp {
+        fn scenes(&self) -> impl Scene {
+            Window::new("Capture", self.clone())
+        }
+    }
+
+    #[test]
+    fn scene_window_component_routes_capture_once_before_focused_control() {
+        use crate::event::{KeyCode, KeyEvent, KeyModifiers};
+        let app = CaptureSceneApp {
+            text: crate::state::State::new(crate::state::generate_state_id(), "address".into()),
+            captures: Rc::new(Cell::new(0)),
+            bubbles: Rc::new(Cell::new(0)),
+        };
+        let mut pipeline = RenderingPipeline::new();
+        let root = SceneWindowRootElement::new(
+            app.clone(),
+            SceneWindowKey::main(),
+            pipeline.pipeline_id(),
+        );
+        pipeline.set_root(Box::new(root));
+        pipeline.layout_initial();
+
+        for (index, event, expected_text) in [
+            (0, KeyEvent::Char { c: 'a' }, "addressa"),
+            (1, KeyEvent::Char { c: 'r' }, "addressa"),
+            (
+                2,
+                KeyEvent::Pressed {
+                    keycode: KeyCode::Left,
+                    modifiers: KeyModifiers::default(),
+                },
+                "addressa",
+            ),
+            (3, KeyEvent::Char { c: 'b' }, "addressab"),
+            (
+                4,
+                KeyEvent::Released {
+                    keycode: KeyCode::Char('b'),
+                    modifiers: KeyModifiers::default(),
+                },
+                "addressab",
+            ),
+        ] {
+            assert!(pipeline.handle_event(&Event::Keyboard(event)));
+            assert_eq!(app.text.get(), expected_text);
+            assert_eq!(app.captures.get(), index + 1);
+            assert_eq!(app.bubbles.get(), u32::from(index == 4));
+        }
+    }
 
     #[derive(Clone)]
     struct ScopedSceneApp {

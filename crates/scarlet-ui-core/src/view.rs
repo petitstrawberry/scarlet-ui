@@ -377,6 +377,24 @@ pub trait ViewExt: View {
         crate::views::modifiers::OnEvent::new(self, callback)
     }
 
+    /// Handle input during capture, before a descendant receives the event.
+    ///
+    /// The callback runs only during capture dispatch, from the root toward
+    /// the target's parent. Return `true` to stop target and bubble dispatch,
+    /// or `false` to let the event continue. Wrap the view containing the
+    /// focused control to handle shortcuts before that control edits text.
+    /// Events dispatched only to the target, such as IME commits and focus
+    /// changes, do not invoke this callback.
+    fn on_event_capture<F: Fn(&crate::event::Event) -> bool + Clone + 'static>(
+        self,
+        callback: F,
+    ) -> crate::views::modifiers::OnEvent<Self, F>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::OnEvent::new_capture(self, callback)
+    }
+
     /// Make this view accept keyboard focus.
     ///
     /// # Arguments

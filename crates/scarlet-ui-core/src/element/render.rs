@@ -1219,6 +1219,11 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 }
                 return handled;
             }
+            // The dispatcher visits each ancestor during capture. Descending
+            // here would invoke capture handlers again on the same path.
+            if _phase == Phase::Capture {
+                return false;
+            }
             for child in self.children.iter_mut() {
                 if child.handle_event(_event, _phase) {
                     return true;
@@ -1276,6 +1281,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                 }
                 return handled;
+            }
+            if _phase == Phase::Capture {
+                return false;
             }
             for child in self.children.iter_mut() {
                 if child.handle_event(_event, _phase) {

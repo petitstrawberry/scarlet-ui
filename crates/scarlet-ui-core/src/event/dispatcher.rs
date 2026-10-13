@@ -675,7 +675,8 @@ impl EventDispatcher {
                 if let Some(action) = element.take_window_action() {
                     self.emitted_events.push(Event::Window(action));
                 }
-                return (true, Some(*id));
+                // Keep a capture-only interceptor on the ancestor route.
+                return (true, None);
             }
         }
         if let Some(id) = path.last()
@@ -1028,6 +1029,7 @@ impl EventDispatcher {
             // 2. Three-phase dispatch
             let mut handled = false;
             let mut handled_id = None;
+            let mut handled_in_capture = false;
 
             // 2.1 Capture Phase: root → target (excluding target)
             for (index, id) in path.iter().take(path.len().saturating_sub(1)).enumerate() {
@@ -1040,6 +1042,7 @@ impl EventDispatcher {
                         }
                         handled = true;
                         handled_id = Some(*id);
+                        handled_in_capture = true;
                         break;
                     }
                 }
@@ -1090,6 +1093,8 @@ impl EventDispatcher {
             // sliding under the cursor mid-gesture.
             if is_wheel
                 && handled
+                // Capture-only handlers must stay ancestors on future events.
+                && !handled_in_capture
                 && let Some(id) = handled_id
                 && self.wheel_target.is_none()
             {
