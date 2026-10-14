@@ -1225,6 +1225,165 @@ mod tests {
     use std::rc::Rc;
 
     #[test]
+    fn consumed_raw_mouse_events_do_not_repaint_unchanged_content() {
+        use crate::event::{MouseButton, ScrollSource, WheelPhase};
+        use crate::pipeline::RenderingPipeline;
+        use crate::views::{Spacer, Window};
+
+        let calls = Rc::new(Cell::new(0));
+        let recorded = Rc::clone(&calls);
+        let view = Spacer::new().frame(320.0, 240.0).on_event(move |_| {
+            recorded.set(recorded.get() + 1);
+            true
+        });
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new("raw mouse", view)
+                .decorated(false)
+                .size(Size::new(320.0, 240.0))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        pipeline.render_with_damage().expect("initial paint");
+        let mut events = (20..24)
+            .map(|x| Event::Mouse(MouseEvent::Moved { x, y: 20 }))
+            .collect::<Vec<_>>();
+        events.extend([
+            Event::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: 23,
+                y: 20,
+                click_count: 1,
+            }),
+            Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 23,
+                y: 20,
+                click_count: 1,
+            }),
+            Event::Mouse(MouseEvent::Wheel {
+                delta_x: 0,
+                delta_y: 32,
+                x: 23,
+                y: 20,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Wheel,
+            }),
+        ]);
+        for event in events {
+            let before = calls.get();
+            assert!(
+                pipeline.handle_event(&event),
+                "raw handler consumes {event:?}"
+            );
+            assert!(calls.get() > before);
+            assert!(
+                !pipeline.has_dirty(),
+                "consumption alone must not repaint: {event:?}"
+            );
+            assert!(pipeline.render_with_damage().is_none());
+        }
+    }
+
+    #[test]
+    fn consumed_raw_mouse_state_changes_still_schedule_paint() {
+        use crate::pipeline::RenderingPipeline;
+        use crate::views::Window;
+
+        let text = State::new(crate::state::generate_state_id(), String::from("before"));
+        let updated = text.clone();
+        let view = Text::from_state(text.clone())
+            .frame(320.0, 240.0)
+            .on_event(move |event| {
+                if matches!(event, Event::Mouse(MouseEvent::Moved { .. })) {
+                    updated.set(String::from("after"));
+                }
+                true
+            });
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new("reactive mouse", view)
+                .decorated(false)
+                .size(Size::new(320.0, 240.0))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        pipeline.render_with_damage().expect("initial paint");
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 20, y: 20 })));
+        assert_eq!(text.get(), "after");
+        assert!(
+            pipeline.has_dirty(),
+            "reactive state must still invalidate its view"
+        );
+        pipeline.render_with_damage().expect("changed text paint");
+        assert!(!pipeline.has_dirty());
+    }
+
+    #[test]
+    fn raw_mouse_capture_consumes_before_target_without_repaint() {
+        use crate::event::MouseButton;
+        use crate::pipeline::RenderingPipeline;
+        use crate::views::{Spacer, Window};
+
+        let target_calls = Rc::new(Cell::new(0));
+        let target = Rc::clone(&target_calls);
+        let capture_calls = Rc::new(Cell::new(0));
+        let capture = Rc::clone(&capture_calls);
+        let view = Spacer::new()
+            .frame(320.0, 240.0)
+            .on_event(move |_| {
+                target.set(target.get() + 1);
+                true
+            })
+            .on_event_capture(move |event| {
+                if matches!(event, Event::Mouse(MouseEvent::Moved { .. })) {
+                    capture.set(capture.get() + 1);
+                    return true;
+                }
+                false
+            });
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new("captured mouse", view)
+                .decorated(false)
+                .size(Size::new(320.0, 240.0))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        pipeline.render_with_damage().expect("initial paint");
+        // Establish the hover path before counting the ordinary move dispatch.
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 20, y: 20 }));
+        pipeline.render_with_damage();
+        let before = target_calls.get();
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 21, y: 20 })));
+        assert_eq!(target_calls.get(), before);
+        assert_eq!(capture_calls.get(), 2);
+        assert!(!pipeline.has_dirty());
+        for event in [
+            MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: 21,
+                y: 20,
+                click_count: 1,
+            },
+            MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 21,
+                y: 20,
+                click_count: 1,
+            },
+        ] {
+            assert!(pipeline.handle_event(&Event::Mouse(event)));
+            assert!(!pipeline.has_dirty());
+        }
+        assert_eq!(
+            target_calls.get(),
+            before + 2,
+            "uncaptured buttons reach the target"
+        );
+    }
+
+    #[test]
     fn capture_stops_focused_text_field_before_target_and_bubble() {
         use crate::event::{KeyCode, KeyModifiers};
         use crate::pipeline::RenderingPipeline;

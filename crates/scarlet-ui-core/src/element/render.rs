@@ -1624,6 +1624,17 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             return false;
         };
 
+        // Raw handlers report event consumption, not a pixel change. Their
+        // reactive state or explicit invalidation schedules any needed paint,
+        // just as it does for their keyboard and text input handlers.
+        if self
+            .render_object
+            .as_any()
+            .is::<crate::views::modifiers::OnEventRenderObject>()
+        {
+            return self.render_object.handle_event(_event, _phase);
+        }
+
         let is_target_phase = _phase == Phase::Target;
         let is_bubble_phase = _phase == Phase::Bubble;
 
