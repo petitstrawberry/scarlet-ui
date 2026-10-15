@@ -24,7 +24,9 @@ use sgfx::ir::{
     Transform, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
 };
 
-use crate::canvas::{SgfxCanvasFrame, SgfxCanvasPaint, SgfxCanvasVertex, SgfxMesh, SgfxTexture};
+use crate::canvas::{
+    SgfxCanvasFrame, SgfxCanvasPaint, SgfxCanvasVertex, SgfxMesh, SgfxTexture, SgfxTextureSource,
+};
 use crate::error::{Error, FrameError, Result, Stage};
 use crate::external_surface::ExternalGpuSurfacePaint;
 use crate::geometry::{
@@ -654,7 +656,18 @@ impl SgfxPaintEncoder {
         }
         self.canvas_textures
             .iter()
-            .filter(|t| t.source.external_source().is_some() && !active.contains(&t.handle_id))
+            .filter(|t| {
+                if t.source.external_source().is_none() || active.contains(&t.handle_id) {
+                    return false;
+                }
+                // A producer can retain a small pool of reusable BGRA wrappers.
+                // Keep its imported views across alternating frames while any
+                // outside owner retains the wrapper. Count the texture Arc, not
+                // its platform payload, which can have unrelated capability owners.
+                // Immutable NV12 frames keep their eager retirement policy.
+                !(matches!(&t.source.source, SgfxTextureSource::ExternalBgra8(_))
+                    && Arc::strong_count(&t.source) > 1)
+            })
             .map(|t| (t.texture, t.external_bound))
             .collect()
     }
@@ -4056,6 +4069,77 @@ mod tests {
         let colors = encoded_paint_colors(&frame.vertex_bytes);
         assert!(colors.iter().any(|color| color == &[1.0, 1.0, 1.0, 1.0]));
         assert!(colors.iter().any(|color| color == &[0.0, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn retained_bgra_pool_alternates_without_reimport_and_retires_after_owner_drop() {
+        #[derive(Debug)]
+        struct Image;
+        let source_a = Arc::new(Image);
+        let a = SgfxTexture::external_bgra8(16, 16, source_a.clone());
+        let b = SgfxTexture::external_bgra8(16, 16, Arc::new(Image));
+        let mut encoder = SgfxPaintEncoder::new(16, 16, false).unwrap();
+        let mut slots = [None, None];
+        for frame in 0..32 {
+            let index = frame % 2;
+            let texture = if index == 0 { &a } else { &b };
+            let mut paint = PaintContext::new();
+            texture.paint(&mut paint, Rect::from_xywh(0.0, 0.0, 16.0, 16.0));
+            assert!(encoder.unused_external_textures(&paint).is_empty());
+            let pending = encoder.prepare_external_textures(&paint).unwrap();
+            if frame < 2 {
+                assert_eq!(pending.len(), 1);
+                slots[index] = Some(pending[0].texture());
+                encoder
+                    .mark_external_texture_bound(pending[0].texture())
+                    .unwrap();
+            } else {
+                assert!(
+                    pending.is_empty(),
+                    "retained image must not be imported again"
+                );
+            }
+            assert!(encoder.canvas_targets.is_empty());
+        }
+        assert_ne!(slots[0], slots[1]);
+        assert_eq!(encoder.canvas_textures.len(), 2);
+        let old_wrapper = Arc::downgrade(&a);
+        assert_eq!(old_wrapper.strong_count(), 2); // Producer plus cache, with no hidden wrapper clone.
+        drop(a);
+        assert_eq!(old_wrapper.strong_count(), 1);
+        // Keeping another platform payload owner must not pin a dead texture wrapper.
+        assert!(Arc::strong_count(&source_a) > 1);
+        let mut paint = PaintContext::new();
+        b.paint(&mut paint, Rect::from_xywh(0.0, 0.0, 16.0, 16.0));
+        let retired = encoder.unused_external_textures(&paint);
+        assert_eq!(retired, alloc::vec![(slots[0].unwrap(), true)]);
+        encoder.retire_external_texture(retired[0].0).unwrap();
+        assert!(old_wrapper.upgrade().is_none());
+        assert_eq!(Arc::strong_count(&source_a), 1);
+        assert_eq!(encoder.canvas_textures.len(), 1);
+    }
+
+    #[test]
+    fn inactive_nv12_retires_even_with_outside_texture_owner() {
+        #[derive(Debug)]
+        struct Image;
+        let texture = SgfxTexture::external_nv12(16, 16, Arc::new(Image));
+        let mut encoder = SgfxPaintEncoder::new(16, 16, false).unwrap();
+        let slot = {
+            let mut paint = PaintContext::new();
+            texture.paint(&mut paint, Rect::from_xywh(0.0, 0.0, 16.0, 16.0));
+            let pending = encoder.prepare_external_textures(&paint).unwrap();
+            let slot = pending[0].texture();
+            encoder.mark_external_texture_bound(slot).unwrap();
+            slot
+        };
+        assert_eq!(Arc::strong_count(&texture), 2);
+        assert_eq!(
+            encoder.unused_external_textures(&PaintContext::new()),
+            alloc::vec![(slot, true)]
+        );
+        encoder.retire_external_texture(slot).unwrap();
+        assert_eq!(Arc::strong_count(&texture), 1);
     }
 
     #[test]

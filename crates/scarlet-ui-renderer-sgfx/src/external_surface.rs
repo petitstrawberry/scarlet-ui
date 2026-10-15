@@ -9,7 +9,7 @@ use scarlet_ui_core::color::Color;
 use scarlet_ui_core::element::{Element, ElementRenderObject, LayoutConstraints, UpdateResult};
 use scarlet_ui_core::geometry::{Point, Rect, Size};
 use scarlet_ui_core::renderer::PaintContext;
-use scarlet_ui_core::state::{Listenable, State};
+use scarlet_ui_core::state::{InvalidationKind, Listenable, State, SubscriptionId};
 use scarlet_ui_core::view::View;
 
 use crate::SgfxTexture;
@@ -30,14 +30,32 @@ pub struct ExternalGpuSurface {
 #[derive(Clone, Debug)]
 enum ExternalGpuSurfaceSource {
     Snapshot(Arc<SgfxTexture>),
-    State(State<Arc<SgfxTexture>>),
+    State(ExternalTextureState),
+}
+
+// New image contents are read at paint time and leave element geometry unchanged.
+#[derive(Clone, Debug)]
+struct ExternalTextureState(State<Arc<SgfxTexture>>);
+
+impl Listenable for ExternalTextureState {
+    fn subscribe_any(&self, callback: Arc<dyn Fn() + Send + Sync>) -> SubscriptionId {
+        self.0.subscribe_any(callback)
+    }
+
+    fn unsubscribe(&self, id: SubscriptionId) -> bool {
+        self.0.unsubscribe(id)
+    }
+
+    fn invalidation_kind(&self) -> InvalidationKind {
+        InvalidationKind::Paint
+    }
 }
 
 impl ExternalGpuSurfaceSource {
     fn texture(&self) -> Arc<SgfxTexture> {
         match self {
             Self::Snapshot(texture) => Arc::clone(texture),
-            Self::State(texture) => texture.get(),
+            Self::State(texture) => texture.0.get(),
         }
     }
 }
@@ -64,7 +82,7 @@ impl ExternalGpuSurface {
     pub fn from_state(width: f32, height: f32, texture: State<Arc<SgfxTexture>>) -> Self {
         Self {
             size: Size::new(width, height),
-            source: ExternalGpuSurfaceSource::State(texture),
+            source: ExternalGpuSurfaceSource::State(ExternalTextureState(texture)),
             placeholder: Color::rgb(0.025, 0.035, 0.055),
         }
     }
@@ -168,5 +186,66 @@ impl ElementRenderObject for ExternalGpuSurfaceRenderObject {
 
     fn update_needs_layout(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use scarlet_ui_core::renderer::PaintCommand;
+    use scarlet_ui_core::state::generate_state_id;
+
+    #[test]
+    fn texture_updates_repaint_existing_surface_without_canvas_or_layout_reset() {
+        #[derive(Debug)]
+        struct Image;
+        let first = SgfxTexture::external_bgra8(16, 16, Arc::new(Image));
+        let next = SgfxTexture::external_bgra8(16, 16, Arc::new(Image));
+        let state = State::new(generate_state_id(), first);
+        let view = ExternalGpuSurface::from_state(800.0, 600.0, state.clone());
+        let listenables = view.listenables();
+        assert_eq!(listenables.len(), 1);
+        assert_eq!(listenables[0].invalidation_kind(), InvalidationKind::Paint);
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&notifications);
+        let subscription = listenables[0].subscribe_any(Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+        let mut element = view.create_element();
+        element.layout(LayoutConstraints::tight(320.0, 240.0));
+        state.set(Arc::clone(&next));
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
+        let render = element.render_object().unwrap();
+        assert_eq!(render.size(), Size::new(320.0, 240.0));
+        let mut paint = PaintContext::new();
+        assert!(render.paint(&mut paint, Point::ZERO));
+        let payloads: Vec<_> = paint
+            .commands()
+            .iter()
+            .filter_map(|command| {
+                let PaintCommand::Extension { payload, .. } = command else {
+                    return None;
+                };
+                Some(payload)
+            })
+            .collect();
+        assert_eq!(payloads.len(), 1);
+        assert!(
+            payloads[0]
+                .as_ref()
+                .as_any()
+                .downcast_ref::<crate::canvas::SgfxCanvasPaint>()
+                .is_none()
+        );
+        let surface = payloads[0]
+            .as_ref()
+            .as_any()
+            .downcast_ref::<ExternalGpuSurfacePaint>()
+            .unwrap();
+        assert!(Arc::ptr_eq(&surface.texture, &next));
+        assert!(listenables[0].unsubscribe(subscription));
+        state.set(next);
+        assert_eq!(notifications.load(Ordering::SeqCst), 1);
     }
 }
