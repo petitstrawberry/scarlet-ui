@@ -25,6 +25,7 @@ pub struct ExternalGpuSurface {
     size: Size,
     source: ExternalGpuSurfaceSource,
     placeholder: Color,
+    damage: Option<State<Option<Rect>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -47,7 +48,7 @@ impl Listenable for ExternalTextureState {
     }
 
     fn invalidation_kind(&self) -> InvalidationKind {
-        InvalidationKind::Paint
+        InvalidationKind::SelfPaint
     }
 }
 
@@ -70,6 +71,7 @@ impl ExternalGpuSurface {
             size: Size::new(width, height),
             source: ExternalGpuSurfaceSource::Snapshot(texture),
             placeholder: Color::rgb(0.025, 0.035, 0.055),
+            damage: None,
         }
     }
 
@@ -84,12 +86,21 @@ impl ExternalGpuSurface {
             size: Size::new(width, height),
             source: ExternalGpuSurfaceSource::State(ExternalTextureState(texture)),
             placeholder: Color::rgb(0.025, 0.035, 0.055),
+            damage: None,
         }
     }
 
     /// Set the color used when the active paint backend cannot draw the image.
     pub fn placeholder(mut self, color: Color) -> Self {
         self.placeholder = color;
+        self
+    }
+
+    /// Producer damage in local logical coordinates. Set this before changing
+    /// the texture state, unioning skipped updates until presentation succeeds.
+    /// `None` requests a full repaint. Geometry changes retain full invalidation.
+    pub fn damage(mut self, damage: State<Option<Rect>>) -> Self {
+        self.damage = Some(damage);
         self
     }
 }
@@ -107,6 +118,7 @@ impl View for ExternalGpuSurface {
                 size: self.size,
                 source: self.source.clone(),
                 placeholder: self.placeholder,
+                damage: self.damage.clone(),
             },
         ))
     }
@@ -128,9 +140,36 @@ pub struct ExternalGpuSurfaceRenderObject {
     size: Size,
     source: ExternalGpuSurfaceSource,
     placeholder: Color,
+    damage: Option<State<Option<Rect>>>,
 }
 
 impl ElementRenderObject for ExternalGpuSurfaceRenderObject {
+    fn self_paint_bounds(&self, origin: Point) -> Option<Rect> {
+        let damage = self.damage.as_ref()?.get()?;
+        if !damage.origin.x.is_finite()
+            || !damage.origin.y.is_finite()
+            || !damage.size.width.is_finite()
+            || !damage.size.height.is_finite()
+            || damage.size.width < 0.0
+            || damage.size.height < 0.0
+        {
+            return None;
+        }
+        let x = damage.origin.x.max(0.0).min(self.size.width);
+        let y = damage.origin.y.max(0.0).min(self.size.height);
+        let right = (damage.origin.x + damage.size.width)
+            .max(x)
+            .min(self.size.width);
+        let bottom = (damage.origin.y + damage.size.height)
+            .max(y)
+            .min(self.size.height);
+        Some(Rect::from_xywh(
+            origin.x + x,
+            origin.y + y,
+            right - x,
+            bottom - y,
+        ))
+    }
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         let width = self
             .size
@@ -181,6 +220,7 @@ impl ElementRenderObject for ExternalGpuSurfaceRenderObject {
         self.size = surface.size;
         self.source = surface.source.clone();
         self.placeholder = surface.placeholder;
+        self.damage = surface.damage.clone();
         UpdateResult::Updated
     }
 
@@ -197,6 +237,35 @@ mod tests {
     use scarlet_ui_core::state::generate_state_id;
 
     #[test]
+    fn producer_damage_clips_to_the_surface_and_full_damage_is_explicit() {
+        #[derive(Debug)]
+        struct Image;
+        let texture = State::new(
+            generate_state_id(),
+            SgfxTexture::external_bgra8(320, 240, Arc::new(Image)),
+        );
+        let damage = State::new(
+            generate_state_id(),
+            Some(Rect::from_xywh(20.0, 30.0, 40.0, 50.0)),
+        );
+        let view = ExternalGpuSurface::from_state(320.0, 240.0, texture).damage(damage.clone());
+        let mut element = view.create_element();
+        element.layout(LayoutConstraints::tight(320.0, 240.0));
+        let render = element.render_object().unwrap();
+        assert_eq!(
+            render.self_paint_bounds(Point::new(5.0, 7.0)),
+            Some(Rect::from_xywh(25.0, 37.0, 40.0, 50.0))
+        );
+        damage.set(Some(Rect::from_xywh(-10.0, 200.0, 100.0, 100.0)));
+        assert_eq!(
+            render.self_paint_bounds(Point::ZERO),
+            Some(Rect::from_xywh(0.0, 200.0, 90.0, 40.0))
+        );
+        damage.set(None);
+        assert_eq!(render.self_paint_bounds(Point::ZERO), None);
+    }
+
+    #[test]
     fn texture_updates_repaint_existing_surface_without_canvas_or_layout_reset() {
         #[derive(Debug)]
         struct Image;
@@ -206,7 +275,10 @@ mod tests {
         let view = ExternalGpuSurface::from_state(800.0, 600.0, state.clone());
         let listenables = view.listenables();
         assert_eq!(listenables.len(), 1);
-        assert_eq!(listenables[0].invalidation_kind(), InvalidationKind::Paint);
+        assert_eq!(
+            listenables[0].invalidation_kind(),
+            InvalidationKind::SelfPaint
+        );
         let notifications = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&notifications);
         let subscription = listenables[0].subscribe_any(Arc::new(move || {

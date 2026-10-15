@@ -1339,7 +1339,7 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
                 InvalidationKind::Build => {
                     crate::pipeline::mark_element_dirty(pipeline_id, element_id)
                 }
-                InvalidationKind::Paint => {
+                InvalidationKind::Paint | InvalidationKind::SelfPaint => {
                     crate::pipeline::mark_element_needs_paint(pipeline_id, element_id)
                 }
             });

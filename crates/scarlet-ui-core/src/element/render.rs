@@ -624,6 +624,9 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
                 InvalidationKind::Paint => {
                     crate::pipeline::mark_element_needs_paint(pipeline_id, element_id)
                 }
+                InvalidationKind::SelfPaint => {
+                    crate::pipeline::mark_element_needs_self_paint(pipeline_id, element_id)
+                }
             });
             self.subscriptions.push(listenable.subscribe_any(callback));
         }

@@ -67,6 +67,8 @@ pub enum InvalidationKind {
     Build,
     /// The subscribed element only needs repainting.
     Paint,
+    /// Only this render object's pixels changed; use its self-paint bounds.
+    SelfPaint,
 }
 
 /// Trait for types that can be subscribed to for change notifications
