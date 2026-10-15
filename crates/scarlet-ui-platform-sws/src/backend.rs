@@ -1,6 +1,7 @@
 //! Shared-image lifecycle and ScarletUI paint-backend integration.
 
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 #[cfg(feature = "std")]
@@ -59,6 +60,12 @@ pub enum Stage {
 pub enum Error {
     /// An SGFX facade operation failed.
     Sgfx(Stage),
+    /// An operation failed with its backend diagnostic preserved.
+    Diagnostic {
+        stage: Stage,
+        operation: &'static str,
+        cause: String,
+    },
     /// A portable ScarletUI encoding or execution operation failed.
     Render,
     /// A discarded frame with an explicit recovery classification and cause.
@@ -75,6 +82,13 @@ impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sgfx(stage) => write!(formatter, "SGFX operation failed at {stage:?}"),
+            Self::Diagnostic {
+                stage,
+                operation,
+                cause,
+            } => {
+                write!(formatter, "SGFX {operation} failed at {stage:?}: {cause}")
+            }
             Self::Render => formatter.write_str("ScarletUI SGFX rendering failed"),
             Self::FrameNotPresented(failure) => failure.fmt(formatter),
             Self::Sink { stage, source } => {
@@ -84,6 +98,21 @@ impl fmt::Display for Error {
             Self::GenerationExhausted => formatter.write_str("SGFX buffer generation exhausted"),
         }
     }
+}
+
+fn diagnostic(stage: Stage, operation: &'static str, source: impl fmt::Debug) -> Error {
+    Error::Diagnostic {
+        stage,
+        operation,
+        cause: format!("{source:?}"),
+    }
+}
+
+fn log_render_error(error: &Error) {
+    #[cfg(feature = "std")]
+    std::println!("[ScarletUI SGFX] frame failed: {error}");
+    #[cfg(not(feature = "std"))]
+    scarlet_std::println!("[ScarletUI SGFX] frame failed: {error}");
 }
 
 /// Result returned by the SWS SGFX paint backend.
@@ -280,7 +309,9 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                 .as_ref()
                 .ok_or(Error::InvalidFrame)?
                 .image(target)
-                .map_err(|_| Error::Sgfx(Stage::CreateSession))?;
+                .map_err(|source| {
+                    diagnostic(Stage::CreateSession, "resolve target image", source)
+                })?;
             if let Err(source) = self.sink.register_shared_image(identity, image) {
                 for state in &mut self.slots {
                     if let Some(registered) = state.registered.take() {
@@ -309,41 +340,80 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                     .as_mut()
                     .ok_or(Error::InvalidFrame)?
                     .release_imported_texture(texture)
-                    .map_err(|_| Error::Sgfx(Stage::ImportExternalImage))?;
+                    .map_err(|source| {
+                        diagnostic(
+                            Stage::ImportExternalImage,
+                            "release imported texture",
+                            source,
+                        )
+                    })?;
             }
             self.encoder
                 .as_mut()
                 .ok_or(Error::InvalidFrame)?
                 .retire_external_texture(texture)
-                .map_err(|_| Error::Render)?;
+                .map_err(|source| {
+                    diagnostic(
+                        Stage::ImportExternalImage,
+                        "retire external texture",
+                        source,
+                    )
+                })?;
         }
         let pending = self
             .encoder
             .as_mut()
             .ok_or(Error::InvalidFrame)?
             .prepare_external_textures(paint)
-            .map_err(|_| Error::Render)?;
+            .map_err(|source| {
+                diagnostic(
+                    Stage::ImportExternalImage,
+                    "prepare external textures",
+                    source,
+                )
+            })?;
         for binding in pending {
             let source = binding
                 .source()
                 .as_any()
                 .downcast_ref::<SharedImageSource>()
-                .ok_or(Error::Sgfx(Stage::ImportExternalImage))?;
-            let handle = source
-                .duplicate_handle()
-                .map_err(|_| Error::Sgfx(Stage::ImportExternalImage))?;
+                .ok_or_else(|| {
+                    diagnostic(
+                        Stage::ImportExternalImage,
+                        "resolve shared image",
+                        "unsupported external texture source",
+                    )
+                })?;
+            let handle = source.duplicate_handle().map_err(|source| {
+                diagnostic(
+                    Stage::ImportExternalImage,
+                    "duplicate shared image handle",
+                    source,
+                )
+            })?;
             let session = self.session.as_mut().ok_or(Error::InvalidFrame)?;
+            let operation = if source.conversion.is_some() {
+                "import NV12 image"
+            } else {
+                "import BGRA image"
+            };
             if let Some(conversion) = source.conversion {
                 session.import_ycbcr_texture(binding.texture(), handle, conversion)
             } else {
                 session.import_shared_bgra_texture(binding.texture(), handle)
             }
-            .map_err(|_| Error::Sgfx(Stage::ImportExternalImage))?;
+            .map_err(|source| diagnostic(Stage::ImportExternalImage, operation, source))?;
             self.encoder
                 .as_mut()
                 .ok_or(Error::InvalidFrame)?
                 .mark_external_texture_bound(binding.texture())
-                .map_err(|_| Error::Render)?;
+                .map_err(|source| {
+                    diagnostic(
+                        Stage::ImportExternalImage,
+                        "mark external texture bound",
+                        source,
+                    )
+                })?;
         }
         Ok(())
     }
@@ -530,7 +600,9 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                 .as_ref()
                 .ok_or(Error::InvalidFrame)?
                 .image(target)
-                .map_err(|_| Error::Sgfx(Stage::CreateSession))?;
+                .map_err(|source| {
+                    diagnostic(Stage::CreateSession, "resolve target image", source)
+                })?;
             self.sink
                 .register_shared_image(identity, image)
                 .map_err(|source| Error::Sink {
@@ -645,7 +717,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             self.supports_depth,
             PRESENTATION_SLOT_COUNT,
         )
-        .map_err(|_| Error::Render)?;
+        .map_err(|source| diagnostic(Stage::CreateSession, "create paint encoder", source))?;
         let mut targets = Vec::new();
         targets
             .try_reserve_exact(PRESENTATION_SLOT_COUNT)
@@ -656,7 +728,9 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         let session = self
             .context
             .create_mapped_target_session(encoder.resource_table(), &targets)
-            .map_err(|_| Error::Sgfx(Stage::CreateSession))?;
+            .map_err(|source| {
+                diagnostic(Stage::CreateSession, "create mapped target session", source)
+            })?;
 
         if let Some(previous) = self.session.replace(session) {
             self.retired.push(RetiredGeneration {
@@ -797,7 +871,10 @@ impl<S: SgfxFrameSink> PaintBackend for SgfxPaintBackend<S> {
                 Error::FrameNotPresented(failure) => {
                     scarlet_ui_core::error::Error::RenderFailure(failure)
                 }
-                _ => scarlet_ui_core::error::Error::RenderError,
+                error => {
+                    log_render_error(&error);
+                    scarlet_ui_core::error::Error::RenderError
+                }
             })?;
         Ok(BackendFrame::External)
     }
