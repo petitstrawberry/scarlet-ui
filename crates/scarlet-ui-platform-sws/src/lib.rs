@@ -14,6 +14,7 @@ mod file_dialog;
 mod file_dialog_policy;
 mod shared_image;
 mod sink;
+mod text_input_sync;
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -742,6 +743,7 @@ pub struct SWSPlatformWindow {
     right_super_pressed: bool,
     click_state: ClickState,
     text_input: Option<TextInputContext>,
+    text_input_sync: text_input_sync::TextInputSync,
     input_panel_show_pending: bool,
     pending_wheel: PendingWheelDelta,
     pending_relative: PendingRelativeMotion,
@@ -1309,6 +1311,7 @@ impl SWSPlatformWindow {
             right_super_pressed: false,
             click_state: ClickState::default(),
             text_input: None,
+            text_input_sync: text_input_sync::TextInputSync::default(),
             input_panel_show_pending: false,
             pending_wheel: PendingWheelDelta::default(),
             pending_relative: PendingRelativeMotion::default(),
@@ -1393,6 +1396,7 @@ impl SWSPlatformWindow {
             return;
         }
         self.transport_failed = true;
+        self.text_input_sync.invalidate();
         self.pending_events.clear();
         self.pending_head = 0;
         logln!(
@@ -1408,6 +1412,7 @@ impl SWSPlatformWindow {
         }
 
         let Some(state) = state else {
+            self.text_input_sync.invalidate();
             self.input_panel_show_pending = false;
             if let Some(context) = self.text_input.as_mut()
                 && context.enabled
@@ -1437,29 +1442,40 @@ impl SWSPlatformWindow {
         };
         let context_id = context.context_id;
         let cursor_rect = self.logical_rect_to_physical(state.cursor_rect);
-        let _ = self.conn.set_text_input_cursor_rect(
+        let synchronized = self.text_input_sync.synchronize(
             context_id,
-            cursor_rect.origin.x as i32,
-            cursor_rect.origin.y as i32,
-            cursor_rect.size.width.max(1.0) as u32,
-            cursor_rect.size.height.max(1.0) as u32,
+            context.serial,
+            text_input_sync::State {
+                rect: (
+                    cursor_rect.origin.x as i32,
+                    cursor_rect.origin.y as i32,
+                    cursor_rect.size.width.max(1.0) as u32,
+                    cursor_rect.size.height.max(1.0) as u32,
+                ),
+                text: &state.surrounding_text,
+                cursor: state.cursor_byte,
+                anchor: state.anchor_byte,
+                hint: sws_protocol::text_input_content_hints::NONE,
+                purpose: sws_protocol::text_input_content_purpose::NORMAL,
+            },
+            |request| {
+                use text_input_sync::Request;
+                match request {
+                    Request::CursorRect(id, (x, y, width, height)) => self
+                        .conn
+                        .set_text_input_cursor_rect(id, x, y, width, height),
+                    Request::SurroundingText(id, cursor, anchor, text) => self
+                        .conn
+                        .set_text_input_surrounding_text(id, cursor, anchor, text),
+                    Request::ContentType(id, hint, purpose) => {
+                        self.conn.set_text_input_content_type(id, hint, purpose)
+                    }
+                    Request::Commit(id, serial) => self.conn.commit_text_input_state(id, serial),
+                }
+                .is_ok()
+            },
         );
-        let _ = self.conn.set_text_input_surrounding_text(
-            context_id,
-            state.cursor_byte,
-            state.anchor_byte,
-            &state.surrounding_text,
-        );
-        let _ = self.conn.set_text_input_content_type(
-            context_id,
-            sws_protocol::text_input_content_hints::NONE,
-            sws_protocol::text_input_content_purpose::NORMAL,
-        );
-        if self
-            .conn
-            .commit_text_input_state(context_id, context.serial)
-            .is_ok()
-        {
+        if synchronized == text_input_sync::SyncResult::Committed {
             if let Some(context) = self.text_input.as_mut() {
                 context.serial = context.serial.saturating_add(1);
             }
@@ -1485,6 +1501,7 @@ impl SWSPlatformWindow {
         width: u32,
         height: u32,
     ) -> core::result::Result<(), sws::Error> {
+        self.text_input_sync.invalidate();
         let cursor_rect = self.logical_rect_to_physical(Rect::from_xywh(
             x as f32,
             y as f32,
@@ -2755,6 +2772,7 @@ impl SWSPlatformWindow {
                 });
             }
             SwsEvent::OutputScaleChanged { scale_milli } => {
+                self.text_input_sync.invalidate();
                 self.scale_milli = Self::sanitize_scale(scale_milli);
                 self.push_event(Event::Resize {
                     width: self.current_size.width.max(1.0) as u32,
@@ -2837,6 +2855,7 @@ impl SWSPlatformWindow {
                 menu_titles,
             } => {
                 let menu_titles = Self::sanitize_menu_titles(&menu_titles);
+                self.text_input_sync.invalidate();
                 if window_id != self.surface_id {
                     self.reset_transient_modifiers();
                     self.pointer_lock_requested = None;
