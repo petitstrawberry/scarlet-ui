@@ -334,6 +334,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             .as_ref()
             .ok_or(Error::InvalidFrame)?
             .unused_external_textures(paint);
+        let retired_count = retired.len();
         for (texture, bound) in retired {
             if bound {
                 self.session
@@ -372,6 +373,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                     source,
                 )
             })?;
+        let pending_count = pending.len();
         for binding in pending {
             let source = binding
                 .source()
@@ -391,18 +393,40 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                     source,
                 )
             })?;
+            let raw_handle = handle.as_raw();
             let session = self.session.as_mut().ok_or(Error::InvalidFrame)?;
             let operation = if source.conversion.is_some() {
                 "import NV12 image"
             } else {
                 "import BGRA image"
             };
-            if let Some(conversion) = source.conversion {
+            let imported = if let Some(conversion) = source.conversion {
                 session.import_ycbcr_texture(binding.texture(), handle, conversion)
             } else {
                 session.import_shared_bgra_texture(binding.texture(), handle)
+            };
+            if let Err(error) = imported {
+                // Binding preparation skips external_bound entries. Preserve
+                // the exact unbound/recycled logical slot and the transferred
+                // handle on failure; the import already consumed that handle.
+                let descriptor = self.encoder.as_ref().map(|encoder| {
+                    let table = encoder.resource_table();
+                    table
+                        .texture_ref(binding.texture())
+                        .and_then(|id| table.texture(id))
+                });
+                return Err(Error::Diagnostic {
+                    stage: Stage::ImportExternalImage,
+                    operation,
+                    cause: format!(
+                        "{error:?}; texture={:?} transferred_handle={raw_handle} descriptor={descriptor:?} external_cache=unbound session_generation={} frame_extent={}x{} pending_imports={pending_count} retired_imports={retired_count}",
+                        binding.texture(),
+                        self.generation,
+                        self.physical_width,
+                        self.physical_height,
+                    ),
+                });
             }
-            .map_err(|source| diagnostic(Stage::ImportExternalImage, operation, source))?;
             self.encoder
                 .as_mut()
                 .ok_or(Error::InvalidFrame)?
