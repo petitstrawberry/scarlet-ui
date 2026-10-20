@@ -1211,7 +1211,7 @@ impl SWSPlatformWindow {
                     activation_token.as_deref(),
                 )
                 .map_err(|error| {
-                    eprintln!("[ScarletUI] create configured surface failed: {error:?}");
+                    logln!("[ScarletUI] create configured surface failed: {error:?}");
                     scarlet_ui_core::error::Error::SurfaceCreationFailed
                 })?;
             (created.surface_id, created.width, created.height)
