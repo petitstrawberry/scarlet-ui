@@ -83,16 +83,20 @@ fn request(options: FileDialog, abandon: &AtomicBool) -> FileDialogResult {
         .unwrap_or("")
         .to_string();
     let (method, args): (&str, Vec<Argument>) = match options.mode {
-        FileDialogMode::Open => (
-            DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
-            vec![
-                Argument::String(options.title),
-                Argument::String(directory),
-                Argument::String(filter),
-                Argument::Boolean(false),
-                Argument::Boolean(false),
-            ],
-        ),
+        FileDialogMode::Open | FileDialogMode::OpenFolder => {
+            let [allow_multiple, select_directories] =
+                super::file_dialog_policy::open_selection_flags(options.mode);
+            (
+                DESKTOP_FILE_MANAGER_OPEN_FILE_METHOD,
+                vec![
+                    Argument::String(options.title),
+                    Argument::String(directory),
+                    Argument::String(filter),
+                    Argument::Boolean(allow_multiple),
+                    Argument::Boolean(select_directories),
+                ],
+            )
+        }
         FileDialogMode::Save => (
             DESKTOP_FILE_MANAGER_SAVE_FILE_METHOD,
             vec![

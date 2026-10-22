@@ -83,6 +83,8 @@ impl From<FileDialogPath> for PathBuf {
 pub enum FileDialogMode {
     Open,
     OpenMultiple,
+    /// Select one folder. File filters and default filenames are not applicable.
+    OpenFolder,
     Save,
 }
 /// Literal extensions without dots or wildcards (e.g. `wav`, `json`).
@@ -139,6 +141,13 @@ impl FileDialog {
         handle
     }
     pub fn validate(&self) -> Result<(), FileDialogError> {
+        if self.mode == FileDialogMode::OpenFolder
+            && (self.default_name.is_some() || !self.filters.is_empty())
+        {
+            return Err(FileDialogError::InvalidOptions(
+                "folder selection does not accept file filters or a default filename".into(),
+            ));
+        }
         if self
             .initial_directory
             .as_ref()
@@ -400,5 +409,40 @@ mod tests {
         assert!(options.validate().is_err());
         options.filters[0].extensions = vec!["wav".into(), "WAV".into()];
         assert!(options.validate().is_ok());
+    }
+
+    #[test]
+    fn folder_selection_accepts_initial_directory_but_rejects_file_options() {
+        let mut options = FileDialog::new(FileDialogMode::OpenFolder);
+        assert_eq!(options.validate(), Ok(()));
+        options.initial_directory = Some("/tmp/project".into());
+        options.title = "Open project folder".into();
+        assert_eq!(options.validate(), Ok(()));
+        options.default_name = Some("project".into());
+        assert!(matches!(
+            options.validate(),
+            Err(FileDialogError::InvalidOptions(_))
+        ));
+        options.default_name = None;
+        options.filters = vec![FileDialogFilter {
+            name: "Rust".into(),
+            extensions: vec!["rs".into()],
+        }];
+        for policy in [
+            FileDialogFilterPolicy::Required,
+            FileDialogFilterPolicy::Optional,
+        ] {
+            options.filter_policy = policy;
+            assert!(matches!(
+                options.validate(),
+                Err(FileDialogError::InvalidOptions(_))
+            ));
+        }
+        options.filters.clear();
+        options.initial_directory = Some("relative".into());
+        assert!(matches!(
+            options.validate(),
+            Err(FileDialogError::InvalidOptions(_))
+        ));
     }
 }

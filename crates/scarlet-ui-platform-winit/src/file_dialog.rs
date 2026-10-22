@@ -14,6 +14,15 @@ enum Panel {
     Open(Retained<NSOpenPanel>),
     Save(Retained<NSSavePanel>),
 }
+
+// NSOpenPanel flags: files, directories, multiple selection.
+fn open_panel_selection(mode: FileDialogMode) -> (bool, bool, bool) {
+    (
+        mode != FileDialogMode::OpenFolder,
+        mode == FileDialogMode::OpenFolder,
+        mode == FileDialogMode::OpenMultiple,
+    )
+}
 impl Panel {
     fn save_panel(&self) -> &NSSavePanel {
         match self {
@@ -69,11 +78,12 @@ pub(crate) fn begin(
             return Err(FileDialogError::Busy);
         }
         let panel = Rc::new(match options.mode {
-            FileDialogMode::Open | FileDialogMode::OpenMultiple => {
+            FileDialogMode::Open | FileDialogMode::OpenMultiple | FileDialogMode::OpenFolder => {
                 let p = NSOpenPanel::openPanel(mtm);
-                p.setCanChooseFiles(true);
-                p.setCanChooseDirectories(false);
-                p.setAllowsMultipleSelection(options.mode == FileDialogMode::OpenMultiple);
+                let (files, directories, multiple) = open_panel_selection(options.mode);
+                p.setCanChooseFiles(files);
+                p.setCanChooseDirectories(directories);
+                p.setAllowsMultipleSelection(multiple);
                 Panel::Open(p)
             }
             FileDialogMode::Save => Panel::Save(NSSavePanel::savePanel(mtm)),
@@ -164,5 +174,26 @@ pub(crate) fn begin(
             result,
             finished: false,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_open_panel_selection_matches_each_open_mode() {
+        assert_eq!(
+            open_panel_selection(FileDialogMode::Open),
+            (true, false, false)
+        );
+        assert_eq!(
+            open_panel_selection(FileDialogMode::OpenMultiple),
+            (true, false, true)
+        );
+        assert_eq!(
+            open_panel_selection(FileDialogMode::OpenFolder),
+            (false, true, false)
+        );
     }
 }
