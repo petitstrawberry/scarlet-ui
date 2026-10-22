@@ -118,3 +118,192 @@ fn text_view_long_line_benchmark() {
         );
     }
 }
+
+// BEGIN VERIFIED SCROLL BENCHMARK
+// This section uses APIs shared by the original app pin and the optimized
+// implementation so the identical harness can be injected into git archives.
+// Verification and paint-command inspection happen outside the timed interval.
+
+fn verified_paint_witness(paint: &PaintContext<'_>) -> (usize, usize, u64) {
+    let mut draw_text = 0usize;
+    let mut body_text = 0usize;
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut feed = |bytes: &[u8]| {
+        for byte in bytes {
+            hash = (hash ^ *byte as u64).wrapping_mul(0x100000001b3);
+        }
+    };
+    for command in paint.commands() {
+        if let PaintCommand::DrawText {
+            position,
+            text,
+            font_size_px,
+            ..
+        } = command
+        {
+            draw_text += 1;
+            body_text += usize::from(text.contains(": A unique editor row"));
+            feed(&position.x.to_bits().to_le_bytes());
+            feed(&position.y.to_bits().to_le_bytes());
+            feed(&font_size_px.to_bits().to_le_bytes());
+            feed(&(text.len() as u64).to_le_bytes());
+            feed(text.as_bytes());
+        }
+    }
+    (draw_text, body_text, hash)
+}
+
+fn verified_benchmark_fonts() {
+    if let Ok(paths) = std::env::var("TEXT_BENCH_FONT_FILES") {
+        let mut paths = paths.split(':');
+        let bytes = |path: &str| -> &'static [u8] {
+            Box::leak(
+                std::fs::read(path)
+                    .expect("benchmark font")
+                    .into_boxed_slice(),
+            )
+        };
+        let mut stack = graphics::FontStack::new(bytes(paths.next().expect("primary font")))
+            .expect("valid primary font");
+        for path in paths {
+            stack
+                .add_fallback(bytes(path))
+                .expect("valid fallback font");
+        }
+        graphics::set_default_font_stack(stack);
+    }
+    black_box(graphics::measure_text_sized(
+        "ASCII 日本語 e\u{301} 👩‍💻",
+        15.0,
+    ));
+}
+
+#[test]
+#[ignore = "verified release CPU benchmark; no rasterization or presentation"]
+fn text_view_verified_scroll_benchmark() {
+    let compiled_manifest = env!("CARGO_MANIFEST_DIR");
+    if let Ok(expected) = std::env::var("TEXT_BENCH_EXPECT_MANIFEST_DIR") {
+        assert_eq!(
+            compiled_manifest, expected,
+            "benchmark executable must come from the requested source snapshot"
+        );
+    }
+    std::println!(
+        "text_view_verified_environment compiled_manifest={compiled_manifest} debug_assertions={}",
+        cfg!(debug_assertions)
+    );
+    verified_benchmark_fonts();
+    let sizes = std::env::var("TEXT_BENCH_LINES").unwrap_or_else(|_| "100,1000,3000".into());
+    let samples: usize = std::env::var("TEXT_BENCH_SAMPLES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(5);
+    assert!(samples > 0);
+    for count in sizes
+        .split(',')
+        .map(|value| value.parse::<usize>().unwrap())
+    {
+        let text: String = (0..count).map(|line| alloc::format!(
+            "{line:06}: A unique editor row, 日本語 e\u{301} 👩‍💻\tand more text for wrapping.\n"
+        )).collect();
+        let bytes = text.len();
+        let value = State::new(StateId::new(6020), text);
+        let selection = State::new(StateId::new(6021), TextSelection::collapsed(0));
+        let scroll = State::new(StateId::new(6022), TextViewScroll::default());
+        let view = TextView::new(value, selection)
+            .scroll_state(scroll.clone())
+            .wrap_mode(WrapMode::Soft)
+            .line_numbers(true)
+            .font_size(15.0)
+            .padding(12.0);
+        let started = Instant::now();
+        let mut object = render_object_with_size(&view, 640.0, 480.0);
+        let initial_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let mut previous_hash = {
+            let mut paint = PaintContext::new();
+            assert!(object.paint(&mut paint, Point::ZERO));
+            verified_paint_witness(&paint).2
+        };
+        for record in [false, true] {
+            let mode = if record {
+                "wheel_update_layout_record"
+            } else {
+                "wheel_only"
+            };
+            let mut timings = Vec::new();
+            for sample in 0..samples {
+                let delta_y = if sample % 2 == 0 { -31 } else { 29 };
+                let before_y = object.scroll.y;
+                let before_row_y = object.layout.visual_lines[0].y;
+                let mut paint = PaintContext::new();
+                let started = Instant::now();
+                let handled = handle_text_view_mouse(
+                    &view,
+                    &mut object,
+                    &MouseEvent::Wheel {
+                        delta_x: 0,
+                        delta_y,
+                        x: 100,
+                        y: 100,
+                        phase: WheelPhase::Moved,
+                        source: ScrollSource::Trackpad,
+                    },
+                );
+                let mut painted = false;
+                if record {
+                    object.update(&view);
+                    object.layout(LayoutConstraints::tight(640.0, 480.0));
+                    painted = object.paint(&mut paint, Point::ZERO);
+                }
+                black_box(&object.layout);
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                // Assertions, witness hashing and recording in wheel-only mode
+                // are deliberately outside the measured interval.
+                if !record {
+                    painted = object.paint(&mut paint, Point::ZERO);
+                }
+                let (draw_text, body_text, hash) = verified_paint_witness(&paint);
+                let after_y = object.scroll.y;
+                assert!(handled && painted);
+                assert_eq!(
+                    after_y,
+                    before_y - delta_y as f32,
+                    "wheel must move by the requested pixels without clamping"
+                );
+                assert_eq!(
+                    scroll.get(),
+                    object.scroll,
+                    "external scroll state must agree"
+                );
+                assert_eq!(
+                    object.layout.visual_lines[0].y - before_row_y,
+                    -(after_y - before_y),
+                    "row coordinates must move with the viewport"
+                );
+                assert!(
+                    draw_text > 0 && body_text > 0,
+                    "record visible document text"
+                );
+                assert_ne!(
+                    hash, previous_hash,
+                    "text content or positions must change on every sample"
+                );
+                previous_hash = hash;
+                std::println!(
+                    "text_view_verified_sample lines={count} mode={mode} sample={sample} before_y={before_y} after_y={after_y} visible_start={} visible_end={} visual_rows={} commands={} draw_text={draw_text} body_text={body_text} text_hash={hash:016x} elapsed_ms={elapsed_ms:.6}",
+                    object.layout.visible_lines.start,
+                    object.layout.visible_lines.end,
+                    object.layout.visual_lines.len(),
+                    paint.commands().len(),
+                );
+                timings.push(elapsed_ms);
+            }
+            timings.sort_by(f64::total_cmp);
+            std::println!(
+                "text_view_verified_summary lines={count} bytes={bytes} mode={mode} initial_ms={initial_ms:.3} samples={samples} median_ms={:.6} max_ms={:.6}",
+                timings[samples / 2],
+                timings[samples - 1],
+            );
+        }
+    }
+}
