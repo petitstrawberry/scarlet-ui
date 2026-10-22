@@ -451,12 +451,11 @@ impl ApplicationRunner {
             pipeline.set_paint_backend(paint_backend);
         }
 
-        if let Some(menu_bar) = window_info.menu_bar {
-            if !menu_json.is_empty() {
-                let _ = window.set_menu_titles(&menu_json);
-                menu_model::register_menu_callbacks(window.surface_id(), &menu_bar);
-            }
-        }
+        let mut menu_sync = WindowMenuSync {
+            published_json: menu_json.is_empty().then(String::new),
+            ..WindowMenuSync::default()
+        };
+        menu_sync.refresh(window.as_mut(), window_info.menu_bar.as_ref());
 
         if !limits.resizable {
             let _ = window.set_resizable(false);
@@ -479,6 +478,7 @@ impl ApplicationRunner {
             context,
             pipeline,
             window,
+            menu_sync,
             file_dialog: None,
             presented_this_cycle: false,
             frame_pacing_enabled,
@@ -629,6 +629,10 @@ impl ApplicationRunner {
                     }
                     Presentation::Idle => {}
                 }
+            } else {
+                // A failed metadata update must not depend on another frame,
+                // animation, or input event to get a retry.
+                slot.menu_sync.publish(slot.window.as_mut());
             }
         }
 
@@ -751,6 +755,7 @@ struct WindowSlot<A: Application> {
     pipeline: RenderingPipeline,
     file_dialog: Option<crate::file_dialog::ActiveDialog>,
     window: Box<dyn PlatformWindow>,
+    menu_sync: WindowMenuSync,
     presented_this_cycle: bool,
     frame_pacing_enabled: bool,
     frame_ready: bool,
@@ -759,6 +764,43 @@ struct WindowSlot<A: Application> {
     retry_render: bool,
     animation_tick: Instant,
     _app: PhantomData<A>,
+}
+
+#[derive(Default)]
+struct WindowMenuSync {
+    desired_json: String,
+    published_json: Option<String>,
+}
+
+impl WindowMenuSync {
+    fn refresh(
+        &mut self,
+        window: &mut dyn PlatformWindow,
+        menu: Option<&menu_model::MenuBarModel>,
+    ) {
+        // Closures can capture a new document/state snapshot while serializing
+        // to identical JSON. Always refresh them from the rebuilt model.
+        if let Some(menu) = menu {
+            menu_model::register_menu_callbacks(window.surface_id(), menu);
+            self.desired_json = menu.to_json();
+        } else {
+            menu_model::unregister_menu_callbacks(window.surface_id());
+            self.desired_json.clear();
+        }
+        self.publish(window);
+    }
+
+    fn publish(&mut self, window: &mut dyn PlatformWindow) {
+        if self.published_json.as_deref() != Some(self.desired_json.as_str()) {
+            // Failure leaves the remote state unknown: it may have applied the
+            // update before the reply was lost. Even reverting to the previous
+            // model must therefore be published again.
+            self.published_json = window
+                .set_menu_titles(&self.desired_json)
+                .ok()
+                .map(|()| self.desired_json.clone());
+        }
+    }
 }
 
 fn request_next_frame<A: Application>(slot: &mut WindowSlot<A>) {
@@ -818,6 +860,15 @@ fn sync_text_input(window: &mut dyn PlatformWindow, pipeline: &RenderingPipeline
     window.sync_text_input(state.as_ref());
 }
 
+fn find_window_info(element: &dyn Element) -> Option<crate::views::WindowInfo> {
+    element.get_window_info().or_else(|| {
+        element
+            .children()
+            .iter()
+            .find_map(|child| find_window_info(child.as_ref()))
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Presentation {
     Cpu,
@@ -827,7 +878,20 @@ enum Presentation {
 
 fn present_window<A: Application>(app: &mut A, slot: &mut WindowSlot<A>) -> Result<Presentation> {
     slot.retry_render = false;
-    match present_pipeline(&mut slot.pipeline, slot.window.as_mut()) {
+    let result = present_pipeline(&mut slot.pipeline, slot.window.as_mut());
+    // render_for_present flushes scene rebuilds even when there is no pixel
+    // damage (or the renderer rejects a frame). Read the resulting WindowInfo,
+    // not the creation-time declaration or a separately rebuilt app snapshot.
+    let info = slot
+        .pipeline
+        .element_tree()
+        .root()
+        .and_then(find_window_info);
+    slot.menu_sync.refresh(
+        slot.window.as_mut(),
+        info.as_ref().and_then(|info| info.menu_bar.as_ref()),
+    );
+    match result {
         Ok(presentation) => Ok(presentation),
         Err(Error::RenderFailure(failure)) => {
             app.on_render_error(&slot.context, &failure);
@@ -1856,6 +1920,9 @@ mod tests {
         dialog_results: [Option<crate::file_dialog::FileDialogResult>; 2],
         dialog_cancels: Vec<usize>,
         dialog_focuses: Vec<usize>,
+        menu_updates: [Vec<String>; 2],
+        menu_failures_remaining: [usize; 2],
+        menu_surface_id_offset: u32,
     }
 
     struct EnvironmentTestBackend {
@@ -2118,7 +2185,7 @@ mod tests {
         }
 
         fn surface_id(&self) -> u32 {
-            self.index as u32 + 1
+            self.probe.borrow().menu_surface_id_offset + self.index as u32 + 1
         }
 
         fn as_any_mut(&mut self) -> &mut dyn Any {
@@ -2133,9 +2200,336 @@ mod tests {
             Ok(())
         }
 
-        fn set_menu_titles(&mut self, _menu_titles: &str) -> Result<()> {
-            Ok(())
+        fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()> {
+            let mut probe = self.probe.borrow_mut();
+            probe.menu_updates[self.index].push(menu_titles.into());
+            if probe.menu_failures_remaining[self.index] > 0 {
+                probe.menu_failures_remaining[self.index] -= 1;
+                Err(Error::ConnectionFailed)
+            } else {
+                Ok(())
+            }
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct MenuSnapshot {
+        removed: bool,
+        can_undo: bool,
+        revision: usize,
+    }
+
+    #[derive(Clone)]
+    struct MenuRuntimeApp {
+        documents: [crate::state::State<MenuSnapshot>; 2],
+        activated: std::sync::mpsc::Sender<(usize, usize)>,
+    }
+
+    impl MenuRuntimeApp {
+        fn window(&self, index: usize) -> Window<Text> {
+            use crate::menu_model::{MenuBarModel, MenuEntry, MenuItemModel};
+            let state = self.documents[index].clone();
+            let snapshot = state.get();
+            let window = Window::new("Menu runtime", Text::new("Document"))
+                .scene_key(if index == 0 { "one" } else { "two" })
+                .size(Size::new(120.0, 80.0));
+            if snapshot.removed {
+                return window;
+            }
+            let rotated = self.activated.clone();
+            let undone = self.activated.clone();
+            window.menu_bar(MenuBarModel::new(vec![
+                MenuItemModel::new("edit", "Edit").children(vec![
+                    MenuEntry::Item(MenuItemModel::new("rotate", "Rotate").on_activate(
+                        alloc::sync::Arc::new(move || {
+                            state.update(|document| {
+                                document.can_undo = true;
+                                document.revision += 1;
+                            });
+                            rotated.send((index, state.get().revision)).unwrap();
+                        }),
+                    )),
+                    MenuEntry::Item(
+                        MenuItemModel::new("undo", "Undo")
+                            .enabled(snapshot.can_undo)
+                            .on_activate(alloc::sync::Arc::new(move || {
+                                undone.send((index, snapshot.revision)).unwrap();
+                            })),
+                    ),
+                ]),
+            ]))
+        }
+    }
+
+    impl Application for MenuRuntimeApp {
+        fn scenes(&self) -> impl Scene {
+            (self.window(0), self.window(1))
+        }
+
+        fn scene_listenables(&self, key: &SceneWindowKey) -> Option<Vec<&dyn Listenable>> {
+            Some(vec![&self.documents[usize::from(key.as_str() == "two")]])
+        }
+    }
+
+    impl View for MenuRuntimeApp {
+        fn create_element(&self) -> Box<dyn Element> {
+            Text::new("Menu runtime").create_element()
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    fn menu_runtime_app() -> (MenuRuntimeApp, std::sync::mpsc::Receiver<(usize, usize)>) {
+        let (activated, received) = std::sync::mpsc::channel();
+        (
+            MenuRuntimeApp {
+                documents: [
+                    crate::state::State::new(StateId::new(8201), MenuSnapshot::default()),
+                    crate::state::State::new(StateId::new(8202), MenuSnapshot::default()),
+                ],
+                activated,
+            },
+            received,
+        )
+    }
+
+    fn menu_runtime_runner(probe: Rc<RefCell<EnvironmentRunnerProbe>>) -> ApplicationRunner {
+        // Detached callbacks may finish just after a test closes its windows.
+        // Give each fixture its own IDs, as real platform windows receive.
+        static NEXT_ID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(10000);
+        probe.borrow_mut().menu_surface_id_offset =
+            NEXT_ID.fetch_add(2, core::sync::atomic::Ordering::Relaxed);
+        ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe,
+            next_window: 0,
+            negotiated_size: None,
+        }))
+    }
+
+    #[test]
+    fn declarative_menu_sync_updates_enabled_state_and_identical_json_callbacks() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let (mut app, received) = menu_runtime_app();
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        let mut runner = menu_runtime_runner(probe.clone());
+        let declarations = collect_scene_declarations(&app).unwrap();
+        let mut slots = runner.create_slots(&mut app, declarations).unwrap();
+        let render_probe = Rc::new(RefCell::new(RenderProbe::default()));
+        slots[0]
+            .pipeline
+            .set_paint_backend(Box::new(FailingPaintBackend(render_probe.clone())));
+        for slot in &mut slots {
+            present_window(&mut app, slot).unwrap();
+        }
+        assert_eq!(probe.borrow().menu_updates[0].len(), 1);
+        assert!(probe.borrow().menu_updates[0][0].contains("\"title\":\"Undo\",\"enabled\":false"));
+
+        let window_id = slots[0].window.surface_id();
+        handle_window_event(
+            &mut app,
+            &mut slots[0],
+            Event::MenuItemActivated {
+                window_id,
+                menu_item_id: "rotate".into(),
+            },
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (0, 1)
+        );
+        assert!(slots[0].pipeline.has_dirty());
+        assert!(!slots[1].pipeline.has_dirty());
+        assert_eq!(
+            present_window(&mut app, &mut slots[0]).unwrap(),
+            Presentation::Idle
+        );
+        assert_eq!(
+            render_probe.borrow().presented,
+            1,
+            "menu-only rebuild needs no frame"
+        );
+        assert_eq!(probe.borrow().menu_updates[0].len(), 2);
+        assert_eq!(probe.borrow().menu_updates[1].len(), 1);
+        assert!(probe.borrow().menu_updates[0][1].contains("\"title\":\"Undo\",\"enabled\":true"));
+
+        // Only a captured snapshot changes; the JSON remains byte-for-byte equal.
+        app.documents[0].update(|document| document.revision = 7);
+        assert_eq!(
+            present_window(&mut app, &mut slots[0]).unwrap(),
+            Presentation::Idle
+        );
+        assert_eq!(probe.borrow().menu_updates[0].len(), 2);
+        assert!(menu_model::invoke_menu_callback(window_id, "undo"));
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (0, 7)
+        );
+        let close_ids = slots
+            .iter()
+            .map(|slot| slot.context.window_id)
+            .collect::<Vec<_>>();
+        remove_closed_slots(&mut slots, &close_ids);
+    }
+
+    #[test]
+    fn declarative_menu_sync_removes_readds_and_isolates_windows() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let (mut app, received) = menu_runtime_app();
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        let mut runner = menu_runtime_runner(probe.clone());
+        let declarations = collect_scene_declarations(&app).unwrap();
+        let mut slots = runner.create_slots(&mut app, declarations).unwrap();
+        let first = slots[0].window.surface_id();
+        let second = slots[1].window.surface_id();
+        app.documents[0].update(|document| document.removed = true);
+        present_window(&mut app, &mut slots[0]).unwrap();
+        assert_eq!(probe.borrow().menu_updates[0].last().unwrap(), "");
+        assert_eq!(probe.borrow().menu_updates[1].len(), 1);
+        assert!(!menu_model::invoke_menu_callback(first, "undo"));
+        assert!(menu_model::invoke_menu_callback(second, "undo"));
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (1, 0)
+        );
+
+        app.documents[0].update(|document| {
+            document.removed = false;
+            document.revision = 8;
+        });
+        present_window(&mut app, &mut slots[0]).unwrap();
+        assert_eq!(probe.borrow().menu_updates[0].len(), 3);
+        assert!(menu_model::invoke_menu_callback(first, "undo"));
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (0, 8)
+        );
+        let second_close = slots[1].context.window_id;
+        remove_closed_slots(&mut slots, &[second_close]);
+        assert!(!menu_model::invoke_menu_callback(second, "undo"));
+        assert_eq!(slots.len(), 1);
+        let first_close = slots[0].context.window_id;
+        remove_closed_slots(&mut slots, &[first_close]);
+        assert!(!menu_model::invoke_menu_callback(first, "undo"));
+    }
+
+    #[test]
+    fn declarative_menu_sync_retries_initial_updates_and_removal_without_dirty_frames() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let (mut app, _received) = menu_runtime_app();
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        probe.borrow_mut().menu_failures_remaining[0] = 2;
+        let mut runner = menu_runtime_runner(probe.clone());
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slots = vec![runner.create_slot(&mut app, declaration, true).unwrap()];
+        present_window(&mut app, &mut slots[0]).unwrap();
+        assert!(!slots[0].pipeline.has_dirty());
+        assert_eq!(probe.borrow().menu_updates[0].len(), 2);
+        let mut loop_state = RunnerLoopState::new();
+        ApplicationRunner::run_cycle(
+            runner.backend.as_mut(),
+            &mut app,
+            &mut slots,
+            &mut loop_state,
+        )
+        .unwrap();
+        assert_eq!(probe.borrow().menu_updates[0].len(), 3);
+        ApplicationRunner::run_cycle(
+            runner.backend.as_mut(),
+            &mut app,
+            &mut slots,
+            &mut loop_state,
+        )
+        .unwrap();
+        assert_eq!(
+            probe.borrow().menu_updates[0].len(),
+            3,
+            "successful retry stops IPC"
+        );
+
+        probe.borrow_mut().menu_failures_remaining[0] = 1;
+        app.documents[0].update(|document| document.can_undo = true);
+        present_window(&mut app, &mut slots[0]).unwrap();
+        assert!(!slots[0].pipeline.has_dirty());
+        ApplicationRunner::run_cycle(
+            runner.backend.as_mut(),
+            &mut app,
+            &mut slots,
+            &mut loop_state,
+        )
+        .unwrap();
+        assert_eq!(probe.borrow().menu_updates[0].len(), 5);
+        assert_eq!(
+            probe.borrow().menu_updates[0][3],
+            probe.borrow().menu_updates[0][4]
+        );
+
+        probe.borrow_mut().menu_failures_remaining[0] = 1;
+        app.documents[0].update(|document| document.removed = true);
+        present_window(&mut app, &mut slots[0]).unwrap();
+        assert!(!menu_model::invoke_menu_callback(
+            slots[0].window.surface_id(),
+            "undo"
+        ));
+        ApplicationRunner::run_cycle(
+            runner.backend.as_mut(),
+            &mut app,
+            &mut slots,
+            &mut loop_state,
+        )
+        .unwrap();
+        assert_eq!(
+            &probe.borrow().menu_updates[0][5..],
+            &[String::new(), String::new()]
+        );
+        let close = slots[0].context.window_id;
+        remove_closed_slots(&mut slots, &[close]);
+    }
+
+    #[test]
+    fn declarative_menu_sync_replaces_failed_updates_with_the_latest_model() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let (mut app, _received) = menu_runtime_app();
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        probe.borrow_mut().menu_failures_remaining[0] = 1;
+        let mut runner = menu_runtime_runner(probe.clone());
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slots = vec![runner.create_slot(&mut app, declaration, true).unwrap()];
+        // Creation included a menu, but its explicit publication failed. A
+        // removal before the first successful sync must still reach the server.
+        app.documents[0].update(|document| document.removed = true);
+        present_window(&mut app, &mut slots[0]).unwrap();
+        assert_eq!(probe.borrow().menu_updates[0].len(), 2);
+        assert_eq!(probe.borrow().menu_updates[0][1], "");
+
+        app.documents[0].update(|document| document.removed = false);
+        present_window(&mut app, &mut slots[0]).unwrap();
+        probe.borrow_mut().menu_failures_remaining[0] = 1;
+        app.documents[0].update(|document| document.can_undo = true);
+        present_window(&mut app, &mut slots[0]).unwrap();
+        // Reverting the failed update cannot assume the old menu is still on
+        // the server. Publish the current model, not a cached retry payload.
+        app.documents[0].update(|document| document.can_undo = false);
+        present_window(&mut app, &mut slots[0]).unwrap();
+        assert_eq!(probe.borrow().menu_updates[0].len(), 5);
+        assert_eq!(
+            probe.borrow().menu_updates[0][4],
+            probe.borrow().menu_updates[0][2]
+        );
+        let mut loop_state = RunnerLoopState::new();
+        ApplicationRunner::run_cycle(
+            runner.backend.as_mut(),
+            &mut app,
+            &mut slots,
+            &mut loop_state,
+        )
+        .unwrap();
+        assert_eq!(probe.borrow().menu_updates[0].len(), 5);
+        let close = slots[0].context.window_id;
+        remove_closed_slots(&mut slots, &[close]);
     }
 
     #[derive(Clone)]
