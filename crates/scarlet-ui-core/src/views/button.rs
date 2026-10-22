@@ -23,6 +23,7 @@ pub type ButtonCallback = Box<dyn Fn() + 'static>;
 /// Button View - displays a clickable button
 #[derive(Clone)]
 pub struct Button {
+    enabled: bool,
     label: String,
     icon: Option<Icon>,
     icon_size: Option<IconSize>,
@@ -52,6 +53,7 @@ impl Button {
         let label_str = label.into();
         let palette = ColorPalette::default();
         Self {
+            enabled: true,
             label: label_str,
             icon: None,
             icon_size: None,
@@ -82,6 +84,7 @@ impl Button {
     pub fn icon_only(icon: Icon) -> Self {
         let palette = ColorPalette::default();
         Self {
+            enabled: true,
             label: String::new(),
             icon: Some(icon),
             icon_size: None,
@@ -226,6 +229,15 @@ impl Button {
         self
     }
 
+    /// Disable pointer and keyboard interaction while retaining the label.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// Set the click callback
     pub fn on_click(mut self, callback: impl Fn() + 'static) -> Self {
         self.on_click = Some(Arc::new(callback));
@@ -316,12 +328,18 @@ impl Button {
 
     /// Invoke the click callback if present
     pub fn invoke_on_click(&self) {
+        if !self.enabled {
+            return;
+        }
         if let Some(callback) = self.on_click.as_ref() {
             callback();
         }
     }
 
     pub(crate) fn press_repeat_timing(&self) -> Option<(Duration, Duration)> {
+        if !self.enabled {
+            return None;
+        }
         self.on_click.as_ref()?;
         self.press_repeat
     }
@@ -338,6 +356,7 @@ impl Button {
             self.font_size,
             self.padding,
         );
+        render_object.enabled = self.enabled;
         render_object.icon_size = self.icon_size;
         render_object.hover_background_color = self.hover_background_color;
         render_object.pressed_background_color = self.pressed_background_color;
@@ -362,6 +381,9 @@ impl View for Button {
 
 /// Button RenderObject - handles button rendering and interaction
 pub struct ButtonRenderObject {
+    enabled: bool,
+    focused: bool,
+    keyboard_pressed: Option<crate::event::KeyCode>,
     label: String,
     icon: Option<Icon>,
     icon_size: Option<IconSize>,
@@ -382,6 +404,49 @@ pub struct ButtonRenderObject {
 }
 
 impl ButtonRenderObject {
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused && self.enabled;
+        if !self.focused {
+            self.keyboard_pressed = None;
+        }
+    }
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    /// Return whether the event was handled and whether it completed an activation.
+    pub fn handle_keyboard(&mut self, event: crate::event::KeyEvent) -> Option<bool> {
+        use crate::event::{KeyCode, KeyEvent};
+        if !self.enabled || !self.focused {
+            return None;
+        }
+        match event {
+            KeyEvent::Pressed {
+                keycode: key @ (KeyCode::Enter | KeyCode::Space),
+                modifiers,
+            } if !modifiers.control && !modifiers.alt && !modifiers.super_key => {
+                if self.keyboard_pressed.is_none() {
+                    self.keyboard_pressed = Some(key);
+                }
+                Some(false)
+            }
+            KeyEvent::Released {
+                keycode: key @ (KeyCode::Enter | KeyCode::Space),
+                ..
+            } => {
+                let activate = self.keyboard_pressed == Some(key);
+                if activate {
+                    self.keyboard_pressed = None;
+                }
+                Some(activate)
+            }
+            KeyEvent::Char {
+                c: ' ' | '\r' | '\n',
+            } => Some(false),
+            _ => None,
+        }
+    }
+
     /// Create a button render object.
     ///
     /// # Arguments
@@ -411,6 +476,9 @@ impl ButtonRenderObject {
         padding: f32,
     ) -> Self {
         Self {
+            enabled: true,
+            focused: false,
+            keyboard_pressed: None,
             label,
             icon,
             icon_size: None,
@@ -471,7 +539,7 @@ impl ButtonRenderObject {
     }
 
     pub fn is_pressed(&self) -> bool {
-        self.pressed.is_pressed()
+        self.pressed.is_pressed() || self.keyboard_pressed.is_some()
     }
 
     pub fn is_mouse_pressed(&self) -> bool {
@@ -489,7 +557,7 @@ impl ButtonRenderObject {
     }
 
     fn current_background(&self) -> Color {
-        if self.pressed.is_pressed() {
+        if self.is_pressed() {
             self.pressed_background_color
                 .unwrap_or_else(|| Self::shade_color(self.background_color, 0.92))
         } else if self.hovered {
@@ -501,7 +569,7 @@ impl ButtonRenderObject {
     }
 
     fn current_border(&self) -> Color {
-        if self.pressed.is_pressed() {
+        if self.is_pressed() {
             Self::shade_color(self.border_color, 0.90)
         } else if self.hovered {
             Self::shade_color(self.border_color, 0.96)
@@ -650,16 +718,15 @@ impl ElementRenderObject for ButtonRenderObject {
         let rect = Rect::new(origin, self.size);
         let background = self.current_background();
         let border = self.current_border();
+        let text_color = if self.enabled {
+            self.text_color
+        } else {
+            ColorPalette::default().text_secondary()
+        };
 
         match self.appearance {
             ButtonAppearance::Raised => {
-                style::raised_control_surface(
-                    ctx,
-                    rect,
-                    background,
-                    border,
-                    self.pressed.is_pressed(),
-                );
+                style::raised_control_surface(ctx, rect, background, border, self.is_pressed());
             }
             ButtonAppearance::Header => style::fill_control(ctx, rect, background),
         }
@@ -688,7 +755,11 @@ impl ElementRenderObject for ButtonRenderObject {
                 icon_size,
                 icon,
                 self.icon_style,
-                self.icon_color.unwrap_or(self.text_color),
+                if self.enabled {
+                    self.icon_color.unwrap_or(text_color)
+                } else {
+                    text_color
+                },
             );
             if !self.label.is_empty() {
                 ctx.draw_text(
@@ -697,7 +768,7 @@ impl ElementRenderObject for ButtonRenderObject {
                         origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0),
                     ),
                     self.label.clone(),
-                    self.text_color,
+                    text_color,
                     self.font_size,
                 );
             }
@@ -708,8 +779,16 @@ impl ElementRenderObject for ButtonRenderObject {
             ctx.draw_text(
                 Point::new(x, y),
                 self.label.clone(),
-                self.text_color,
+                text_color,
                 self.font_size,
+            );
+        }
+        if self.focused {
+            ctx.stroke_rounded_rect(
+                rect,
+                style::metrics().control_radius,
+                style::metrics().focus_stroke_width,
+                ColorPalette::default().primary(),
             );
         }
         true
@@ -719,7 +798,8 @@ impl ElementRenderObject for ButtonRenderObject {
         let Some(button) = new_view.as_any().downcast_ref::<Button>() else {
             return crate::element::UpdateResult::Replaced;
         };
-        if self.label == button.label
+        if self.enabled == button.enabled
+            && self.label == button.label
             && self.icon == button.icon
             && self.icon_size == button.icon_size
             && self.icon_style == button.icon_style
@@ -734,6 +814,13 @@ impl ElementRenderObject for ButtonRenderObject {
             && self.appearance == button.appearance
         {
             return crate::element::UpdateResult::NoChange;
+        }
+        self.enabled = button.enabled;
+        if !self.enabled {
+            self.focused = false;
+            self.keyboard_pressed = None;
+            self.hovered = false;
+            self.pressed = Default::default();
         }
         self.label = button.label.clone();
         self.icon = button.icon;

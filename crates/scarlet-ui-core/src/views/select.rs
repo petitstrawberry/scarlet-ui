@@ -41,6 +41,7 @@ pub type SelectChangeCallback = Box<dyn Fn(usize) + 'static>;
 /// Select View - displays a selected option and expands on click.
 #[derive(Clone)]
 pub struct Select {
+    enabled: bool,
     options: Vec<String>,
     selected_index: State<usize>,
     expanded: State<bool>,
@@ -65,6 +66,7 @@ impl Select {
     pub fn new(options: Vec<String>, selected_index: State<usize>) -> Self {
         let expanded = select_expanded_state(&selected_index);
         Self {
+            enabled: true,
             options,
             selected_index,
             expanded,
@@ -74,6 +76,15 @@ impl Select {
             placeholder: String::from("Select…"),
             max_visible_rows: 8,
         }
+    }
+
+    /// Disable pointer and keyboard interaction.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Set the change callback.
@@ -166,18 +177,19 @@ impl Select {
 
 impl View for Select {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
-            self.clone(),
-            SelectRenderObject::new(
+        Box::new(RenderElement::new(self.clone(), {
+            let mut object = SelectRenderObject::new(
                 self.options.clone(),
                 self.selected_index.get(),
-                self.expanded.get(),
+                self.enabled && !self.options.is_empty() && self.expanded.get(),
                 self.width,
                 self.row_height,
                 self.placeholder.clone(),
                 self.max_visible_rows,
-            ),
-        ))
+            );
+            object.enabled = self.enabled;
+            object
+        }))
     }
 
     fn listenables(&self) -> Vec<&dyn crate::state::Listenable> {
@@ -191,6 +203,9 @@ impl View for Select {
 
 /// Select RenderObject - handles select rendering and hit testing.
 pub struct SelectRenderObject {
+    enabled: bool,
+    focused: bool,
+    activation_key: Option<crate::event::KeyCode>,
     options: Vec<String>,
     selected_index: usize,
     expanded: bool,
@@ -205,6 +220,33 @@ pub struct SelectRenderObject {
 }
 
 impl SelectRenderObject {
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused && self.enabled;
+        if !self.focused { self.activation_key = None; }
+    }
+    /// Consume activation presses until their matching release. Navigation
+    /// arrows may repeat; holding Enter/Space must not reopen/commit repeatedly.
+    pub(crate) fn activation_key(&mut self, event: crate::event::KeyEvent) -> Option<bool> {
+        use crate::event::{KeyCode, KeyEvent};
+        match event {
+            KeyEvent::Pressed { keycode: key @ (KeyCode::Enter | KeyCode::Space), modifiers }
+                if !modifiers.control && !modifiers.alt && !modifiers.super_key => {
+                let first = self.activation_key.is_none();
+                if first { self.activation_key = Some(key); }
+                Some(first)
+            }
+            KeyEvent::Released { keycode: key @ (KeyCode::Enter | KeyCode::Space), .. } => {
+                if self.activation_key == Some(key) { self.activation_key = None; }
+                Some(false)
+            }
+            KeyEvent::Char { c: ' ' | '\r' | '\n' } => Some(false),
+            _ => None,
+        }
+    }
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
     /// Create a new SelectRenderObject.
     ///
     /// # Arguments
@@ -227,7 +269,10 @@ impl SelectRenderObject {
         placeholder: String,
         max_visible_rows: usize,
     ) -> Self {
-        let mut render_object = Self {
+        Self {
+            enabled: true,
+            focused: false,
+            activation_key: None,
             options,
             selected_index,
             expanded,
@@ -239,9 +284,7 @@ impl SelectRenderObject {
             hovered_index: None,
             size: Size::ZERO,
             buffer: None,
-        };
-        render_object.selected_index = render_object.clamped_selected_index();
-        render_object
+        }
     }
 
     /// Set whether the list is expanded.
@@ -293,7 +336,10 @@ impl SelectRenderObject {
         if count == 0 {
             return false;
         }
-        let start = self.hovered_index.unwrap_or(self.selected_index);
+        let start = self
+            .hovered_index
+            .unwrap_or(self.selected_index)
+            .min(count - 1);
         for offset in 0..count {
             let i = (start + 1 + offset) % count;
             if self.options[i]
@@ -315,7 +361,7 @@ impl SelectRenderObject {
     ///
     /// * `index` - Hovered option index, or `None` when no option is hovered.
     pub fn set_hovered_index(&mut self, index: Option<usize>) {
-        self.hovered_index = index;
+        self.hovered_index = index.filter(|index| *index < self.options.len());
     }
 
     /// Find an option index for a local Y coordinate in the expanded list.
@@ -337,14 +383,6 @@ impl SelectRenderObject {
             Some(index)
         } else {
             None
-        }
-    }
-
-    fn clamped_selected_index(&self) -> usize {
-        if self.options.is_empty() {
-            0
-        } else {
-            self.selected_index.min(self.options.len() - 1)
         }
     }
 
@@ -398,8 +436,8 @@ impl SelectRenderObject {
         let w = libm::ceilf(self.size.width) as u32;
         let h = libm::ceilf(self.popup_height()) as u32;
         let row_h = libm::ceilf(self.effective_row_height()) as u32;
-        let selected_index = self.clamped_selected_index();
-        let selected_label = self.options.get(selected_index).cloned();
+        let selected_index = self.selected_index;
+        let selected_label = self.options.get(self.selected_index).cloned();
         let options = self.options.clone();
         let hovered_index = self.hovered_index;
         let opt_count = options.len();
@@ -423,8 +461,16 @@ impl SelectRenderObject {
         let palette = ColorPalette::default();
         let background = palette.button_background();
         let popup_background = style::surface_color(&palette, style::SurfaceRole::Floating);
-        let border = palette.border();
-        let text = palette.text_primary();
+        let border = if self.focused {
+            palette.primary()
+        } else {
+            palette.border()
+        };
+        let text = if self.enabled {
+            palette.text_primary()
+        } else {
+            palette.text_secondary()
+        };
         let subtle = palette.text_secondary();
         canvas.fill_rect(0, 0, w, h, Color::rgba(0.0, 0.0, 0.0, 0.0));
         canvas.fill_rect(0, 0, w, row_h, background);
@@ -443,7 +489,8 @@ impl SelectRenderObject {
         );
 
         if self.expanded {
-            let active = hovered_index.or(Some(selected_index));
+            let active =
+                hovered_index.or_else(|| self.options.get(selected_index).map(|_| selected_index));
             let active_background =
                 style::selected_item_surface(palette.primary(), popup_background);
             let mut y = row_h as i32;
@@ -536,8 +583,8 @@ impl ElementRenderObject for SelectRenderObject {
         let w = self.size.width;
         let row_h = self.effective_row_height();
         let h = self.popup_height();
-        let selected_index = self.clamped_selected_index();
-        let selected_label = self.options.get(selected_index);
+        let selected_index = self.selected_index;
+        let selected_label = self.options.get(self.selected_index);
         let visible = self.options.len().min(self.max_visible_rows);
         let scroll_start = self
             .scroll_offset
@@ -546,8 +593,16 @@ impl ElementRenderObject for SelectRenderObject {
         let palette = ColorPalette::default();
         let background = palette.button_background();
         let popup_background = style::surface_color(&palette, style::SurfaceRole::Floating);
-        let border = palette.border();
-        let text = palette.text_primary();
+        let border = if self.focused {
+            palette.primary()
+        } else {
+            palette.border()
+        };
+        let text = if self.enabled {
+            palette.text_primary()
+        } else {
+            palette.text_secondary()
+        };
         let subtle = palette.text_secondary();
         let metrics = style::metrics();
 
@@ -599,7 +654,9 @@ impl ElementRenderObject for SelectRenderObject {
         );
 
         if self.expanded {
-            let active = self.hovered_index.or(Some(selected_index));
+            let active = self
+                .hovered_index
+                .or_else(|| self.options.get(selected_index).map(|_| selected_index));
             let active_background =
                 style::selected_item_surface(palette.primary(), popup_background);
             let mut y = origin.y + row_h;
@@ -655,13 +712,15 @@ impl ElementRenderObject for SelectRenderObject {
         if let Some(select) = new_view.as_any().downcast_ref::<Select>() {
             let new_options = select.options.clone();
             let new_selected_index = select.selected_index.get();
-            let new_expanded = select.expanded.get();
+            let new_expanded =
+                select.enabled && !select.options.is_empty() && select.expanded.get();
             let new_width = select.width;
             let new_row_height = select.row_height;
             let new_placeholder = select.placeholder.clone();
             let new_max_visible_rows = select.max_visible_rows;
 
-            if self.options != new_options
+            if self.enabled != select.enabled
+                || self.options != new_options
                 || self.selected_index != new_selected_index
                 || self.expanded != new_expanded
                 || (self.width - new_width).abs() > 0.001
@@ -670,6 +729,11 @@ impl ElementRenderObject for SelectRenderObject {
                 || self.max_visible_rows != new_max_visible_rows
             {
                 let just_expanded = !self.expanded && new_expanded;
+                self.enabled = select.enabled;
+                if !self.enabled {
+                    self.activation_key = None;
+                    self.focused = false;
+                }
                 self.options = new_options;
                 self.selected_index = new_selected_index;
                 self.expanded = new_expanded;
@@ -677,9 +741,12 @@ impl ElementRenderObject for SelectRenderObject {
                 self.row_height = new_row_height;
                 self.placeholder = new_placeholder;
                 self.max_visible_rows = new_max_visible_rows;
-                self.selected_index = self.clamped_selected_index();
+
                 if just_expanded {
-                    self.hovered_index = Some(self.selected_index);
+                    self.hovered_index = self
+                        .options
+                        .get(self.selected_index)
+                        .map(|_| self.selected_index);
                     self.scroll_offset = 0;
                     self.adjust_scroll();
                 }
