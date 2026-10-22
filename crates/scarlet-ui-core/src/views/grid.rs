@@ -38,6 +38,7 @@ pub struct GridView<T: Clone + 'static> {
     minimum_cell_width: Option<f32>,
     cell_builder: CellBuilder<T>,
     content_bottom_inset: f32,
+    reveal_selection: bool,
     item_key: Option<Rc<dyn Fn(&T) -> crate::view::ViewKey>>,
 }
 
@@ -77,8 +78,31 @@ impl<T: Clone + 'static> GridView<T> {
                 Box::new(cell_builder(index, item, selected))
             }),
             content_bottom_inset: 0.0,
+            reveal_selection: false,
             item_key: None,
         }
+    }
+
+    /// Reveal a changed selection, including after the grid reflows on resize.
+    /// An unchanged selection preserves manual scrolling.
+    pub fn reveal_selection(mut self, reveal: bool) -> Self {
+        self.reveal_selection = reveal;
+        self
+    }
+
+    fn columns_for_width(&self, width: f32) -> usize {
+        let maximum = self.columns.max(1);
+        let Some(minimum) = self.minimum_cell_width else {
+            return maximum;
+        };
+        if !width.is_finite() {
+            return maximum;
+        }
+        let stride = minimum + self.spacing;
+        if !stride.is_finite() || stride <= 0.0 {
+            return 1;
+        }
+        (libm::floorf((width + self.spacing) / stride) as usize).clamp(1, maximum)
     }
 
     /// Stable model identities for scroll anchoring through collection changes.
@@ -400,20 +424,7 @@ impl<T: Clone + 'static> GridContentElement<T> {
     }
 
     fn columns_for_width(&self, width: f32) -> usize {
-        let maximum = self.view.columns.max(1);
-        let Some(minimum) = self.view.minimum_cell_width else {
-            return maximum;
-        };
-        if !width.is_finite() {
-            return maximum;
-        }
-
-        let stride = minimum + self.view.spacing;
-        if !stride.is_finite() || stride <= 0.0 {
-            return 1;
-        }
-
-        (libm::floorf((width + self.view.spacing) / stride) as usize).clamp(1, maximum)
+        self.view.columns_for_width(width)
     }
 
     fn row_count(&self, columns: usize) -> usize {
@@ -706,11 +717,24 @@ impl<T: Clone + 'static> Element for GridContentElement<T> {
 }
 
 fn build_grid_child<T: Clone + 'static>(view: &GridView<T>) -> Box<dyn View> {
-    Box::new(
-        ScrollView::new(GridContentView { grid: view.clone() })
-            .content_bottom_inset(view.content_bottom_inset)
-            .scrollbar_visibility(ScrollbarVisibility::Automatic),
-    )
+    let scroll = ScrollView::new(GridContentView { grid: view.clone() })
+        .content_bottom_inset(view.content_bottom_inset)
+        .scrollbar_visibility(ScrollbarVisibility::Automatic);
+    if view.reveal_selection {
+        let grid = view.clone();
+        let item_count = grid.items.get().len();
+        Box::new(scroll.scroll_to_layout_range(move |viewport| {
+            let selected = grid.selected.get()?;
+            if selected >= item_count {
+                return None;
+            }
+            let row = selected / grid.columns_for_width(viewport.width);
+            let top = row as f32 * (grid.row_height + grid.row_spacing);
+            Some((selected, top, top + grid.row_height))
+        }))
+    } else {
+        Box::new(scroll)
+    }
 }
 
 impl<T: Clone + 'static> View for GridView<T> {
@@ -738,6 +762,79 @@ mod tests {
     use crate::pipeline::RenderingPipeline;
     use crate::state::{State, StateId};
     use crate::view::{View, ViewExt};
+
+    #[test]
+    fn selection_reveals_adaptive_rows_and_preserves_manual_scroll_until_selection_changes() {
+        use super::GridContentView;
+        use crate::views::scroll::ScrollViewRenderObject;
+        fn offset(element: &dyn crate::element::Element) -> Option<f32> {
+            element
+                .render_object()
+                .and_then(|render| {
+                    render
+                        .as_any()
+                        .downcast_ref::<ScrollViewRenderObject<GridContentView<usize>>>()
+                })
+                .map(|render| render.offset().1)
+                .or_else(|| {
+                    element
+                        .children()
+                        .iter()
+                        .find_map(|child| offset(child.as_ref()))
+                })
+        }
+        let selected = State::new(crate::state::generate_state_id(), Some(19));
+        let grid = GridView::new(
+            State::new(crate::state::generate_state_id(), (0..100).collect()),
+            selected.clone(),
+            5,
+            40.,
+            |_, item: usize, _| crate::views::Rectangle::new().fill(Color::rgb(item as u8, 20, 50)),
+        )
+        .minimum_cell_width(100.)
+        .spacing(0.)
+        .row_spacing(4.)
+        .reveal_selection(true);
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(grid.create_element());
+        pipeline.layout_initial();
+        pipeline.resize(crate::geometry::Size::new(500., 180.));
+        pipeline.render_with_damage();
+        assert_eq!(offset(pipeline.element_tree().root().unwrap()), Some(0.));
+        selected.set(Some(99));
+        for _ in 0..3 {
+            pipeline.render_with_damage();
+        }
+        assert_eq!(offset(pipeline.element_tree().root().unwrap()), Some(696.));
+        pipeline.resize(crate::geometry::Size::new(200., 180.));
+        pipeline.render_with_damage();
+        assert_eq!(offset(pipeline.element_tree().root().unwrap()), Some(2016.));
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: 100000,
+            x: 20,
+            y: 20,
+            phase: crate::event::WheelPhase::Moved,
+            source: crate::event::ScrollSource::Trackpad,
+        }));
+        pipeline.render_with_damage();
+        assert_eq!(offset(pipeline.element_tree().root().unwrap()), Some(0.));
+        pipeline.request_redraw();
+        pipeline.render_with_damage();
+        assert_eq!(offset(pipeline.element_tree().root().unwrap()), Some(0.));
+        // A different cell in the same off-screen row is still a new selection.
+        selected.set(Some(98));
+        for _ in 0..3 {
+            pipeline.render_with_damage();
+        }
+        assert_eq!(offset(pipeline.element_tree().root().unwrap()), Some(2016.));
+        selected.set(Some(0));
+        for _ in 0..3 {
+            pipeline.render_with_damage();
+        }
+        assert_eq!(offset(pipeline.element_tree().root().unwrap()), Some(0.));
+        pipeline.teardown();
+    }
 
     #[test]
     fn loading_items_after_mount_exposes_every_grid_row() {
