@@ -722,7 +722,7 @@ fn build_grid_child<T: Clone + 'static>(view: &GridView<T>) -> Box<dyn View> {
         .scrollbar_visibility(ScrollbarVisibility::Automatic);
     if view.reveal_selection {
         let grid = view.clone();
-        let item_count = grid.items.get().len();
+        let item_count = grid.items.len();
         Box::new(scroll.scroll_to_layout_range(move |viewport| {
             let selected = grid.selected.get()?;
             if selected >= item_count {
@@ -762,6 +762,31 @@ mod tests {
     use crate::pipeline::RenderingPipeline;
     use crate::state::{State, StateId};
     use crate::view::{View, ViewExt};
+
+    #[test]
+    fn selection_reveal_builder_does_not_clone_the_item_vector() {
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        struct Item(Arc<AtomicUsize>);
+        impl Clone for Item {
+            fn clone(&self) -> Self {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Self(self.0.clone())
+            }
+        }
+        let clones = Arc::new(AtomicUsize::new(0));
+        let items = (0..20_000).map(|_| Item(clones.clone())).collect();
+        let grid = GridView::new(
+            State::new(crate::state::generate_state_id(), items),
+            State::new(crate::state::generate_state_id(), Some(19_999)),
+            5,
+            40.,
+            |_, _: Item, _| crate::views::Rectangle::new(),
+        )
+        .reveal_selection(true);
+        let _view = super::build_grid_child(&grid);
+        assert_eq!(clones.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn selection_reveals_adaptive_rows_and_preserves_manual_scroll_until_selection_changes() {
