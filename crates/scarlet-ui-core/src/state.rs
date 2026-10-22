@@ -251,6 +251,43 @@ impl<T: Default> State<T> {
     }
 }
 
+impl<T> State<alloc::vec::Vec<T>> {
+    /// Return the item count without cloning the vector or its items.
+    pub fn len(&self) -> usize {
+        self.inner.value.lock().len()
+    }
+
+    /// Return whether the vector is empty without cloning its items.
+    pub fn is_empty(&self) -> bool {
+        self.inner.value.lock().is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn vector_count_does_not_clone_items_and_tracks_updates() {
+        struct Item(Arc<AtomicUsize>);
+        impl Clone for Item {
+            fn clone(&self) -> Self {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Self(self.0.clone())
+            }
+        }
+        let clones = Arc::new(AtomicUsize::new(0));
+        let state = State::new(generate_state_id(), alloc::vec![Item(clones.clone())]);
+        assert_eq!(state.len(), 1);
+        assert!(!state.is_empty());
+        state.update(|items| items.clear());
+        assert_eq!(state.len(), 0);
+        assert!(state.is_empty());
+        assert_eq!(clones.load(Ordering::Relaxed), 0);
+    }
+}
+
 impl<T: core::fmt::Debug> core::fmt::Debug for State<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("State")
