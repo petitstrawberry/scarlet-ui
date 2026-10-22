@@ -548,7 +548,12 @@ impl WinitEventState {
         let modifiers = self.modifiers;
         if state == WinitElementState::Pressed {
             self.push(Event::Keyboard(KeyEvent::Pressed { keycode, modifiers }));
-            if !self.ime_preedit_active {
+            // Ctrl/Command shortcuts must not also replace the selection with text.
+            // Ctrl+Alt is retained for layouts that report AltGr this way.
+            if !self.ime_preedit_active
+                && !modifiers.super_key
+                && !(modifiers.control && !modifiers.alt)
+            {
                 // Winit represents a normal space as a named key. Emit the
                 // same text event as SWS, separately from the physical press.
                 let text = match key {
@@ -2022,6 +2027,83 @@ fn map_wheel_phase(phase: TouchPhase) -> WheelPhase {
 mod tests {
     use super::*;
     use scarlet_ui_core::platform::{WindowFrame, WindowTitleBar};
+
+    #[test]
+    fn application_shortcuts_emit_keys_without_printable_text() {
+        for modifiers in [
+            KeyModifiers {
+                control: true,
+                ..KeyModifiers::empty()
+            },
+            KeyModifiers {
+                super_key: true,
+                ..KeyModifiers::empty()
+            },
+        ] {
+            for key in [
+                Key::Character("a".into()),
+                Key::Character("s".into()),
+                Key::Named(NamedKey::Space),
+            ] {
+                let mut state = WinitEventState::new_with_wheel_coalesce(1.0, false);
+                state.modifiers = modifiers;
+                state.push_keyboard_input(&key, WinitElementState::Pressed);
+                state.push_keyboard_input(&key, WinitElementState::Released);
+                assert!(matches!(
+                    state.pop(),
+                    Some(Event::Keyboard(KeyEvent::Pressed { .. }))
+                ));
+                assert!(matches!(
+                    state.pop(),
+                    Some(Event::Keyboard(KeyEvent::Released { .. }))
+                ));
+                assert!(state.pop().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn shifted_and_altgr_text_remain_printable() {
+        for (modifiers, text, expected) in [
+            (
+                KeyModifiers {
+                    shift: true,
+                    ..KeyModifiers::empty()
+                },
+                "A",
+                'A',
+            ),
+            (
+                KeyModifiers {
+                    control: true,
+                    alt: true,
+                    ..KeyModifiers::empty()
+                },
+                "€",
+                '€',
+            ),
+            (
+                KeyModifiers {
+                    alt: true,
+                    ..KeyModifiers::empty()
+                },
+                "ø",
+                'ø',
+            ),
+        ] {
+            let mut state = WinitEventState::new_with_wheel_coalesce(1.0, false);
+            state.modifiers = modifiers;
+            state.push_keyboard_input(&Key::Character(text.into()), WinitElementState::Pressed);
+            assert!(matches!(
+                state.pop(),
+                Some(Event::Keyboard(KeyEvent::Pressed { .. }))
+            ));
+            assert!(
+                matches!(state.pop(), Some(Event::Keyboard(KeyEvent::Char { c })) if c == expected)
+            );
+            assert!(state.pop().is_none());
+        }
+    }
 
     #[test]
     fn space_emits_one_text_event_per_press_and_repeat() {
