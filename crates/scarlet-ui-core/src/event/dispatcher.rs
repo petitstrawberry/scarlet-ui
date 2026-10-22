@@ -1250,6 +1250,27 @@ impl EventDispatcher {
         element_tree: &mut ElementTree,
         event: &crate::event::KeyEvent,
     ) -> bool {
+        if let crate::event::KeyEvent::Pressed {
+            keycode: crate::event::KeyCode::Tab,
+            modifiers,
+        } = event
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.super_key
+        {
+            let editing_multiline_text = self
+                .current_focus_path(element_tree)
+                .and_then(|path| path.last().copied())
+                .and_then(|id| element_tree.find_element(id))
+                .and_then(|element| element.render_object())
+                .is_some_and(|render| render.as_any().is::<crate::views::TextViewRenderObject>());
+            // A multiline editor owns Tab for indentation. Single-line fields
+            // and ordinary controls participate in the window's focus order.
+            if !editing_multiline_text && self.advance_keyboard_focus(element_tree, modifiers.shift)
+            {
+                return true;
+            }
+        }
         let path = self
             .focused_id
             .and_then(|focused_id| {
@@ -1323,6 +1344,29 @@ impl EventDispatcher {
             crate::logln!("[EventDispatcher] keyboard handled={}", handled);
         }
         handled
+    }
+
+    fn advance_keyboard_focus(&mut self, element_tree: &mut ElementTree, reverse: bool) -> bool {
+        let candidates = element_tree.keyboard_focus_candidates();
+        if candidates.is_empty() {
+            return false;
+        }
+        let current = self
+            .current_focus_path(element_tree)
+            .and_then(|path| path.last().copied())
+            .and_then(|id| candidates.iter().position(|candidate| *candidate == id));
+        let next = match (current, reverse) {
+            (Some(index), false) => (index + 1) % candidates.len(),
+            (Some(0) | None, true) => candidates.len() - 1,
+            (Some(index), true) => index - 1,
+            (None, false) => 0,
+        };
+        let target_id = candidates[next];
+        let Some(path) = element_tree.find_path_ids(target_id) else {
+            return false;
+        };
+        self.set_focused_element(element_tree, target_id, &path);
+        true
     }
 
     fn dispatch_text_input(&mut self, element_tree: &mut ElementTree, event: &Event) -> bool {
@@ -1733,7 +1777,9 @@ impl EventDispatcher {
         target_id: ElementId,
         path: &[ElementId],
     ) {
-        if self.focused_id == Some(target_id) {
+        if self.focused_id == Some(target_id)
+            && element_tree.element_wants_keyboard_focus(target_id)
+        {
             self.focused_path = path.to_vec();
             return;
         }
@@ -1946,6 +1992,10 @@ impl Default for EventDispatcher {
         Self::new()
     }
 }
+
+#[cfg(test)]
+#[path = "focus_tests.rs"]
+mod focus_tests;
 
 #[cfg(test)]
 mod tests {
