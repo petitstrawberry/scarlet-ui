@@ -6,7 +6,6 @@ use super::layout::{TextViewLayout, VisualLine};
 use super::{BORDER_WIDTH, TextDocument, TextPosition, TextSelection};
 use crate::color::Color;
 use crate::geometry::{Point, Rect, Size};
-use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::views::style;
 
@@ -90,7 +89,6 @@ pub fn paint_text_view(
             ctx,
             origin,
             layout,
-            font_size,
             padding,
             placeholder_color,
             background_color,
@@ -117,7 +115,6 @@ pub fn paint_text_view(
         preedit,
         text_color,
         placeholder_color,
-        font_size,
     );
     if focused && !preedit.is_empty() {
         paint_preedit(
@@ -137,7 +134,7 @@ pub fn paint_text_view(
         let mut caret = layout.cursor_rect(selection.caret, document);
         if !preedit.is_empty() {
             let prefix = preedit_prefix(preedit, preedit_cursor_byte);
-            caret.origin.x += graphics::measure_text_sized(prefix, font_size).0 as f32;
+            caret.origin.x += layout.measure_text(prefix).0 as f32;
         }
         caret.origin.x += origin.x;
         caret.origin.y += origin.y;
@@ -211,7 +208,6 @@ fn paint_line_numbers(
     ctx: &mut PaintContext,
     origin: Point,
     layout: &TextViewLayout,
-    font_size: f32,
     padding: f32,
     color: Color,
     background_color: Color,
@@ -232,9 +228,9 @@ fn paint_line_numbers(
         }
         last_logical = Some(line.logical_line);
         let label = (line.logical_line + 1).to_string();
-        let label_width = graphics::measure_text_sized(&label, font_size).0 as f32;
+        let label_width = layout.measure_text(&label).0 as f32;
         let x = origin.x + padding + (layout.gutter_width - label_width - 6.0).max(0.0);
-        ctx.draw_text(Point::new(x, origin.y + line.y), label, color, font_size);
+        layout.draw_text(ctx, Point::new(x, origin.y + line.y), label, color);
     }
 }
 
@@ -249,15 +245,14 @@ fn paint_visible_text(
     preedit: &str,
     text_color: Color,
     placeholder_color: Color,
-    font_size: f32,
 ) {
     if document.len() == 0 && preedit.is_empty() && !placeholder.is_empty() {
         if let Some(line) = layout.visual_lines.first() {
-            ctx.draw_text(
+            layout.draw_text(
+                ctx,
                 Point::new(origin.x + line.x, origin.y + line.y),
                 placeholder,
                 placeholder_color,
-                font_size,
             );
         }
         return;
@@ -267,19 +262,19 @@ fn paint_visible_text(
             paint_line_with_preedit_gap(
                 ctx,
                 origin,
+                layout,
                 line,
                 selection.caret,
                 preedit,
                 text_color,
-                font_size,
             );
             continue;
         }
-        ctx.draw_text(
+        layout.draw_text(
+            ctx,
             Point::new(origin.x + line.x, origin.y + line.y),
             line.text(),
             text_color,
-            font_size,
         );
     }
 }
@@ -287,11 +282,11 @@ fn paint_visible_text(
 fn paint_line_with_preedit_gap(
     ctx: &mut PaintContext,
     origin: Point,
+    layout: &TextViewLayout,
     line: &VisualLine,
     position: TextPosition,
     preedit: &str,
     text_color: Color,
-    font_size: f32,
 ) {
     let display_byte = line.display_byte_for_document_byte(position.byte);
     let (prefix, suffix) = split_at_char_boundary(line.text(), display_byte);
@@ -299,17 +294,17 @@ fn paint_line_with_preedit_gap(
     let y = origin.y + line.y;
 
     if !prefix.is_empty() {
-        ctx.draw_text(Point::new(x, y), prefix, text_color, font_size);
+        layout.draw_text(ctx, Point::new(x, y), prefix, text_color);
     }
 
     let prefix_width = line.width_to_byte(position.byte);
-    let preedit_width = graphics::measure_text_sized(preedit, font_size).0 as f32;
+    let preedit_width = layout.measure_text(preedit).0 as f32;
     if !suffix.is_empty() {
-        ctx.draw_text(
+        layout.draw_text(
+            ctx,
             Point::new(x + prefix_width + preedit_width, y),
             suffix,
             text_color,
-            font_size,
         );
     }
 }
@@ -329,12 +324,13 @@ fn paint_preedit(
     let caret = layout.cursor_rect(position, document);
     let x = origin.x + caret.origin.x;
     let y = origin.y + caret.origin.y;
-    paint_preedit_marks(ctx, x, y, preedit, spans, font_size, active_color);
-    ctx.draw_text(Point::new(x, y), preedit, text_color, font_size);
+    paint_preedit_marks(ctx, layout, x, y, preedit, spans, font_size, active_color);
+    layout.draw_text(ctx, Point::new(x, y), preedit, text_color);
 }
 
 fn paint_preedit_marks(
     ctx: &mut PaintContext,
+    layout: &TextViewLayout,
     x: f32,
     y: f32,
     preedit: &str,
@@ -345,6 +341,7 @@ fn paint_preedit_marks(
     if spans.is_empty() {
         paint_preedit_mark_span(
             ctx,
+            layout,
             x,
             y,
             preedit,
@@ -388,6 +385,7 @@ fn paint_preedit_marks(
                 != 0;
             paint_preedit_mark_span(
                 ctx,
+                layout,
                 x,
                 y,
                 preedit,
@@ -404,6 +402,7 @@ fn paint_preedit_marks(
 
 fn paint_preedit_mark_span(
     ctx: &mut PaintContext,
+    layout: &TextViewLayout,
     x: f32,
     y: f32,
     preedit: &str,
@@ -413,8 +412,8 @@ fn paint_preedit_mark_span(
     font_size: f32,
     active_color: Color,
 ) {
-    let prefix_width = graphics::measure_text_sized(&preedit[..start], font_size).0 as f32;
-    let span_width = graphics::measure_text_sized(&preedit[start..end], font_size).0 as f32;
+    let prefix_width = layout.measure_text(&preedit[..start]).0 as f32;
+    let span_width = layout.measure_text(&preedit[start..end]).0 as f32;
     let underline_x = x + prefix_width;
     let underline_y = (y + font_size * 1.15).max(0.0);
     let thickness = if active { 3.0 } else { 1.0 };

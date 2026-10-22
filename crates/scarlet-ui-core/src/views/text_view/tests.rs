@@ -16,6 +16,8 @@ use crate::{geometry::Point, graphics};
 
 use super::*;
 
+#[path = "font_stack_tests.rs"]
+mod font_stack_tests;
 #[path = "performance.rs"]
 mod performance;
 #[path = "regressions.rs"]

@@ -360,7 +360,7 @@ fn next_font_stack_id() -> usize {
 ///
 /// The first font is the primary face. Fallback fonts are consulted only when
 /// the primary font does not provide a glyph for a character.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FontStack {
     primary: FontRef<'static>,
     fallbacks: Vec<FontRef<'static>>,
@@ -796,8 +796,28 @@ pub fn rasterize_text_cached(
     let Some(font_stack) = default_font_stack_for_text(text) else {
         return Arc::from([]);
     };
+    rasterize_text_cached_with_font_stack(text, font_size_px, scale_milli, &font_stack)
+}
+
+/// Return shared positioned glyphs for an explicit font stack.
+///
+/// Uses the same bounded run cache as [`rasterize_text_cached`], keyed by the
+/// stack identity, text, logical pixels per em, and physical output scale.
+pub fn rasterize_text_cached_with_font_stack(
+    text: &str,
+    font_size_px: f32,
+    scale_milli: u32,
+    font_stack: &FontStack,
+) -> Arc<[RasterizedGlyph]> {
+    if let Some(glyphs) =
+        TEXT_RUN_CACHE
+            .lock()
+            .get(text, font_size_px, scale_milli, font_stack.cache_id())
+    {
+        return glyphs;
+    }
     let glyphs: Arc<[RasterizedGlyph]> =
-        rasterize_text_with_font_stack(text, font_size_px, scale_milli, &font_stack).into();
+        rasterize_text_with_font_stack(text, font_size_px, scale_milli, font_stack).into();
     // The captured stack's identity remains valid if another thread changes
     // the default font while this run is being rasterized.
     TEXT_RUN_CACHE.lock().insert(
@@ -892,6 +912,14 @@ pub(crate) struct TextMeasure {
 }
 
 impl TextMeasure {
+    pub(crate) fn with_font_stack(font_size: f32, font_stack: &FontStack) -> Self {
+        Self {
+            font_stack: Some(font_stack.clone()),
+            font_size,
+            font_revision: font_stack.cache_id(),
+        }
+    }
+
     pub(crate) fn new(text: &str, font_size: f32) -> Self {
         let fallback_revision = text_font_revision();
         let font_stack = default_font_stack_for_text(text);
@@ -1351,6 +1379,30 @@ impl<'a> Canvas<'a> {
         );
     }
 
+    /// Draw text using an explicit stack, clipped to a logical rectangle.
+    /// The size is logical pixels per em, including for fallback faces.
+    pub fn draw_text_sized_with_font_stack_clipped(
+        &mut self,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: Color,
+        font_size_px: f32,
+        font_stack: &FontStack,
+        clip_rect: Rect,
+        corner_radius: f32,
+    ) {
+        self.draw_text_sized_with_font_stack_internal(
+            x,
+            y,
+            text,
+            color,
+            font_size_px,
+            font_stack,
+            Some(self.scale_clip(clip_rect, corner_radius)),
+        );
+    }
+
     fn draw_text_sized_with_font_stack_internal(
         &mut self,
         x: i32,
@@ -1472,6 +1524,35 @@ fn contains_rounded_rect(rect: Rect, corner_radius: f32, px: f32, py: f32) -> bo
 #[cfg(test)]
 mod text_run_tests {
     use super::*;
+
+    #[test]
+    fn explicit_stack_runs_reuse_masks_and_distinguish_fallbacks_size_and_dpi() {
+        let primary = FontStack::new(include_bytes!("testing/fonts/metrics-primary.ttf")).unwrap();
+        let stack = primary
+            .clone()
+            .with_fallback(include_bytes!("testing/fonts/metrics-fallback.ttf"))
+            .unwrap();
+        let first = rasterize_text_cached_with_font_stack("日☃", 20., 1250, &stack);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[1].key.font_slot, 1);
+        assert_eq!(
+            first.as_ref(),
+            rasterize_text_with_font_stack("日☃", 20., 1250, &stack)
+        );
+        assert!(Arc::ptr_eq(
+            &first,
+            &rasterize_text_cached_with_font_stack("日☃", 20., 1250, &stack.clone())
+        ));
+        for (size, dpi, other) in [
+            (21., 1250, &stack),
+            (20., 2000, &stack),
+            (20., 1250, &primary),
+        ] {
+            let next = rasterize_text_cached_with_font_stack("日☃", size, dpi, other);
+            assert!(!Arc::ptr_eq(&first, &next));
+            assert_ne!(first[0].key, next[0].key);
+        }
+    }
 
     #[test]
     fn metrics_cache_verifies_text_when_hashes_collide() {

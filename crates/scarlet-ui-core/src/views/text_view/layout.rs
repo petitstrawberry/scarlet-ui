@@ -2,14 +2,17 @@
 
 use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::Range;
 
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{BORDER_WIDTH, TextDocument, TextPosition, TextViewScroll, WrapMode};
+use crate::color::Color;
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
+use crate::renderer::PaintContext;
 
 const GUTTER_PADDING: f32 = 12.0;
 const DEFAULT_TAB_WIDTH: usize = 4;
@@ -42,6 +45,7 @@ pub struct TextViewLayout {
     size: Size,
     show_line_numbers: bool,
     font_revision: usize,
+    font_stack: Option<Arc<graphics::FontStack>>,
 }
 
 /// A measured visual line fragment.
@@ -91,16 +95,51 @@ impl TextViewLayout {
         scroll: TextViewScroll,
         show_line_numbers: bool,
     ) -> Self {
-        let line_height = graphics::line_height_sized(font_size).max(1) as f32;
+        Self::compute_with_font_stack(
+            document,
+            font_size,
+            padding,
+            wrap_mode,
+            size,
+            scroll,
+            show_line_numbers,
+            None,
+        )
+    }
+
+    pub(crate) fn compute_with_font_stack(
+        document: &TextDocument,
+        font_size: f32,
+        padding: f32,
+        wrap_mode: WrapMode,
+        size: Size,
+        scroll: TextViewScroll,
+        show_line_numbers: bool,
+        font_stack: Option<&Arc<graphics::FontStack>>,
+    ) -> Self {
+        let line_height = match font_stack {
+            Some(stack) => graphics::line_height_sized_with_font_stack(font_size, stack),
+            None => graphics::line_height_sized(font_size),
+        }
+        .max(1) as f32;
         let gutter_width = if show_line_numbers {
             let digits = document.line_count().max(1).to_string();
-            graphics::measure_text_sized(&digits, font_size).0 as f32 + GUTTER_PADDING
+            let width = match font_stack {
+                Some(stack) => {
+                    graphics::measure_text_sized_with_font_stack(&digits, font_size, stack).0
+                }
+                None => graphics::measure_text_sized(&digits, font_size).0,
+            };
+            width as f32 + GUTTER_PADDING
         } else {
             0.0
         };
         // Gutter measurement can discover fallback fonts too. Capture the
         // complete stack after that work so glyph and cached caret widths agree.
-        let measure = graphics::TextMeasure::new(&document.as_str(), font_size);
+        let measure = match font_stack {
+            Some(stack) => graphics::TextMeasure::with_font_stack(font_size, stack),
+            None => graphics::TextMeasure::new(&document.as_str(), font_size),
+        };
         let text_origin_x = padding + gutter_width;
         let viewport_width = (size.width - padding * 2.0 - gutter_width).max(1.0);
         let viewport_height = (size.height - padding * 2.0).max(1.0);
@@ -185,6 +224,35 @@ impl TextViewLayout {
             size,
             show_line_numbers,
             font_revision: measure.font_revision(),
+            font_stack: font_stack.cloned(),
+        }
+    }
+
+    pub(crate) fn measure_text(&self, text: &str) -> (u32, u32) {
+        match &self.font_stack {
+            Some(stack) => {
+                graphics::measure_text_sized_with_font_stack(text, self.font_size, stack)
+            }
+            None => graphics::measure_text_sized(text, self.font_size),
+        }
+    }
+
+    pub(crate) fn draw_text(
+        &self,
+        ctx: &mut PaintContext,
+        position: Point,
+        text: impl Into<String>,
+        color: Color,
+    ) {
+        match &self.font_stack {
+            Some(stack) => ctx.draw_text_with_font_stack(
+                position,
+                text,
+                color,
+                self.font_size,
+                Arc::clone(stack),
+            ),
+            None => ctx.draw_text(position, text, color, self.font_size),
         }
     }
 
@@ -199,13 +267,36 @@ impl TextViewLayout {
         size: Size,
         show_line_numbers: bool,
     ) -> bool {
+        self.matches_with_font_stack(
+            document,
+            font_size,
+            padding,
+            wrap_mode,
+            size,
+            show_line_numbers,
+            None,
+        )
+    }
+
+    pub(crate) fn matches_with_font_stack(
+        &self,
+        document: &TextDocument,
+        font_size: f32,
+        padding: f32,
+        wrap_mode: WrapMode,
+        size: Size,
+        show_line_numbers: bool,
+        font_stack: Option<&Arc<graphics::FontStack>>,
+    ) -> bool {
         self.document.same_revision(document)
             && self.font_size == font_size
             && self.padding == padding
             && self.wrap_mode == wrap_mode
             && (wrap_mode == WrapMode::None || self.size.width == size.width)
             && self.show_line_numbers == show_line_numbers
-            && self.font_revision == graphics::text_font_revision()
+            && self.font_stack.is_some() == font_stack.is_some()
+            && self.font_revision
+                == font_stack.map_or_else(graphics::text_font_revision, |stack| stack.cache_id())
     }
 
     pub(crate) fn set_viewport(&mut self, size: Size) {

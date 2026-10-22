@@ -889,6 +889,121 @@ mod tests {
         c.draw_text(Point::new(0.5, 10.), "World", UiColor::BLACK, 13.);
         assert!(replay_offset(&c.into_display_list(), Point::new(10.5, 20.5), 1000).is_some());
     }
+
+    #[test]
+    fn explicit_font_stack_uses_glyph_atlases_and_reuses_retained_meshes() {
+        use scarlet_ui_core::graphics::{FontStack, rasterize_text_with_font_stack};
+        let stack = FontStack::new(include_bytes!(
+            "../../../scarlet-ui-core/src/testing/fonts/metrics-primary.ttf"
+        ))
+        .unwrap()
+        .with_fallback(include_bytes!(
+            "../../../scarlet-ui-core/src/testing/fonts/metrics-fallback.ttf"
+        ))
+        .unwrap();
+        let mut recording = PaintContext::new();
+        recording.draw_text_with_font_stack(
+            Point::new(0.5, 2.5),
+            "日☃",
+            UiColor::BLACK,
+            20.,
+            Arc::new(stack.clone()),
+        );
+        let list = recording.into_display_list();
+        let area = PixelBounds {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 120,
+        };
+        for scale in [1000, 1250, 2000] {
+            let mut encoder = encoder();
+            let mut executor = Executor::default();
+            let context = paint(list.clone(), Point::new(10.25, 10.25));
+            let flat = context.flattened();
+            let frame = encoder.lower_once(&flat, scale, area).unwrap();
+            let glyphs = rasterize_text_with_font_stack("日☃", 20., scale, &stack);
+            let draws: Vec<_> = frame
+                .draws
+                .iter()
+                .filter(|draw| matches!(draw.source, DrawSource::Glyph(_)))
+                .collect();
+            assert!(!draws.is_empty());
+            assert!(
+                frame
+                    .draws
+                    .iter()
+                    .all(|draw| matches!(draw.source, DrawSource::Glyph(_) | DrawSource::Solid))
+            );
+            let glyph_vertices: Vec<_> = draws
+                .iter()
+                .flat_map(|draw| {
+                    let start = draw.geometry.first_vertex as usize * PAINT_VERTEX_STRIDE as usize;
+                    let end =
+                        start + draw.geometry.vertex_count as usize * PAINT_VERTEX_STRIDE as usize;
+                    frame.vertex_bytes[start..end].iter().copied()
+                })
+                .collect();
+            assert_eq!(glyph_vertices.len(), 2 * 6 * PAINT_VERTEX_STRIDE as usize);
+            for (vertices, glyph) in glyph_vertices
+                .chunks_exact(6 * PAINT_VERTEX_STRIDE as usize)
+                .zip(&glyphs)
+            {
+                let bounds = vertex_bounds(vertices);
+                assert_eq!(bounds.x, (scale_text_origin(10.75, scale) + glyph.x) as f32);
+                assert_eq!(bounds.y, (scale_text_origin(12.75, scale) + glyph.y) as f32);
+                assert_eq!(bounds.width, glyph.width as f32);
+                assert_eq!(bounds.height, glyph.height as f32);
+                assert!(
+                    frame
+                        .uploads
+                        .iter()
+                        .any(|upload| upload.bytes.as_slice() == glyph.mask.as_ref())
+                );
+                assert!(
+                    encoder
+                        .glyph_atlases
+                        .iter()
+                        .any(|atlas| atlas.entries.iter().any(|entry| entry.key == glyph.key))
+                );
+            }
+            drop(frame);
+
+            encoder
+                .encode_frame(
+                    &mut executor,
+                    0,
+                    None,
+                    &context,
+                    UiColor::WHITE,
+                    scale,
+                    &[(0, 0, 200, 120)],
+                )
+                .unwrap();
+            let writes = (executor.writes, executor.texture_writes);
+            let moved = paint(list.clone(), Point::new(12.75, 10.75));
+            encoder
+                .encode_frame(
+                    &mut executor,
+                    0,
+                    None,
+                    &moved,
+                    UiColor::WHITE,
+                    scale,
+                    &[(0, 0, 200, 120)],
+                )
+                .unwrap();
+            if scale % 1000 == 0 {
+                assert_eq!(encoder.retained_meshes.len(), 1);
+                assert_eq!((executor.writes, executor.texture_writes), writes);
+            } else {
+                // Fractional DPI uses precise vector lowering, never a view bitmap.
+                assert!(encoder.retained_meshes.is_empty());
+                assert_eq!(executor.texture_writes, writes.1);
+            }
+            assert!(encoder.buffer_textures.is_empty());
+        }
+    }
     #[test]
     fn fractional_scroll_replay_matches_flat_shape_text_and_image_vertices() {
         let mut encoder = encoder();

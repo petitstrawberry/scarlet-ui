@@ -9,7 +9,9 @@ use alloc::vec::Vec;
 use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::color::Color as UiColor;
 use scarlet_ui_core::compositor::DamageRect;
-use scarlet_ui_core::graphics::{GlyphRasterKey, rasterize_text_cached};
+use scarlet_ui_core::graphics::{
+    GlyphRasterKey, rasterize_text_cached, rasterize_text_cached_with_font_stack,
+};
 use scarlet_ui_core::icon::{IconMaskKey, rasterize_icon};
 use scarlet_ui_core::renderer::{
     BufferHandle, PaintBuffer, PaintCommand, PaintContext, PaintExtension,
@@ -1204,6 +1206,7 @@ impl SgfxPaintEncoder {
                     text,
                     color,
                     font_size_px,
+                    font_stack,
                 } => {
                     if !position.x.is_finite()
                         || !position.y.is_finite()
@@ -1214,7 +1217,15 @@ impl SgfxPaintEncoder {
                     let origin_x = scale_text_origin(position.x, scale_milli);
                     let origin_y = scale_text_origin(position.y, scale_milli);
                     let color = ui_color(*color, opacity)?;
-                    let glyphs = rasterize_text_cached(text, *font_size_px, scale_milli);
+                    let glyphs = match font_stack {
+                        Some(stack) => rasterize_text_cached_with_font_stack(
+                            text,
+                            *font_size_px,
+                            scale_milli,
+                            stack,
+                        ),
+                        None => rasterize_text_cached(text, *font_size_px, scale_milli),
+                    };
                     for glyph in glyphs.iter() {
                         if glyph.width == 0 || glyph.height == 0 {
                             continue;

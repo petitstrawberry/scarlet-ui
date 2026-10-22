@@ -424,8 +424,7 @@ pub(super) fn ensure_caret_visible(view: &TextView, render_object: &mut TextView
     if !render_object.preedit.is_empty() {
         let prefix =
             super::preedit_prefix(&render_object.preedit, render_object.preedit_cursor_byte);
-        caret.origin.x +=
-            crate::graphics::measure_text_sized(prefix, render_object.font_size).0 as f32;
+        caret.origin.x += render_object.layout.measure_text(prefix).0 as f32;
     }
     let clip_left = BORDER_WIDTH;
     let clip_top = BORDER_WIDTH;

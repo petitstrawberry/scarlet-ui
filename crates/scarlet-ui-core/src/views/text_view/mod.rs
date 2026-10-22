@@ -29,6 +29,7 @@ use crate::element::{
     Element, ElementRenderObject, LayoutConstraints, RenderElement, TextInputElementState,
 };
 use crate::geometry::{Point, Rect, Size};
+use crate::graphics::FontStack;
 use crate::renderer::PaintContext;
 use crate::state::{Listenable, State};
 use crate::view::View;
@@ -54,6 +55,7 @@ pub struct TextView {
     autofocus: bool,
     placeholder: String,
     font_size: f32,
+    font_stack: Option<Arc<FontStack>>,
     padding: f32,
     tab_mode: TabMode,
     line_numbers: bool,
@@ -111,6 +113,7 @@ impl TextView {
             autofocus: false,
             placeholder: String::new(),
             font_size: 14.0,
+            font_stack: None,
             padding: 8.0,
             tab_mode: TabMode::Tab,
             line_numbers: false,
@@ -214,6 +217,16 @@ impl TextView {
     /// The updated text view.
     pub fn font_size(mut self, size: f32) -> Self {
         self.font_size = size;
+        self
+    }
+
+    /// Use an explicit primary/fallback stack for this editor's text.
+    ///
+    /// Applies to document text, line numbers, placeholder and IME composition.
+    /// Font sizes remain logical pixels per em. Other views keep their fonts.
+    /// Without this override, the text view uses the global default stack.
+    pub fn font_stack(mut self, font_stack: FontStack) -> Self {
+        self.font_stack = Some(Arc::new(font_stack));
         self
     }
 
@@ -494,6 +507,7 @@ pub struct TextViewRenderObject {
     layout: TextViewLayout,
     placeholder: String,
     font_size: f32,
+    font_stack: Option<Arc<FontStack>>,
     padding: f32,
     tab_mode: TabMode,
     line_numbers: bool,
@@ -534,7 +548,7 @@ impl TextViewRenderObject {
             .unwrap_or(view.static_wrap_mode);
         // The first real constraints determine wrapping. Avoid laying out the
         // entire document into one-pixel rows while constructing the shell.
-        let layout = TextViewLayout::compute(
+        let layout = TextViewLayout::compute_with_font_stack(
             &TextDocument::new(),
             view.font_size,
             view.padding,
@@ -542,6 +556,7 @@ impl TextViewRenderObject {
             Size::ZERO,
             TextViewScroll::default(),
             view.line_numbers,
+            view.font_stack.as_ref(),
         );
 
         let requested_selection = view.selection.get();
@@ -567,6 +582,7 @@ impl TextViewRenderObject {
             layout,
             placeholder: view.placeholder.clone(),
             font_size: view.font_size,
+            font_stack: view.font_stack.clone(),
             padding: view.padding,
             tab_mode: view.tab_mode,
             line_numbers: view.line_numbers,
@@ -582,15 +598,16 @@ impl TextViewRenderObject {
     }
 
     pub(crate) fn compute_layout(&mut self) {
-        if !self.layout.matches(
+        if !self.layout.matches_with_font_stack(
             &self.text_document,
             self.font_size,
             self.padding,
             self.wrap_mode,
             self.size,
             self.line_numbers,
+            self.font_stack.as_ref(),
         ) {
-            self.layout = TextViewLayout::compute(
+            self.layout = TextViewLayout::compute_with_font_stack(
                 &self.text_document,
                 self.font_size,
                 self.padding,
@@ -598,6 +615,7 @@ impl TextViewRenderObject {
                 self.size,
                 self.scroll,
                 self.line_numbers,
+                self.font_stack.as_ref(),
             );
         }
         self.layout.set_viewport(self.size);
@@ -610,8 +628,7 @@ impl TextViewRenderObject {
             // Composition is painted inline without changing document byte
             // ranges. Allow a temporary horizontal reveal even on wrapped rows.
             let caret = self.cursor_rect();
-            let preedit_width =
-                crate::graphics::measure_text_sized(&self.preedit, self.font_size).0 as f32;
+            let preedit_width = self.layout.measure_text(&self.preedit).0 as f32;
             let composition_end = caret.origin.x + self.layout.scroll.x - self.layout.text_origin_x
                 + preedit_width
                 + caret.size.width;
@@ -647,8 +664,7 @@ impl TextViewRenderObject {
         let mut cursor_rect = self.cursor_rect();
         if !self.preedit.is_empty() {
             let prefix = preedit_prefix(&self.preedit, self.preedit_anchor_byte);
-            cursor_rect.origin.x +=
-                crate::graphics::measure_text_sized(prefix, self.font_size).0 as f32;
+            cursor_rect.origin.x += self.layout.measure_text(prefix).0 as f32;
         }
         cursor_rect
     }
@@ -850,6 +866,9 @@ impl ElementRenderObject for TextViewRenderObject {
             .unwrap_or(view.static_wrap_mode);
         self.placeholder.clone_from(&view.placeholder);
         self.font_size = view.font_size;
+        let font_changed = self.font_stack.as_deref().map(FontStack::cache_id)
+            != view.font_stack.as_deref().map(FontStack::cache_id);
+        self.font_stack.clone_from(&view.font_stack);
         self.padding = view.padding;
         self.tab_mode = view.tab_mode;
         self.line_numbers = view.line_numbers;
@@ -862,6 +881,9 @@ impl ElementRenderObject for TextViewRenderObject {
         self.border_color = view.border_color;
         self.focused_border_color = view.focused_border_color;
         self.compute_layout();
+        if font_changed {
+            self.desired_x = None;
+        }
         if selection_changed {
             self.desired_x = None;
             if view.reveal_selection_on_change {
