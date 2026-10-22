@@ -10,6 +10,7 @@ extern crate alloc;
 extern crate scarlet_std as std;
 
 mod backend;
+mod clipboard;
 mod file_dialog;
 mod file_dialog_policy;
 mod shared_image;
@@ -1815,6 +1816,9 @@ impl SWSPlatformWindow {
 }
 
 impl PlatformWindow for SWSPlatformWindow {
+    fn text_clipboard(&self) -> core::result::Result<scarlet_ui_core::clipboard::TextClipboard, scarlet_ui_core::clipboard::ClipboardError> {
+        Ok(clipboard::service(self.conn.clone(), self.surface_id))
+    }
     fn begin_file_dialog(
         &mut self,
         options: &scarlet_ui_core::file_dialog::FileDialog,

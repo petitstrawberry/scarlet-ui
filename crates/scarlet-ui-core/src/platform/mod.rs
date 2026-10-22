@@ -316,6 +316,11 @@ pub trait PlatformBackend {
 /// PlatformWindow abstracts platform-specific window functionality,
 /// allowing ScarletUI to work with different window systems.
 pub trait PlatformWindow: Any {
+    /// Return a window-bound asynchronous service for the real platform clipboard.
+    /// Unsupported backends never substitute a private app-local buffer.
+    fn text_clipboard(&self) -> core::result::Result<crate::clipboard::TextClipboard, crate::clipboard::ClipboardError> {
+        Err(crate::clipboard::ClipboardError::Unsupported)
+    }
     /// Begin owner-bound selection on the UI thread without blocking the event loop.
     /// Existing/custom backends explicitly report unsupported by default.
     fn begin_file_dialog(
