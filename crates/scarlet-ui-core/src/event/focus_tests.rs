@@ -367,3 +367,202 @@ fn existing_field_blur_returns_focus_to_its_ancestor() {
     assert_eq!(focused_count(pipeline.element_tree().root().unwrap()), 1);
     assert!(pipeline.element_tree().focused_text_input_state().is_none());
 }
+
+fn press(pipeline: &mut RenderingPipeline, keycode: KeyCode) -> bool {
+    pipeline.handle_event(&Event::Keyboard(KeyEvent::Pressed {
+        keycode,
+        modifiers: KeyModifiers::empty(),
+    }))
+}
+
+fn scroll_offsets(element: &dyn Element, offsets: &mut Vec<Point>) {
+    if element
+        .render_object()
+        .is_some_and(|render| render.owns_child_viewport())
+    {
+        offsets.push(element.children()[0].bounds().origin);
+    }
+    for child in element.children() {
+        scroll_offsets(child.as_ref(), offsets);
+    }
+}
+
+fn offsets(pipeline: &RenderingPipeline) -> Vec<Point> {
+    let mut offsets = Vec::new();
+    scroll_offsets(pipeline.element_tree().root().unwrap(), &mut offsets);
+    offsets
+}
+
+#[test]
+fn page_navigation_reveals_offscreen_form_actions_without_pointer_input() {
+    let activated = Rc::new(Cell::new(0));
+    let saved = activated.clone();
+    let mut pipeline = pipeline(
+        ScrollView::new(
+            VStack::new((
+                Select::new(vec![String::from("Style")], state(0)).frame(180.0, 32.0),
+                Spacer::new().frame(180.0, 240.0),
+                Button::new("Save again")
+                    .on_click(move || saved.set(saved.get() + 1))
+                    .frame(180.0, 32.0),
+            ))
+            .spacing(0.0),
+        )
+        .content_size(200.0, 304.0)
+        .frame(200.0, 80.0),
+    );
+    pipeline.render_for_present().unwrap();
+    assert_eq!(pipeline.element_tree().keyboard_focus_candidates().len(), 1);
+    assert!(tab(&mut pipeline, false));
+    assert!(press(&mut pipeline, KeyCode::PageDown));
+    assert_eq!(offsets(&pipeline)[0].y, -72.0);
+    assert!(press(&mut pipeline, KeyCode::PageDown));
+    assert!(press(&mut pipeline, KeyCode::PageDown));
+    pipeline.render_for_present().unwrap();
+    assert!(
+        tab(&mut pipeline, false),
+        "the action is now inside the viewport"
+    );
+    assert!(press(&mut pipeline, KeyCode::Enter));
+    assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Released {
+        keycode: KeyCode::Enter,
+        modifiers: KeyModifiers::empty(),
+    })));
+    assert_eq!(activated.get(), 1);
+    assert!(press(&mut pipeline, KeyCode::Home));
+    assert_eq!(offsets(&pipeline)[0].y, 0.0);
+    assert!(press(&mut pipeline, KeyCode::End));
+    assert_eq!(offsets(&pipeline)[0].y, -224.0);
+    assert!(press(&mut pipeline, KeyCode::PageUp));
+    assert_eq!(offsets(&pipeline)[0].y, -152.0);
+}
+
+#[test]
+fn page_keys_navigate_an_open_select_without_scrolling_its_parent() {
+    let selected = state(0);
+    let mut pipeline = pipeline(
+        ScrollView::new(
+            VStack::new((
+                Select::new(
+                    (0..20).map(|i| alloc::format!("Option {i}")).collect(),
+                    selected.clone(),
+                )
+                .max_visible_rows(4)
+                .frame(180.0, 32.0),
+                Spacer::new().frame(180.0, 268.0),
+            ))
+            .spacing(0.0),
+        )
+        .content_size(200.0, 300.0)
+        .frame(200.0, 100.0),
+    );
+    pipeline.render_for_present().unwrap();
+    assert!(tab(&mut pipeline, false));
+    assert!(press(&mut pipeline, KeyCode::Enter));
+    assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Released {
+        keycode: KeyCode::Enter,
+        modifiers: KeyModifiers::empty(),
+    })));
+    for key in [KeyCode::PageDown, KeyCode::PageDown, KeyCode::PageUp] {
+        assert!(press(&mut pipeline, key));
+        assert_eq!(offsets(&pipeline)[0], Point::ZERO);
+    }
+    assert!(press(&mut pipeline, KeyCode::Enter));
+    assert_eq!(selected.get(), 3);
+    assert!(
+        press(&mut pipeline, KeyCode::PageDown),
+        "closed Select lets the form page"
+    );
+    assert_eq!(offsets(&pipeline)[0].y, -90.0);
+}
+
+#[test]
+fn paging_nested_scrolls_moves_the_nearest_viewport_then_bubbles_at_its_edge() {
+    let inner = ScrollView::new(
+        VStack::new((
+            Button::new("Focused").frame(160.0, 32.0),
+            Spacer::new().frame(160.0, 168.0),
+        ))
+        .spacing(0.0),
+    )
+    .content_size(180.0, 200.0)
+    .frame(180.0, 80.0);
+    let mut pipeline = pipeline(
+        ScrollView::new(VStack::new((inner, Spacer::new().frame(200.0, 320.0))).spacing(0.0))
+            .content_size(200.0, 400.0)
+            .frame(200.0, 100.0),
+    );
+    pipeline.render_for_present().unwrap();
+    assert!(tab(&mut pipeline, false));
+    assert!(press(&mut pipeline, KeyCode::End));
+    assert_eq!(
+        offsets(&pipeline),
+        vec![Point::ZERO, Point::new(0.0, -120.0)]
+    );
+    assert!(press(&mut pipeline, KeyCode::End));
+    assert_eq!(
+        offsets(&pipeline),
+        vec![Point::new(0.0, -300.0), Point::new(0.0, -120.0)]
+    );
+    assert!(!press(&mut pipeline, KeyCode::End));
+}
+
+#[test]
+fn editor_and_slider_navigation_do_not_scroll_the_enclosing_form() {
+    let selection = state(TextSelection::default());
+    let text = state("line\n".repeat(50));
+    let single = state(String::from("single line"));
+    let value = state(0.5);
+    let mut pipeline = pipeline(
+        ScrollView::new(
+            VStack::new((
+                TextView::new(text.clone(), selection.clone()).frame(180.0, 60.0),
+                TextField::new(single.clone()).frame(180.0, 32.0),
+                Slider::new(value.clone()).frame(180.0, 32.0),
+                Spacer::new().frame(180.0, 300.0),
+            ))
+            .spacing(0.0),
+        )
+        .content_size(200.0, 424.0)
+        .frame(200.0, 140.0),
+    );
+    pipeline.render_for_present().unwrap();
+    assert!(tab(&mut pipeline, false));
+    for key in [KeyCode::PageDown, KeyCode::Home, KeyCode::End] {
+        assert!(press(&mut pipeline, key));
+        assert_eq!(offsets(&pipeline)[0], Point::ZERO);
+    }
+    assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Pressed {
+        keycode: KeyCode::PageDown,
+        modifiers: KeyModifiers {
+            shift: true,
+            ..KeyModifiers::empty()
+        },
+    })));
+    assert!(
+        !selection.get().is_collapsed(),
+        "Shift+PageDown extends the editor selection"
+    );
+    assert_eq!(offsets(&pipeline)[0], Point::ZERO);
+    // A pointer-free programmatic focus handoff avoids changing the multiline
+    // editor's intentional Tab-for-indentation behavior.
+    let targets = pipeline.element_tree().keyboard_focus_candidates();
+    for (index, key) in [(1, KeyCode::End), (2, KeyCode::PageDown)] {
+        let id = targets[index];
+        let tree = pipeline.element_tree_mut();
+        for claim in tree.keyboard_focus_claims() {
+            tree.find_element_mut(claim)
+                .unwrap()
+                .handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
+        }
+        tree.find_element_mut(id).unwrap().handle_event(
+            &Event::Focus(crate::event::FocusEvent::Gained),
+            Phase::Target,
+        );
+        assert!(press(&mut pipeline, key));
+        assert_eq!(offsets(&pipeline)[0], Point::ZERO);
+    }
+    assert!(value.get() < 0.5);
+    assert_eq!(single.get(), "single line");
+    assert_eq!(text.get(), "line\n".repeat(50));
+}

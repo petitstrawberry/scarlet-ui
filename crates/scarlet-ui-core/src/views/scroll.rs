@@ -8,7 +8,7 @@ use crate::color::{Color, ColorPalette};
 use crate::element::{
     Element, ElementRenderObject, LayoutConstraints, RenderElement, ScrollOffsetUpdate,
 };
-use crate::event::{Event, MouseEvent, Phase, ScrollSource, WheelPhase};
+use crate::event::{Event, KeyCode, KeyEvent, MouseEvent, Phase, ScrollSource, WheelPhase};
 use crate::geometry::{Point, Rect, Size};
 use crate::pipeline::layers::{LayerClip, LayerPrimitive, LayerPrimitiveKind};
 use crate::renderer::PaintContext;
@@ -119,6 +119,10 @@ impl Default for ScrollbarVisibility {
 }
 
 /// Scrollable viewport for a child view.
+///
+/// Unmodified Page Up/Down and Home/End scroll this viewport when the focused
+/// descendant does not consume the key. Editors and value controls retain their
+/// own navigation. At an edge, an unconsumed key can scroll an outer viewport.
 #[derive(Clone)]
 pub struct ScrollView<V: View> {
     inner: V,
@@ -1253,6 +1257,47 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
             return false;
         }
 
+        // Controls get first refusal through target/bubble dispatch. In
+        // particular editors retain caret/selection keys, and sliders retain
+        // value keys. Unmodified navigation that reaches the viewport scrolls
+        // it; at an edge the event can continue to an outer scroll container.
+        if let Event::Keyboard(KeyEvent::Pressed { keycode, modifiers }) = event {
+            if modifiers.shift || modifiers.control || modifiers.alt || modifiers.super_key {
+                return false;
+            }
+            let vertical = self.axes.allows_y() && self.max_offset_y() > 0.0;
+            let horizontal = self.axes.allows_x() && self.max_offset_x() > 0.0;
+            if !vertical && !horizontal {
+                return false;
+            }
+            let (offset, extent, maximum) = if vertical {
+                (
+                    self.offset_y,
+                    self.viewport_size.height,
+                    self.max_offset_y(),
+                )
+            } else {
+                (self.offset_x, self.viewport_size.width, self.max_offset_x())
+            };
+            let page = (extent * 0.9).max(1.0);
+            let next = match keycode {
+                KeyCode::PageUp => offset - page,
+                KeyCode::PageDown => offset + page,
+                KeyCode::Home => 0.0,
+                KeyCode::End => maximum,
+                _ => return false,
+            };
+            let changed = if vertical {
+                self.set_offset(self.offset_x, next)
+            } else {
+                self.set_offset(next, self.offset_y)
+            };
+            if changed {
+                self.selection_scroll_pending = false;
+            }
+            return changed;
+        }
+
         let (delta_x, delta_y, gesture_active, direct_touch, momentum_start) = match event {
             Event::Mouse(MouseEvent::Wheel {
                 delta_x,
@@ -1483,6 +1528,48 @@ mod tests {
     use crate::state::generate_state_id;
     use crate::view::View;
     use crate::views::Text;
+
+    #[test]
+    fn keyboard_pages_clamp_horizontal_offsets_and_ignore_modified_keys() {
+        let view = ScrollView::new(Text::new("content"))
+            .horizontal()
+            .content_size(350.0, 60.0);
+        let mut object = ScrollViewRenderObject::<Text>::from_view(&view);
+        object.layout(LayoutConstraints::tight(100.0, 60.0));
+        let key = |keycode, modifiers| Event::Keyboard(KeyEvent::Pressed { keycode, modifiers });
+        for modifiers in [
+            crate::event::KeyModifiers {
+                shift: true,
+                ..crate::event::KeyModifiers::empty()
+            },
+            crate::event::KeyModifiers {
+                control: true,
+                ..crate::event::KeyModifiers::empty()
+            },
+            crate::event::KeyModifiers {
+                alt: true,
+                ..crate::event::KeyModifiers::empty()
+            },
+            crate::event::KeyModifiers {
+                super_key: true,
+                ..crate::event::KeyModifiers::empty()
+            },
+        ] {
+            assert!(!object.handle_event(&key(KeyCode::PageDown, modifiers), Phase::Bubble));
+            assert_eq!(object.offset(), (0.0, 0.0));
+        }
+        let plain = crate::event::KeyModifiers::empty();
+        assert!(!object.handle_event(&key(KeyCode::PageDown, plain), Phase::Capture));
+        assert!(object.handle_event(&key(KeyCode::PageDown, plain), Phase::Bubble));
+        assert_eq!(object.offset(), (90.0, 0.0));
+        assert!(object.handle_event(&key(KeyCode::End, plain), Phase::Bubble));
+        assert_eq!(object.offset(), (250.0, 0.0));
+        assert!(!object.handle_event(&key(KeyCode::PageDown, plain), Phase::Bubble));
+        assert!(object.handle_event(&key(KeyCode::PageUp, plain), Phase::Bubble));
+        assert_eq!(object.offset(), (160.0, 0.0));
+        assert!(object.handle_event(&key(KeyCode::Home, plain), Phase::Bubble));
+        assert_eq!(object.offset(), (0.0, 0.0));
+    }
 
     #[test]
     fn active_trackpad_axis_survives_diagonal_jitter_and_resets_after_the_gesture() {

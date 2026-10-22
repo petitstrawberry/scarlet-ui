@@ -313,6 +313,10 @@ impl SelectRenderObject {
         self.hovered_index
     }
 
+    pub(crate) fn page_step(&self) -> usize {
+        self.max_visible_rows.saturating_sub(1).max(1)
+    }
+
     pub fn adjust_scroll(&mut self) {
         if self.options.is_empty() {
             return;
