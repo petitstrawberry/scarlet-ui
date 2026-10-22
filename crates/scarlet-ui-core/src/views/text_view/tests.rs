@@ -464,7 +464,7 @@ fn visible_range_contains_only_rows_intersecting_viewport() {
     assert_eq!(layout.visible_lines, 4..7);
     for (index, line) in layout.visual_lines.iter().enumerate() {
         let intersects_viewport =
-            line.y < 24.0 - BORDER_WIDTH && line.y + layout.line_height > BORDER_WIDTH;
+            line.y < viewport_height - BORDER_WIDTH && line.y + layout.line_height > BORDER_WIDTH;
         assert_eq!(
             layout.visible_lines.contains(&index),
             intersects_viewport,
@@ -472,7 +472,7 @@ fn visible_range_contains_only_rows_intersecting_viewport() {
             line.y,
             layout.line_height,
             BORDER_WIDTH,
-            24.0 - BORDER_WIDTH
+            viewport_height - BORDER_WIDTH
         );
     }
 }
@@ -563,16 +563,17 @@ fn hit_testing_returns_expected_byte_position() {
 #[test]
 fn hit_testing_accounts_for_scroll_offset() {
     let document = TextDocument::from_str("first\nsecond\nthird");
+    let line_height = graphics::line_height_sized(14.0) as f32;
     let scroll = TextViewScroll {
         x: 0.0,
-        y: 14.0 * 1.2,
+        y: line_height,
     };
     let layout = TextViewLayout::compute(
         &document,
         14.0,
         8.0,
         WrapMode::None,
-        Size::new(200.0, 80.0),
+        Size::new(200.0, line_height + 16.0),
         scroll,
         false,
     );

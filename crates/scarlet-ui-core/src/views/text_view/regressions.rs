@@ -1,6 +1,24 @@
 use super::*;
 use unicode_segmentation::UnicodeSegmentation;
 
+/// Font discovery in another parallel test legitimately invalidates layout.
+/// Cache reuse assertions require an unchanged font epoch, so retry the whole
+/// scenario only when that external input changed. A stable epoch must still
+/// satisfy every allocation/storage assertion; repeated instability fails.
+#[track_caller]
+fn with_stable_font_revision<T>(mut scenario: impl FnMut() -> T) -> T {
+    for _ in 0..8 {
+        let before = graphics::text_font_revision();
+        let result = scenario();
+        let after = graphics::text_font_revision();
+        if before == after {
+            return result;
+        }
+        std::eprintln!("font revision changed during cache scenario: {before} -> {after}");
+    }
+    panic!("could not measure cache reuse within an unchanged font revision");
+}
+
 fn check_document_index(document: &TextDocument, expected: &str) {
     assert_eq!(document.as_str(), expected);
     let mut starts = Vec::new();
@@ -174,26 +192,34 @@ fn cached_caret_widths_match_measurement_at_all_unicode_boundaries() {
 #[test]
 fn scrolling_and_state_rebuild_reuse_document_and_layout_allocations() {
     let document = TextDocument::from_str(&"line of text e\u{301} 日本\t\n".repeat(1000));
-    let state = State::new(StateId::new(7100), document.clone());
-    let selection = State::new(StateId::new(7101), TextSelection::collapsed(0));
-    let scroll = State::new(StateId::new(7102), TextViewScroll::default());
-    let view = TextView::with_document(state, selection)
-        .scroll_state(scroll.clone())
-        .wrap_mode(WrapMode::Soft);
-    let mut object = render_object_with_size(&view, 320.0, 180.0);
-    let layout_storage = object.layout.visual_lines.as_ptr();
-    let work = crate::testing::alloc_counter::measure_allocations(|| {
-        for index in 0..20 {
-            scroll.set(TextViewScroll {
-                x: 0.0,
-                y: index as f32 * 3.25,
-            });
-            object.update(&view);
-            object.layout(LayoutConstraints::tight(320.0, 180.0));
-            assert!(object.text_document.same_revision(&document));
-            assert_eq!(object.layout.visual_lines.as_ptr(), layout_storage);
-        }
+    let (work, retained_storage) = with_stable_font_revision(|| {
+        let state = State::new(StateId::new(7100), document.clone());
+        let selection = State::new(StateId::new(7101), TextSelection::collapsed(0));
+        let scroll = State::new(StateId::new(7102), TextViewScroll::default());
+        let view = TextView::with_document(state, selection)
+            .scroll_state(scroll.clone())
+            .wrap_mode(WrapMode::Soft);
+        let mut object = render_object_with_size(&view, 320.0, 180.0);
+        let layout_storage = object.layout.visual_lines.as_ptr();
+        let mut retained_storage = true;
+        let work = crate::testing::alloc_counter::measure_allocations(|| {
+            for index in 0..20 {
+                scroll.set(TextViewScroll {
+                    x: 0.0,
+                    y: index as f32 * 3.25,
+                });
+                object.update(&view);
+                object.layout(LayoutConstraints::tight(320.0, 180.0));
+                assert!(object.text_document.same_revision(&document));
+                retained_storage &= object.layout.visual_lines.as_ptr() == layout_storage;
+            }
+        });
+        (work, retained_storage)
     });
+    assert!(
+        retained_storage,
+        "unchanged-font scrolling rebuilt measured rows"
+    );
     assert_eq!(
         work.allocations, 0,
         "scrolling a shared document must not rebuild or copy text"
@@ -399,24 +425,31 @@ fn mounted_pipeline_scroll_rebuild_keeps_measured_layout_and_keyboard_focus() {
 #[test]
 fn viewport_height_changes_reuse_metrics_and_refresh_visible_range() {
     let document = TextDocument::from_str(&"one two three four five\n".repeat(30));
-    let state = State::new(StateId::new(7150), document.clone());
-    let view = TextView::with_document(
-        state,
-        State::new(StateId::new(7151), TextSelection::collapsed(0)),
-    )
-    .wrap_mode(WrapMode::Soft);
-    let mut object = render_object_with_size(&view, 140.0, 90.0);
-    let storage = object.layout.visual_lines.as_ptr();
-    object.layout(LayoutConstraints::tight(140.0, 230.0));
-    assert_eq!(object.layout.visual_lines.as_ptr(), storage);
-    let fresh = TextViewLayout::compute(
-        &document,
-        object.font_size,
-        object.padding,
-        object.wrap_mode,
-        object.size,
-        object.scroll,
-        false,
+    let (object, fresh, retained_storage) = with_stable_font_revision(|| {
+        let state = State::new(StateId::new(7150), document.clone());
+        let view = TextView::with_document(
+            state,
+            State::new(StateId::new(7151), TextSelection::collapsed(0)),
+        )
+        .wrap_mode(WrapMode::Soft);
+        let mut object = render_object_with_size(&view, 140.0, 90.0);
+        let storage = object.layout.visual_lines.as_ptr();
+        object.layout(LayoutConstraints::tight(140.0, 230.0));
+        let retained_storage = object.layout.visual_lines.as_ptr() == storage;
+        let fresh = TextViewLayout::compute(
+            &document,
+            object.font_size,
+            object.padding,
+            object.wrap_mode,
+            object.size,
+            object.scroll,
+            false,
+        );
+        (object, fresh, retained_storage)
+    });
+    assert!(
+        retained_storage,
+        "height change rebuilt unchanged-font metrics"
     );
     assert_same_layout(&object.layout, &fresh, &document);
 }

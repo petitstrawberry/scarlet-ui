@@ -49,3 +49,7 @@ required-features = ["platform-winit"]
 [[example]]
 name = "scroll-benchmark"
 required-features = ["platform-winit"]
+
+[[example]]
+name = "typography-smoke"
+required-features = ["platform-winit"]
