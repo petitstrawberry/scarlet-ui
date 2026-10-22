@@ -123,6 +123,33 @@ pub trait Application: Clone + 'static {
     /// Handle active application change event from window server.
     fn on_active_app_changed(&mut self, _window_id: u32, _app_name: &str, _menu_titles: &str) {}
 
+    /// Handle focus metadata, including the live document/window title.
+    ///
+    /// The application name remains separate from the title. The default keeps
+    /// existing applications' `on_focus_changed` callbacks working unchanged.
+    fn on_focus_changed_with_title(
+        &mut self,
+        window_id: u32,
+        app_name: &str,
+        _title: &str,
+        menu_titles: &str,
+    ) {
+        self.on_focus_changed(window_id, app_name, menu_titles);
+    }
+
+    /// Handle active-window metadata, also sent when its title or menus change.
+    ///
+    /// The default forwards to the original active-application callback.
+    fn on_active_app_changed_with_title(
+        &mut self,
+        window_id: u32,
+        app_name: &str,
+        _title: &str,
+        menu_titles: &str,
+    ) {
+        self.on_active_app_changed(window_id, app_name, menu_titles);
+    }
+
     /// Configure a created platform window before its first presentation.
     ///
     /// This also runs for windows opened by commands after the main loop starts.
@@ -1129,13 +1156,18 @@ fn handle_window_event<A: Application>(
             let _ = slot.pipeline.handle_event(&event);
         }
         Event::Custom { event_type, data } if event_type == 0xF0C0F => {
-            if let Some((window_id, app_name, menu_titles)) = decode_app_change_payload(&data) {
-                app.on_focus_changed(window_id, &app_name, &menu_titles);
+            if let Some((window_id, app_name, title, menu_titles)) =
+                decode_app_change_payload(&data)
+            {
+                app.on_focus_changed_with_title(window_id, &app_name, &title, &menu_titles);
+                sync_after_event(slot)?;
             }
         }
         Event::Custom { event_type, data } if event_type == 0xF0C0A => {
-            if let Some((window_id, app_name, menu_titles)) = decode_app_change_payload(&data) {
-                app.on_active_app_changed(window_id, &app_name, &menu_titles);
+            if let Some((window_id, app_name, title, menu_titles)) =
+                decode_app_change_payload(&data)
+            {
+                app.on_active_app_changed_with_title(window_id, &app_name, &title, &menu_titles);
                 sync_after_event(slot)?;
             }
         }
@@ -1221,7 +1253,7 @@ fn remove_closed_slots<A: Application>(slots: &mut Vec<WindowSlot<A>>, close_ids
     *slots = retained;
 }
 
-fn decode_app_change_payload(data: &[u8]) -> Option<(u32, String, String)> {
+fn decode_app_change_payload(data: &[u8]) -> Option<(u32, String, String, String)> {
     if data.len() < 4 {
         return None;
     }
@@ -1244,9 +1276,9 @@ fn decode_app_change_payload(data: &[u8]) -> Option<(u32, String, String)> {
 
     let _app_id = read_str(data, &mut offset)?;
     let app_name = read_str(data, &mut offset)?;
-    let _title = read_str(data, &mut offset)?;
+    let title = read_str(data, &mut offset)?;
     let menu_titles = read_str(data, &mut offset)?;
-    Some((window_id, app_name, menu_titles))
+    Some((window_id, app_name, title, menu_titles))
 }
 
 struct SceneWindowRootElement<A: Application + View> {
@@ -1422,6 +1454,57 @@ mod tests {
 
     use crate::input_environment::install_test_input_environment;
     use crate::views::{Text, Window};
+
+    #[test]
+    fn app_change_payload_preserves_identity_and_live_document_titles() {
+        for title in [
+            "fixture.txt — Notepad",
+            "保存.txt — Notepad",
+            "Untitled — Notepad",
+            "",
+        ] {
+            let mut payload = 42u32.to_le_bytes().to_vec();
+            for field in ["org.scarlet-os.notepad", "Notepad", title, "File|Edit"] {
+                payload.extend_from_slice(&(field.len() as u32).to_le_bytes());
+                payload.extend_from_slice(field.as_bytes());
+            }
+            assert_eq!(
+                decode_app_change_payload(&payload),
+                Some((42, "Notepad".into(), title.into(), "File|Edit".into()))
+            );
+            payload.pop();
+            assert!(decode_app_change_payload(&payload).is_none());
+        }
+    }
+
+    #[test]
+    fn title_aware_callbacks_preserve_legacy_application_hooks() {
+        #[derive(Clone, Default)]
+        struct LegacyApp {
+            calls: Vec<(u32, String, String)>,
+        }
+        impl Application for LegacyApp {
+            fn scenes(&self) -> impl Scene {
+                Window::new("Probe", Text::new(""))
+            }
+            fn on_focus_changed(&mut self, id: u32, name: &str, menu: &str) {
+                self.calls.push((id, name.into(), menu.into()));
+            }
+            fn on_active_app_changed(&mut self, id: u32, name: &str, menu: &str) {
+                self.calls.push((id, name.into(), menu.into()));
+            }
+        }
+        let mut app = LegacyApp::default();
+        app.on_focus_changed_with_title(7, "Editor", "document.txt", "File");
+        app.on_active_app_changed_with_title(8, "Editor", "saved.txt", "File|Edit");
+        assert_eq!(
+            app.calls,
+            vec![
+                (7, "Editor".into(), "File".into()),
+                (8, "Editor".into(), "File|Edit".into()),
+            ]
+        );
+    }
 
     #[derive(Clone)]
     struct CaptureSceneApp {
