@@ -3444,7 +3444,7 @@ mod tests {
         atlas.entries.push(GlyphTexture {
             key: GlyphRasterKey {
                 codepoint: 'A' as u32,
-                size_px: 16,
+                scale_bits: 16.0_f32.to_bits(),
                 font_stack_id: 1,
                 font_slot: 0,
             },
@@ -5056,7 +5056,7 @@ mod tests {
         let mut encoder = SgfxPaintEncoder::new(32, 32, false).unwrap();
         let glyph_key = GlyphRasterKey {
             codepoint: 'A' as u32,
-            size_px: 16,
+            scale_bits: 16.0_f32.to_bits(),
             font_stack_id: 1,
             font_slot: 0,
         };

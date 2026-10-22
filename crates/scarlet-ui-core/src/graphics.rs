@@ -41,8 +41,9 @@ pub fn set_current_scale_milli(scale_milli: u32) {
 pub struct GlyphRasterKey {
     /// Unicode scalar value selected after font fallback.
     pub codepoint: u32,
-    /// Physical font size used for rasterization.
-    pub size_px: u16,
+    /// Exact physical ab_glyph scale, encoded with `f32::to_bits`.
+    /// Fractional font sizes and output scales must not share a raster mask.
+    pub scale_bits: u32,
     /// Identity of the primary and fallback font sequence.
     pub font_stack_id: usize,
     /// Selected font index, where zero identifies the primary font.
@@ -288,7 +289,7 @@ fn glyph_cache_get_or_rasterize(
 ) -> Option<GlyphMask> {
     let key = GlyphRasterKey {
         codepoint: ch as u32,
-        size_px: scaled.scale.y as u16,
+        scale_bits: scaled.scale.y.to_bits(),
         font_stack_id,
         font_slot,
     };
@@ -591,19 +592,14 @@ fn read_font_file(path: &str) -> Option<Vec<u8>> {
 
 #[cfg(feature = "std")]
 fn load_fonts_from_rootfs_once() {
-    let should_try = {
-        let mut state = DEFAULT_FONT.lock();
-        if state.font.is_some() || state.load_attempted {
-            false
-        } else {
-            state.load_attempted = true;
-            true
-        }
-    };
-
-    if !should_try {
+    // Publish the initial font and attempted flag together. Other threads must
+    // not observe "attempted" with no font while discovery is still running,
+    // or they cache temporary fallback widths/line heights as real layout.
+    let mut state = DEFAULT_FONT.lock();
+    if state.font.is_some() || state.load_attempted {
         return;
     }
+    state.load_attempted = true;
 
     let mut discovery = FontDiscovery::new();
     let Some(font) = ['A', 'a', '日']
@@ -616,12 +612,9 @@ fn load_fonts_from_rootfs_once() {
         return;
     };
 
-    let mut state = DEFAULT_FONT.lock();
-    if state.font.is_none() {
-        state.font = Some(font);
-        state.discovery = Some(discovery);
-        state.cache_id = next_font_stack_id();
-    }
+    state.font = Some(font);
+    state.discovery = Some(discovery);
+    state.cache_id = next_font_stack_id();
 }
 
 #[cfg(not(feature = "std"))]
@@ -663,7 +656,10 @@ fn discovered_font_ref(font: DiscoveredFont) -> Result<FontRef<'static>, Invalid
 fn ensure_default_font_coverage(text: &str) {
     let mut changed = false;
     let mut state = DEFAULT_FONT.lock();
-    for ch in text.chars().filter(|ch| !ch.is_control()) {
+    for ch in text
+        .chars()
+        .filter(|ch| !ch.is_control() && !is_zero_width_format(*ch))
+    {
         let covered = state
             .font
             .as_ref()
@@ -765,7 +761,7 @@ fn select_font_for_char(ch: char, font_stack: &FontStack) -> (FontRef<'static>, 
 /// # Arguments
 ///
 /// * `text` - Text to lay out and rasterize.
-/// * `font_size_px` - Logical font size in pixels.
+/// * `font_size_px` - Logical pixels per em; each fallback face uses the same em size.
 /// * `scale_milli` - Physical output scale in milli-units.
 ///
 /// # Returns
@@ -836,8 +832,10 @@ pub fn rasterize_text_with_font_stack(
     font_stack: &FontStack,
 ) -> Vec<RasterizedGlyph> {
     let ui_scale = scale_milli.max(1) as f32 / 1000.0;
-    let scale = PxScale::from(font_size_px * ui_scale);
-    let base_scaled = font_stack.primary.as_scaled(scale);
+    let physical_em = font_size_px * ui_scale;
+    let base_scaled = font_stack
+        .primary
+        .as_scaled(em_scale(&font_stack.primary, physical_em));
     let mut caret_x = 0.0;
     let mut caret_y = base_scaled.ascent();
     let mut glyphs = Vec::new();
@@ -848,10 +846,12 @@ pub fn rasterize_text_with_font_stack(
             caret_y += base_scaled.height() + base_scaled.line_gap();
             continue;
         }
+        if is_zero_width_format(ch) {
+            continue;
+        }
 
         let (selected_font, font_slot, render_ch) = select_font_for_char(ch, font_stack);
-        let scaled = selected_font.as_scaled(scale);
-        let glyph_id = scaled.glyph_id(render_ch);
+        let scaled = selected_font.as_scaled(em_scale(&selected_font, physical_em));
         if let Some(glyph) =
             glyph_cache_get_or_rasterize(&scaled, render_ch, font_stack.cache_id(), font_slot)
         {
@@ -864,7 +864,7 @@ pub fn rasterize_text_with_font_stack(
                 mask: glyph.mask,
             });
         }
-        caret_x += scaled.h_advance(glyph_id);
+        caret_x += em_advance(&selected_font, render_ch, physical_em);
     }
 
     glyphs
@@ -872,7 +872,8 @@ pub fn rasterize_text_with_font_stack(
 
 /// Measure text using the global default vector font
 ///
-/// Returns `(width, height)` in pixels
+/// Font size is logical pixels per em. Returns `(width, height)` in logical
+/// pixels, with height including the primary face's ascent and descent.
 pub fn measure_text_sized(text: &str, font_size_px: f32) -> (u32, u32) {
     if let Some(font_stack) = default_font_stack_for_text(text) {
         measure_text_sized_with_font_stack(text, font_size_px, &font_stack)
@@ -910,10 +911,12 @@ impl TextMeasure {
     }
 
     pub(crate) fn advance(&self, ch: char) -> f32 {
+        if is_zero_width_format(ch) {
+            return 0.0;
+        }
         if let Some(stack) = &self.font_stack {
             let (font, _, render_ch) = select_font_for_char(ch, stack);
-            let scaled = font.as_scaled(PxScale::from(self.font_size));
-            scaled.h_advance(scaled.glyph_id(render_ch))
+            em_advance(&font, render_ch, self.font_size)
         } else {
             ceil_i32(self.font_size.max(1.0) * 0.60).max(1) as f32
         }
@@ -987,8 +990,34 @@ fn fallback_line_height(font_size_px: f32) -> u32 {
     ceil_i32(font_size_px.max(1.0)).max(1) as u32
 }
 
+// Formatting scalars have no standalone ink or advance. A font may omit them
+// (or assign a visible .notdef width); never turn a join/variation selector
+// into a replacement character. This does not implement sequence shaping.
+fn is_zero_width_format(ch: char) -> bool {
+    matches!(ch, '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}' | '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}')
+}
+
+// Public font sizes are logical pixels per em. ab_glyph's PxScale instead
+// measures ascent minus descent, which varies independently between faces.
+// Convert each face, including fallbacks, without adding character spacing.
+fn em_scale(font: &FontRef<'_>, em_pixels: f32) -> PxScale {
+    let units = font
+        .units_per_em()
+        .unwrap_or_else(|| font.height_unscaled());
+    PxScale::from(em_pixels * font.height_unscaled() / units)
+}
+
+fn em_advance(font: &FontRef<'_>, ch: char, em_pixels: f32) -> f32 {
+    let units = font
+        .units_per_em()
+        .unwrap_or_else(|| font.height_unscaled());
+    // Use the original horizontal metrics directly; converting through a
+    // rounded vertical PxScale can push an integral advance just over a pixel.
+    font.h_advance_unscaled(font.glyph_id(ch)) * em_pixels / units
+}
+
 fn line_advance(font_size_px: f32, font_stack: &FontStack) -> f32 {
-    let scale = PxScale::from(font_size_px);
+    let scale = em_scale(&font_stack.primary, font_size_px);
     let scaled = font_stack.primary.as_scaled(scale);
     scaled.height() + scaled.line_gap()
 }
@@ -996,13 +1025,14 @@ fn line_advance(font_size_px: f32, font_stack: &FontStack) -> f32 {
 fn fallback_text_metrics(text: &str, font_size_px: f32) -> (u32, u32) {
     let fs = font_size_px.max(1.0);
     let char_w = ceil_i32(fs * 0.60).max(1) as u32;
-    let w = (text.chars().count() as u32).saturating_mul(char_w);
+    let w = (text.chars().filter(|ch| !is_zero_width_format(*ch)).count() as u32)
+        .saturating_mul(char_w);
     let h = fallback_line_height(font_size_px);
     (w, h)
 }
 
 fn measure_text_uncached(text: &str, font_size_px: f32, font_stack: &FontStack) -> (u32, u32) {
-    let scale = PxScale::from(font_size_px);
+    let scale = em_scale(&font_stack.primary, font_size_px);
     let scaled = font_stack.primary.as_scaled(scale);
 
     let mut max_line_w: f32 = 0.0;
@@ -1018,10 +1048,11 @@ fn measure_text_uncached(text: &str, font_size_px: f32, font_stack: &FontStack) 
             lines = lines.saturating_add(1);
             continue;
         }
+        if is_zero_width_format(ch) {
+            continue;
+        }
         let (selected, _, render_ch) = select_font_for_char(ch, font_stack);
-        let selected_scaled = selected.as_scaled(scale);
-        let glyph_id = selected_scaled.glyph_id(render_ch);
-        line_w += selected_scaled.h_advance(glyph_id);
+        line_w += em_advance(&selected, render_ch, font_size_px);
     }
 
     if line_w > max_line_w {
@@ -1465,7 +1496,7 @@ mod text_run_tests {
         RasterizedGlyph {
             key: GlyphRasterKey {
                 codepoint: 65,
-                size_px: 13,
+                scale_bits: 13.0_f32.to_bits(),
                 font_stack_id: 1,
                 font_slot: 0,
             },
@@ -1557,3 +1588,6 @@ mod text_run_tests {
         assert_eq!(first.as_ref(), rasterize_text(text, 13., 1000).as_slice());
     }
 }
+
+#[cfg(test)]
+mod typography_tests;

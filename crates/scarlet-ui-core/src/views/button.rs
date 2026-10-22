@@ -499,7 +499,7 @@ impl ButtonRenderObject {
         }
     }
 
-    /// Estimate button size based on label
+    /// Measure the label using the same font metrics as painting.
     fn estimate_size(&self) -> Size {
         if self.icon.is_some() && self.label.is_empty() {
             let icon_size = self
@@ -509,9 +509,7 @@ impl ButtonRenderObject {
             let side = icon_size + self.padding * 2.0;
             return Size::new(side, side);
         }
-        let char_width = self.font_size * 0.6;
-
-        let text_width = self.label.len() as f32 * char_width;
+        let (text_width, text_height) = graphics::measure_text_sized(&self.label, self.font_size);
         let icon_width = if self.icon.is_some() {
             self.icon_size
                 .map(|size| size.logical_pixels() as f32)
@@ -520,8 +518,8 @@ impl ButtonRenderObject {
         } else {
             0.0
         };
-        let width = text_width + icon_width + self.padding * 2.0;
-        let height = self.font_size * 1.2 + self.padding * 2.0;
+        let width = text_width as f32 + icon_width + self.padding * 2.0;
+        let height = (text_height as f32).max(self.font_size * 1.2) + self.padding * 2.0;
 
         Size { width, height }
     }
@@ -692,9 +690,9 @@ impl ElementRenderObject for ButtonRenderObject {
             }
 
             // Draw text centered
-            let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
+            let (text_w, text_h) = graphics::measure_text_sized(&self.label, self.font_size);
             let x = ((width as i32) - (text_w as i32)) / 2;
-            let y = ((height as i32) - (self.font_size as i32 * 6 / 5)) / 2;
+            let y = ((height as i32) - text_h as i32) / 2;
 
             canvas.draw_text_sized(
                 x.max(0),
@@ -742,7 +740,7 @@ impl ElementRenderObject for ButtonRenderObject {
                 .map(|size| size.logical_pixels() as f32)
                 .unwrap_or(available_icon_size)
                 .min(available_icon_size);
-            let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
+            let (text_w, text_h) = graphics::measure_text_sized(&self.label, self.font_size);
             let group_width = if self.label.is_empty() {
                 icon_size
             } else {
@@ -765,7 +763,7 @@ impl ElementRenderObject for ButtonRenderObject {
                 ctx.draw_text(
                     Point::new(
                         group_x + icon_size + 6.0,
-                        origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0),
+                        origin.y + ((self.size.height - text_h as f32) / 2.0).max(0.0),
                     ),
                     self.label.clone(),
                     text_color,
@@ -773,9 +771,9 @@ impl ElementRenderObject for ButtonRenderObject {
                 );
             }
         } else {
-            let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
+            let (text_w, text_h) = graphics::measure_text_sized(&self.label, self.font_size);
             let x = origin.x + ((self.size.width - text_w as f32) / 2.0).max(0.0);
-            let y = origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0);
+            let y = origin.y + ((self.size.height - text_h as f32) / 2.0).max(0.0);
             ctx.draw_text(
                 Point::new(x, y),
                 self.label.clone(),
@@ -979,12 +977,22 @@ mod tests {
         ));
         let laptop_size = render_object.layout(LayoutConstraints::unconstrained());
 
-        assert_eq!(tablet_size.height, 26.0);
+        assert!(tablet_size.height >= graphics::measure_text_sized("Mode", 15.0).1 as f32 + 8.0);
         assert_eq!(laptop_size.height, tablet_size.height);
         assert_eq!(
             crate::current_input_environment().interaction_mode(),
             crate::InteractionMode::Pointer
         );
+    }
+
+    #[test]
+    fn intrinsic_width_uses_glyph_metrics_instead_of_utf8_bytes() {
+        for label in ["iiii", "WWWW", "日本語", "Wi 日本語 (保存)"] {
+            let render_object = laid_out(Button::new(label).font_size(14.0));
+            let measured = graphics::measure_text_sized(label, 14.0);
+            assert_eq!(render_object.size.width, measured.0 as f32 + 8.0);
+            assert!(render_object.size.height >= measured.1 as f32 + 8.0);
+        }
     }
 
     #[test]
