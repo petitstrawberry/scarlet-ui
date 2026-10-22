@@ -50,6 +50,8 @@ pub struct TextView {
     scroll: Option<State<TextViewScroll>>,
     wrap_mode: Option<State<WrapMode>>,
     static_wrap_mode: WrapMode,
+    reveal_selection_on_change: bool,
+    autofocus: bool,
     placeholder: String,
     font_size: f32,
     padding: f32,
@@ -83,11 +85,11 @@ impl TextView {
         Self::base(TextBinding::String(text), selection)
     }
 
-    /// Create a text view bound to a rope-backed document state.
+    /// Create a text view bound to a shared immutable document state.
     ///
     /// # Arguments
     ///
-    /// * `text` - Document state used by the O(log n) editing path.
+    /// * `text` - Document state with shared snapshots and indexed line access.
     /// * `selection` - Selection state shared with the view.
     ///
     /// # Returns
@@ -105,6 +107,8 @@ impl TextView {
             scroll: None,
             wrap_mode: None,
             static_wrap_mode: WrapMode::None,
+            reveal_selection_on_change: false,
+            autofocus: false,
             placeholder: String::new(),
             font_size: 14.0,
             padding: 8.0,
@@ -125,6 +129,21 @@ impl TextView {
             on_paste: None,
             on_text_change: None,
         }
+    }
+
+    /// Reveal an externally changed selection, for example Find or Undo.
+    /// Scroll-only updates leave the caret where it is, so reading another
+    /// part of the document never jumps back to the selection.
+    pub fn reveal_selection_on_change(mut self, reveal: bool) -> Self {
+        self.reveal_selection_on_change = reveal;
+        self
+    }
+
+    /// Set initial keyboard focus. An unchanged value preserves subsequent
+    /// user focus changes; changing the value explicitly requests that focus.
+    pub fn autofocus(mut self, autofocus: bool) -> Self {
+        self.autofocus = autofocus;
+        self
     }
 
     /// Bind an external scroll state.
@@ -468,6 +487,7 @@ pub struct TextViewRenderObject {
     preedit_anchor_byte: u32,
     preedit_spans: Vec<u8>,
     focused: bool,
+    autofocus: bool,
     dragging: bool,
     desired_x: Option<f32>,
     size: Size,
@@ -512,26 +532,35 @@ impl TextViewRenderObject {
             .as_ref()
             .map(State::get)
             .unwrap_or(view.static_wrap_mode);
+        // The first real constraints determine wrapping. Avoid laying out the
+        // entire document into one-pixel rows while constructing the shell.
         let layout = TextViewLayout::compute(
-            &text_document,
+            &TextDocument::new(),
             view.font_size,
             view.padding,
             wrap_mode,
             Size::ZERO,
-            scroll,
+            TextViewScroll::default(),
             view.line_numbers,
         );
 
+        let requested_selection = view.selection.get();
+        let selection = TextSelection {
+            anchor: text_document.clamp_position(requested_selection.anchor),
+            caret: text_document.clamp_position(requested_selection.caret),
+        };
+
         Self {
             text_document,
-            selection: view.selection.get(),
+            selection,
             scroll,
             wrap_mode,
             preedit: String::new(),
             preedit_cursor_byte: 0,
             preedit_anchor_byte: 0,
             preedit_spans: Vec::new(),
-            focused: false,
+            focused: view.autofocus,
+            autofocus: view.autofocus,
             dragging: false,
             desired_x: None,
             size: Size::ZERO,
@@ -553,21 +582,15 @@ impl TextViewRenderObject {
     }
 
     pub(crate) fn compute_layout(&mut self) {
-        let layout = TextViewLayout::compute(
+        if !self.layout.matches(
             &self.text_document,
             self.font_size,
             self.padding,
             self.wrap_mode,
             self.size,
-            self.scroll,
             self.line_numbers,
-        );
-        let clamped_scroll = layout.clamp_scroll(self.scroll);
-        self.layout = if clamped_scroll == self.scroll {
-            layout
-        } else {
-            self.scroll = clamped_scroll;
-            TextViewLayout::compute(
+        ) {
+            self.layout = TextViewLayout::compute(
                 &self.text_document,
                 self.font_size,
                 self.padding,
@@ -575,8 +598,26 @@ impl TextViewRenderObject {
                 self.size,
                 self.scroll,
                 self.line_numbers,
-            )
+            );
+        }
+        self.layout.set_viewport(self.size);
+        let base_width = match self.wrap_mode {
+            WrapMode::None => self.layout.max_line_width,
+            WrapMode::Soft => self.layout.viewport_width,
         };
+        self.layout.content_width = base_width;
+        if !self.preedit.is_empty() {
+            // Composition is painted inline without changing document byte
+            // ranges. Allow a temporary horizontal reveal even on wrapped rows.
+            let caret = self.cursor_rect();
+            let preedit_width =
+                crate::graphics::measure_text_sized(&self.preedit, self.font_size).0 as f32;
+            let composition_end = caret.origin.x + self.layout.scroll.x - self.layout.text_origin_x
+                + preedit_width
+                + caret.size.width;
+            self.layout.content_width = base_width.max(composition_end);
+        }
+        self.scroll = self.layout.set_scroll(self.scroll);
     }
 
     /// Convert a widget-local point to a text position.
@@ -672,14 +713,19 @@ impl TextViewRenderObject {
         self.preedit_anchor_byte = clamp_byte_boundary(preedit, anchor_byte);
         self.preedit_spans.clear();
         self.preedit_spans.extend_from_slice(spans);
+        self.compute_layout();
     }
 
     /// Clear the active IME preedit state.
     pub(crate) fn clear_preedit(&mut self) {
+        let had_preedit = !self.preedit.is_empty();
         self.preedit.clear();
         self.preedit_cursor_byte = 0;
         self.preedit_anchor_byte = 0;
         self.preedit_spans.clear();
+        if had_preedit {
+            self.compute_layout();
+        }
     }
 
     /// Return the text-input state exposed to platform IME backends.
@@ -772,28 +818,56 @@ impl ElementRenderObject for TextViewRenderObject {
         let Some(view) = new_view.as_any().downcast_ref::<TextView>() else {
             return crate::element::UpdateResult::Replaced;
         };
-        let focused = self.focused;
-        let dragging = self.dragging;
-        let preedit = self.preedit.clone();
-        let preedit_cursor_byte = self.preedit_cursor_byte;
-        let preedit_anchor_byte = self.preedit_anchor_byte;
-        let preedit_spans = self.preedit_spans.clone();
-        let desired_x = self.desired_x;
-        let scroll = self.scroll;
-        let size = self.size;
-        *self = TextViewRenderObject::from_view(view);
-        if view.scroll.is_none() {
-            self.scroll = scroll;
+        if self.autofocus != view.autofocus {
+            self.set_focused(view.autofocus);
+            self.autofocus = view.autofocus;
         }
-        self.focused = focused;
-        self.dragging = dragging;
-        self.preedit = preedit;
-        self.preedit_cursor_byte = preedit_cursor_byte;
-        self.preedit_anchor_byte = preedit_anchor_byte;
-        self.preedit_spans = preedit_spans;
-        self.desired_x = desired_x;
-        self.size = size;
+        match &view.text {
+            TextBinding::String(text) => {
+                let text = text.get();
+                if self.text_document.as_str().as_ref() != text {
+                    self.text_document = TextDocument::from_str(&text);
+                }
+            }
+            TextBinding::Document(text) => self.text_document = text.get(),
+        }
+        let requested_selection = view.selection.get();
+        let selection = TextSelection {
+            anchor: self
+                .text_document
+                .clamp_position(requested_selection.anchor),
+            caret: self.text_document.clamp_position(requested_selection.caret),
+        };
+        let selection_changed = self.selection != selection;
+        self.selection = selection;
+        if let Some(scroll) = &view.scroll {
+            self.scroll = scroll.get();
+        }
+        self.wrap_mode = view
+            .wrap_mode
+            .as_ref()
+            .map(State::get)
+            .unwrap_or(view.static_wrap_mode);
+        self.placeholder.clone_from(&view.placeholder);
+        self.font_size = view.font_size;
+        self.padding = view.padding;
+        self.tab_mode = view.tab_mode;
+        self.line_numbers = view.line_numbers;
+        self.current_line_highlight = view.current_line_highlight;
+        self.background_color = view.background_color;
+        self.text_color = view.text_color;
+        self.placeholder_color = view.placeholder_color;
+        self.selection_color = view.selection_color;
+        self.current_line_color = view.current_line_color;
+        self.border_color = view.border_color;
+        self.focused_border_color = view.focused_border_color;
         self.compute_layout();
+        if selection_changed {
+            self.desired_x = None;
+            if view.reveal_selection_on_change {
+                editing::ensure_caret_visible(view, self);
+            }
+        }
         crate::element::UpdateResult::Updated
     }
 

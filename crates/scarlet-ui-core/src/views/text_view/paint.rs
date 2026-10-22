@@ -172,11 +172,7 @@ fn paint_current_line(
     color: Color,
 ) {
     let logical_line = layout.line_index_at_byte(selection.caret.byte);
-    for line in layout
-        .visual_lines
-        .iter()
-        .filter(|line| line.logical_line == logical_line)
-    {
+    for line in visible_lines(layout).filter(|line| line.logical_line == logical_line) {
         ctx.fill_rect(
             Rect::from_xywh(origin.x, origin.y + line.y, size.width, layout.line_height),
             color,
@@ -306,7 +302,7 @@ fn paint_line_with_preedit_gap(
         ctx.draw_text(Point::new(x, y), prefix, text_color, font_size);
     }
 
-    let prefix_width = graphics::measure_text_sized(prefix, font_size).0 as f32;
+    let prefix_width = line.width_to_byte(position.byte);
     let preedit_width = graphics::measure_text_sized(preedit, font_size).0 as f32;
     if !suffix.is_empty() {
         ctx.draw_text(
@@ -448,10 +444,8 @@ fn visible_lines(layout: &TextViewLayout) -> impl Iterator<Item = &VisualLine> {
     layout.visual_lines[layout.visible_lines.clone()].iter()
 }
 
-fn width_to_byte(line: &VisualLine, byte: usize, font_size: f32) -> f32 {
-    let display_byte = line.display_byte_for_document_byte(byte);
-    let prefix = clamp_str_prefix(line.text(), display_byte);
-    graphics::measure_text_sized(prefix, font_size).0 as f32
+fn width_to_byte(line: &VisualLine, byte: usize, _font_size: f32) -> f32 {
+    line.width_to_byte(byte)
 }
 
 fn preedit_prefix(preedit: &str, byte: u32) -> &str {
@@ -465,14 +459,6 @@ fn clamp_byte_boundary(text: &str, byte: u32) -> u32 {
         byte -= 1;
     }
     byte as u32
-}
-
-fn clamp_str_prefix(text: &str, byte: usize) -> &str {
-    let mut byte = byte.min(text.len());
-    while byte > 0 && !text.is_char_boundary(byte) {
-        byte -= 1;
-    }
-    &text[..byte]
 }
 
 fn split_at_char_boundary(text: &str, byte: usize) -> (&str, &str) {

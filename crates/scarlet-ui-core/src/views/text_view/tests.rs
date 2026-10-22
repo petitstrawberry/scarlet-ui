@@ -16,6 +16,11 @@ use crate::{geometry::Point, graphics};
 
 use super::*;
 
+#[path = "performance.rs"]
+mod performance;
+#[path = "regressions.rs"]
+mod regressions;
+
 #[test]
 fn document_round_trips_full_text() {
     for text in ["", "hello", "こんにちは", "😀😃😄", "hello こんにちは 👋"] {
