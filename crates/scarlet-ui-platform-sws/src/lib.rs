@@ -1816,7 +1816,12 @@ impl SWSPlatformWindow {
 }
 
 impl PlatformWindow for SWSPlatformWindow {
-    fn text_clipboard(&self) -> core::result::Result<scarlet_ui_core::clipboard::TextClipboard, scarlet_ui_core::clipboard::ClipboardError> {
+    fn text_clipboard(
+        &self,
+    ) -> core::result::Result<
+        scarlet_ui_core::clipboard::TextClipboard,
+        scarlet_ui_core::clipboard::ClipboardError,
+    > {
         Ok(clipboard::service(self.conn.clone(), self.surface_id))
     }
     fn begin_file_dialog(
