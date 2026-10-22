@@ -17,6 +17,7 @@ use crate::view::View;
 use crate::views::modifiers::RepaintBoundary;
 use crate::views::style;
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -53,9 +54,29 @@ impl ScrollAxis {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct SelectionScrollTarget {
     axis: ScrollAxis,
+    identity: usize,
     index: usize,
     item_extent: f32,
     offset: f32,
+}
+
+// A virtualized child can resolve its selected item's bounds after viewport sizing.
+type SelectionRangeResolver = Rc<dyn Fn(Size) -> Option<(usize, f32, f32)>>;
+
+fn resolved_selection_range(
+    resolver: &SelectionRangeResolver,
+    size: Size,
+) -> Option<SelectionScrollTarget> {
+    let (identity, start, end) = resolver(size)?;
+    (start.is_finite() && end.is_finite() && start >= 0.0 && end > start).then_some(
+        SelectionScrollTarget {
+            axis: ScrollAxis::Vertical,
+            identity,
+            index: 0,
+            offset: start,
+            item_extent: end - start,
+        },
+    )
 }
 
 /// Wheel direction for a scroll axis.
@@ -116,6 +137,7 @@ pub struct ScrollView<V: View> {
     selection_index_state: Option<State<Option<usize>>>,
     selection_item_extent: Option<f32>,
     selection_target: Option<SelectionScrollTarget>,
+    selection_range_resolver: Option<SelectionRangeResolver>,
 }
 
 impl<V: View> ScrollView<V> {
@@ -146,6 +168,7 @@ impl<V: View> ScrollView<V> {
             selection_index_state: None,
             selection_item_extent: None,
             selection_target: None,
+            selection_range_resolver: None,
         }
     }
 
@@ -378,10 +401,12 @@ impl<V: View> ScrollView<V> {
     /// Updated scroll view.
     pub fn scroll_to_index(mut self, index: Option<usize>, item_extent: f32) -> Self {
         let item_extent = item_extent.max(1.0);
+        self.selection_range_resolver = None;
         self.selection_index_state = None;
         self.selection_item_extent = None;
         self.selection_target = index.map(|index| SelectionScrollTarget {
             axis: ScrollAxis::Vertical,
+            identity: index,
             index,
             item_extent,
             offset: 0.0,
@@ -411,11 +436,13 @@ impl<V: View> ScrollView<V> {
     }
 
     fn set_selection_range(&mut self, axis: ScrollAxis, start: f32, end: f32) {
+        self.selection_range_resolver = None;
         self.selection_index_state = None;
         self.selection_item_extent = None;
         self.selection_target = if start.is_finite() && end.is_finite() && end > start.max(0.0) {
             Some(SelectionScrollTarget {
                 axis,
+                identity: 0,
                 index: 0,
                 offset: start.max(0.0),
                 item_extent: end - start.max(0.0),
@@ -442,10 +469,12 @@ impl<V: View> ScrollView<V> {
     /// Updated scroll view.
     pub fn scroll_to_index_state(mut self, index: State<Option<usize>>, item_extent: f32) -> Self {
         let item_extent = item_extent.max(1.0);
+        self.selection_range_resolver = None;
         self.selection_index_state = Some(index.clone());
         self.selection_item_extent = Some(item_extent);
         self.selection_target = index.get().map(|index| SelectionScrollTarget {
             axis: ScrollAxis::Vertical,
+            identity: index,
             index,
             item_extent,
             offset: 0.0,
@@ -453,10 +482,25 @@ impl<V: View> ScrollView<V> {
         self
     }
 
-    fn current_selection_target(&self) -> Option<SelectionScrollTarget> {
+    pub(crate) fn scroll_to_layout_range(
+        mut self,
+        resolver: impl Fn(Size) -> Option<(usize, f32, f32)> + 'static,
+    ) -> Self {
+        self.selection_index_state = None;
+        self.selection_item_extent = None;
+        self.selection_target = None;
+        self.selection_range_resolver = Some(Rc::new(resolver));
+        self
+    }
+
+    fn current_selection_target(&self, viewport: Size) -> Option<SelectionScrollTarget> {
+        if let Some(resolver) = &self.selection_range_resolver {
+            return resolved_selection_range(resolver, viewport);
+        }
         if let Some(index) = &self.selection_index_state {
             return index.get().map(|index| SelectionScrollTarget {
                 axis: ScrollAxis::Vertical,
+                identity: index,
                 index,
                 item_extent: self.selection_item_extent.unwrap_or(1.0),
                 offset: 0.0,
@@ -611,6 +655,7 @@ pub struct ScrollViewRenderObject<V: View> {
     scrollbar_active: bool,
     trackpad_axis_engaged: bool,
     selection_target: Option<SelectionScrollTarget>,
+    selection_range_resolver: Option<SelectionRangeResolver>,
     selection_scroll_pending: bool,
     anchor: Option<crate::element::ScrollAnchor>,
     _marker: PhantomData<V>,
@@ -649,6 +694,7 @@ impl<V: View> ScrollViewRenderObject<V> {
             scrollbar_active: false,
             trackpad_axis_engaged: false,
             selection_target: None,
+            selection_range_resolver: None,
             selection_scroll_pending: false,
             anchor: None,
             _marker: PhantomData,
@@ -685,7 +731,8 @@ impl<V: View> ScrollViewRenderObject<V> {
         render_object.content_bottom_inset = view.content_bottom_inset;
         render_object.scrollbar_visibility = view.scrollbar_visibility_value();
         render_object.scrollbar_color = view.scrollbar_color_value();
-        render_object.selection_target = view.current_selection_target();
+        render_object.selection_range_resolver = view.selection_range_resolver.clone();
+        render_object.selection_target = view.current_selection_target(Size::ZERO);
         render_object.selection_scroll_pending = render_object.selection_target.is_some();
         render_object
     }
@@ -1031,6 +1078,13 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let viewport_width = finite_viewport_axis(constraints.min_width, constraints.max_width);
         let viewport_height = finite_viewport_axis(constraints.min_height, constraints.max_height);
         self.viewport_size = Size::new(viewport_width, viewport_height);
+        if let Some(resolver) = &self.selection_range_resolver {
+            let target = resolved_selection_range(resolver, self.viewport_size);
+            if target != self.selection_target {
+                self.selection_target = target;
+                self.selection_scroll_pending = target.is_some();
+            }
+        }
 
         let base_content = self.configured_content_size.unwrap_or(self.viewport_size);
         let content_width = base_content.width.max(viewport_width);
@@ -1141,7 +1195,8 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         ) = scroll_view.exclusive_wheel_axis_lock_values();
         self.scrollbar_visibility = scroll_view.scrollbar_visibility_value();
         self.scrollbar_color = scroll_view.scrollbar_color_value();
-        self.selection_target = scroll_view.current_selection_target();
+        self.selection_range_resolver = scroll_view.selection_range_resolver.clone();
+        self.selection_target = scroll_view.current_selection_target(self.viewport_size);
         if (self.selection_target != old_selection_target
             || self.content_bottom_inset != old_bottom_inset)
             && self.selection_target.is_some()
