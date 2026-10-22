@@ -1,7 +1,8 @@
 //! Text document model for the multi-line text view.
 
 use alloc::borrow::Cow;
-use alloc::string::{String, ToString};
+use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -16,7 +17,17 @@ use unicode_segmentation::UnicodeSegmentation;
 /// the public API.
 #[derive(Clone, Debug, Default)]
 pub struct TextDocument {
+    snapshot: Arc<DocumentSnapshot>,
+}
+
+/// A revision owns one flattened view and line index. Cloning a document for
+/// state, undo history, or layout retains this revision without copying text.
+#[derive(Debug, Default)]
+struct DocumentSnapshot {
     table: PieceTable,
+    text: Arc<str>,
+    line_starts: Vec<usize>,
+    grapheme_boundaries: Vec<usize>,
 }
 
 impl TextDocument {
@@ -39,9 +50,56 @@ impl TextDocument {
     ///
     /// A document containing `text`.
     pub fn from_str(text: &str) -> Self {
-        Self {
-            table: PieceTable::from_str(text),
+        Self::from_table(PieceTable::from_str(text))
+    }
+
+    fn from_table(table: PieceTable) -> Self {
+        let text = if table.added.is_empty() && table.len == table.original.len() {
+            Arc::clone(&table.original)
+        } else {
+            Arc::from(table.as_str().as_ref())
+        };
+        let mut line_starts = Vec::new();
+        if !text.is_empty() {
+            line_starts.push(0);
+            line_starts.extend(
+                text.bytes()
+                    .enumerate()
+                    .filter_map(|(byte, ch)| (ch == b'\n').then_some(byte + 1)),
+            );
         }
+        let mut grapheme_boundaries: Vec<_> =
+            text.grapheme_indices(true).map(|(byte, _)| byte).collect();
+        grapheme_boundaries.push(text.len());
+        Self {
+            snapshot: Arc::new(DocumentSnapshot {
+                table,
+                text,
+                line_starts,
+                grapheme_boundaries,
+            }),
+        }
+    }
+
+    pub(crate) fn same_revision(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.snapshot, &other.snapshot)
+    }
+
+    pub(crate) fn clamp_position(&self, position: TextPosition) -> TextPosition {
+        let byte = clamp_byte_to_char_boundary(&self.snapshot.text, position.byte);
+        let boundaries = &self.snapshot.grapheme_boundaries;
+        let index = boundaries.partition_point(|boundary| *boundary < byte);
+        let next = boundaries.get(index).copied().unwrap_or(self.len());
+        let previous = index
+            .checked_sub(1)
+            .and_then(|index| boundaries.get(index))
+            .copied()
+            .unwrap_or(0);
+        TextPosition::new(if next - byte < byte - previous {
+            next
+        } else {
+            previous
+        })
     }
 
     /// Return the full document text.
@@ -50,7 +108,7 @@ impl TextDocument {
     ///
     /// The document text as a borrowed or owned string.
     pub fn as_str(&self) -> Cow<'_, str> {
-        self.table.as_str()
+        Cow::Borrowed(&self.snapshot.text)
     }
 
     /// Return the document length in UTF-8 bytes.
@@ -59,7 +117,7 @@ impl TextDocument {
     ///
     /// The number of bytes in the document.
     pub fn len(&self) -> usize {
-        self.table.len()
+        self.snapshot.text.len()
     }
 
     /// Return whether the document is empty.
@@ -68,7 +126,7 @@ impl TextDocument {
     ///
     /// `true` when the document contains no bytes.
     pub fn is_empty(&self) -> bool {
-        self.table.is_empty()
+        self.snapshot.text.is_empty()
     }
 
     /// Return the number of logical lines in the document.
@@ -77,7 +135,7 @@ impl TextDocument {
     ///
     /// `0` for an empty document, otherwise the newline count plus one.
     pub fn line_count(&self) -> usize {
-        self.table.line_count()
+        self.snapshot.line_starts.len()
     }
 
     /// Return the byte range for a line.
@@ -90,7 +148,23 @@ impl TextDocument {
     ///
     /// The byte range occupied by the line, or `None` when out of bounds.
     pub fn line_range(&self, line_index: usize) -> Option<Range<usize>> {
-        self.table.line_range(line_index)
+        let start = *self.snapshot.line_starts.get(line_index)?;
+        let end = self
+            .snapshot
+            .line_starts
+            .get(line_index + 1)
+            .copied()
+            .unwrap_or(self.len());
+        Some(start..end)
+    }
+
+    /// Return the zero-based logical line containing a UTF-8 byte offset.
+    /// Offsets past the document clamp to its end; an empty document returns 0.
+    pub fn line_index_at_byte(&self, byte: usize) -> usize {
+        self.snapshot
+            .line_starts
+            .partition_point(|start| *start <= byte.min(self.len()))
+            .saturating_sub(1)
     }
 
     /// Return the text for a line.
@@ -103,7 +177,9 @@ impl TextDocument {
     ///
     /// The line text, or `None` when out of bounds.
     pub fn line_text(&self, line_index: usize) -> Option<Cow<'_, str>> {
-        self.table.line_text(line_index)
+        Some(Cow::Borrowed(
+            &self.snapshot.text[self.line_range(line_index)?],
+        ))
     }
 
     /// Insert text at a byte position.
@@ -117,8 +193,7 @@ impl TextDocument {
     ///
     /// The edited document and the edit delta describing the insertion.
     pub fn insert(&self, at: TextPosition, text: &str) -> (Self, EditDelta) {
-        let (table, delta) = self.table.insert(at.byte, text);
-        (Self { table }, delta)
+        self.replace(at.byte..at.byte, text)
     }
 
     /// Delete a byte range.
@@ -131,8 +206,7 @@ impl TextDocument {
     ///
     /// The edited document and the edit delta describing the deletion.
     pub fn delete(&self, range: Range<usize>) -> (Self, EditDelta) {
-        let (table, delta) = self.table.delete(range);
-        (Self { table }, delta)
+        self.replace(range, "")
     }
 
     /// Replace a byte range with new text.
@@ -146,8 +220,34 @@ impl TextDocument {
     ///
     /// The edited document and the edit delta describing the replacement.
     pub fn replace(&self, range: Range<usize>, text: &str) -> (Self, EditDelta) {
-        let (table, delta) = self.table.replace(range, text);
-        (Self { table }, delta)
+        let start = clamp_byte_to_char_boundary(&self.snapshot.text, range.start);
+        let end = clamp_byte_to_char_boundary(&self.snapshot.text, range.end).max(start);
+        let range = start..end;
+        let delta = EditDelta {
+            replaced_range: range.clone(),
+            inserted: String::from(text),
+        };
+        if self.snapshot.text[range.clone()] == *text {
+            return (self.clone(), delta);
+        }
+        let mut table = self.snapshot.table.clone();
+        table.delete_range(range.clone());
+        table.len -= range.len();
+        if !text.is_empty() {
+            let added_start = table.added.len();
+            Arc::make_mut(&mut table.added).push_str(text);
+            table.insert_piece(
+                start,
+                Piece {
+                    source: PieceSource::Added,
+                    start: added_start,
+                    length: text.len(),
+                },
+            );
+            table.len += text.len();
+        }
+        table.prune_empty_pieces();
+        (Self::from_table(table), delta)
     }
 
     /// Convert a character index to a byte offset.
@@ -185,8 +285,8 @@ impl TextDocument {
 
 #[derive(Clone, Debug, Default)]
 struct PieceTable {
-    original: String,
-    added: String,
+    original: Arc<str>,
+    added: Arc<String>,
     pieces: Vec<Piece>,
     len: usize,
 }
@@ -202,8 +302,8 @@ impl PieceTable {
             });
         }
         Self {
-            original: String::from(text),
-            added: String::new(),
+            original: Arc::from(text),
+            added: Arc::new(String::new()),
             pieces,
             len: text.len(),
         }
@@ -227,115 +327,6 @@ impl PieceTable {
             text.push_str(self.piece_text(*piece));
         }
         Cow::Owned(text)
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    fn line_count(&self) -> usize {
-        if self.is_empty() {
-            0
-        } else {
-            1 + self
-                .pieces
-                .iter()
-                .map(|piece| {
-                    self.piece_text(*piece)
-                        .bytes()
-                        .filter(|byte| *byte == b'\n')
-                        .count()
-                })
-                .sum::<usize>()
-        }
-    }
-
-    fn line_range(&self, line_index: usize) -> Option<Range<usize>> {
-        if line_index >= self.line_count() {
-            return None;
-        }
-
-        let mut current_line = 0usize;
-        let mut line_start = 0usize;
-        let mut byte_offset = 0usize;
-        for piece in &self.pieces {
-            for byte in self.piece_text(*piece).bytes() {
-                byte_offset += 1;
-                if byte == b'\n' {
-                    if current_line == line_index {
-                        return Some(line_start..byte_offset);
-                    }
-                    current_line += 1;
-                    line_start = byte_offset;
-                }
-            }
-        }
-
-        Some(line_start..self.len)
-    }
-
-    fn line_text(&self, line_index: usize) -> Option<Cow<'_, str>> {
-        let range = self.line_range(line_index)?;
-        let text = self.as_str();
-        Some(Cow::Owned(text[range].to_string()))
-    }
-
-    fn insert(&self, byte_offset: usize, text: &str) -> (Self, EditDelta) {
-        let offset = self.clamp_byte(byte_offset);
-        let mut table = self.clone();
-        if !text.is_empty() {
-            let added_start = table.added.len();
-            table.added.push_str(text);
-            let insertion = Piece {
-                source: PieceSource::Added,
-                start: added_start,
-                length: text.len(),
-            };
-            table.insert_piece(offset, insertion);
-            table.len += text.len();
-        }
-        table.prune_empty_pieces();
-        (
-            table,
-            EditDelta {
-                replaced_range: offset..offset,
-                inserted: String::from(text),
-            },
-        )
-    }
-
-    fn delete(&self, range: Range<usize>) -> (Self, EditDelta) {
-        let range = self.clamp_range(range);
-        let mut table = self.clone();
-        if !range.is_empty() {
-            table.delete_range(range.clone());
-            table.len -= range.end - range.start;
-        }
-        table.prune_empty_pieces();
-        (
-            table,
-            EditDelta {
-                replaced_range: range,
-                inserted: String::new(),
-            },
-        )
-    }
-
-    fn replace(&self, range: Range<usize>, text: &str) -> (Self, EditDelta) {
-        let range = self.clamp_range(range);
-        let (deleted, _) = self.delete(range.clone());
-        let (inserted, _) = deleted.insert(range.start, text);
-        (
-            inserted,
-            EditDelta {
-                replaced_range: range,
-                inserted: String::from(text),
-            },
-        )
     }
 
     fn insert_piece(&mut self, byte_offset: usize, insertion: Piece) {
@@ -418,24 +409,10 @@ impl PieceTable {
         (self.pieces.len(), 0)
     }
 
-    fn clamp_range(&self, range: Range<usize>) -> Range<usize> {
-        let start = self.clamp_byte(range.start);
-        let mut end = self.clamp_byte(range.end);
-        if end < start {
-            end = start;
-        }
-        start..end
-    }
-
-    fn clamp_byte(&self, byte: usize) -> usize {
-        let text = self.as_str();
-        clamp_byte_to_char_boundary(&text, byte)
-    }
-
     fn piece_text(&self, piece: Piece) -> &str {
         let source = match piece.source {
-            PieceSource::Original => &self.original,
-            PieceSource::Added => &self.added,
+            PieceSource::Original => self.original.as_ref(),
+            PieceSource::Added => self.added.as_str(),
         };
         &source[piece.start..piece.start + piece.length]
     }

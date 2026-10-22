@@ -246,6 +246,7 @@ pub struct TextFieldRenderObject {
     text_document: TextDocument,
     selection: TextSelection,
     layout: TextViewLayout,
+    scroll: TextViewScroll,
     preedit: String,
     preedit_cursor_byte: u32,
     preedit_anchor_byte: u32,
@@ -269,11 +270,17 @@ impl TextFieldRenderObject {
     pub fn from_view(view: &TextField) -> Self {
         let text_document = TextDocument::from_str(&view.text.get());
         let selection = TextSelection::collapsed(text_document.len());
-        let layout = text_field_layout(&text_document, view.font_size, view.padding, Size::ZERO);
+        let layout = text_field_layout(
+            &TextDocument::new(),
+            view.font_size,
+            view.padding,
+            Size::ZERO,
+        );
         Self {
             text_document,
             selection,
             layout,
+            scroll: TextViewScroll::default(),
             preedit: String::new(),
             preedit_cursor_byte: 0,
             preedit_anchor_byte: 0,
@@ -294,8 +301,63 @@ impl TextFieldRenderObject {
     }
 
     fn compute_layout(&mut self) {
-        self.layout =
-            text_field_layout(&self.text_document, self.font_size, self.padding, self.size);
+        if !self.layout.matches(
+            &self.text_document,
+            self.font_size,
+            self.padding,
+            WrapMode::None,
+            self.size,
+            false,
+        ) {
+            self.layout =
+                text_field_layout(&self.text_document, self.font_size, self.padding, self.size);
+        }
+        let preedit_width = if self.preedit.is_empty() {
+            0.0
+        } else {
+            graphics::measure_text_sized(&self.preedit, self.font_size).0 as f32
+        };
+        self.layout.set_viewport(self.size);
+        self.layout.content_width = self.layout.max_line_width + preedit_width + 1.0;
+        self.scroll = self.layout.set_scroll(self.scroll);
+        self.center_lines();
+    }
+
+    fn center_lines(&mut self) {
+        let top = if self.size.height > 0.0 {
+            ((self.size.height - self.layout.line_height) * 0.5).max(0.0)
+        } else {
+            self.padding
+        };
+        for (index, line) in self.layout.visual_lines.iter_mut().enumerate() {
+            line.y = top + index as f32 * self.layout.line_height;
+        }
+    }
+
+    fn ensure_caret_visible(&mut self) {
+        if !self.focused {
+            return;
+        }
+        let mut caret = self
+            .layout
+            .cursor_rect(self.selection.caret, &self.text_document);
+        if !self.preedit.is_empty() {
+            caret.origin.x += graphics::measure_text_sized(
+                preedit_prefix(&self.preedit, self.preedit_cursor_byte),
+                self.font_size,
+            )
+            .0 as f32;
+        }
+        let left = self.padding;
+        let right = (self.size.width - self.padding).max(left);
+        let mut scroll = self.scroll;
+        if caret.origin.x < left {
+            scroll.x -= left - caret.origin.x;
+        } else if caret.origin.x + caret.size.width > right {
+            scroll.x += caret.origin.x + caret.size.width - right;
+        }
+        self.scroll = self.layout.set_scroll(scroll);
+        self.center_lines();
     }
 }
 
@@ -312,7 +374,11 @@ impl ElementRenderObject for TextFieldRenderObject {
         } else {
             graphics::measure_text_sized(&self.preedit, self.font_size).0 as f32
         };
-        let (measured_width, _) = graphics::measure_text_sized(&visible_text, self.font_size);
+        let measured_width = if constraints.min_width == constraints.max_width {
+            0
+        } else {
+            graphics::measure_text_sized(&visible_text, self.font_size).0
+        };
         let line_height = graphics::line_height_sized(self.font_size).max(1) as f32;
         let intrinsic = Size::new(
             measured_width as f32 + preedit_width + self.padding * 2.0,
@@ -320,6 +386,7 @@ impl ElementRenderObject for TextFieldRenderObject {
         );
         self.size = constraints.constrain(intrinsic);
         self.compute_layout();
+        self.ensure_caret_visible();
         self.size
     }
 
@@ -362,28 +429,30 @@ impl ElementRenderObject for TextFieldRenderObject {
         let text_changed = self.text_document.as_str().as_ref() != new_text.as_str();
         let selection_followed_old_end =
             selection.anchor.byte == old_len && selection.caret.byte == old_len;
-        let preedit = self.preedit.clone();
-        let preedit_cursor_byte = self.preedit_cursor_byte;
-        let preedit_anchor_byte = self.preedit_anchor_byte;
-        let preedit_spans = self.preedit_spans.clone();
-        let size = self.size;
-        *self = TextFieldRenderObject::from_view(view);
+        if text_changed {
+            self.text_document = TextDocument::from_str(&new_text);
+        }
         let len = self.text_document.len();
         self.selection = if text_changed && selection_followed_old_end {
             TextSelection::collapsed(len)
         } else {
             TextSelection {
-                anchor: TextPosition::new(selection.anchor.byte.min(len)),
-                caret: TextPosition::new(selection.caret.byte.min(len)),
+                anchor: self.text_document.clamp_position(selection.anchor),
+                caret: self.text_document.clamp_position(selection.caret),
             }
         };
         self.focused = focused;
-        self.preedit = preedit;
-        self.preedit_cursor_byte = preedit_cursor_byte;
-        self.preedit_anchor_byte = preedit_anchor_byte;
-        self.preedit_spans = preedit_spans;
-        self.size = size;
+        self.autofocus = view.autofocus;
+        self.placeholder.clone_from(&view.placeholder);
+        self.background_color = view.background_color;
+        self.border_color = view.border_color;
+        self.focused_border_color = view.focused_border_color;
+        self.text_color = view.text_color;
+        self.placeholder_color = view.placeholder_color;
+        self.font_size = view.font_size;
+        self.padding = view.padding;
         self.compute_layout();
+        self.ensure_caret_visible();
         crate::element::UpdateResult::Updated
     }
 
@@ -445,13 +514,20 @@ impl TextFieldRenderObject {
         self.preedit_anchor_byte = clamp_byte_boundary(&self.preedit, anchor_byte);
         self.preedit_spans.clear();
         self.preedit_spans.extend_from_slice(spans);
+        self.compute_layout();
+        self.ensure_caret_visible();
     }
 
     pub(crate) fn clear_preedit(&mut self) {
+        let had_preedit = !self.preedit.is_empty();
         self.preedit.clear();
         self.preedit_cursor_byte = 0;
         self.preedit_anchor_byte = 0;
         self.preedit_spans.clear();
+        if had_preedit {
+            self.compute_layout();
+            self.ensure_caret_visible();
+        }
     }
 
     pub(crate) fn text_input_state(&self) -> TextInputElementState {
@@ -712,6 +788,7 @@ fn insert_text(field: &TextField, render_object: &mut TextFieldRenderObject, tex
     render_object.text_document = document;
     render_object.selection = TextSelection::collapsed(caret);
     render_object.compute_layout();
+    render_object.ensure_caret_visible();
     field
         .text
         .set(render_object.text_document.as_str().into_owned());
@@ -776,6 +853,7 @@ fn delete_range(
     render_object.text_document = document;
     render_object.selection = TextSelection::collapsed(start);
     render_object.compute_layout();
+    render_object.ensure_caret_visible();
     field
         .text
         .set(render_object.text_document.as_str().into_owned());
@@ -794,7 +872,10 @@ fn move_caret(
         CaretMove::Start => 0,
         CaretMove::End => text.len(),
     };
-    let position = TextPosition::new(byte).clamp_to_grapheme(&text);
+    let position = render_object
+        .text_document
+        .clamp_position(TextPosition::new(byte));
+    drop(text);
     if modifiers.shift {
         render_object.selection.caret = position;
     } else {
@@ -803,6 +884,7 @@ fn move_caret(
             caret: position,
         };
     }
+    render_object.ensure_caret_visible();
 }
 
 fn handle_primary_click(
@@ -847,6 +929,7 @@ fn handle_drag_selection(render_object: &mut TextFieldRenderObject, x: i32, y: i
     }
     if let Some(position) = hit_test_mouse(render_object, x, y) {
         render_object.selection.caret = position;
+        render_object.ensure_caret_visible();
     }
     true
 }
@@ -857,7 +940,7 @@ fn hit_test_mouse(render_object: &TextFieldRenderObject, x: i32, _y: i32) -> Opt
     render_object
         .layout
         .hit_test(Point::new(x, y))
-        .map(|position| position.clamp_to_grapheme(&render_object.text_document.as_str()))
+        .map(|position| render_object.text_document.clamp_position(position))
 }
 
 fn word_selection(render_object: &TextFieldRenderObject, byte: usize) -> TextSelection {
@@ -969,7 +1052,7 @@ fn previous_grapheme_boundary(text: &str, byte: usize) -> Option<usize> {
     text[..byte]
         .grapheme_indices(true)
         .map(|(offset, _)| offset)
-        .last()
+        .next_back()
 }
 
 fn next_grapheme_boundary(text: &str, byte: usize) -> Option<usize> {
@@ -986,7 +1069,7 @@ fn previous_grapheme(byte: usize, text: &str) -> Option<(usize, &str)> {
     text[..byte]
         .grapheme_indices(true)
         .map(|(offset, grapheme)| (offset, grapheme))
-        .last()
+        .next_back()
 }
 
 fn next_grapheme(byte: usize, text: &str) -> Option<(usize, &str)> {
@@ -1008,6 +1091,71 @@ mod tests {
     use crate::event::{Event, KeyEvent, MouseButton, MouseEvent};
     use crate::renderer::PaintCommand;
     use crate::state::StateId;
+
+    #[test]
+    fn long_field_reveals_caret_and_ime_without_losing_vertical_centering() {
+        let text = State::new(StateId::new(7200), "日本 e\u{301} 👩‍💻 abc ".repeat(20));
+        let field = TextField::new(text.clone()).autofocus(true);
+        let mut object = TextFieldRenderObject::from_view(&field);
+        object.layout(LayoutConstraints::tight(170.0, 48.0));
+        assert!(object.scroll.x > 0.0);
+        let caret = object.text_input_state().cursor_rect;
+        assert!(caret.origin.x + caret.size.width <= 162.0);
+        assert_eq!(caret.origin.y, (48.0 - object.layout.line_height) * 0.5);
+        move_caret(&mut object, CaretMove::Start, KeyModifiers::default());
+        assert_eq!(object.scroll.x, 0.0);
+        move_caret(&mut object, CaretMove::End, KeyModifiers::default());
+        object.set_preedit_state("入力中の文字", 18, 18, &[]);
+        assert_eq!(text.get(), object.text_document.as_str());
+        let caret = object.text_input_state().cursor_rect;
+        assert!(caret.origin.x + caret.size.width <= 162.0);
+        object.clear_preedit();
+        assert!(
+            object.scroll.x
+                <= (object.layout.content_width - object.layout.viewport_width).max(0.0)
+        );
+        assert!(object.text_input_state().cursor_rect.origin.x >= 8.0);
+    }
+
+    #[test]
+    fn field_update_preserves_drag_selection_preedit_and_measured_lines() {
+        let text = State::new(StateId::new(7201), String::from("abcd 日本 e\u{301}"));
+        let field = TextField::new(text).autofocus(true);
+        let mut object = TextFieldRenderObject::from_view(&field);
+        object.layout(LayoutConstraints::tight(240.0, 48.0));
+        object.selection = TextSelection {
+            anchor: TextPosition::new(1),
+            caret: TextPosition::new(3),
+        };
+        object.dragging = true;
+        object.set_preedit_state("入力", 6, 3, &[]);
+        let lines = object.layout.visual_lines.as_ptr();
+        object.update(&field);
+        object.layout(LayoutConstraints::tight(240.0, 48.0));
+        assert_eq!(object.layout.visual_lines.as_ptr(), lines);
+        assert_eq!(object.selection.anchor.byte, 1);
+        assert_eq!(object.selection.caret.byte, 3);
+        assert!(object.dragging);
+        assert_eq!(object.preedit, "入力");
+        assert_eq!(object.preedit_anchor_byte, 3);
+    }
+
+    #[test]
+    fn scrolled_field_hit_testing_maps_to_visible_unicode_text() {
+        let field = TextField::new(State::new(
+            StateId::new(7202),
+            "日本 e\u{301} text ".repeat(20),
+        ))
+        .autofocus(true);
+        let mut object = TextFieldRenderObject::from_view(&field);
+        object.layout(LayoutConstraints::tight(150.0, 32.0));
+        let caret = object.text_input_state().cursor_rect;
+        let position = hit_test_mouse(&object, caret.origin.x as i32, 10).unwrap();
+        assert_eq!(position.byte, object.text_document.len());
+        let middle = hit_test_mouse(&object, 80, 10).unwrap();
+        assert!(middle.byte > 0);
+        assert_eq!(object.text_document.clamp_position(middle), middle);
+    }
 
     #[test]
     fn physical_space_and_text_insert_one_space() {

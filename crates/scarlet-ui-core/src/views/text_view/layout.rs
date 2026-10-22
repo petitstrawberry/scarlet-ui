@@ -37,6 +37,11 @@ pub struct TextViewLayout {
     pub(crate) viewport_height: f32,
     pub(crate) text_origin_x: f32,
     pub(crate) scroll: TextViewScroll,
+    document: TextDocument,
+    wrap_mode: WrapMode,
+    size: Size,
+    show_line_numbers: bool,
+    font_revision: usize,
 }
 
 /// A measured visual line fragment.
@@ -57,6 +62,8 @@ pub struct VisualLine {
     pub width: f32,
     text: String,
     document_to_display_offsets: Vec<usize>,
+    prefix_widths: Vec<f32>,
+    caret_stops: Vec<(usize, f32)>,
 }
 
 impl TextViewLayout {
@@ -84,13 +91,16 @@ impl TextViewLayout {
         scroll: TextViewScroll,
         show_line_numbers: bool,
     ) -> Self {
-        let line_height = graphics::line_height_sized(font_size) as f32;
+        let line_height = graphics::line_height_sized(font_size).max(1) as f32;
         let gutter_width = if show_line_numbers {
             let digits = document.line_count().max(1).to_string();
             graphics::measure_text_sized(&digits, font_size).0 as f32 + GUTTER_PADDING
         } else {
             0.0
         };
+        // Gutter measurement can discover fallback fonts too. Capture the
+        // complete stack after that work so glyph and cached caret widths agree.
+        let measure = graphics::TextMeasure::new(&document.as_str(), font_size);
         let text_origin_x = padding + gutter_width;
         let viewport_width = (size.width - padding * 2.0 - gutter_width).max(1.0);
         let viewport_height = (size.height - padding * 2.0).max(1.0);
@@ -101,10 +111,11 @@ impl TextViewLayout {
                 0,
                 0..0,
                 String::new(),
-                text_origin_x,
+                text_origin_x - scroll.x,
                 padding,
                 0.0,
                 alloc::vec![0],
+                &measure,
             ));
         } else {
             for logical_line in 0..document.line_count() {
@@ -121,17 +132,17 @@ impl TextViewLayout {
                         display.to_string(),
                         text_origin_x - scroll.x,
                         padding,
-                        font_size,
+                        &measure,
                     ),
                     WrapMode::Soft => push_wrapped_lines(
                         &mut visual_lines,
                         logical_line,
                         range.start,
                         display,
-                        text_origin_x,
+                        text_origin_x - scroll.x,
                         padding,
                         viewport_width,
-                        font_size,
+                        &measure,
                     ),
                 }
             }
@@ -169,7 +180,68 @@ impl TextViewLayout {
             viewport_height,
             text_origin_x,
             scroll,
+            document: document.clone(),
+            wrap_mode,
+            size,
+            show_line_numbers,
+            font_revision: measure.font_revision(),
         }
+    }
+
+    /// Reuse measured text unless a layout input actually changed. Scrolling
+    /// changes coordinates and the visible range, never glyph measurement.
+    pub(crate) fn matches(
+        &self,
+        document: &TextDocument,
+        font_size: f32,
+        padding: f32,
+        wrap_mode: WrapMode,
+        size: Size,
+        show_line_numbers: bool,
+    ) -> bool {
+        self.document.same_revision(document)
+            && self.font_size == font_size
+            && self.padding == padding
+            && self.wrap_mode == wrap_mode
+            && (wrap_mode == WrapMode::None || self.size.width == size.width)
+            && self.show_line_numbers == show_line_numbers
+            && self.font_revision == graphics::text_font_revision()
+    }
+
+    pub(crate) fn set_viewport(&mut self, size: Size) {
+        if self.size == size {
+            return;
+        }
+        self.size = size;
+        self.viewport_width = (size.width - self.padding * 2.0 - self.gutter_width).max(1.0);
+        self.viewport_height = (size.height - self.padding * 2.0).max(1.0);
+        if self.wrap_mode == WrapMode::Soft {
+            self.content_width = self.viewport_width;
+        }
+        self.visible_lines = visible_range(
+            self.scroll.y - self.padding + BORDER_WIDTH,
+            (size.height - BORDER_WIDTH * 2.0).max(1.0),
+            self.line_height,
+            self.visual_lines.len(),
+        );
+    }
+
+    pub(crate) fn set_scroll(&mut self, requested: TextViewScroll) -> TextViewScroll {
+        let scroll = self.clamp_scroll(requested);
+        if scroll != self.scroll {
+            for (index, line) in self.visual_lines.iter_mut().enumerate() {
+                line.x = self.text_origin_x - scroll.x;
+                line.y = self.padding + index as f32 * self.line_height - scroll.y;
+            }
+            self.scroll = scroll;
+            self.visible_lines = visible_range(
+                scroll.y - self.padding + BORDER_WIDTH,
+                (self.size.height - BORDER_WIDTH * 2.0).max(1.0),
+                self.line_height,
+                self.visual_lines.len(),
+            );
+        }
+        scroll
     }
 
     /// Convert a widget-local point to a text position.
@@ -188,7 +260,7 @@ impl TextViewLayout {
         let visual_index = ((point.y + self.scroll.y - self.padding) / self.line_height) as usize;
         let line = self.visual_lines.get(visual_index)?;
         let local_x = (point.x - line.x).max(0.0);
-        Some(TextPosition::new(byte_for_x(line, local_x, self.font_size)))
+        Some(TextPosition::new(byte_for_x(line, local_x)))
     }
 
     /// Compute the caret rectangle for a text position.
@@ -205,14 +277,10 @@ impl TextViewLayout {
         let byte = position.byte.min(document.len());
         let line_index = self
             .visual_lines
-            .iter()
-            .position(|line| line.contains_byte(byte))
-            .unwrap_or_else(|| self.visual_lines.len().saturating_sub(1));
+            .partition_point(|line| line.text_range.end < byte)
+            .min(self.visual_lines.len().saturating_sub(1));
         let line = &self.visual_lines[line_index];
-        let clamped = byte.clamp(line.text_range.start, line.text_range.end);
-        let prefix_end = line.display_byte_for_document_byte(clamped);
-        let prefix = clamp_str_prefix(&line.text, prefix_end);
-        let x = line.x + graphics::measure_text_sized(prefix, self.font_size).0 as f32;
+        let x = line.x + line.width_to_byte(byte);
         Rect::from_xywh(x, line.y, 1.0, self.line_height)
     }
 
@@ -226,16 +294,14 @@ impl TextViewLayout {
     ///
     /// Zero-based logical line index.
     pub fn line_index_at_byte(&self, byte_offset: usize) -> usize {
+        let index = self
+            .visual_lines
+            .partition_point(|line| line.text_range.end < byte_offset)
+            .min(self.visual_lines.len().saturating_sub(1));
         self.visual_lines
-            .iter()
-            .find(|line| line.contains_byte(byte_offset))
+            .get(index)
             .map(|line| line.logical_line)
-            .unwrap_or_else(|| {
-                self.visual_lines
-                    .last()
-                    .map(|line| line.logical_line)
-                    .unwrap_or(0)
-            })
+            .unwrap_or(0)
     }
 
     /// Resolve a byte offset on a specific visual line at a given x position.
@@ -256,7 +322,7 @@ impl TextViewLayout {
     pub(crate) fn byte_at_line_x(&self, line_index: usize, x: f32) -> Option<usize> {
         let line = self.visual_lines.get(line_index)?;
         let local_x = (x - line.x).max(0.0);
-        Some(byte_for_x(line, local_x, self.font_size))
+        Some(byte_for_x(line, local_x))
     }
 
     /// Clamp a scroll offset to the measured content bounds.
@@ -289,8 +355,17 @@ impl VisualLine {
         y: f32,
         width: f32,
         document_to_display_offsets: Vec<usize>,
+        measure: &graphics::TextMeasure,
     ) -> Self {
-        Self {
+        let mut prefix_widths = alloc::vec![0.0; text.len() + 1];
+        let mut advance = 0.0;
+        for (byte, ch) in text.char_indices() {
+            let start_width = graphics::TextMeasure::rounded_width(advance);
+            prefix_widths[byte..byte + ch.len_utf8()].fill(start_width);
+            advance += measure.advance(ch);
+            prefix_widths[byte + ch.len_utf8()] = graphics::TextMeasure::rounded_width(advance);
+        }
+        let mut line = Self {
             logical_line,
             text_range,
             x,
@@ -298,7 +373,23 @@ impl VisualLine {
             width,
             text,
             document_to_display_offsets,
+            prefix_widths,
+            caret_stops: Vec::new(),
+        };
+        line.width = *line.prefix_widths.last().unwrap_or(&0.0);
+        line.caret_stops.push((line.text_range.start, 0.0));
+        for (offset, grapheme) in line.text.grapheme_indices(true) {
+            let end = offset + grapheme.len();
+            line.caret_stops.push((
+                line.document_byte_for_display_byte(end),
+                line.prefix_widths[end],
+            ));
         }
+        line
+    }
+
+    pub(crate) fn width_to_byte(&self, byte: usize) -> f32 {
+        self.prefix_widths[self.display_byte_for_document_byte(byte)]
     }
 
     pub(crate) fn text(&self) -> &str {
@@ -328,9 +419,7 @@ impl VisualLine {
         let display_byte = display_byte.min(self.text.len());
         let local = self
             .document_to_display_offsets
-            .iter()
-            .position(|offset| *offset >= display_byte)
-            .unwrap_or_else(|| self.text_range.end.saturating_sub(self.text_range.start));
+            .partition_point(|offset| *offset < display_byte);
         self.text_range.start + local.min(self.text_range.end.saturating_sub(self.text_range.start))
     }
 }
@@ -342,19 +431,18 @@ fn push_visual_line(
     text: String,
     x: f32,
     y: f32,
-    font_size: f32,
+    measure: &graphics::TextMeasure,
 ) {
-    let (display_text, document_to_display_offsets) =
-        expand_tabs_with_offsets(&text, DEFAULT_TAB_WIDTH);
-    let width = graphics::measure_text_sized(&display_text, font_size).0 as f32;
+    let (display_text, offsets) = expand_tabs_with_offsets(&text, DEFAULT_TAB_WIDTH);
     lines.push(VisualLine::new(
         logical_line,
         range,
         display_text,
         x,
         y,
-        width,
-        document_to_display_offsets,
+        0.0,
+        offsets,
+        measure,
     ));
 }
 
@@ -366,7 +454,7 @@ fn push_wrapped_lines(
     x: f32,
     y: f32,
     max_width: f32,
-    font_size: f32,
+    measure: &graphics::TextMeasure,
 ) {
     if text.is_empty() {
         push_visual_line(
@@ -376,102 +464,90 @@ fn push_wrapped_lines(
             String::new(),
             x,
             y,
-            font_size,
+            measure,
         );
         return;
     }
-
-    let mut start = 0usize;
-    while start < text.len() {
-        let end = wrapped_line_end(&text[start..], max_width, font_size) + start;
-        let end = if end == start {
-            next_grapheme_end(text, start)
-        } else {
-            end
-        };
-        let fragment = text[start..end].to_string();
+    // Measure scalars once. Each candidate row then visits advances, rather
+    // than repeatedly expanding and remeasuring its growing text prefix.
+    let mut advances = Vec::with_capacity(text.len());
+    let graphemes: Vec<_> = text
+        .grapheme_indices(true)
+        .map(|(start, grapheme)| {
+            let advance_start = advances.len();
+            for ch in grapheme.chars() {
+                let (ch, repeats) = if ch == '\t' {
+                    (' ', DEFAULT_TAB_WIDTH)
+                } else {
+                    (ch, 1)
+                };
+                advances.extend(core::iter::repeat_n(measure.advance(ch), repeats));
+            }
+            (
+                start,
+                start + grapheme.len(),
+                grapheme == " " || grapheme == "\t",
+                advance_start..advances.len(),
+            )
+        })
+        .collect();
+    let mut start = 0;
+    while start < graphemes.len() {
+        let mut end = start;
+        let mut last_space = None;
+        let mut advance = 0.0;
+        while end < graphemes.len() {
+            for width in &advances[graphemes[end].3.clone()] {
+                advance += width;
+            }
+            if graphics::TextMeasure::rounded_width(advance) > max_width && end > start {
+                end = last_space.unwrap_or(end);
+                break;
+            }
+            if graphemes[end].2 {
+                last_space = Some(end + 1);
+            }
+            end += 1;
+        }
+        let byte_start = graphemes[start].0;
+        let byte_end = graphemes[end - 1].1;
         push_visual_line(
             lines,
             logical_line,
-            line_start + start..line_start + end,
-            fragment,
+            line_start + byte_start..line_start + byte_end,
+            text[byte_start..byte_end].to_string(),
             x,
             y,
-            font_size,
+            measure,
         );
         start = end;
-        while start < text.len() && text[start..].starts_with(' ') {
-            start += 1;
-        }
     }
 }
 
-fn wrapped_line_end(text: &str, max_width: f32, font_size: f32) -> usize {
-    let mut last_fit = 0usize;
-    let mut last_space_fit = 0usize;
-    for (offset, grapheme) in text.grapheme_indices(true) {
-        let end = offset + grapheme.len();
-        let width = graphics::measure_text_sized(
-            &expand_tabs(&text[..end], DEFAULT_TAB_WIDTH),
-            font_size,
-        )
-        .0 as f32;
-        if width > max_width && last_fit > 0 {
-            return if last_space_fit > 0 {
-                last_space_fit
-            } else {
-                last_fit
-            };
-        }
-        last_fit = end;
-        if grapheme == " " || grapheme == "\t" {
-            last_space_fit = end;
-        }
-    }
-    text.len()
-}
-
-fn next_grapheme_end(text: &str, start: usize) -> usize {
-    text[start..]
-        .grapheme_indices(true)
-        .map(|(offset, grapheme)| start + offset + grapheme.len())
-        .next()
-        .unwrap_or(text.len())
-}
-
-fn byte_for_x(line: &VisualLine, x: f32, font_size: f32) -> usize {
+fn byte_for_x(line: &VisualLine, x: f32) -> usize {
     if x <= 0.0 {
         return line.text_range.start;
     }
-    let mut previous_byte = line.text_range.start;
-    let mut previous_width = 0.0;
-    for (offset, grapheme) in line.text.grapheme_indices(true) {
-        let end = offset + grapheme.len();
-        let width = graphics::measure_text_sized(&line.text[..end], font_size).0 as f32;
-        let midpoint = previous_width + (width - previous_width) * 0.5;
-        if x < midpoint {
-            return previous_byte;
+    let mut left = 0;
+    let mut right = line.caret_stops.len() - 1;
+    while left < right {
+        let middle = left + (right - left) / 2;
+        let a = line.caret_stops[middle].1;
+        let b = line.caret_stops[middle + 1].1;
+        if x >= a + (b - a) * 0.5 {
+            left = middle + 1;
+        } else {
+            right = middle;
         }
-        // VisualLine.text contains expanded tabs, so map display byte offsets back to the
-        // original document bytes. Hit testing inside an expanded tab resolves to the nearest
-        // original tab boundary, which is an accepted MVP limitation.
-        previous_byte = line.document_byte_for_display_byte(end);
-        previous_width = width;
     }
-    line.text_range.end
-}
-
-fn expand_tabs(text: &str, width: usize) -> String {
-    let (display_text, _) = expand_tabs_with_offsets(text, width);
-    display_text
+    line.caret_stops[left].0
 }
 
 fn expand_tabs_with_offsets(text: &str, width: usize) -> (String, Vec<usize>) {
-    let mut display_text = String::new();
+    let mut display_text = String::with_capacity(text.len());
     let mut offsets = alloc::vec![0usize; text.len() + 1];
-
     for (byte, character) in text.char_indices() {
-        offsets[byte] = display_text.len();
+        offsets[byte..byte + character.len_utf8()].fill(display_text.len());
         if character == '\t' {
             for _ in 0..width {
                 display_text.push(' ');
@@ -481,8 +557,6 @@ fn expand_tabs_with_offsets(text: &str, width: usize) -> (String, Vec<usize>) {
         }
         offsets[byte + character.len_utf8()] = display_text.len();
     }
-    offsets[text.len()] = display_text.len();
-
     (display_text, offsets)
 }
 
@@ -495,7 +569,7 @@ fn visible_range(
     if line_count == 0 {
         return 0..0;
     }
-    let first = libm::floorf(scroll_y / line_height).max(0.0) as usize;
+    let first = (libm::floorf(scroll_y / line_height).max(0.0) as usize).min(line_count);
     let end = libm::ceilf((scroll_y + viewport_height) / line_height)
         .max(first.saturating_add(1) as f32) as usize;
     first..end.min(line_count)
@@ -505,12 +579,4 @@ fn strip_line_ending(text: &str) -> &str {
     text.strip_suffix("\r\n")
         .or_else(|| text.strip_suffix('\n'))
         .unwrap_or(text)
-}
-
-fn clamp_str_prefix(text: &str, byte: usize) -> &str {
-    let mut byte = byte.min(text.len());
-    while byte > 0 && !text.is_char_boundary(byte) {
-        byte -= 1;
-    }
-    &text[..byte]
 }

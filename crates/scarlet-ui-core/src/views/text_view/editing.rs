@@ -209,6 +209,7 @@ pub(crate) fn handle_text_view_text_input(
             ..
         } => {
             render_object.set_preedit_state(text, *cursor_byte, *anchor_byte, spans);
+            ensure_caret_visible(view, render_object);
             true
         }
         Event::TextInputDeleteSurroundingText {
@@ -404,12 +405,13 @@ fn scroll_view(
     delta_x: i32,
     delta_y: i32,
 ) -> bool {
+    let previous = render_object.scroll;
     let requested = super::TextViewScroll {
         x: render_object.scroll.x - delta_x as f32,
         y: render_object.scroll.y - delta_y as f32,
     };
     set_scroll(view, render_object, requested);
-    true
+    render_object.scroll != previous
 }
 
 fn finish_caret_change(view: &TextView, render_object: &mut TextViewRenderObject) {
@@ -417,8 +419,14 @@ fn finish_caret_change(view: &TextView, render_object: &mut TextViewRenderObject
     view.selection_state().set(render_object.selection);
 }
 
-fn ensure_caret_visible(view: &TextView, render_object: &mut TextViewRenderObject) {
-    let caret = render_object.cursor_rect();
+pub(super) fn ensure_caret_visible(view: &TextView, render_object: &mut TextViewRenderObject) {
+    let mut caret = render_object.cursor_rect();
+    if !render_object.preedit.is_empty() {
+        let prefix =
+            super::preedit_prefix(&render_object.preedit, render_object.preedit_cursor_byte);
+        caret.origin.x +=
+            crate::graphics::measure_text_sized(prefix, render_object.font_size).0 as f32;
+    }
     let clip_left = BORDER_WIDTH;
     let clip_top = BORDER_WIDTH;
     let clip_right = (render_object.size.width - BORDER_WIDTH).max(clip_left);
@@ -458,8 +466,7 @@ fn set_scroll(
     if clamped == render_object.scroll {
         return;
     }
-    render_object.scroll = clamped;
-    render_object.compute_layout();
+    render_object.scroll = render_object.layout.set_scroll(clamped);
     if let Some(scroll) = view.scroll.as_ref() {
         scroll.set(clamped);
     }
@@ -469,7 +476,7 @@ fn hit_test_mouse(render_object: &TextViewRenderObject, x: i32, y: i32) -> Optio
     let point = Point::new(x as f32, y as f32);
     render_object
         .hit_test(point)
-        .map(|position| position.clamp_to_grapheme(&render_object.text_document.as_str()))
+        .map(|position| render_object.text_document.clamp_position(position))
 }
 
 fn word_selection(render_object: &TextViewRenderObject, byte: usize) -> TextSelection {
@@ -533,7 +540,7 @@ fn previous_grapheme(byte: usize, text: &str) -> Option<(usize, &str)> {
     text[..byte]
         .grapheme_indices(true)
         .map(|(offset, grapheme)| (offset, grapheme))
-        .last()
+        .next_back()
 }
 
 fn next_grapheme(byte: usize, text: &str) -> Option<(usize, &str)> {
@@ -682,8 +689,9 @@ fn copy_selection(view: &TextView, render_object: &TextViewRenderObject) -> bool
 }
 
 fn set_caret(render_object: &mut TextViewRenderObject, byte: usize, extend_selection: bool) {
-    let text = render_object.text_document.as_str();
-    let position = TextPosition::new(byte.min(text.len())).clamp_to_grapheme(&text);
+    let position = render_object
+        .text_document
+        .clamp_position(TextPosition::new(byte));
     if extend_selection {
         render_object.selection.caret = position;
     } else {
@@ -748,9 +756,8 @@ fn visual_line_index(render_object: &TextViewRenderObject, byte: usize) -> usize
     render_object
         .layout
         .visual_lines
-        .iter()
-        .position(|line| line.contains_byte(byte))
-        .unwrap_or_else(|| render_object.layout.visual_lines.len().saturating_sub(1))
+        .partition_point(|line| line.text_range.end < byte)
+        .min(render_object.layout.visual_lines.len().saturating_sub(1))
 }
 
 fn update_desired_x(render_object: &mut TextViewRenderObject) {
@@ -762,7 +769,7 @@ fn previous_grapheme_boundary(text: &str, byte: usize) -> Option<usize> {
     text[..byte]
         .grapheme_indices(true)
         .map(|(offset, _)| offset)
-        .last()
+        .next_back()
 }
 
 fn next_grapheme_boundary(text: &str, byte: usize) -> Option<usize> {

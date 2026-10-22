@@ -206,6 +206,7 @@ impl TextMetricsKey {
 
 struct TextMetricsEntry {
     key: TextMetricsKey,
+    text: alloc::string::String,
     value: (u32, u32),
 }
 
@@ -232,9 +233,14 @@ impl TextMetricsCache {
     where
         F: FnOnce() -> (u32, u32),
     {
+        // Large editor lines keep their own metrics. Bound retained string
+        // storage here as well as the number of entries.
+        if text.len() > 4096 {
+            return compute();
+        }
         let key = TextMetricsKey::from_text(text, font_size, font_stack_id);
         for entry in &self.entries {
-            if entry.key == key {
+            if entry.key == key && entry.text == text {
                 return entry.value;
             }
         }
@@ -248,7 +254,11 @@ impl TextMetricsCache {
             }
         }
 
-        self.entries.push(TextMetricsEntry { key, value: result });
+        self.entries.push(TextMetricsEntry {
+            key,
+            text: text.into(),
+            value: result,
+        });
         result
     }
 }
@@ -871,6 +881,54 @@ pub fn measure_text_sized(text: &str, font_size_px: f32) -> (u32, u32) {
     }
 }
 
+/// Resolve fallback coverage once for a layout, then measure each scalar once.
+/// Keep fractional advances until the end of each prefix, matching drawing and
+/// `measure_text_uncached` rather than summing independently rounded widths.
+pub(crate) struct TextMeasure {
+    font_stack: Option<FontStack>,
+    font_size: f32,
+    font_revision: usize,
+}
+
+impl TextMeasure {
+    pub(crate) fn new(text: &str, font_size: f32) -> Self {
+        let fallback_revision = text_font_revision();
+        let font_stack = default_font_stack_for_text(text);
+        let font_revision = font_stack
+            .as_ref()
+            .map(FontStack::cache_id)
+            .unwrap_or(fallback_revision);
+        Self {
+            font_stack,
+            font_size,
+            font_revision,
+        }
+    }
+
+    pub(crate) fn font_revision(&self) -> usize {
+        self.font_revision
+    }
+
+    pub(crate) fn advance(&self, ch: char) -> f32 {
+        if let Some(stack) = &self.font_stack {
+            let (font, _, render_ch) = select_font_for_char(ch, stack);
+            let scaled = font.as_scaled(PxScale::from(self.font_size));
+            scaled.h_advance(scaled.glyph_id(render_ch))
+        } else {
+            ceil_i32(self.font_size.max(1.0) * 0.60).max(1) as f32
+        }
+    }
+
+    pub(crate) fn rounded_width(advance: f32) -> f32 {
+        ceil_i32(advance).max(0) as f32
+    }
+}
+
+pub(crate) fn text_font_revision() -> usize {
+    load_fonts_from_rootfs_once();
+    DEFAULT_FONT.lock().cache_id
+}
+
 /// Measure text using an explicit font stack.
 ///
 /// # Arguments
@@ -1383,6 +1441,26 @@ fn contains_rounded_rect(rect: Rect, corner_radius: f32, px: f32, py: f32) -> bo
 #[cfg(test)]
 mod text_run_tests {
     use super::*;
+
+    #[test]
+    fn metrics_cache_verifies_text_when_hashes_collide() {
+        let mut cache = TextMetricsCache::new(8);
+        assert!(
+            TextMetricsKey::from_text("Aa", 14.0, 1) == TextMetricsKey::from_text("BB", 14.0, 1)
+        );
+        assert_eq!(cache.get_or_compute("Aa", 14.0, 1, || (11, 14)), (11, 14));
+        assert_eq!(cache.get_or_compute("BB", 14.0, 1, || (17, 14)), (17, 14));
+        assert_eq!(
+            cache.get_or_compute("Aa", 14.0, 1, || panic!("cache miss")),
+            (11, 14)
+        );
+        cache.get_or_compute(&"x".repeat(4097), 14.0, 1, || (4097, 14));
+        assert_eq!(
+            cache.entries.len(),
+            2,
+            "oversized strings must not be retained"
+        );
+    }
     fn glyph(bytes: usize) -> RasterizedGlyph {
         RasterizedGlyph {
             key: GlyphRasterKey {
