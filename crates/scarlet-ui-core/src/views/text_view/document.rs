@@ -1,82 +1,52 @@
-//! Text document model for the multi-line text view.
+//! Persistent text document model for the multi-line text view.
 
 use alloc::borrow::Cow;
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::ops::Range;
 
-use unicode_segmentation::UnicodeSegmentation;
+use once_cell::race::OnceBox;
+use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
 
-/// Persistent text document backed by a piece table.
+#[path = "document_tree.rs"]
+mod tree;
+
+/// Persistent UTF-8 document with indexed, shared text chunks.
 ///
-/// Provides efficient edit operations by keeping the original text immutable,
-/// appending inserted text to a separate buffer, and describing the visible
-/// document as an ordered list of pieces. The internal representation is hidden
-/// behind this abstraction so the implementation can change without affecting
-/// the public API.
+/// Local edits copy only the affected tree paths and adjoining chunks. Cloning
+/// for state or undo retains an immutable revision. APIs requiring a contiguous
+/// string materialize it lazily once per revision; edits and indexed queries do
+/// not require flattening the document.
 #[derive(Clone, Debug, Default)]
 pub struct TextDocument {
     snapshot: Arc<DocumentSnapshot>,
 }
 
-/// A revision owns one flattened view and line index. Cloning a document for
-/// state, undo history, or layout retains this revision without copying text.
 #[derive(Debug, Default)]
 struct DocumentSnapshot {
-    table: PieceTable,
-    text: Arc<str>,
-    line_starts: Vec<usize>,
-    grapheme_boundaries: Vec<usize>,
+    root: tree::Root,
+    // Race-safe, alloc-only initialization also supports legacy Scarlet. Two
+    // concurrent first readers may compute equivalent text; one result is kept.
+    flat: OnceBox<String>,
 }
 
 impl TextDocument {
-    /// Create an empty text document.
-    ///
-    /// # Returns
-    ///
-    /// A document containing no text.
+    /// Create an empty document. Its logical line count is zero.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Create a text document from a string slice.
-    ///
-    /// # Arguments
-    ///
-    /// * `text` - Initial UTF-8 text for the document.
-    ///
-    /// # Returns
-    ///
-    /// A document containing `text`.
+    /// Create a UTF-8 document. Newlines are retained exactly, including CRLF.
     pub fn from_str(text: &str) -> Self {
-        Self::from_table(PieceTable::from_str(text))
+        Self::from_root(tree::from_str(text))
     }
 
-    fn from_table(table: PieceTable) -> Self {
-        let text = if table.added.is_empty() && table.len == table.original.len() {
-            Arc::clone(&table.original)
-        } else {
-            Arc::from(table.as_str().as_ref())
-        };
-        let mut line_starts = Vec::new();
-        if !text.is_empty() {
-            line_starts.push(0);
-            line_starts.extend(
-                text.bytes()
-                    .enumerate()
-                    .filter_map(|(byte, ch)| (ch == b'\n').then_some(byte + 1)),
-            );
-        }
-        let mut grapheme_boundaries: Vec<_> =
-            text.grapheme_indices(true).map(|(byte, _)| byte).collect();
-        grapheme_boundaries.push(text.len());
+    fn from_root(root: tree::Root) -> Self {
         Self {
             snapshot: Arc::new(DocumentSnapshot {
-                table,
-                text,
-                line_starts,
-                grapheme_boundaries,
+                root,
+                flat: OnceBox::new(),
             }),
         }
     }
@@ -85,16 +55,76 @@ impl TextDocument {
         Arc::ptr_eq(&self.snapshot, &other.snapshot)
     }
 
+    fn chunk_at(&self, byte: usize) -> (&str, usize) {
+        self.snapshot
+            .root
+            .as_ref()
+            .map(|root| root.chunk_at(byte))
+            .unwrap_or(("", 0))
+    }
+
+    fn clamp_byte(&self, byte: usize) -> usize {
+        let byte = byte.min(self.len());
+        let (chunk, start) = self.chunk_at(byte);
+        start + clamp_byte_to_char_boundary(chunk, byte - start)
+    }
+
+    fn provide_grapheme_context(&self, cursor: &mut GraphemeCursor, end: usize) {
+        let (chunk, start) = self.chunk_at(end - 1);
+        cursor.provide_context(&chunk[..end - start], start);
+    }
+
+    fn is_grapheme_boundary(&self, byte: usize) -> bool {
+        let (chunk, start) = self.chunk_at(byte);
+        let mut cursor = GraphemeCursor::new(byte, self.len(), true);
+        loop {
+            match cursor.is_boundary(chunk, start) {
+                Ok(boundary) => return boundary,
+                Err(GraphemeIncomplete::PreContext(end)) => {
+                    self.provide_grapheme_context(&mut cursor, end)
+                }
+                Err(other) => unreachable!("valid chunk for boundary query: {other:?}"),
+            }
+        }
+    }
+
+    fn adjacent_grapheme_boundary(&self, byte: usize, forward: bool) -> usize {
+        let mut cursor = GraphemeCursor::new(byte, self.len(), true);
+        let (mut chunk, mut start) = self.chunk_at(if forward {
+            byte
+        } else {
+            byte.saturating_sub(1)
+        });
+        loop {
+            let result = if forward {
+                cursor.next_boundary(chunk, start)
+            } else {
+                cursor.prev_boundary(chunk, start)
+            };
+            match result {
+                Ok(Some(boundary)) => return boundary,
+                Ok(None) => return if forward { self.len() } else { 0 },
+                Err(GraphemeIncomplete::PreContext(end)) => {
+                    self.provide_grapheme_context(&mut cursor, end)
+                }
+                Err(GraphemeIncomplete::NextChunk) => {
+                    (chunk, start) = self.chunk_at(start + chunk.len())
+                }
+                Err(GraphemeIncomplete::PrevChunk) => (chunk, start) = self.chunk_at(start - 1),
+                Err(GraphemeIncomplete::InvalidOffset) => {
+                    unreachable!("valid chunk for grapheme traversal")
+                }
+            }
+        }
+    }
+
     pub(crate) fn clamp_position(&self, position: TextPosition) -> TextPosition {
-        let byte = clamp_byte_to_char_boundary(&self.snapshot.text, position.byte);
-        let boundaries = &self.snapshot.grapheme_boundaries;
-        let index = boundaries.partition_point(|boundary| *boundary < byte);
-        let next = boundaries.get(index).copied().unwrap_or(self.len());
-        let previous = index
-            .checked_sub(1)
-            .and_then(|index| boundaries.get(index))
-            .copied()
-            .unwrap_or(0);
+        let byte = self.clamp_byte(position.byte);
+        if byte == 0 || byte == self.len() || self.is_grapheme_boundary(byte) {
+            return TextPosition::new(byte);
+        }
+        let previous = self.adjacent_grapheme_boundary(byte, false);
+        let next = self.adjacent_grapheme_boundary(byte, true);
         TextPosition::new(if next - byte < byte - previous {
             next
         } else {
@@ -102,338 +132,162 @@ impl TextDocument {
         })
     }
 
-    /// Return the full document text.
-    ///
-    /// # Returns
-    ///
-    /// The document text as a borrowed or owned string.
+    /// Return contiguous text, materializing it once for this immutable revision.
+    /// Subsequent calls and document clones borrow the same cached text.
     pub fn as_str(&self) -> Cow<'_, str> {
-        Cow::Borrowed(&self.snapshot.text)
+        let Some(root) = &self.snapshot.root else {
+            return Cow::Borrowed("");
+        };
+        if let Some(text) = root.leaf_text() {
+            return Cow::Borrowed(text);
+        }
+        Cow::Borrowed(
+            self.snapshot
+                .flat
+                .get_or_init(|| {
+                    let mut text = String::with_capacity(root.bytes);
+                    root.append_range(0..root.bytes, &mut text);
+                    Box::new(text)
+                })
+                .as_str(),
+        )
     }
 
-    /// Return the document length in UTF-8 bytes.
-    ///
-    /// # Returns
-    ///
-    /// The number of bytes in the document.
+    /// Return the length in UTF-8 bytes.
     pub fn len(&self) -> usize {
-        self.snapshot.text.len()
+        self.snapshot.root.as_ref().map_or(0, |root| root.bytes)
     }
 
-    /// Return whether the document is empty.
-    ///
-    /// # Returns
-    ///
-    /// `true` when the document contains no bytes.
+    /// Whether the document contains no bytes.
     pub fn is_empty(&self) -> bool {
-        self.snapshot.text.is_empty()
+        self.snapshot.root.is_none()
     }
 
-    /// Return the number of logical lines in the document.
-    ///
-    /// # Returns
-    ///
-    /// `0` for an empty document, otherwise the newline count plus one.
+    /// Return zero for an empty document, otherwise the LF count plus one.
+    /// A trailing LF therefore creates a final empty logical line.
     pub fn line_count(&self) -> usize {
-        self.snapshot.line_starts.len()
+        self.snapshot
+            .root
+            .as_ref()
+            .map_or(0, |root| root.newlines + 1)
     }
 
-    /// Return the byte range for a line.
-    ///
-    /// # Arguments
-    ///
-    /// * `line_index` - Zero-based line index.
-    ///
-    /// # Returns
-    ///
-    /// The byte range occupied by the line, or `None` when out of bounds.
+    /// Byte range of a logical line, including its line ending when present.
     pub fn line_range(&self, line_index: usize) -> Option<Range<usize>> {
-        let start = *self.snapshot.line_starts.get(line_index)?;
-        let end = self
-            .snapshot
-            .line_starts
-            .get(line_index + 1)
-            .copied()
-            .unwrap_or(self.len());
+        let root = self.snapshot.root.as_ref()?;
+        if line_index > root.newlines {
+            return None;
+        }
+        let start = if line_index == 0 {
+            0
+        } else {
+            root.newline_byte(line_index - 1) + 1
+        };
+        let end = if line_index == root.newlines {
+            root.bytes
+        } else {
+            root.newline_byte(line_index) + 1
+        };
         Some(start..end)
     }
 
-    /// Return the zero-based logical line containing a UTF-8 byte offset.
-    /// Offsets past the document clamp to its end; an empty document returns 0.
+    /// Zero-based logical line containing a byte; offsets past the end clamp.
+    /// Empty documents return zero. An LF byte belongs to its preceding line.
     pub fn line_index_at_byte(&self, byte: usize) -> usize {
         self.snapshot
-            .line_starts
-            .partition_point(|start| *start <= byte.min(self.len()))
-            .saturating_sub(1)
+            .root
+            .as_ref()
+            .map_or(0, |root| root.newlines_before(byte.min(root.bytes)))
     }
 
-    /// Return the text for a line.
-    ///
-    /// # Arguments
-    ///
-    /// * `line_index` - Zero-based line index.
-    ///
-    /// # Returns
-    ///
-    /// The line text, or `None` when out of bounds.
+    /// Return one logical line, borrowing an existing contiguous slice when
+    /// possible. A line crossing chunks copies that line without flattening the
+    /// rest of the document. Once as_str is cached every line can be borrowed.
     pub fn line_text(&self, line_index: usize) -> Option<Cow<'_, str>> {
-        Some(Cow::Borrowed(
-            &self.snapshot.text[self.line_range(line_index)?],
-        ))
+        let range = self.line_range(line_index)?;
+        if let Some(text) = self.snapshot.flat.get() {
+            return Some(Cow::Borrowed(&text[range]));
+        }
+        let (chunk, start) = self.chunk_at(range.start);
+        if range.end <= start + chunk.len() {
+            return Some(Cow::Borrowed(
+                &chunk[range.start - start..range.end - start],
+            ));
+        }
+        let mut text = String::with_capacity(range.len());
+        self.snapshot.root.as_ref()?.append_range(range, &mut text);
+        Some(Cow::Owned(text))
     }
 
-    /// Insert text at a byte position.
-    ///
-    /// # Arguments
-    ///
-    /// * `at` - Target byte position. Invalid UTF-8 boundaries are clamped.
-    /// * `text` - Text to insert.
-    ///
-    /// # Returns
-    ///
-    /// The edited document and the edit delta describing the insertion.
+    /// Insert at a byte offset, clamped down to a Unicode scalar boundary.
     pub fn insert(&self, at: TextPosition, text: &str) -> (Self, EditDelta) {
         self.replace(at.byte..at.byte, text)
     }
 
-    /// Delete a byte range.
-    ///
-    /// # Arguments
-    ///
-    /// * `range` - Byte range to delete. Invalid UTF-8 boundaries are clamped.
-    ///
-    /// # Returns
-    ///
-    /// The edited document and the edit delta describing the deletion.
+    /// Delete a range, clamping each endpoint down to a scalar boundary.
     pub fn delete(&self, range: Range<usize>) -> (Self, EditDelta) {
         self.replace(range, "")
     }
 
-    /// Replace a byte range with new text.
-    ///
-    /// # Arguments
-    ///
-    /// * `range` - Byte range to replace. Invalid UTF-8 boundaries are clamped.
-    /// * `text` - Replacement text.
-    ///
-    /// # Returns
-    ///
-    /// The edited document and the edit delta describing the replacement.
+    fn range_equals(&self, range: Range<usize>, text: &str) -> bool {
+        if range.len() != text.len() {
+            return false;
+        }
+        let mut byte = range.start;
+        while byte < range.end {
+            let (chunk, start) = self.chunk_at(byte);
+            let end = range.end.min(start + chunk.len());
+            if chunk.as_bytes()[byte - start..end - start]
+                != text.as_bytes()[byte - range.start..end - range.start]
+            {
+                return false;
+            }
+            byte = end;
+        }
+        true
+    }
+
+    /// Replace bytes without normalizing text or forcing grapheme-aligned edits.
+    /// Endpoints clamp down to scalar boundaries; reversed ranges become empty
+    /// at their clamped start. A byte-identical replacement retains its revision.
     pub fn replace(&self, range: Range<usize>, text: &str) -> (Self, EditDelta) {
-        let start = clamp_byte_to_char_boundary(&self.snapshot.text, range.start);
-        let end = clamp_byte_to_char_boundary(&self.snapshot.text, range.end).max(start);
+        let start = self.clamp_byte(range.start);
+        let end = self.clamp_byte(range.end).max(start);
         let range = start..end;
         let delta = EditDelta {
             replaced_range: range.clone(),
             inserted: String::from(text),
         };
-        if self.snapshot.text[range.clone()] == *text {
+        if self.range_equals(range.clone(), text) {
             return (self.clone(), delta);
         }
-        let mut table = self.snapshot.table.clone();
-        table.delete_range(range.clone());
-        table.len -= range.len();
-        if !text.is_empty() {
-            let added_start = table.added.len();
-            Arc::make_mut(&mut table.added).push_str(text);
-            table.insert_piece(
-                start,
-                Piece {
-                    source: PieceSource::Added,
-                    start: added_start,
-                    length: text.len(),
-                },
-            );
-            table.len += text.len();
-        }
-        table.prune_empty_pieces();
-        (Self::from_table(table), delta)
+        let (before, rest) = tree::split(self.snapshot.root.clone(), start);
+        let (_, after) = tree::split(rest, end - start);
+        let root = tree::concat(tree::concat(before, tree::from_str(text)), after);
+        (Self::from_root(root), delta)
     }
 
-    /// Convert a character index to a byte offset.
-    ///
-    /// # Arguments
-    ///
-    /// * `char_index` - Character index to convert. Values past the end clamp.
-    ///
-    /// # Returns
-    ///
-    /// The corresponding UTF-8 byte offset.
+    /// Convert a Unicode scalar index to a byte offset, clamping past the end.
     pub fn char_to_byte(&self, char_index: usize) -> usize {
-        let text = self.as_str();
-        text.char_indices()
-            .map(|(byte, _)| byte)
-            .nth(char_index)
-            .unwrap_or(text.len())
+        self.snapshot
+            .root
+            .as_ref()
+            .map_or(0, |root| root.char_to_byte(char_index))
     }
 
-    /// Convert a byte offset to a character index.
-    ///
-    /// # Arguments
-    ///
-    /// * `byte_offset` - Byte offset to convert. Invalid boundaries clamp down.
-    ///
-    /// # Returns
-    ///
-    /// The corresponding character index.
+    /// Convert a byte to a Unicode scalar index; invalid boundaries clamp down.
     pub fn byte_to_char(&self, byte_offset: usize) -> usize {
-        let text = self.as_str();
-        let byte = clamp_byte_to_char_boundary(&text, byte_offset);
-        text[..byte].chars().count()
+        let byte = self.clamp_byte(byte_offset);
+        self.snapshot
+            .root
+            .as_ref()
+            .map_or(0, |root| root.byte_to_char(byte))
     }
 }
 
-#[derive(Clone, Debug, Default)]
-struct PieceTable {
-    original: Arc<str>,
-    added: Arc<String>,
-    pieces: Vec<Piece>,
-    len: usize,
-}
-
-impl PieceTable {
-    fn from_str(text: &str) -> Self {
-        let mut pieces = Vec::new();
-        if !text.is_empty() {
-            pieces.push(Piece {
-                source: PieceSource::Original,
-                start: 0,
-                length: text.len(),
-            });
-        }
-        Self {
-            original: Arc::from(text),
-            added: Arc::new(String::new()),
-            pieces,
-            len: text.len(),
-        }
-    }
-
-    fn as_str(&self) -> Cow<'_, str> {
-        if self.pieces.is_empty() {
-            return Cow::Borrowed("");
-        }
-        if self.added.is_empty()
-            && self.pieces.len() == 1
-            && self.pieces[0].source == PieceSource::Original
-            && self.pieces[0].start == 0
-            && self.pieces[0].length == self.original.len()
-        {
-            return Cow::Borrowed(&self.original);
-        }
-
-        let mut text = String::with_capacity(self.len);
-        for piece in &self.pieces {
-            text.push_str(self.piece_text(*piece));
-        }
-        Cow::Owned(text)
-    }
-
-    fn insert_piece(&mut self, byte_offset: usize, insertion: Piece) {
-        if self.pieces.is_empty() {
-            self.pieces.push(insertion);
-            return;
-        }
-
-        let (index, inner_offset) = self.find_piece(byte_offset);
-        if index == self.pieces.len() {
-            self.pieces.push(insertion);
-            return;
-        }
-
-        if inner_offset == 0 {
-            self.pieces.insert(index, insertion);
-            return;
-        }
-
-        let piece = self.pieces[index];
-        if inner_offset >= piece.length {
-            self.pieces.insert(index + 1, insertion);
-            return;
-        }
-
-        let left = Piece {
-            length: inner_offset,
-            ..piece
-        };
-        let right = Piece {
-            start: piece.start + inner_offset,
-            length: piece.length - inner_offset,
-            ..piece
-        };
-        self.pieces.splice(index..=index, [left, insertion, right]);
-    }
-
-    fn delete_range(&mut self, range: Range<usize>) {
-        let mut next = Vec::with_capacity(self.pieces.len());
-        let mut cursor = 0usize;
-        for piece in &self.pieces {
-            let piece_start = cursor;
-            let piece_end = cursor + piece.length;
-            if piece_end <= range.start || piece_start >= range.end {
-                next.push(*piece);
-            } else {
-                if range.start > piece_start {
-                    next.push(Piece {
-                        source: piece.source,
-                        start: piece.start,
-                        length: range.start - piece_start,
-                    });
-                }
-                if range.end < piece_end {
-                    let right_offset = range.end - piece_start;
-                    next.push(Piece {
-                        source: piece.source,
-                        start: piece.start + right_offset,
-                        length: piece_end - range.end,
-                    });
-                }
-            }
-            cursor = piece_end;
-        }
-        self.pieces = next;
-    }
-
-    fn find_piece(&self, byte_offset: usize) -> (usize, usize) {
-        let mut cursor = 0usize;
-        for (index, piece) in self.pieces.iter().enumerate() {
-            let end = cursor + piece.length;
-            if byte_offset < end {
-                return (index, byte_offset - cursor);
-            }
-            if byte_offset == end {
-                return (index, piece.length);
-            }
-            cursor = end;
-        }
-        (self.pieces.len(), 0)
-    }
-
-    fn piece_text(&self, piece: Piece) -> &str {
-        let source = match piece.source {
-            PieceSource::Original => self.original.as_ref(),
-            PieceSource::Added => self.added.as_str(),
-        };
-        &source[piece.start..piece.start + piece.length]
-    }
-
-    fn prune_empty_pieces(&mut self) {
-        self.pieces.retain(|piece| piece.length > 0);
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PieceSource {
-    Original,
-    Added,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Piece {
-    source: PieceSource,
-    start: usize,
-    length: usize,
-}
+#[cfg(test)]
+#[path = "document_tests.rs"]
+mod tests;
 
 /// A UTF-8 byte position in a text document.
 ///

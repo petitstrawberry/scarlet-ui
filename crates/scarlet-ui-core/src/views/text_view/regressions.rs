@@ -202,6 +202,9 @@ fn scrolling_and_state_rebuild_reuse_document_and_layout_allocations() {
         let mut object = render_object_with_size(&view, 320.0, 180.0);
         let layout_storage = object.layout.visual_lines.as_ptr();
         let mut retained_storage = true;
+        // macOS lazily allocates the subscriber mutex on its first lock.
+        // Initialize notification before measuring steady-state UI work.
+        scroll.set(TextViewScroll::default());
         let work = crate::testing::alloc_counter::measure_allocations(|| {
             for index in 0..20 {
                 scroll.set(TextViewScroll {

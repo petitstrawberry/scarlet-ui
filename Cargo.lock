@@ -1928,6 +1928,7 @@ dependencies = [
  "inventory",
  "libloading 0.9.0",
  "libm",
+ "once_cell",
  "proc-macro2",
  "quote",
  "raw-window-handle",

@@ -174,7 +174,48 @@ document-bound scroll-state change, update and unchanged-size layout with an
 unchanged font revision—not wheel dispatch, paint recording or application
 rebuilds. A separate mounted-pipeline test covers real wheel-triggered rebuilding.
 
-Caches remain proportional to document size. Edits rebuild indices and layout;
-scrolling updates row coordinates in O(visual rows). A visible unwrapped line is
+Caches remain proportional to document size. At the revision measured above,
+edits rebuilt indices and layout; scrolling updates row coordinates in O(visual
+rows). A visible unwrapped line is
 submitted whole to the renderer, so these recordings establish no GPU performance
 claim for long clipped lines. Direct-touch scrolling and momentum were not added.
+
+## Document editing follow-up (2026-10-22, macOS)
+
+`TextDocument` now stores shared, balanced UTF-8 chunks with cached byte, scalar
+and newline counts. An edit copies the affected paths and adjoining leaf text;
+undo snapshots retain the previous tree. Indexed queries and grapheme clamping
+do not require flattening. `as_str()` still materializes a contiguous string once
+per revision and shares that cache with clones. Grapheme boundaries are resolved
+across chunks, including combining marks, ZWJ emoji, regional indicators and CRLF.
+
+The same `text_document_edit_benchmark` workload was compiled against the previous
+committed `document.rs` and the new module. This used Apple M3 Pro, macOS arm64,
+Scarlet rustc `1.94.0-nightly (71dd04258 2026-10-04)`, release optimization and the
+Apple clang linker. Each sample performs eight middle-of-document edits, retains
+four undo snapshots, and queries line counts, line indices and cursor boundaries.
+Seven samples are recorded; String-reference checks and checksums run outside
+timing. Both versions produced identical final checksums and retained text.
+
+Median milliseconds per edit:
+
+| UTF-8 input | Previous, edit/queries | New, edit/queries | Previous, also `as_str()` | New, also `as_str()` |
+| --- | ---: | ---: | ---: | ---: |
+| 1,000 lines / 76 KB | 0.901 | 0.0021 | 0.866 | 0.0040 |
+| 10,000 lines / 760 KB | 9.392 | 0.0027 | 8.847 | 0.0253 |
+| 100,000 lines / 7.6 MB | 95.921 | 0.0042 | 96.355 | 0.4271 |
+
+Run the current workload with:
+
+```sh
+cargo test -p scarlet-ui-core --release text_document_edit_benchmark \
+  -- --ignored --nocapture --test-threads=1
+```
+
+The baseline source, shared workload and logs are retained in the adjacent Scarlet
+checkout under `artifacts/desktop-quality-20261022/document-benchmark/` and
+`document-{before,after}.log`. These results measure document storage, not keypress
+latency or Scarlet native rendering. TextView still materializes text for font
+discovery and recomputes visual layout after edits; this change does not provide
+incremental layout. The document-bound scrolling regression continues to require
+zero allocations after the host's first subscriber-mutex initialization.

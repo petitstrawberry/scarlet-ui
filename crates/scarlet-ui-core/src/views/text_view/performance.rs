@@ -6,6 +6,109 @@ use super::*;
 use core::hint::black_box;
 use std::time::Instant;
 
+/// Same public-API workload before/after document storage changes. Snapshot
+/// retention is deliberately inside timing; String-reference checks are outside.
+#[test]
+#[ignore = "release document-core edit benchmark; no view layout or paint"]
+fn text_document_edit_benchmark() {
+    let lines =
+        std::env::var("DOCUMENT_BENCH_LINES").unwrap_or_else(|_| "1000,10000,100000".into());
+    let samples: usize = std::env::var("DOCUMENT_BENCH_SAMPLES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7);
+    let operations: usize = std::env::var("DOCUMENT_BENCH_EDITS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+    assert!(samples > 0 && operations > 0);
+    std::println!(
+        "document_bench_environment manifest={} debug_assertions={} retained_snapshots=4",
+        env!("CARGO_MANIFEST_DIR"),
+        cfg!(debug_assertions)
+    );
+    let clamp = |text: &str, byte: usize| {
+        let mut byte = byte.min(text.len());
+        while !text.is_char_boundary(byte) {
+            byte -= 1;
+        }
+        byte
+    };
+    let hash = |text: &str| {
+        text.bytes().fold(0xcbf29ce484222325u64, |h, b| {
+            (h ^ b as u64).wrapping_mul(0x100000001b3)
+        })
+    };
+    for count in lines.split(',').map(|s| s.parse::<usize>().unwrap()) {
+        let source =
+            "A local edit row: 日本語 e\u{301} 👩‍💻 🇯🇵; persistent snapshots\r\n".repeat(count);
+        let base = TextDocument::from_str(&source);
+        for materialize in [false, true] {
+            let mut timings = Vec::new();
+            let mut expected_hash = None;
+            for _ in 0..samples {
+                let mut document = base.clone();
+                let mut snapshots = Vec::new();
+                let mut edits = Vec::new();
+                // Generate String-reference edits before timing, including their
+                // intentionally non-character-aligned raw byte positions.
+                let mut reference = source.clone();
+                let mut expected_snapshots = Vec::new();
+                for edit in 0..operations {
+                    let raw_start = reference.len() / 2 + edit * 17;
+                    let raw_end = raw_start + edit % 5;
+                    let start = clamp(&reference, raw_start);
+                    let end = clamp(&reference, raw_end).max(start);
+                    let replacement = ["x", "\n日本", "e\u{301}", "", "👨‍👩‍👧‍👦"][edit % 5];
+                    edits.push((raw_start..raw_end, replacement));
+                    expected_snapshots.push(reference.clone());
+                    if expected_snapshots.len() > 4 {
+                        expected_snapshots.remove(0);
+                    }
+                    reference.replace_range(start..end, replacement);
+                }
+                let started = Instant::now();
+                for (range, replacement) in &edits {
+                    snapshots.push(document.clone());
+                    if snapshots.len() > 4 {
+                        snapshots.remove(0);
+                    }
+                    document = document.replace(range.clone(), replacement).0;
+                    black_box(document.line_count());
+                    black_box(document.line_index_at_byte(range.start));
+                    black_box(
+                        document.clamp_position(TextPosition::new(range.start + replacement.len())),
+                    );
+                    if materialize {
+                        black_box(document.as_str());
+                    }
+                }
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                assert_eq!(document.as_str(), reference);
+                assert_eq!(
+                    document.line_count(),
+                    reference.bytes().filter(|b| *b == b'\n').count()
+                        + usize::from(!reference.is_empty())
+                );
+                for (snapshot, expected) in snapshots.iter().zip(&expected_snapshots) {
+                    assert_eq!(snapshot.as_str(), expected.as_str());
+                }
+                let witness = hash(&document.as_str());
+                assert_eq!(*expected_hash.get_or_insert(witness), witness);
+                timings.push(elapsed_ms / operations as f64);
+            }
+            timings.sort_by(f64::total_cmp);
+            std::println!(
+                "document_edit lines={count} bytes={} materialize={materialize} edits={operations} samples={samples} checksum={:016x} median_ms_per_edit={:.6} p95_ms_per_edit={:.6} sample_ms_per_edit={timings:?}",
+                source.len(),
+                expected_hash.unwrap(),
+                timings[samples / 2],
+                timings[(samples * 95 / 100).min(samples - 1)]
+            );
+        }
+    }
+}
+
 #[test]
 #[ignore = "release CPU benchmark, not a timing assertion"]
 fn text_view_cpu_benchmark() {
