@@ -35,6 +35,7 @@ fn slider_dragging_state(value_state: &State<f32>) -> State<bool> {
 /// Slider View
 #[derive(Clone)]
 pub struct Slider {
+    enabled: bool,
     value: State<f32>,
     min: f32,
     max: f32,
@@ -47,12 +48,22 @@ impl Slider {
     pub fn new(value: State<f32>) -> Self {
         let dragging = slider_dragging_state(&value);
         Self {
+            enabled: true,
             value,
             min: 0.0,
             max: 1.0,
             dragging,
             on_change: None,
         }
+    }
+
+    /// Disable pointer and keyboard interaction.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Set minimum value
@@ -136,10 +147,12 @@ impl Slider {
 
 impl View for Slider {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
-            self.clone(),
-            SliderRenderObject::new(self.value.get(), self.min, self.max, self.dragging.get()),
-        ))
+        Box::new(RenderElement::new(self.clone(), {
+            let mut object =
+                SliderRenderObject::new(self.value.get(), self.min, self.max, self.dragging.get());
+            object.enabled = self.enabled;
+            object
+        }))
     }
 
     fn listenables(&self) -> Vec<&dyn crate::state::Listenable> {
@@ -160,6 +173,8 @@ impl View for Slider {
 /// - Fill: semantic primary color
 /// - Thumb: 16px surface circle with a hairline
 pub struct SliderRenderObject {
+    enabled: bool,
+    focused: bool,
     value: f32,
     min: f32,
     max: f32,
@@ -171,6 +186,13 @@ pub struct SliderRenderObject {
 }
 
 impl SliderRenderObject {
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused && self.enabled;
+    }
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
     fn thumb_diameter(&self) -> f32 {
         style::metrics().slider_thumb_diameter
     }
@@ -206,6 +228,8 @@ impl SliderRenderObject {
     pub fn new(value: f32, min: f32, max: f32, dragging: bool) -> Self {
         let metrics = style::metrics();
         Self {
+            enabled: true,
+            focused: false,
             value: value.clamp(min, max),
             min,
             max,
@@ -319,9 +343,15 @@ impl SliderRenderObject {
 
             let palette = ColorPalette::default();
             let track_color = style::surface_color(&palette, style::SurfaceRole::Section);
-            let fill_color = palette.primary();
+            let fill_color = if self.enabled {
+                palette.primary()
+            } else {
+                palette.divider()
+            };
             let thumb_color = style::surface_color(&palette, style::SurfaceRole::Floating);
-            let thumb_border = if self.dragging {
+            let thumb_border = if self.focused {
+                palette.primary()
+            } else if self.dragging {
                 style::focus_highlight(&palette)
             } else {
                 palette.divider()
@@ -430,9 +460,15 @@ impl ElementRenderObject for SliderRenderObject {
         let fill_width = normalized_value * track_width;
         let palette = ColorPalette::default();
         let track_color = style::surface_color(&palette, style::SurfaceRole::Section);
-        let fill_color = palette.primary();
+        let fill_color = if self.enabled {
+            palette.primary()
+        } else {
+            palette.divider()
+        };
         let thumb_color = style::surface_color(&palette, style::SurfaceRole::Floating);
-        let thumb_border = if self.dragging {
+        let thumb_border = if self.focused {
+            palette.primary()
+        } else if self.dragging {
             style::focus_highlight(&palette)
         } else {
             palette.divider()
@@ -468,7 +504,13 @@ impl ElementRenderObject for SliderRenderObject {
 
     fn update(&mut self, new_view: &dyn crate::view::View) -> crate::element::UpdateResult {
         if let Some(slider) = new_view.as_any().downcast_ref::<Slider>() {
-            let mut changed = false;
+            let mut changed = self.enabled != slider.enabled;
+            self.enabled = slider.enabled;
+            if !self.enabled {
+                self.focused = false;
+                self.mouse_dragging = false;
+                self.active_touch_id = None;
+            }
             let new_min = slider.min;
             let new_max = slider.max;
             if (self.min - new_min).abs() > 0.001 || (self.max - new_max).abs() > 0.001 {
@@ -481,8 +523,8 @@ impl ElementRenderObject for SliderRenderObject {
                 self.value = new_value;
                 changed = true;
             }
-            let dragging =
-                slider.dragging.get() || self.mouse_dragging || self.active_touch_id.is_some();
+            let dragging = self.enabled
+                && (slider.dragging.get() || self.mouse_dragging || self.active_touch_id.is_some());
             if self.dragging != dragging {
                 self.dragging = dragging;
                 changed = true;
@@ -508,7 +550,10 @@ mod tests {
     fn narrow_sliders_respect_allocated_width_and_keep_their_value() {
         let mut slider = SliderRenderObject::new(0.5, 0.0, 1.0, false);
         for width in [200.0, 72.0, 24.0, 0.0, 200.0] {
-            let size = slider.layout(LayoutConstraints::tight(width, style::metrics().slider_height));
+            let size = slider.layout(LayoutConstraints::tight(
+                width,
+                style::metrics().slider_height,
+            ));
             assert_eq!(size.width, width);
             assert_eq!(slider.value, 0.5);
             if width >= 24.0 {

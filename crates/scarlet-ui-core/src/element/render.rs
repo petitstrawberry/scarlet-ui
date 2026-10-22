@@ -33,6 +33,7 @@ fn update_slider_value(
     if (slider.get_value().get() - new_value).abs() > 0.001 {
         slider.get_value().set(new_value);
         slider.invoke_on_change(new_value);
+        render_object.set_value(slider.get_value().get());
     }
 }
 
@@ -57,8 +58,9 @@ fn activate_toggle(
 ) {
     let state = toggle.get_is_on().clone();
     let next = !state.get();
-    render_object.set_is_on(next);
     state.set(next);
+    toggle.invoke_on_change(next);
+    render_object.set_is_on(state.get());
     crate::pipeline::mark_element_needs_paint(pipeline_id, id);
 }
 
@@ -924,6 +926,32 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         if self
             .render_object
             .as_any()
+            .downcast_ref::<crate::views::ButtonRenderObject>()
+            .is_some_and(|object| object.is_focused())
+        {
+            return true;
+        }
+        if self
+            .render_object
+            .as_any()
+            .downcast_ref::<crate::views::ToggleRenderObject>()
+            .is_some_and(|object| object.is_focused())
+            || self
+                .render_object
+                .as_any()
+                .downcast_ref::<crate::views::SliderRenderObject>()
+                .is_some_and(|object| object.is_focused())
+            || self
+                .render_object
+                .as_any()
+                .downcast_ref::<crate::views::SelectRenderObject>()
+                .is_some_and(|object| object.is_focused())
+        {
+            return true;
+        }
+        if self
+            .render_object
+            .as_any()
             .downcast_ref::<crate::views::TextFieldRenderObject>()
             .is_some_and(|field| field.is_focused())
         {
@@ -952,6 +980,18 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn accepts_keyboard_focus(&self) -> bool {
+        if let Some(button) = self.view.as_any().downcast_ref::<crate::views::Button>() {
+            return button.is_enabled();
+        }
+        if let Some(toggle) = self.view.as_any().downcast_ref::<crate::views::Toggle>() {
+            return toggle.is_enabled();
+        }
+        if let Some(slider) = self.view.as_any().downcast_ref::<crate::views::Slider>() {
+            return slider.is_enabled();
+        }
+        if let Some(select) = self.view.as_any().downcast_ref::<crate::views::Select>() {
+            return select.is_enabled() && select.option_count() > 0;
+        }
         self.view
             .as_any()
             .downcast_ref::<crate::views::TextField>()
@@ -960,11 +1000,6 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 .view
                 .as_any()
                 .downcast_ref::<crate::views::TextView>()
-                .is_some()
-            || self
-                .view
-                .as_any()
-                .downcast_ref::<crate::views::Select>()
                 .is_some()
             || self
                 .render_object
@@ -1120,7 +1155,91 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
         use crate::event::{Event, MouseButton, MouseEvent, Phase};
 
+        let disabled_button = self
+            .view
+            .as_any()
+            .downcast_ref::<crate::views::Button>()
+            .is_some_and(|view| !view.is_enabled());
+        let disabled_control = disabled_button
+            || self
+                .view
+                .as_any()
+                .downcast_ref::<crate::views::Toggle>()
+                .is_some_and(|view| !view.is_enabled())
+            || self
+                .view
+                .as_any()
+                .downcast_ref::<crate::views::Slider>()
+                .is_some_and(|view| !view.is_enabled())
+            || self
+                .view
+                .as_any()
+                .downcast_ref::<crate::views::Select>()
+                .is_some_and(|view| !view.is_enabled() || view.option_count() == 0);
+        if disabled_control && !matches!(_event, Event::Focus(_)) {
+            return false;
+        }
+
         if let Event::Keyboard(key_event) = _event {
+            if _phase == Phase::Target {
+                if let Some(button) = self.view.as_any().downcast_ref::<crate::views::Button>()
+                    && let Some(object) = self
+                        .render_object
+                        .as_any_mut()
+                        .downcast_mut::<crate::views::ButtonRenderObject>()
+                    && let Some(activate) = object.handle_keyboard(*key_event)
+                {
+                    if activate {
+                        button.invoke_on_click();
+                    }
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                    return true;
+                }
+                if let Some(toggle) = self.view.as_any().downcast_ref::<crate::views::Toggle>()
+                    && let Some(object) = self
+                        .render_object
+                        .as_any_mut()
+                        .downcast_mut::<crate::views::ToggleRenderObject>()
+                    && object.is_focused()
+                    && let Some(activate) = object.activation_key(*key_event)
+                {
+                    if activate {
+                        activate_toggle(toggle, object, self.pipeline_id, self.id);
+                    }
+                    return true;
+                }
+                if let Some(slider) = self.view.as_any().downcast_ref::<crate::views::Slider>()
+                    && let Some(object) = self
+                        .render_object
+                        .as_any_mut()
+                        .downcast_mut::<crate::views::SliderRenderObject>()
+                    && object.is_focused()
+                    && let crate::event::KeyEvent::Pressed { keycode, .. } = key_event
+                {
+                    use crate::event::KeyCode;
+                    let step = (slider.get_max() - slider.get_min()) / 100.0;
+                    let value = slider.get_value().get();
+                    let next = match keycode {
+                        KeyCode::Left | KeyCode::Down => Some(value - step),
+                        KeyCode::Right | KeyCode::Up => Some(value + step),
+                        KeyCode::PageDown => Some(value - step * 10.0),
+                        KeyCode::PageUp => Some(value + step * 10.0),
+                        KeyCode::Home => Some(slider.get_min()),
+                        KeyCode::End => Some(slider.get_max()),
+                        _ => None,
+                    };
+                    if let Some(next) = next {
+                        let next = next.clamp(slider.get_min(), slider.get_max());
+                        if next != value {
+                            slider.get_value().set(next);
+                            slider.invoke_on_change(next);
+                        }
+                        object.set_value(slider.get_value().get());
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
+                }
+            }
             if self
                 .render_object
                 .as_any()
@@ -1173,48 +1292,68 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 return render_object.invoke_on_key(*key_event);
             }
             if _phase == Phase::Target
-                && let Some(select_view) = self.view.as_any().downcast_ref::<crate::views::Select>()
-                && let Some(select_ro) = self
+                && let Some(select) = self.view.as_any().downcast_ref::<crate::views::Select>()
+                && let Some(object) = self
                     .render_object
                     .as_any_mut()
                     .downcast_mut::<crate::views::SelectRenderObject>()
-                && select_ro.is_expanded()
+                && (object.is_focused() || object.is_expanded())
             {
+                use crate::event::{KeyCode, KeyEvent};
+                if object.activation_key(*key_event) == Some(false) {
+                    return true;
+                }
                 let handled = match key_event {
-                    crate::event::KeyEvent::Pressed { keycode, .. } => match keycode {
-                        crate::event::KeyCode::Up => {
-                            let current = select_ro
+                    KeyEvent::Pressed { modifiers, keycode: KeyCode::Enter | KeyCode::Space }
+                        if modifiers.control || modifiers.alt || modifiers.super_key => false,
+                    KeyEvent::Pressed { keycode, .. } => match keycode {
+                        KeyCode::Enter | KeyCode::Space if object.is_expanded() => {
+                            if let Some(index) = object
                                 .hovered_index()
-                                .unwrap_or_else(|| select_view.selected_index().get());
-                            select_ro.set_hovered_index(Some(current.saturating_sub(1)));
-                            select_ro.adjust_scroll();
-                            true
-                        }
-                        crate::event::KeyCode::Down => {
-                            let current = select_ro
-                                .hovered_index()
-                                .unwrap_or_else(|| select_view.selected_index().get());
-                            let new =
-                                (current + 1).min(select_view.option_count().saturating_sub(1));
-                            select_ro.set_hovered_index(Some(new));
-                            select_ro.adjust_scroll();
-                            true
-                        }
-                        crate::event::KeyCode::Enter => {
-                            if let Some(hovered) = select_ro.hovered_index() {
-                                select_view.selected_index().set(hovered);
-                                select_view.invoke_on_change(hovered);
+                                .filter(|index| *index < select.option_count())
+                            {
+                                if select.selected_index().get() != index {
+                                    select.selected_index().set(index);
+                                    select.invoke_on_change(index);
+                                }
                             }
-                            select_view.expanded().set(false);
+                            select.expanded().set(false);
+                            object.set_expanded(false);
                             true
                         }
-                        crate::event::KeyCode::Escape => {
-                            select_view.expanded().set(false);
+                        KeyCode::Escape if object.is_expanded() => {
+                            select.expanded().set(false);
+                            object.set_expanded(false);
+                            true
+                        }
+                        KeyCode::Enter
+                        | KeyCode::Space
+                        | KeyCode::Up
+                        | KeyCode::Down
+                        | KeyCode::Home
+                        | KeyCode::End => {
+                            let was_expanded = object.is_expanded();
+                            let last = select.option_count().saturating_sub(1);
+                            let current = object
+                                .hovered_index()
+                                .unwrap_or_else(|| select.selected_index().get())
+                                .min(last);
+                            let next = match keycode {
+                                KeyCode::Home => 0,
+                                KeyCode::End => last,
+                                KeyCode::Up if was_expanded => current.saturating_sub(1),
+                                KeyCode::Down if was_expanded => (current + 1).min(last),
+                                _ => select.selected_index().get().min(last),
+                            };
+                            select.expanded().set(true);
+                            object.set_expanded(true);
+                            object.set_hovered_index(Some(next));
+                            object.adjust_scroll();
                             true
                         }
                         _ => false,
                     },
-                    crate::event::KeyEvent::Char { c } => select_ro.typeahead(*c),
+                    KeyEvent::Char { c } if object.is_expanded() => object.typeahead(*c),
                     _ => false,
                 };
                 if handled {
@@ -1297,6 +1436,55 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         }
 
         if let Event::Focus(focus_event) = _event {
+            if _phase == Phase::Target {
+                let focused = *focus_event == crate::event::FocusEvent::Gained;
+                let mut control = false;
+                if let Some(object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::ButtonRenderObject>()
+                {
+                    object.set_focused(focused);
+                    control = true;
+                }
+                if let Some(object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::ToggleRenderObject>()
+                {
+                    object.set_focused(focused);
+                    control = true;
+                }
+                if let Some(object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::SliderRenderObject>()
+                {
+                    object.set_focused(focused);
+                    control = true;
+                }
+                if let Some(object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::SelectRenderObject>()
+                {
+                    object.set_focused(focused);
+                    if !focused {
+                        object.set_expanded(false);
+                        object.set_hovered_index(None);
+                        if let Some(select) =
+                            self.view.as_any().downcast_ref::<crate::views::Select>()
+                        {
+                            select.expanded().set(false);
+                        }
+                    }
+                    control = true;
+                }
+                if control {
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                    return true;
+                }
+            }
             if _phase == Phase::Target
                 && self
                     .view
@@ -1921,8 +2109,11 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         if crate::debug::is_enabled() {
                             crate::logln!("[RenderElement] Toggle click id={:?}", self.id);
                         }
+                        let activate = render_object.is_mouse_pressed();
                         render_object.set_pressed(false);
-                        activate_toggle(toggle, render_object, self.pipeline_id, self.id);
+                        if activate {
+                            activate_toggle(toggle, render_object, self.pipeline_id, self.id);
+                        }
                         return true;
                     }
                     _ => {}

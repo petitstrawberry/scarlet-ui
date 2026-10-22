@@ -5648,6 +5648,12 @@ mod tests {
         let click_x = (toggle_origin.x + toggle_size.width * 0.5) as i32;
         let click_y = (toggle_origin.y + toggle_size.height * 0.5) as i32;
 
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonPressed {
+            button: MouseButton::Left,
+            x: click_x,
+            y: click_y,
+            click_count: 1,
+        })));
         assert!(
             pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
                 button: MouseButton::Left,
