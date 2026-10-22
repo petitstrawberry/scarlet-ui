@@ -65,7 +65,7 @@ impl TextField {
             focused_border_color: style::focus_highlight(&palette),
             text_color: palette.text(),
             placeholder_color: palette.text_secondary(),
-            font_size: 14.0,
+            font_size: style::BODY_FONT_SIZE,
             padding: 8.0,
         }
     }

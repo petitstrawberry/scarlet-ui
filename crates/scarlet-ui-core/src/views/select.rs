@@ -222,24 +222,37 @@ pub struct SelectRenderObject {
 impl SelectRenderObject {
     pub fn set_focused(&mut self, focused: bool) {
         self.focused = focused && self.enabled;
-        if !self.focused { self.activation_key = None; }
+        if !self.focused {
+            self.activation_key = None;
+        }
     }
     /// Consume activation presses until their matching release. Navigation
     /// arrows may repeat; holding Enter/Space must not reopen/commit repeatedly.
     pub(crate) fn activation_key(&mut self, event: crate::event::KeyEvent) -> Option<bool> {
         use crate::event::{KeyCode, KeyEvent};
         match event {
-            KeyEvent::Pressed { keycode: key @ (KeyCode::Enter | KeyCode::Space), modifiers }
-                if !modifiers.control && !modifiers.alt && !modifiers.super_key => {
+            KeyEvent::Pressed {
+                keycode: key @ (KeyCode::Enter | KeyCode::Space),
+                modifiers,
+            } if !modifiers.control && !modifiers.alt && !modifiers.super_key => {
                 let first = self.activation_key.is_none();
-                if first { self.activation_key = Some(key); }
+                if first {
+                    self.activation_key = Some(key);
+                }
                 Some(first)
             }
-            KeyEvent::Released { keycode: key @ (KeyCode::Enter | KeyCode::Space), .. } => {
-                if self.activation_key == Some(key) { self.activation_key = None; }
+            KeyEvent::Released {
+                keycode: key @ (KeyCode::Enter | KeyCode::Space),
+                ..
+            } => {
+                if self.activation_key == Some(key) {
+                    self.activation_key = None;
+                }
                 Some(false)
             }
-            KeyEvent::Char { c: ' ' | '\r' | '\n' } => Some(false),
+            KeyEvent::Char {
+                c: ' ' | '\r' | '\n',
+            } => Some(false),
             _ => None,
         }
     }
@@ -414,7 +427,8 @@ impl SelectRenderObject {
         row_height: u32,
         color: Color,
     ) {
-        let text_y = y + ((row_height as i32 - 15) / 2).max(0);
+        let text_height = graphics::measure_text_sized(label, style::BODY_FONT_SIZE).1;
+        let text_y = y + ((row_height as i32 - text_height as i32) / 2).max(0);
         let max_chars = ((width.saturating_sub(44) / 8) as usize).max(1);
         if label.chars().count() > max_chars {
             let clipped: String = label.chars().take(max_chars).collect();
@@ -634,7 +648,9 @@ impl ElementRenderObject for SelectRenderObject {
         } else {
             String::from(label)
         };
-        let text_y = origin.y + ((row_h - 15.0) / 2.0).max(0.0);
+        let text_height =
+            graphics::measure_text_sized(&display_label, style::BODY_FONT_SIZE).1 as f32;
+        let text_y = origin.y + ((row_h - text_height) / 2.0).max(0.0);
         ctx.draw_text(
             Point::new(origin.x + 12.0, text_y),
             display_label,
@@ -678,7 +694,17 @@ impl ElementRenderObject for SelectRenderObject {
                     border.with_opacity(0.55),
                 );
                 ctx.draw_text(
-                    Point::new(origin.x + 12.0, y + ((row_h - 15.0) / 2.0).max(0.0)),
+                    Point::new(
+                        origin.x + 12.0,
+                        y + ((row_h
+                            - graphics::measure_text_sized(
+                                &self.options[index],
+                                style::BODY_FONT_SIZE,
+                            )
+                            .1 as f32)
+                            / 2.0)
+                            .max(0.0),
+                    ),
                     self.options[index].clone(),
                     text,
                     13.0,

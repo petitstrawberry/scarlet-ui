@@ -31,7 +31,7 @@ impl Text {
         Self {
             content: content_str,
             content_state: None,
-            font_size: 16.0,
+            font_size: super::style::BODY_FONT_SIZE,
             color: palette.text_primary(),
         }
     }
@@ -51,7 +51,7 @@ impl Text {
         text
     }
 
-    /// Set the font size in points
+    /// Set the font size in logical pixels per em.
     pub fn font_size(mut self, size: f32) -> Self {
         self.font_size = size;
         self

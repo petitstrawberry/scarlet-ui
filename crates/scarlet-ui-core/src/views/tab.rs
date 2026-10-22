@@ -800,7 +800,8 @@ impl ElementRenderObject for TabViewRenderObject {
             } else {
                 self.text_color
             };
-            let text_y = rect.origin.y + (self.tab_bar_height - self.font_size * 1.2) / 2.0;
+            let text_height = graphics::measure_text_sized(label, self.font_size).1 as f32;
+            let text_y = rect.origin.y + (self.tab_bar_height - text_height) / 2.0;
             ctx.draw_text(
                 Point::new(rect.origin.x + self.tab_padding, text_y),
                 label.clone(),

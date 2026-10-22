@@ -65,7 +65,7 @@ impl Button {
             pressed_background_color: None,
             border_color: Color::CLEAR,
             text_color: palette.text_primary(),
-            font_size: 15.0,
+            font_size: style::BODY_FONT_SIZE,
             padding: 4.0,
             press_repeat: None,
             appearance: ButtonAppearance::Raised,
@@ -96,7 +96,7 @@ impl Button {
             pressed_background_color: None,
             border_color: Color::CLEAR,
             text_color: palette.text_primary(),
-            font_size: 15.0,
+            font_size: style::BODY_FONT_SIZE,
             padding: 7.0,
             press_repeat: None,
             appearance: ButtonAppearance::Raised,
@@ -977,7 +977,10 @@ mod tests {
         ));
         let laptop_size = render_object.layout(LayoutConstraints::unconstrained());
 
-        assert!(tablet_size.height >= graphics::measure_text_sized("Mode", 15.0).1 as f32 + 8.0);
+        assert!(
+            tablet_size.height
+                >= graphics::measure_text_sized("Mode", style::BODY_FONT_SIZE).1 as f32 + 8.0
+        );
         assert_eq!(laptop_size.height, tablet_size.height);
         assert_eq!(
             crate::current_input_environment().interaction_mode(),

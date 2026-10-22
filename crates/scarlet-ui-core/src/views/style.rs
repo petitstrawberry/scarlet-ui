@@ -9,6 +9,10 @@ use crate::geometry::{EdgeInsets, Offset, Rect};
 use crate::input_environment::{InteractionMode, current_input_environment};
 use crate::renderer::PaintContext;
 
+/// Default desktop body and control text size, in logical pixels per em.
+/// Keep UI density independent from font metric conversion and output scale.
+pub(crate) const BODY_FONT_SIZE: f32 = 13.0;
+
 const RAISED_TOP_LIGHTEN: f32 = 0.018;
 const RAISED_BOTTOM_DARKEN: f32 = 0.010;
 const PRESSED_TOP_DARKEN: f32 = 0.010;
@@ -102,7 +106,7 @@ const DESKTOP_VISUAL_METRICS: VisualMetrics = VisualMetrics {
     toggle_height: 20.0,
     toggle_thumb_diameter: 16.0,
     toggle_thumb_inset: 2.0,
-    chrome_title_font_size: 14.0,
+    chrome_title_font_size: BODY_FONT_SIZE,
     chrome_titlebar_height: 32.0,
     chrome_control_size: 18.0,
     chrome_control_margin: 8.0,

@@ -37,7 +37,6 @@ pub struct NavigationViewRenderObject {
 const BOTTOM_BAR_EXTRA_HEIGHT: f32 = 12.0;
 const BOTTOM_BAR_ICON_TOP_INSET: f32 = 8.0;
 const BOTTOM_BAR_TEXT_BOTTOM_INSET: f32 = 5.0;
-const TEXT_LINE_HEIGHT_FACTOR: f32 = 1.2;
 
 fn bottom_bar_height(navigation_item_height: f32) -> f32 {
     navigation_item_height.max(0.0) + BOTTOM_BAR_EXTRA_HEIGHT
@@ -53,11 +52,10 @@ fn bottom_bar_content_geometry(
     item: Rect,
     shows_icon: bool,
     icon_size: f32,
-    font_size: f32,
+    text_height: f32,
     text_width: f32,
 ) -> BottomBarContentGeometry {
     let text_x = item.origin.x + (item.size.width - text_width) * 0.5;
-    let text_height = font_size * TEXT_LINE_HEIGHT_FACTOR;
     BottomBarContentGeometry {
         icon_origin: shows_icon.then(|| {
             Point::new(
@@ -401,7 +399,7 @@ impl NavigationSidebarRenderObject {
             item_height: style::metrics().navigation_item_height,
             size: Size::ZERO,
             buffer: None,
-            font_size: 14.0,
+            font_size: style::BODY_FONT_SIZE,
             icon_size: 16,
             item_padding: 8.0,
             presentation: view.presentation,
@@ -521,7 +519,7 @@ impl NavigationSidebarRenderObject {
                     Rect::from_xywh(origin.x + x, origin.y + y, item_width, item_height),
                     self.shows_icons && self.icons.get(index).is_some_and(Option::is_some),
                     self.icon_size as f32,
-                    self.font_size,
+                    text_height as f32,
                     text_width as f32,
                 )
             });
@@ -739,7 +737,7 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
                             Rect::from_xywh(item_x, item_y, item_width, item_height),
                             self.shows_icons && self.icons.get(index).copied().flatten().is_some(),
                             self.icon_size as f32,
-                            self.font_size,
+                            text_height as f32,
                             text_width as f32,
                         )
                     });
@@ -785,13 +783,13 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
                     let Some(icon) = self.icons.get(index).copied().flatten() else {
                         continue;
                     };
-                    let (text_width, _) =
+                    let (text_width, text_height) =
                         graphics::measure_text_sized(&self.labels[index], self.font_size);
                     let content = bottom_bar_content_geometry(
                         Rect::from_xywh(index as f32 * item_width, 0.0, item_width, height as f32),
                         true,
                         self.icon_size as f32,
-                        self.font_size,
+                        text_height as f32,
                         text_width as f32,
                     );
                     let Some(origin) = content.icon_origin else {
@@ -904,7 +902,7 @@ mod tests {
             Rect::from_xywh(100.0, 20.0, 80.0, 64.0),
             true,
             16.0,
-            14.0,
+            20.0,
             28.0,
         );
         assert_eq!(
@@ -912,7 +910,7 @@ mod tests {
             Some(crate::geometry::Point::new(132.0, 28.0))
         );
         assert_eq!(geometry.text_origin.x, 126.0);
-        assert!((geometry.text_origin.y - 62.2).abs() < 0.001);
+        assert!((geometry.text_origin.y - 59.0).abs() < 0.001);
     }
 
     #[test]

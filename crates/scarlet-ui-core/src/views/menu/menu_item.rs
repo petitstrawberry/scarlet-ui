@@ -46,7 +46,7 @@ impl MenuItem {
             icon_size: IconSize::Small,
             on_click: None,
             on_hover: None,
-            font_size: 14.0,
+            font_size: style::BODY_FONT_SIZE,
             padding: 6.0,
             selected: false,
             foreground_color: None,
@@ -467,9 +467,9 @@ impl ElementRenderObject for MenuItemRenderObject {
             }
 
             // Draw text centered
-            let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
+            let (text_w, text_h) = graphics::measure_text_sized(&self.label, self.font_size);
             let x = ((width as i32) - (text_w as i32)) / 2;
-            let y = ((height as i32) - (self.font_size as i32 * 6 / 5)) / 2;
+            let y = ((height as i32) - text_h as i32) / 2;
 
             canvas.draw_text_sized(x.max(0), y.max(0), &self.label, text_color, self.font_size);
         }
@@ -503,7 +503,7 @@ impl ElementRenderObject for MenuItemRenderObject {
             );
         }
 
-        let (text_w, _text_h) = if self.label.is_empty() {
+        let (text_w, text_h) = if self.label.is_empty() {
             (0, 0)
         } else {
             graphics::measure_text_sized(&self.label, self.font_size)
@@ -534,7 +534,7 @@ impl ElementRenderObject for MenuItemRenderObject {
         }
         if !self.label.is_empty() {
             let text_x = group_x + icon_size + spacing;
-            let text_y = origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0);
+            let text_y = origin.y + ((self.size.height - text_h as f32) / 2.0).max(0.0);
             ctx.draw_text(
                 Point::new(text_x, text_y),
                 self.label.clone(),
@@ -549,6 +549,22 @@ impl ElementRenderObject for MenuItemRenderObject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::LayoutConstraints;
+
+    #[test]
+    fn menu_label_is_centered_using_measured_font_height() {
+        let mut item = MenuItemRenderObject::new(String::from("File 保存"), 13.0, 3.0, false);
+        item.layout(LayoutConstraints::tight(120.0, 32.0));
+        let mut context = PaintContext::new();
+        item.paint(&mut context, Point::new(10.0, 20.0));
+        let expected_y =
+            20.0 + (32.0 - graphics::measure_text_sized("File 保存", 13.0).1 as f32) / 2.0;
+        assert!(context.commands().iter().any(|command| matches!(
+            command,
+            crate::renderer::PaintCommand::DrawText { position, .. }
+                if (position.y - expected_y).abs() < 0.001
+        )));
+    }
 
     #[test]
     fn foreground_override_does_not_change_menu_item_geometry() {

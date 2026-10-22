@@ -421,7 +421,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
 
             // Draw items
             let mut current_y = MENU_EDGE_PADDING;
-            let font_size = 13.0;
+            let font_size = style::BODY_FONT_SIZE;
 
             for (i, item) in self.items.iter().enumerate() {
                 if matches!(item.action, MenuAction::Separator) {
@@ -449,7 +449,9 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
 
                     // Draw text
                     let text_x = MENU_TEXT_INSET as i32;
-                    let text_y = current_y as i32 + ((item_height as i32 - 16) / 2).max(0);
+                    let text_height = graphics::measure_text_sized(&item.label, font_size).1;
+                    let text_y =
+                        current_y as i32 + ((item_height as i32 - text_height as i32) / 2).max(0);
 
                     let text_color = if item.enabled {
                         text_color
@@ -494,7 +496,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
         style::popover_surface(ctx, rect, bg_color, border_color, palette.shadow());
 
         let mut current_y = MENU_EDGE_PADDING;
-        let font_size = 13.0;
+        let font_size = style::BODY_FONT_SIZE;
         let width = self.size.width.max(0.0);
 
         for (i, item) in self.items.iter().enumerate() {
@@ -530,7 +532,8 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
             } else {
                 palette.text_tertiary()
             };
-            let text_y = origin.y + current_y + ((item_height - 16.0) / 2.0).max(0.0);
+            let text_height = graphics::measure_text_sized(&item.label, font_size).1 as f32;
+            let text_y = origin.y + current_y + ((item_height - text_height) / 2.0).max(0.0);
             ctx.draw_text(
                 Point::new(origin.x + MENU_TEXT_INSET, text_y),
                 item.label.clone(),

@@ -19,6 +19,24 @@ font sizes and display scale, so different requested masks cannot collide after
 integer truncation. Buttons measure label dimensions rather than multiplying
 UTF-8 byte counts by an estimated character width.
 
+## Desktop sizing after the metric correction
+
+The em conversion remains the sizing contract. It must not be reverted to
+ascent/descent scaling to make old layouts look smaller. Existing app sizes
+were chosen under that older conversion; using the same number with Mplus 1
+increases visible text by 1.448. App typography therefore needs a separate
+review when adopting the corrected metrics.
+
+Desktop body text and ordinary controls now default to 13 logical pixels per
+em, using macOS-like desktop density as the visual reference. Apps use 11–12
+for supporting text and larger sizes only for headings or prominent values.
+Output scaling, glyph advances and fallback sizing are unchanged.
+
+Menu items, popup rows, selects, tabs and bottom navigation align text using
+measured line height. Guesses such as `font_size * 1.2` and fixed 15/16-pixel
+heights placed the corrected text too low. This is a control-layout correction,
+not an adjustment to the glyph baseline or a global upward pixel offset.
+
 Fallback discovery also verifies that a candidate has a vector outline for the
 requested visible glyph. A cmap hit in a bitmap/color-only font cannot be drawn
 by this renderer; discovery continues to another candidate instead of accepting
