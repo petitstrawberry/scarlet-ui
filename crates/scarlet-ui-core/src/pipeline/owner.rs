@@ -285,6 +285,18 @@ impl PipelineOwner {
         window_size: Size,
         render_legacy_paint: bool,
     ) {
+        self.flush_before_paint(element_tree, window_size, render_legacy_paint, |_| {});
+    }
+
+    /// Reconcile input ownership after rebuilding/layout and before recording
+    /// paint, so caret state and event routing describe the same frame.
+    pub(crate) fn flush_before_paint(
+        &mut self,
+        element_tree: &mut ElementTree,
+        window_size: Size,
+        render_legacy_paint: bool,
+        before_paint: impl FnOnce(&mut ElementTree),
+    ) {
         self.collect_global_dirty();
 
         // 1. Build Phase: Rebuild Elements whose State changed
@@ -293,6 +305,9 @@ impl PipelineOwner {
 
         // 2. Layout Phase: Recalculate layout
         self.flush_layout(element_tree, window_size);
+
+        before_paint(element_tree);
+        self.collect_global_dirty();
 
         // 3. Paint Phase: Repaint dirty elements
         self.flush_paint(element_tree, render_legacy_paint);

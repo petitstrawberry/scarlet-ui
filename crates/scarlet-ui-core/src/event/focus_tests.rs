@@ -9,7 +9,7 @@ use crate::views::{
     Button, HStack, ScrollView, Select, Slider, Spacer, TabItem, TabView, TextField, TextSelection,
     TextView, Toggle, VStack, Window,
 };
-use alloc::{rc::Rc, string::String, vec};
+use alloc::{boxed::Box, rc::Rc, string::String, vec};
 use core::cell::Cell;
 
 fn state<T: Clone + Send + Sync + 'static>(value: T) -> State<T> {
@@ -225,4 +225,145 @@ fn modified_tab_is_not_hijacked_for_focus_navigation() {
         }));
         assert_eq!(focused(&pipeline), first);
     }
+}
+
+#[derive(Clone)]
+struct DynamicField {
+    text: State<String>,
+    request: State<u64>,
+    visible: State<bool>,
+}
+
+impl View for DynamicField {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(crate::element::ComponentElement::new_with_builder(
+            self.clone(),
+            |view| {
+                if view.visible.get() {
+                    Box::new(
+                        TextField::new(view.text.clone())
+                            .autofocus(view.request.get() != 0)
+                            .key(alloc::format!("field-{}", view.request.get()))
+                            .frame(200.0, 32.0),
+                    )
+                } else {
+                    Box::new(Spacer::new().frame(200.0, 32.0))
+                }
+            },
+        ))
+    }
+    fn listenables(&self) -> Vec<&dyn crate::state::Listenable> {
+        vec![&self.request, &self.visible]
+    }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+#[test]
+fn keyed_autofocus_takes_keyboard_and_ime_from_the_previous_grid_target() {
+    let field = DynamicField {
+        text: state(String::new()),
+        request: state(0),
+        visible: state(true),
+    };
+    let grid_focused = state(true);
+    let mut pipeline = pipeline(VStack::new((
+        field.clone(),
+        Spacer::new()
+            .frame(200.0, 60.0)
+            .focusable(grid_focused.clone()),
+    )));
+    pipeline.render_for_present().unwrap();
+    let grid_id = focused(&pipeline);
+    assert!(grid_focused.get());
+
+    for request in [1, 2] {
+        field.request.set(request);
+        pipeline.render_for_present().unwrap();
+        assert!(!grid_focused.get(), "autofocus must release the old owner");
+        assert_ne!(focused(&pipeline), grid_id);
+        assert_eq!(focused_count(pipeline.element_tree().root().unwrap()), 1);
+        assert!(pipeline.element_tree().focused_text_input_state().is_some());
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c: 'x' })));
+        assert!(pipeline.handle_event(&Event::TextInputCommit {
+            context_id: 1,
+            serial: request as u32,
+            text: "語".into(),
+        }));
+        pipeline.render_for_present().unwrap();
+        assert_eq!(focused_count(pipeline.element_tree().root().unwrap()), 1);
+
+        grid_focused.set(true);
+        pipeline.render_for_present().unwrap();
+        assert_eq!(focused(&pipeline), grid_id);
+        assert!(pipeline.element_tree().focused_text_input_state().is_none());
+    }
+    assert_eq!(field.text.get(), "x語x語");
+}
+
+#[test]
+fn removing_the_focused_editor_restores_the_ancestor_shortcut_route() {
+    let field = DynamicField {
+        text: state(String::new()),
+        request: state(1),
+        visible: state(true),
+    };
+    let root_focused = state(true);
+    let shortcuts = Rc::new(Cell::new(0));
+    let count = shortcuts.clone();
+    let mut pipeline = pipeline(
+        VStack::new((field.clone(), Button::new("Other")))
+            .focusable(root_focused.clone())
+            .on_event_capture(move |event| {
+                if let Event::Keyboard(KeyEvent::Pressed {
+                    keycode: KeyCode::Char('3'),
+                    modifiers,
+                }) = event
+                    && modifiers.control
+                {
+                    count.set(count.get() + 1);
+                    return true;
+                }
+                false
+            }),
+    );
+    pipeline.render_for_present().unwrap();
+    assert!(!root_focused.get(), "the child is the sole initial owner");
+    assert!(pipeline.element_tree().focused_text_input_state().is_some());
+    field.visible.set(false);
+    pipeline.render_for_present().unwrap();
+    assert!(root_focused.get());
+    assert_eq!(focused_count(pipeline.element_tree().root().unwrap()), 1);
+    assert!(pipeline.element_tree().focused_text_input_state().is_none());
+    assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Pressed {
+        keycode: KeyCode::Char('3'),
+        modifiers: KeyModifiers {
+            control: true,
+            ..KeyModifiers::empty()
+        },
+    })));
+    assert_eq!(shortcuts.get(), 1);
+    assert!(tab(&mut pipeline, false));
+    assert!(!root_focused.get(), "Tab moves from the restored ancestor");
+}
+
+#[test]
+fn existing_field_blur_returns_focus_to_its_ancestor() {
+    let parent_focused = state(true);
+    let mut pipeline = pipeline(
+        TextField::new(state(String::from("text")))
+            .autofocus(true)
+            .focusable(parent_focused.clone()),
+    );
+    pipeline.render_for_present().unwrap();
+    assert!(!parent_focused.get());
+    assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Pressed {
+        keycode: KeyCode::Escape,
+        modifiers: KeyModifiers::empty(),
+    })));
+    pipeline.render_for_present().unwrap();
+    assert!(parent_focused.get());
+    assert_eq!(focused_count(pipeline.element_tree().root().unwrap()), 1);
+    assert!(pipeline.element_tree().focused_text_input_state().is_none());
 }

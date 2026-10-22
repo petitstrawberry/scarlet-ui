@@ -1250,6 +1250,7 @@ impl EventDispatcher {
         element_tree: &mut ElementTree,
         event: &crate::event::KeyEvent,
     ) -> bool {
+        self.reconcile_keyboard_focus(element_tree);
         if let crate::event::KeyEvent::Pressed {
             keycode: crate::event::KeyCode::Tab,
             modifiers,
@@ -1272,25 +1273,7 @@ impl EventDispatcher {
             }
         }
         let path = self
-            .focused_id
-            .and_then(|focused_id| {
-                element_tree
-                    .element_wants_keyboard_focus(focused_id)
-                    .then(|| element_tree.find_path_ids(focused_id))
-                    .flatten()
-            })
-            .or_else(|| element_tree.find_keyboard_focus_path_ids())
-            .or_else(|| {
-                if self
-                    .focused_path
-                    .last()
-                    .is_some_and(|id| element_tree.element_wants_keyboard_focus(*id))
-                {
-                    Some(self.focused_path.clone())
-                } else {
-                    None
-                }
-            })
+            .current_focus_path(element_tree)
             .or_else(|| element_tree.root().map(|root| alloc::vec![root.id()]));
 
         let Some(path) = path else {
@@ -1299,9 +1282,6 @@ impl EventDispatcher {
         let Some(target_id) = path.last().copied() else {
             return false;
         };
-        self.focused_id = Some(target_id);
-        self.focused_path = path.clone();
-
         if crate::debug::is_enabled() {
             crate::logln!(
                 "[EventDispatcher] keyboard: {:?} target_id={:?} path_len={}",
@@ -1370,26 +1350,8 @@ impl EventDispatcher {
     }
 
     fn dispatch_text_input(&mut self, element_tree: &mut ElementTree, event: &Event) -> bool {
-        let path = self
-            .focused_id
-            .and_then(|focused_id| {
-                element_tree
-                    .element_wants_keyboard_focus(focused_id)
-                    .then(|| element_tree.find_path_ids(focused_id))
-                    .flatten()
-            })
-            .or_else(|| element_tree.find_keyboard_focus_path_ids())
-            .or_else(|| {
-                if self
-                    .focused_path
-                    .last()
-                    .is_some_and(|id| element_tree.element_wants_keyboard_focus(*id))
-                {
-                    Some(self.focused_path.clone())
-                } else {
-                    None
-                }
-            });
+        self.reconcile_keyboard_focus(element_tree);
+        let path = self.current_focus_path(element_tree);
 
         let Some(path) = path else {
             return false;
@@ -1397,9 +1359,6 @@ impl EventDispatcher {
         let Some(target_id) = path.last().copied() else {
             return false;
         };
-        self.focused_id = Some(target_id);
-        self.focused_path = path;
-
         element_tree
             .find_element_mut(target_id)
             .is_some_and(|target| target.handle_event(event, Phase::Target))
@@ -1777,25 +1736,20 @@ impl EventDispatcher {
         target_id: ElementId,
         path: &[ElementId],
     ) {
-        if self.focused_id == Some(target_id)
-            && element_tree.element_wants_keyboard_focus(target_id)
-        {
-            self.focused_path = path.to_vec();
-            return;
-        }
-
-        if let Some(old_path) = self.current_focus_path(element_tree)
-            && let Some(old_target_id) = old_path.last().copied()
-            && old_target_id != target_id
-            && let Some(old_target) = element_tree.find_element_mut(old_target_id)
-        {
-            let _ = old_target
-                .handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
+        for old_target_id in element_tree.keyboard_focus_claims() {
+            if old_target_id != target_id
+                && let Some(old_target) = element_tree.find_element_mut(old_target_id)
+            {
+                let _ = old_target
+                    .handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
+            }
         }
 
         self.focused_id = Some(target_id);
         self.focused_path = path.to_vec();
-        if let Some(target) = element_tree.find_element_mut(target_id) {
+        if !element_tree.element_wants_keyboard_focus(target_id)
+            && let Some(target) = element_tree.find_element_mut(target_id)
+        {
             let _ = target.handle_event(
                 &Event::Focus(crate::event::FocusEvent::Gained),
                 Phase::Target,
@@ -1804,15 +1758,46 @@ impl EventDispatcher {
     }
 
     fn clear_focused_element(&mut self, element_tree: &mut ElementTree) {
-        if let Some(old_path) = self.current_focus_path(element_tree)
-            && let Some(old_target_id) = old_path.last().copied()
-            && let Some(old_target) = element_tree.find_element_mut(old_target_id)
-        {
-            let _ = old_target
-                .handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
+        for old_target_id in element_tree.keyboard_focus_claims() {
+            if let Some(old_target) = element_tree.find_element_mut(old_target_id) {
+                let _ = old_target
+                    .handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
+            }
         }
         self.focused_id = None;
         self.focused_path.clear();
+    }
+
+    /// Keep programmatic focus, visual caret state and the dispatch route in
+    /// agreement. A new request takes precedence over the retained target. If
+    /// several are mounted together, the last declared request wins; this also
+    /// lets an autofocus child take precedence over its focusable wrapper.
+    pub(crate) fn reconcile_keyboard_focus(&mut self, element_tree: &mut ElementTree) {
+        let claims = element_tree.keyboard_focus_claims();
+        let requested = claims
+            .iter()
+            .rev()
+            .copied()
+            .find(|id| Some(*id) != self.focused_id)
+            .or_else(|| self.focused_id.filter(|id| claims.contains(id)));
+        // When an editor disappears or explicitly blurs, retain its nearest
+        // surviving focusable ancestor. Routing straight to Window would skip
+        // application capture/bubble handlers below that root.
+        let target = requested.or_else(|| {
+            self.focused_path.iter().rev().skip(1).copied().find(|id| {
+                element_tree
+                    .find_element(*id)
+                    .is_some_and(|element| element.accepts_keyboard_focus())
+            })
+        });
+        if let Some(target) = target
+            && let Some(path) = element_tree.find_path_ids(target)
+        {
+            self.set_focused_element(element_tree, target, &path);
+        } else {
+            self.focused_id = None;
+            self.focused_path.clear();
+        }
     }
 
     fn current_focus_path(&mut self, element_tree: &mut ElementTree) -> Option<Vec<ElementId>> {
