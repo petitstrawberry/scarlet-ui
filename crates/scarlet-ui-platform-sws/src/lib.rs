@@ -13,6 +13,7 @@ mod backend;
 mod clipboard;
 mod file_dialog;
 mod file_dialog_policy;
+mod keyboard;
 mod shared_image;
 mod sink;
 mod text_input_sync;
@@ -32,7 +33,7 @@ use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::element::{TextInputElementState, WindowSizeLimits};
 use scarlet_ui_core::error::{Error, Result};
 use scarlet_ui_core::event::{
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
+    Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
 };
 use scarlet_ui_core::geometry::{EdgeInsets, Point, Rect, Size};
 use scarlet_ui_core::input_environment::{InputEnvironment, WindowingMode};
@@ -2623,11 +2624,7 @@ impl SWSPlatformWindow {
                             return;
                         }
                         let mapped_char = self.map_key_char_with_modifiers(code);
-                        let mapped = if mapped_char.is_some_and(|c| c.is_control()) {
-                            mapped_char.map_or(KeyCode::Unknown, KeyCode::Char)
-                        } else {
-                            Self::map_key_code(code)
-                        };
+                        let mapped = Self::map_key_code(code);
                         if debug {
                             logln!(
                                 "[SWSPlatformWindow] key dispatch: code={} value={} mapped={:?} char={:?}",
@@ -2638,21 +2635,10 @@ impl SWSPlatformWindow {
                             );
                         }
                         let modifiers = self.current_modifiers();
-                        if pressed {
-                            self.push_event(Event::Keyboard(KeyEvent::Pressed {
-                                keycode: mapped,
-                                modifiers,
-                            }));
-                            if let Some(c) = mapped_char
-                                && !c.is_control()
-                            {
-                                self.push_event(Event::Keyboard(KeyEvent::Char { c }));
-                            }
-                        } else {
-                            self.push_event(Event::Keyboard(KeyEvent::Released {
-                                keycode: mapped,
-                                modifiers,
-                            }));
+                        for event in keyboard::keyboard_events(mapped, mapped_char, modifiers, pressed)
+                            .into_iter().flatten()
+                        {
+                            self.push_event(Event::Keyboard(event));
                         }
                     }
                     _ => {}
