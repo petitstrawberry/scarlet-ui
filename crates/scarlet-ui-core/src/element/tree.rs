@@ -217,6 +217,24 @@ impl ElementTree {
         }
     }
 
+    /// Mounted elements requesting focus, in declaration order. Reconciliation
+    /// uses this to adopt autofocus requests and clear competing focus state.
+    pub(crate) fn keyboard_focus_claims(&self) -> Vec<ElementId> {
+        fn collect(element: &dyn Element, claims: &mut Vec<ElementId>) {
+            if element.wants_keyboard_focus() {
+                claims.push(element.id());
+            }
+            for child in element.children() {
+                collect(child.as_ref(), claims);
+            }
+        }
+        let mut claims = Vec::new();
+        if let Some(root) = self.root.as_deref() {
+            collect(root, &mut claims);
+        }
+        claims
+    }
+
     /// Return visible, enabled focus targets in declaration order. Only the
     /// currently mounted branch participates; clipped virtual rows are skipped.
     pub(crate) fn keyboard_focus_candidates(&self) -> Vec<ElementId> {

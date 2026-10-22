@@ -592,10 +592,11 @@ impl RenderingPipeline {
         }
         // Flush all dirty phases (build, layout, paint)
         crate::graphics::set_current_scale_milli(self.scale_milli);
-        self.pipeline_owner.flush_with_legacy_paint(
+        self.pipeline_owner.flush_before_paint(
             &mut self.element_tree,
             self.window_size,
             !self.paint_enabled,
+            |tree| self.event_dispatcher.reconcile_keyboard_focus(tree),
         );
         if crate::debug::is_enabled() {
             crate::logln!("[RenderingPipeline] flush() completed");
@@ -3151,10 +3152,11 @@ impl RenderingPipeline {
 
         let started = crate::debug::frame_log_enabled().then(crate::clock::Instant::now);
         crate::graphics::set_current_scale_milli(self.scale_milli);
-        self.pipeline_owner.flush_with_legacy_paint(
+        self.pipeline_owner.flush_before_paint(
             &mut self.element_tree,
             self.window_size,
             false,
+            |tree| self.event_dispatcher.reconcile_keyboard_focus(tree),
         );
         let layout_us = started.map(|start| start.elapsed().as_micros());
         let background_color = self.extract_background_color();
