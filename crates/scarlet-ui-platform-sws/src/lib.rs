@@ -2071,9 +2071,9 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn set_title(&mut self, title: &str) {
-        // Note: sws-client doesn't have a set_surface_title method
-        // The title is set during surface creation
-        let _ = title;
+        if let Err(error) = self.conn.set_window_title(self.surface_id, title) {
+            logln!("[ScarletUI] could not update window title: {error:?}");
+        }
     }
 
     fn size(&self) -> Size {
