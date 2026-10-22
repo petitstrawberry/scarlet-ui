@@ -1326,6 +1326,19 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                             object.set_expanded(false);
                             true
                         }
+                        KeyCode::PageUp | KeyCode::PageDown if object.is_expanded() => {
+                            let last = select.option_count().saturating_sub(1);
+                            let current = object.hovered_index()
+                                .unwrap_or_else(|| select.selected_index().get()).min(last);
+                            let next = if *keycode == KeyCode::PageUp {
+                                current.saturating_sub(object.page_step())
+                            } else {
+                                current.saturating_add(object.page_step()).min(last)
+                            };
+                            object.set_hovered_index(Some(next));
+                            object.adjust_scroll();
+                            true
+                        }
                         KeyCode::Enter
                         | KeyCode::Space
                         | KeyCode::Up
@@ -1365,6 +1378,28 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             // here would invoke capture handlers again on the same path.
             if _phase == Phase::Capture {
                 return false;
+            }
+            // Scroll containers receive unconsumed navigation on the normal
+            // ancestor route, after the focused editor/control has handled it.
+            if self.render_object.owns_child_viewport()
+                && self.render_object.handle_event(_event, _phase)
+            {
+                match self.render_object.apply_scroll_offset(&mut self.children) {
+                    ScrollOffsetUpdate::ChildrenChanged => {
+                        crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id);
+                    }
+                    ScrollOffsetUpdate::NeedsComposite => {
+                        crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id);
+                    }
+                    ScrollOffsetUpdate::NeedsPaint => {
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        for child in &self.children {
+                            crate::pipeline::mark_element_needs_paint(self.pipeline_id, child.id());
+                        }
+                    }
+                    ScrollOffsetUpdate::None => {}
+                }
+                return true;
             }
             for child in self.children.iter_mut() {
                 if child.handle_event(_event, _phase) {
