@@ -631,3 +631,13 @@ fn caret_geometry_binding_tracks_layout_selection_scroll_and_ime_only_when_chang
     object.clear_preedit();
     assert_eq!(rect.get(), object.cursor_rect());
 }
+
+#[test]
+fn borderless_document_surface_has_square_fill_and_no_control_outline() {
+    let view=TextView::new(State::new(StateId::new(7190),"code".into()),State::new(StateId::new(7191),TextSelection::collapsed(0))).borderless().autofocus(true);
+    let object=render_object_with_size(&view,240.0,120.0);
+    let mut context=PaintContext::new();assert!(object.paint(&mut context,Point::ZERO));
+    assert!(!context.commands().iter().any(|command|matches!(command,PaintCommand::FillRoundedRect{..}|PaintCommand::StrokeRoundedRect{..})),"a document pane must not paint a rounded form control");
+    let regular=render_object_with_size(&TextView::new(view.text_state().unwrap().clone(),view.selection_state().clone()),240.0,120.0);
+    assert_eq!(object.cursor_rect(),regular.cursor_rect());
+}

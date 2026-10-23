@@ -81,6 +81,7 @@ pub struct TextView {
     current_line_color: Color,
     border_color: Color,
     focused_border_color: Color,
+    borderless: bool,
     on_copy: Option<Arc<dyn for<'a> Fn(Cow<'a, str>) + 'static>>,
     on_paste: Option<Arc<dyn Fn() -> Option<Cow<'static, str>> + 'static>>,
     on_text_change: Option<Arc<dyn Fn(&EditDelta) + 'static>>,
@@ -146,6 +147,7 @@ impl TextView {
             current_line_color: palette.background_secondary(),
             border_color: palette.divider(),
             focused_border_color: style::focus_highlight(&palette),
+            borderless: false,
             on_copy: None,
             on_paste: None,
             on_text_change: None,
@@ -368,6 +370,10 @@ impl TextView {
         self
     }
 
+    /// Render a flat document surface without a form-control outline or rounded corners.
+    /// Text metrics, padding and selection geometry are unchanged.
+    pub fn borderless(mut self) -> Self {self.borderless=true;self}
+
     /// Set the focused border color.
     ///
     /// # Arguments
@@ -585,6 +591,7 @@ pub struct TextViewRenderObject {
     current_line_color: Color,
     border_color: Color,
     focused_border_color: Color,
+    borderless: bool,
 }
 
 impl TextViewRenderObject {
@@ -663,6 +670,7 @@ impl TextViewRenderObject {
             current_line_color: view.current_line_color,
             border_color: view.border_color,
             focused_border_color: view.focused_border_color,
+            borderless: view.borderless,
         }
     }
 
@@ -908,6 +916,7 @@ impl ElementRenderObject for TextViewRenderObject {
             self.line_numbers,
             self.current_line_highlight,
             &self.decorations,
+            self.borderless,
         );
         true
     }
@@ -978,6 +987,7 @@ impl ElementRenderObject for TextViewRenderObject {
         self.current_line_color = view.current_line_color;
         self.border_color = view.border_color;
         self.focused_border_color = view.focused_border_color;
+        self.borderless = view.borderless;
         self.compute_layout();
         if font_changed {
             self.desired_x = None;

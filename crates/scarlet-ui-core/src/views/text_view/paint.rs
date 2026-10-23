@@ -92,6 +92,7 @@ pub fn paint_text_view(
         show_line_numbers,
         highlight_current_line,
         &TextDecorations::default(),
+        false,
     );
 }
 
@@ -119,10 +120,11 @@ pub(super) fn paint_text_view_with_decorations(
     show_line_numbers: bool,
     highlight_current_line: bool,
     decorations: &TextDecorations,
+    borderless: bool,
 ) {
     let bounds = Rect::new(origin, size);
     let metrics = style::metrics();
-    style::fill_control(ctx, bounds, background_color);
+    if borderless {ctx.fill_rect(bounds,background_color);}else{style::fill_control(ctx, bounds, background_color);}
 
     let clip_rect = Rect::from_xywh(
         origin.x + BORDER_WIDTH,
@@ -130,10 +132,10 @@ pub(super) fn paint_text_view_with_decorations(
         (size.width - BORDER_WIDTH * 2.0).max(0.0),
         (size.height - BORDER_WIDTH * 2.0).max(0.0),
     );
-    ctx.push_rounded_clip(
+    if borderless {ctx.push_clip(clip_rect);}else{ctx.push_rounded_clip(
         clip_rect,
         style::radius_for(clip_rect, (metrics.control_radius - BORDER_WIDTH).max(0.0)),
-    );
+    );}
 
     if highlight_current_line && focused {
         paint_current_line(ctx, origin, size, layout, selection, current_line_color);
@@ -207,7 +209,7 @@ pub(super) fn paint_text_view_with_decorations(
     } else {
         border_color
     };
-    style::stroke_control(
+    if !borderless && border.a>0.0 {style::stroke_control(
         ctx,
         bounds,
         if focused {
@@ -216,7 +218,7 @@ pub(super) fn paint_text_view_with_decorations(
             BORDER_WIDTH
         },
         border,
-    );
+    );}
 }
 
 fn paint_current_line(
