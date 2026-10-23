@@ -15,6 +15,7 @@ use crate::graphics;
 use crate::renderer::PaintContext;
 
 const GUTTER_PADDING: f32 = 12.0;
+const MIN_LINE_NUMBER_DIGITS: usize = 4;
 const DEFAULT_TAB_WIDTH: usize = 4;
 
 /// Computed layout for a TextView render object.
@@ -123,14 +124,25 @@ impl TextViewLayout {
         }
         .max(1) as f32;
         let gutter_width = if show_line_numbers {
-            let digits = document.line_count().max(1).to_string();
-            let width = match font_stack {
-                Some(stack) => {
-                    graphics::measure_text_sized_with_font_stack(&digits, font_size, stack).0
-                }
-                None => graphics::measure_text_sized(&digits, font_size).0,
-            };
-            width as f32 + GUTTER_PADDING
+            let digits = document
+                .line_count()
+                .max(1)
+                .to_string()
+                .len()
+                .max(MIN_LINE_NUMBER_DIGITS);
+            // Reserve a stable column before editing begins. Measuring the
+            // current line count also jitters with proportional digits (11/88).
+            let digit_width = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+                .into_iter()
+                .map(|digit| match font_stack {
+                    Some(stack) => {
+                        graphics::measure_text_sized_with_font_stack(digit, font_size, stack).0
+                    }
+                    None => graphics::measure_text_sized(digit, font_size).0,
+                })
+                .max()
+                .unwrap_or(0);
+            digit_width as f32 * digits as f32 + GUTTER_PADDING
         } else {
             0.0
         };

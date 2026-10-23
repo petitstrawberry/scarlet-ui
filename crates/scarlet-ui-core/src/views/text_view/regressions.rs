@@ -479,8 +479,9 @@ fn selection_drag_keeps_scrolled_editor_geometry_without_ancestor_layout() {
     .line_numbers(true)
     .wrap_mode(WrapMode::None)
     .scroll_state(scroll.clone())
-    .reveal_selection_on_change(true)
-    .on_geometry_change(
+    .reveal_selection_on_change(true);
+    let text_x = render_object_with_size(&view, 320., 180.).layout.text_origin_x as i32 + 5;
+    let view = view.on_geometry_change(
         move |geometry| {
             count.fetch_add(1, Ordering::Relaxed);
             geometry.size()
@@ -504,14 +505,14 @@ fn selection_drag_keeps_scrolled_editor_geometry_without_ancestor_layout() {
     assert!(
         pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonPressed {
             button: MouseButton::Left,
-            x: 55,
+            x: text_x,
             y: 40,
             click_count: 1,
         }))
     );
     let anchor = selection.get().anchor;
     for y in [45, 55, 65, 55, 45] {
-        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 65, y })));
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: text_x + 10, y })));
         pipeline.render();
         assert_eq!(selection.get().anchor, anchor);
         assert_eq!(scroll.get(), initial_scroll);

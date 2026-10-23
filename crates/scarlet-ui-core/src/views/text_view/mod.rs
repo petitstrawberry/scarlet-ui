@@ -285,7 +285,8 @@ impl TextView {
     ///
     /// # Arguments
     ///
-    /// * `enabled` - `true` to reserve space for line numbers in later tasks.
+    /// * `enabled` - `true` to show line numbers with at least four digits of
+    ///   reserved width, keeping the text origin stable as the document grows.
     ///
     /// # Returns
     ///

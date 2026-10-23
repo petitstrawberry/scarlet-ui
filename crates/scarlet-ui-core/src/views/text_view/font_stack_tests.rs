@@ -1,4 +1,5 @@
 use super::*;
+use crate::generate_state_id;
 
 fn primary() -> FontStack {
     FontStack::new(include_bytes!("../../testing/fonts/metrics-primary.ttf")).unwrap()
@@ -42,6 +43,52 @@ fn assert_text_stacks(ctx: &PaintContext<'_>, stack: &FontStack) -> Vec<String> 
 }
 
 #[test]
+fn line_number_gutter_keeps_text_and_hit_targets_stable_across_digit_boundaries() {
+    let document = State::new(generate_state_id(), TextDocument::from_str("Ai"));
+    let view = TextView::with_document(
+        document.clone(),
+        State::new(generate_state_id(), TextSelection::collapsed(0)),
+    )
+    .font_size(20.)
+    .font_stack(stack())
+    .line_numbers(true);
+    let mut object = render_object_with_size(&view, 300., 160.);
+    let gutter = object.layout.gutter_width;
+    let caret = object
+        .layout
+        .cursor_rect(TextPosition::new(1), &document.get());
+    let viewport = object.layout.viewport_width;
+    for count in [9, 10, 11, 88, 99, 100, 999, 1000, 9999, 100, 9, 1] {
+        document.set(TextDocument::from_str(&format!(
+            "{}Ai",
+            "Ai\n".repeat(count - 1)
+        )));
+        object.update(&view);
+        object.layout(LayoutConstraints::tight(300., 160.));
+        assert_eq!(object.layout.gutter_width, gutter, "{count} lines");
+        assert_eq!(object.layout.viewport_width, viewport, "{count} lines");
+        assert_eq!(
+            object
+                .layout
+                .cursor_rect(TextPosition::new(1), &document.get()),
+            caret,
+            "{count} lines"
+        );
+        assert_eq!(
+            object.hit_test(Point::new(caret.origin.x, caret.origin.y + 1.)),
+            Some(TextPosition::new(1)),
+            "{count} lines"
+        );
+    }
+    // Beyond the reservation, grow enough to keep every line-number digit visible.
+    document.set(TextDocument::from_str(&"\n".repeat(9999)));
+    object.update(&view);
+    object.layout(LayoutConstraints::tight(300., 160.));
+    assert!(object.layout.gutter_width > gutter);
+    assert!(object.layout.gutter_width >= object.layout.measure_text("10000").0 as f32 + 12.);
+}
+
+#[test]
 fn explicit_stack_controls_em_metrics_tabs_wrap_carets_hit_testing_and_selection() {
     let stack = stack();
     let default_revision = graphics::text_font_revision();
@@ -50,7 +97,7 @@ fn explicit_stack_controls_em_metrics_tabs_wrap_carets_hit_testing_and_selection
         .line_numbers(true);
     let mut object = render_object_with_size(&view, 300., 160.);
     assert_eq!(object.layout.line_height, 29.); // ceil(20 * (1160 + 288) / 1000)
-    assert_eq!(object.layout.gutter_width, 24.); // missing digit: '?' at 0.6 em + padding
+    assert_eq!(object.layout.gutter_width, 60.); // four missing digits: '?' at 0.6 em + padding
     let line = &object.layout.visual_lines[0];
     assert_eq!(line.text(), "Ai    日☃");
     assert_eq!(line.width, 84.); // ceil(14 + 5.6 + 24 + 20 + 20)
@@ -192,7 +239,8 @@ fn explicit_stack_covers_placeholder_gutter_and_ime_measurement_and_paint() {
                 && path[1].x - path[0].x == 6.
     )));
     drop(ctx);
-    object.size = Size::new(65., 80.);
+    // Keep the text viewport narrow, independently of the reserved gutter.
+    object.size = Size::new(object.layout.gutter_width + 41., 80.);
     object.compute_layout();
     editing::ensure_caret_visible(&view, &mut object);
     assert!(object.scroll.x > 0.);
