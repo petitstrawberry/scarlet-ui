@@ -483,6 +483,40 @@ impl VisualLine {
         self.prefix_widths[self.display_byte_for_document_byte(byte)]
     }
 
+    pub(crate) fn width_to_display_byte(&self, byte: usize) -> f32 {
+        self.prefix_widths[byte]
+    }
+
+    /// Keep one neighboring scalar at each edge for glyph overhang. The clip
+    /// removes its offscreen pixels; distant text never reaches the renderer.
+    pub(crate) fn visible_display_range(&self, left: f32, right: f32) -> Range<usize> {
+        let mut start = self
+            .prefix_widths
+            .partition_point(|width| *width < left)
+            .saturating_sub(1)
+            .min(self.text.len());
+        while start > 0 && !self.text.is_char_boundary(start) {
+            start -= 1;
+        }
+        if start > 0 {
+            start -= 1;
+            while !self.text.is_char_boundary(start) {
+                start -= 1;
+            }
+        }
+        let mut end = self
+            .prefix_widths
+            .partition_point(|width| *width <= right)
+            .min(self.text.len());
+        while end < self.text.len() && !self.text.is_char_boundary(end) {
+            end += 1;
+        }
+        if end < self.text.len() {
+            end += self.text[end..].chars().next().unwrap().len_utf8();
+        }
+        start..end
+    }
+
     pub(crate) fn text(&self) -> &str {
         &self.text
     }
@@ -504,6 +538,22 @@ impl VisualLine {
             .copied()
             .unwrap_or(self.text.len())
             .min(self.text.len())
+    }
+
+    pub(crate) fn display_end_for_document_byte(&self, document_byte: usize) -> usize {
+        let byte = self.display_byte_for_document_byte(document_byte);
+        let local = document_byte
+            .saturating_sub(self.text_range.start)
+            .min(self.text_range.len());
+        if local > 0
+            && self.document_to_display_offsets[local - 1]
+                == self.document_to_display_offsets[local]
+            && byte < self.text.len()
+        {
+            byte + self.text[byte..].chars().next().unwrap().len_utf8()
+        } else {
+            byte
+        }
     }
 
     fn document_byte_for_display_byte(&self, display_byte: usize) -> usize {

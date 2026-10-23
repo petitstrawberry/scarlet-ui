@@ -1,5 +1,6 @@
 //! Multi-line editable text view.
 
+mod decoration;
 mod document;
 mod editing;
 mod layout;
@@ -14,6 +15,9 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
+
+use decoration::{DecorationIndex, TextDecorations};
+pub use decoration::{TextDiagnosticSpan, TextStyleSpan};
 
 pub use document::{EditDelta, TextDocument, TextPosition};
 pub(crate) use editing::{
@@ -62,6 +66,7 @@ pub struct TextView {
     current_line_highlight: bool,
     background_color: Color,
     text_color: Color,
+    decorations: TextDecorations,
     placeholder_color: Color,
     selection_color: Color,
     current_line_color: Color,
@@ -120,6 +125,7 @@ impl TextView {
             current_line_highlight: false,
             background_color: style::surface_color(&palette, style::SurfaceRole::Canvas),
             text_color: palette.text(),
+            decorations: TextDecorations::default(),
             placeholder_color: palette.text_secondary(),
             selection_color: style::text_selection_highlight(
                 palette.primary(),
@@ -311,6 +317,25 @@ impl TextView {
     /// The updated text view.
     pub fn text_color(mut self, color: Color) -> Self {
         self.text_color = color;
+        self
+    }
+
+    /// Replace document foreground decorations. See [`TextStyleSpan`] for range
+    /// handling and overlap precedence. Uncovered text uses `text_color`.
+    ///
+    /// Decorations affect painting only. Callers should replace them after
+    /// edits; ranges are not automatically rebased onto a new document revision.
+    pub fn text_spans(mut self, spans: Vec<TextStyleSpan>) -> Self {
+        self.decorations.foreground =
+            DecorationIndex::new(spans.into_iter().map(|span| (span.range, span.color)));
+        self
+    }
+
+    /// Replace document diagnostic underlines. See [`TextDiagnosticSpan`].
+    /// As with foreground spans, callers supply ranges for the current document.
+    pub fn diagnostic_spans(mut self, spans: Vec<TextDiagnosticSpan>) -> Self {
+        self.decorations.diagnostics =
+            DecorationIndex::new(spans.into_iter().map(|span| (span.range, span.color)));
         self
     }
 
@@ -514,6 +539,7 @@ pub struct TextViewRenderObject {
     current_line_highlight: bool,
     background_color: Color,
     text_color: Color,
+    decorations: TextDecorations,
     placeholder_color: Color,
     selection_color: Color,
     current_line_color: Color,
@@ -589,6 +615,7 @@ impl TextViewRenderObject {
             current_line_highlight: view.current_line_highlight,
             background_color: view.background_color,
             text_color: view.text_color,
+            decorations: view.decorations.clone(),
             placeholder_color: view.placeholder_color,
             selection_color: view.selection_color,
             current_line_color: view.current_line_color,
@@ -789,7 +816,7 @@ impl ElementRenderObject for TextViewRenderObject {
     }
 
     fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
-        paint::paint_text_view(
+        paint::paint_text_view_with_decorations(
             ctx,
             origin,
             self.size,
@@ -812,6 +839,7 @@ impl ElementRenderObject for TextViewRenderObject {
             &self.preedit_spans,
             self.line_numbers,
             self.current_line_highlight,
+            &self.decorations,
         );
         true
     }
@@ -875,6 +903,7 @@ impl ElementRenderObject for TextViewRenderObject {
         self.current_line_highlight = view.current_line_highlight;
         self.background_color = view.background_color;
         self.text_color = view.text_color;
+        self.decorations = view.decorations.clone();
         self.placeholder_color = view.placeholder_color;
         self.selection_color = view.selection_color;
         self.current_line_color = view.current_line_color;

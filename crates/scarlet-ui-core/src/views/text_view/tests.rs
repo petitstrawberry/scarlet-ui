@@ -16,6 +16,8 @@ use crate::{geometry::Point, graphics};
 
 use super::*;
 
+#[path = "decoration_tests.rs"]
+mod decoration_tests;
 #[path = "font_stack_tests.rs"]
 mod font_stack_tests;
 #[path = "performance.rs"]
@@ -1100,13 +1102,24 @@ fn paint_text_is_clipped_to_text_area_when_horizontally_scrolled_with_line_numbe
             )
         })
         .expect("line number should be painted");
+    let line = &render_object.layout.visual_lines[0];
+    let visible = line.visible_display_range(
+        render_object.layout.text_origin_x - line.x,
+        render_object.size.width - BORDER_WIDTH - line.x,
+    );
+    assert!(
+        visible.len() < source.len(),
+        "offscreen columns should be culled"
+    );
     let text_index = commands
         .iter()
         .position(|command| {
             matches!(
                 command,
                 PaintCommand::DrawText { text, position, .. }
-                    if text == &source && position.x < render_object.layout.text_origin_x
+                    if text == &line.text()[visible.clone()]
+                        && position.x == line.x + line.width_to_display_byte(visible.start)
+                        && position.x < render_object.layout.text_origin_x
             )
         })
         .expect("horizontally scrolled text should move left of the text origin");

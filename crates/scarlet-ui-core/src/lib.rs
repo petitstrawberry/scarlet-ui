@@ -170,8 +170,8 @@ pub use views::{
     WindowShadow, ZStack,
 };
 pub use views::{
-    EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView, TextViewRenderObject,
-    TextViewScroll, WrapMode,
+    EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,
+    TextStyleSpan, TextView, TextViewRenderObject, TextViewScroll, WrapMode,
 };
 pub use views::{NavigationLink, NavigationPresentation, NavigationView};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
@@ -231,8 +231,8 @@ pub mod prelude {
         SurfaceRole, Text, TextField, VStack, Window, WindowContentLayout, WindowShadow, ZStack,
     };
     pub use crate::views::{
-        EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView,
-        TextViewRenderObject, TextViewScroll, WrapMode,
+        EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,
+        TextStyleSpan, TextView, TextViewRenderObject, TextViewScroll, WrapMode,
     };
     pub use crate::views::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};
     pub use crate::views::{

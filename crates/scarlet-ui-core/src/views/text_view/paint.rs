@@ -1,6 +1,11 @@
 //! Paint helpers for the multi-line text view.
 
+use alloc::collections::BTreeSet;
 use alloc::string::ToString;
+use alloc::vec::Vec;
+use core::ops::Range;
+
+use super::decoration::TextDecorations;
 
 use super::layout::{TextViewLayout, VisualLine};
 use super::{BORDER_WIDTH, TextDocument, TextPosition, TextSelection};
@@ -63,6 +68,58 @@ pub fn paint_text_view(
     show_line_numbers: bool,
     highlight_current_line: bool,
 ) {
+    paint_text_view_with_decorations(
+        ctx,
+        origin,
+        size,
+        layout,
+        document,
+        selection,
+        focused,
+        font_size,
+        padding,
+        background_color,
+        text_color,
+        placeholder_color,
+        selection_color,
+        current_line_color,
+        border_color,
+        focused_border_color,
+        placeholder,
+        preedit,
+        preedit_cursor_byte,
+        preedit_spans,
+        show_line_numbers,
+        highlight_current_line,
+        &TextDecorations::default(),
+    );
+}
+
+pub(super) fn paint_text_view_with_decorations(
+    ctx: &mut PaintContext,
+    origin: Point,
+    size: Size,
+    layout: &TextViewLayout,
+    document: &TextDocument,
+    selection: TextSelection,
+    focused: bool,
+    font_size: f32,
+    padding: f32,
+    background_color: Color,
+    text_color: Color,
+    placeholder_color: Color,
+    selection_color: Color,
+    current_line_color: Color,
+    border_color: Color,
+    focused_border_color: Color,
+    placeholder: &str,
+    preedit: &str,
+    preedit_cursor_byte: u32,
+    preedit_spans: &[u8],
+    show_line_numbers: bool,
+    highlight_current_line: bool,
+    decorations: &TextDecorations,
+) {
     let bounds = Rect::new(origin, size);
     let metrics = style::metrics();
     style::fill_control(ctx, bounds, background_color);
@@ -115,6 +172,8 @@ pub fn paint_text_view(
         preedit,
         text_color,
         placeholder_color,
+        decorations,
+        text_clip,
     );
     if focused && !preedit.is_empty() {
         paint_preedit(
@@ -245,6 +304,8 @@ fn paint_visible_text(
     preedit: &str,
     text_color: Color,
     placeholder_color: Color,
+    decorations: &TextDecorations,
+    clip: Rect,
 ) {
     if document.len() == 0 && preedit.is_empty() && !placeholder.is_empty() {
         if let Some(line) = layout.visual_lines.first() {
@@ -258,54 +319,155 @@ fn paint_visible_text(
         return;
     }
     for line in visible_lines(layout) {
-        if focused && !preedit.is_empty() && line.contains_byte(selection.caret.byte) {
-            paint_line_with_preedit_gap(
+        let gap = if focused && !preedit.is_empty() && line.contains_byte(selection.caret.byte) {
+            Some((
+                line.display_byte_for_document_byte(selection.caret.byte),
+                layout.measure_text(preedit).0 as f32,
+            ))
+        } else {
+            None
+        };
+        // Split at the composition insertion point so source decorations never
+        // color or underline the IME text, and suffix marks move with the suffix.
+        let split = gap.map_or(line.text().len(), |(byte, _)| byte);
+        for (part, shift) in [
+            (0..split, 0.0),
+            (
+                split..line.text().len(),
+                gap.map_or(0.0, |(_, width)| width),
+            ),
+        ] {
+            let x = origin.x + line.x + shift;
+            let visible =
+                line.visible_display_range(clip.origin.x - x, clip.origin.x + clip.size.width - x);
+            let part = part.start.max(visible.start)..part.end.min(visible.end);
+            if part.start >= part.end {
+                continue;
+            }
+            paint_foreground(
                 ctx,
-                origin,
+                origin.y + line.y,
+                x,
                 layout,
                 line,
-                selection.caret,
-                preedit,
+                part.clone(),
                 text_color,
+                decorations,
             );
-            continue;
+            paint_diagnostics(
+                ctx,
+                origin.y + line.y,
+                x,
+                layout,
+                line,
+                part,
+                decorations,
+                clip,
+            );
         }
+    }
+}
+
+// Convert only intersections with a visible row; no full document flattening.
+// Mapping through VisualLine also expands tab ranges to all display spaces.
+fn display_range(line: &VisualLine, range: &Range<usize>) -> Range<usize> {
+    let text = line.text();
+    let mut start = line.display_byte_for_document_byte(range.start);
+    let mut end = line.display_end_for_document_byte(range.end);
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    while end < text.len() && !text.is_char_boundary(end) {
+        end += 1;
+    }
+    start..end
+}
+
+fn paint_foreground(
+    ctx: &mut PaintContext,
+    y: f32,
+    x: f32,
+    layout: &TextViewLayout,
+    line: &VisualLine,
+    part: Range<usize>,
+    default_color: Color,
+    decorations: &TextDecorations,
+) {
+    let mut events = Vec::new();
+    let mut colors = Vec::new();
+    for span in decorations.foreground.intersecting(line.text_range.clone()) {
+        let range = display_range(line, &span.range);
+        let start = range.start.max(part.start);
+        let end = range.end.min(part.end);
+        if start < end {
+            let index = colors.len();
+            colors.push(span.color);
+            events.push((start, true, span.priority, index));
+            events.push((end, false, span.priority, index));
+        }
+    }
+    events.sort_unstable();
+    let mut active = BTreeSet::new();
+    let mut byte = part.start;
+    for (at, entering, priority, index) in events {
+        if at > byte {
+            let color = active
+                .last()
+                .map_or(default_color, |&(_, index)| colors[index]);
+            layout.draw_text(
+                ctx,
+                Point::new(x + line.width_to_display_byte(byte), y),
+                &line.text()[byte..at],
+                color,
+            );
+            byte = at;
+        }
+        if entering {
+            active.insert((priority, index));
+        } else {
+            active.remove(&(priority, index));
+        }
+    }
+    if byte < part.end {
         layout.draw_text(
             ctx,
-            Point::new(origin.x + line.x, origin.y + line.y),
-            line.text(),
-            text_color,
+            Point::new(x + line.width_to_display_byte(byte), y),
+            &line.text()[byte..part.end],
+            default_color,
         );
     }
 }
 
-fn paint_line_with_preedit_gap(
+fn paint_diagnostics(
     ctx: &mut PaintContext,
-    origin: Point,
+    y: f32,
+    x: f32,
     layout: &TextViewLayout,
     line: &VisualLine,
-    position: TextPosition,
-    preedit: &str,
-    text_color: Color,
+    part: Range<usize>,
+    decorations: &TextDecorations,
+    clip: Rect,
 ) {
-    let display_byte = line.display_byte_for_document_byte(position.byte);
-    let (prefix, suffix) = split_at_char_boundary(line.text(), display_byte);
-    let x = origin.x + line.x;
-    let y = origin.y + line.y;
-
-    if !prefix.is_empty() {
-        layout.draw_text(ctx, Point::new(x, y), prefix, text_color);
-    }
-
-    let prefix_width = line.width_to_byte(position.byte);
-    let preedit_width = layout.measure_text(preedit).0 as f32;
-    if !suffix.is_empty() {
-        layout.draw_text(
-            ctx,
-            Point::new(x + prefix_width + preedit_width, y),
-            suffix,
-            text_color,
-        );
+    let mut spans: Vec<_> = decorations
+        .diagnostics
+        .intersecting(line.text_range.clone())
+        .collect();
+    spans.sort_unstable_by_key(|span| span.priority);
+    for span in spans {
+        let range = display_range(line, &span.range);
+        let start = range.start.max(part.start);
+        let end = range.end.min(part.end);
+        if start >= end {
+            continue;
+        }
+        let left = (x + line.width_to_display_byte(start)).max(clip.origin.x);
+        let right = (x + line.width_to_display_byte(end)).min(clip.origin.x + clip.size.width);
+        if left < right {
+            ctx.fill_rect(
+                Rect::from_xywh(left, y + layout.line_height - 2.0, right - left, 1.0),
+                span.color,
+            );
+        }
     }
 }
 
@@ -458,12 +620,4 @@ fn clamp_byte_boundary(text: &str, byte: u32) -> u32 {
         byte -= 1;
     }
     byte as u32
-}
-
-fn split_at_char_boundary(text: &str, byte: usize) -> (&str, &str) {
-    let mut byte = byte.min(text.len());
-    while byte > 0 && !text.is_char_boundary(byte) {
-        byte -= 1;
-    }
-    text.split_at(byte)
 }

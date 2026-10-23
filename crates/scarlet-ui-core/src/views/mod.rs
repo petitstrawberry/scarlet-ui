@@ -71,8 +71,8 @@ pub use text_grid::{
     text_grid_cell_width,
 };
 pub use text_view::{
-    EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView, TextViewRenderObject,
-    TextViewScroll, WrapMode,
+    EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,
+    TextStyleSpan, TextView, TextViewRenderObject, TextViewScroll, WrapMode,
 };
 pub use toggle::{Toggle, ToggleRenderObject};
 pub(crate) use window::WindowBackdrop;
