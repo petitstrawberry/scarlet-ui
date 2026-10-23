@@ -2,6 +2,7 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 
@@ -15,6 +16,10 @@ use crate::graphics::{self, FontStack};
 use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::view::View;
+
+#[cfg(test)]
+#[path = "text_grid_tests.rs"]
+mod tests;
 
 /// A single fixed-cell text grid cell.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -370,7 +375,7 @@ pub struct TextGrid {
     cell_width: f32,
     cell_height: f32,
     font_size: f32,
-    font_stack: Option<FontStack>,
+    font_stack: Option<Arc<FontStack>>,
     background_color: Color,
     cursor: Option<TextGridCursor>,
     cursor_color: Color,
@@ -442,7 +447,7 @@ impl TextGrid {
     ///
     /// Updated view.
     pub fn font_stack(mut self, font_stack: FontStack) -> Self {
-        self.font_stack = Some(font_stack);
+        self.font_stack = Some(Arc::new(font_stack));
         self
     }
 
@@ -510,7 +515,7 @@ impl View for TextGrid {
                 self.cell_width,
                 self.cell_height,
                 self.font_size,
-                self.font_stack.clone(),
+                self.font_stack.as_deref().cloned(),
                 self.background_color,
                 self.cursor,
                 self.cursor_color,
@@ -533,7 +538,7 @@ pub struct TextGridRenderObject {
     cell_width: f32,
     cell_height: f32,
     font_size: f32,
-    font_stack: Option<FontStack>,
+    font_stack: Option<Arc<FontStack>>,
     background_color: Color,
     cursor: Option<TextGridCursor>,
     cursor_color: Color,
@@ -575,7 +580,7 @@ impl TextGridRenderObject {
             cell_width: cell_width.max(1.0),
             cell_height: cell_height.max(1.0),
             font_size: font_size.max(1.0),
-            font_stack,
+            font_stack: font_stack.map(Arc::new),
             background_color,
             cursor,
             cursor_color,
@@ -596,6 +601,14 @@ impl TextGridRenderObject {
         if let Some(index) = self.grid.index(cursor.column, cursor.row) {
             self.dirty_cells.push(index);
         }
+    }
+
+    fn text_y_offset(&self) -> f32 {
+        let line_height = match &self.font_stack {
+            Some(font) => graphics::line_height_sized_with_font_stack(self.font_size, font),
+            None => graphics::line_height_sized(self.font_size),
+        };
+        ((self.cell_height - line_height as f32) / 2.0).max(0.0)
     }
 
     fn repaint_cell(&self, canvas: &mut graphics::Canvas<'_>, index: usize) {
@@ -637,7 +650,7 @@ impl TextGridRenderObject {
         if cell.ch != ' ' && cell.ch != '\0' {
             let mut encoded = [0u8; 4];
             let text = cell.ch.encode_utf8(&mut encoded);
-            let baseline_adjust = ((self.cell_height - self.font_size) / 2.0).max(0.0);
+            let baseline_adjust = self.text_y_offset();
             if let Some(font_stack) = &self.font_stack {
                 canvas.draw_text_sized_with_font_stack(
                     x,
@@ -808,18 +821,18 @@ impl TextGridRenderObject {
                 let mut encoded = [0u8; 4];
                 let text = cell.ch.encode_utf8(&mut encoded);
                 let text = String::from(text);
-                let baseline_adjust = ((self.cell_height - self.font_size) / 2.0).max(0.0);
+                let baseline_adjust = self.text_y_offset();
                 let text_origin = Point::new(
                     origin.x + x as f32,
                     origin.y + y as f32 + libm::floorf(baseline_adjust),
                 );
-                ctx.draw_text(text_origin, text.clone(), foreground, self.font_size);
+                self.paint_text(ctx, text_origin, text.clone(), foreground);
                 if cell.bold {
-                    ctx.draw_text(
+                    self.paint_text(
+                        ctx,
                         Point::new(text_origin.x + 1.0, text_origin.y),
                         text,
                         foreground,
-                        self.font_size,
                     );
                 }
             }
@@ -870,6 +883,14 @@ impl TextGridRenderObject {
                 ),
                 background,
             );
+        }
+    }
+
+    fn paint_text(&self, ctx: &mut PaintContext, origin: Point, text: String, color: Color) {
+        if let Some(font_stack) = &self.font_stack {
+            ctx.draw_text_with_font_stack(origin, text, color, self.font_size, font_stack.clone());
+        } else {
+            ctx.draw_text(origin, text, color, self.font_size);
         }
     }
 
@@ -1042,7 +1063,9 @@ impl ElementRenderObject for TextGridRenderObject {
             self.full_repaint = true;
             changed = true;
         }
-        if font_stack_id(self.font_stack.as_ref()) != font_stack_id(text_grid.font_stack.as_ref()) {
+        if font_stack_id(self.font_stack.as_deref())
+            != font_stack_id(text_grid.font_stack.as_deref())
+        {
             self.font_stack = text_grid.font_stack.clone();
             self.full_repaint = true;
             changed = true;
