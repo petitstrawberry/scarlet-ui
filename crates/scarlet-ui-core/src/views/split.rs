@@ -388,6 +388,7 @@ pub struct SplitViewRenderObject<A: View, B: View> {
     axis_policy: SplitAxisPolicy,
     adaptive_stack_narrow_width: f32,
     fraction: f32,
+    configured_fraction: f32,
     min_first: f32,
     min_second: f32,
     divider_thickness: f32,
@@ -423,6 +424,7 @@ impl<A: View, B: View> SplitViewRenderObject<A, B> {
             axis_policy: view.split_axis_policy(),
             adaptive_stack_narrow_width: view.split_adaptive_stack_narrow_width(),
             fraction: view.split_fraction(),
+            configured_fraction: view.split_fraction(),
             min_first: view.minimum_extents().0,
             min_second: view.minimum_extents().1,
             divider_thickness: view.split_divider_thickness(),
@@ -648,19 +650,22 @@ impl<A: View + Clone + 'static, B: View + Clone + 'static> ElementRenderObject
         let old_divider_hit_slop = self.divider_hit_slop;
         let old_divider_color = self.divider_color;
         let old_active_divider_color = self.active_divider_color;
+        let fraction_changed = self.configured_fraction != split_view.split_fraction();
 
         self.configured_axis = split_view.split_axis();
         self.axis_policy = split_view.split_axis_policy();
         self.adaptive_stack_narrow_width = split_view.split_adaptive_stack_narrow_width();
-        if !self.is_dragging() {
-            self.fraction = split_view.split_fraction();
+        self.configured_fraction = split_view.split_fraction();
+        if fraction_changed {
+            self.fraction = self.configured_fraction;
         }
         (self.min_first, self.min_second) = split_view.minimum_extents();
         self.divider_thickness = split_view.split_divider_thickness();
         self.divider_hit_slop = split_view.split_divider_hit_slop();
         (self.divider_color, self.active_divider_color) = split_view.split_divider_colors();
 
-        if self.configured_axis != old_configured_axis
+        if fraction_changed
+            || self.configured_axis != old_configured_axis
             || self.axis_policy != old_axis_policy
             || (self.adaptive_stack_narrow_width - old_adaptive_stack_narrow_width).abs() > 0.001
             || (self.min_first - old_min_first).abs() > 0.001
@@ -898,6 +903,46 @@ fn sanitize_non_negative(value: f32, fallback: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::views::Text;
+
+    #[test]
+    fn released_divider_survives_view_rebuild_and_explicit_fraction_still_works() {
+        let view = SplitView::new(Text::new("A"), Text::new("B"))
+            .fraction(0.25)
+            .divider_thickness(2.0);
+        let mut object = SplitViewRenderObject::<Text, Text>::from_view(&view);
+        let bounds = LayoutConstraints::tight(402.0, 180.0);
+        object.layout(bounds);
+        for event in [
+            MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: 101,
+                y: 20,
+                click_count: 1,
+            },
+            MouseEvent::Moved { x: 221, y: 20 },
+            MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 221,
+                y: 20,
+                click_count: 1,
+            },
+        ] {
+            assert!(object.handle_event(&Event::Mouse(event), Phase::Target));
+        }
+        let resized = object.first_extent();
+        assert!((resized - 220.0).abs() < 0.01);
+        for _ in 0..4 {
+            object.update(&view);
+            object.layout(bounds);
+            assert_eq!(object.first_extent(), resized);
+        }
+        assert!(matches!(
+            object.update(&view.fraction(0.4)),
+            crate::element::UpdateResult::Updated
+        ));
+        object.layout(bounds);
+        assert_eq!(object.first_extent(), 160.0);
+    }
 
     #[test]
     fn horizontal_layout_respects_fraction() {
