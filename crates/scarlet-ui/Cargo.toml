@@ -53,3 +53,7 @@ required-features = ["platform-winit"]
 [[example]]
 name = "typography-smoke"
 required-features = ["platform-winit"]
+
+[[example]]
+name = "native-menu-smoke"
+required-features = ["platform-winit"]

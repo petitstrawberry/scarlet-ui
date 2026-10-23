@@ -197,6 +197,12 @@ impl TextField {
         self
     }
 
+    /// Set the placeholder color without changing the entered text color.
+    pub fn placeholder_color(mut self, color: Color) -> Self {
+        self.placeholder_color = color;
+        self
+    }
+
     /// Return the bound text state.
     pub fn text_state(&self) -> &State<String> {
         &self.text
@@ -1091,6 +1097,24 @@ mod tests {
     use crate::event::{Event, KeyEvent, MouseButton, MouseEvent};
     use crate::renderer::PaintCommand;
     use crate::state::StateId;
+
+    #[test]
+    fn placeholder_color_updates_without_changing_entered_text_color() {
+        let text = State::new(crate::state::generate_state_id(), String::new());
+        let foreground = Color::rgb(210u8, 212u8, 216u8);
+        let placeholder = Color::rgb(148u8, 152u8, 160u8);
+        let field = TextField::new(text).placeholder("Find").text_color(foreground);
+        let mut object = TextFieldRenderObject::from_view(&field);
+        let updated = field.placeholder_color(placeholder);
+        object.update(&updated);
+        object.layout(LayoutConstraints::tight(160.0, 32.0));
+        let mut ctx = PaintContext::new();
+        object.paint(&mut ctx, Point::ZERO);
+        assert!(ctx.commands().iter().any(|command| matches!(command,
+            PaintCommand::DrawText { text, color, .. } if text == "Find" && *color == placeholder
+        )));
+        assert_eq!(object.text_color, foreground);
+    }
 
     #[test]
     fn long_field_reveals_caret_and_ime_without_losing_vertical_centering() {

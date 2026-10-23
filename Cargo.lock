@@ -1985,6 +1985,8 @@ dependencies = [
  "raw-window-handle",
  "scarlet-ui-core",
  "scarlet-ui-renderer-sgfx",
+ "serde",
+ "serde_json",
  "sgfx",
  "softbuffer",
  "winit",

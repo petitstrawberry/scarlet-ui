@@ -25,6 +25,7 @@ pub struct MenuItemModel {
     id: String,
     title: String,
     enabled: bool,
+    checked: bool,
     shortcut: Option<String>,
     children: Vec<MenuEntry>,
     on_activate: Option<MenuCallback>,
@@ -36,6 +37,7 @@ impl MenuItemModel {
             id: id.into(),
             title: title.into(),
             enabled: true,
+            checked: false,
             shortcut: None,
             children: Vec::new(),
             on_activate: None,
@@ -56,6 +58,16 @@ impl MenuItemModel {
     pub fn shortcut(mut self, shortcut: impl Into<String>) -> Self {
         self.shortcut = Some(shortcut.into());
         self
+    }
+
+    /// Show a checkmark beside this item on platforms with native menu support.
+    pub fn checked(mut self, checked: bool) -> Self {
+        self.checked = checked;
+        self
+    }
+
+    pub fn checked_value(&self) -> bool {
+        self.checked
     }
 
     pub fn children(mut self, children: Vec<MenuEntry>) -> Self {
@@ -154,6 +166,10 @@ fn write_menu_item_json(out: &mut String, item: &MenuItemModel) {
     } else {
         "false"
     });
+    // Keep the wire representation of existing, unchecked menus unchanged.
+    if item.checked_value() {
+        out.push_str(",\"checked\":true");
+    }
     out.push_str(",\"shortcut\":");
     if let Some(sc) = item.shortcut_value() {
         out.push('"');

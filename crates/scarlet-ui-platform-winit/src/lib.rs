@@ -56,6 +56,8 @@ use ::winit::window::{
 
 #[cfg(target_os = "macos")]
 mod file_dialog;
+#[cfg(target_os = "macos")]
+mod native_menu;
 #[cfg(feature = "sgfx")]
 mod sgfx_renderer;
 mod tablet_mode;
@@ -805,6 +807,8 @@ struct WinitSharedState {
     native_loop_active: Cell<bool>,
     windows: RefCell<BTreeMap<WindowId, WinitWindowEntry>>,
     pointer_lock_owner: RefCell<Option<WindowId>>,
+    #[cfg(target_os = "macos")]
+    menus: RefCell<native_menu::NativeMenus>,
 }
 
 impl WinitSharedState {
@@ -815,6 +819,8 @@ impl WinitSharedState {
             native_loop_active: Cell::new(false),
             windows: RefCell::new(BTreeMap::new()),
             pointer_lock_owner: RefCell::new(None),
+            #[cfg(target_os = "macos")]
+            menus: RefCell::new(native_menu::NativeMenus::default()),
         }
     }
 
@@ -829,6 +835,8 @@ impl WinitSharedState {
     }
 
     fn remove_window(&self, window_id: WindowId) {
+        #[cfg(target_os = "macos")]
+        self.menus.borrow_mut().remove(window_id);
         self.clear_pointer_lock_owner(window_id);
         self.windows.borrow_mut().remove(&window_id);
     }
@@ -939,6 +947,7 @@ impl WinitNativeHandler<'_> {
 #[cfg(target_os = "macos")]
 impl ApplicationHandler for WinitNativeHandler<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.pump.resumed(event_loop);
         self.run_tick(event_loop);
     }
 
@@ -973,12 +982,23 @@ impl ApplicationHandler for WinitNativeHandler<'_> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.pump.about_to_wait(event_loop);
         self.run_tick(event_loop);
     }
 }
 
 impl ApplicationHandler for WinitPumpHandler {
-    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
+    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        self.shared.menus.borrow_mut().launched();
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // AppKit can deliver didBecomeKey before NSApplication.keyWindow is
+        // updated. Reconcile once its native event dispatch has completed.
+        #[cfg(target_os = "macos")]
+        self.shared.menus.borrow_mut().refresh();
+    }
 
     fn window_event(
         &mut self,
@@ -1015,6 +1035,8 @@ impl ApplicationHandler for WinitPumpHandler {
                 ));
             }
             WindowEvent::Destroyed => {
+                #[cfg(target_os = "macos")]
+                self.shared.menus.borrow_mut().remove(window_id);
                 self.shared.clear_pointer_lock_owner(window_id);
                 mark_pointer_lock_released(&mut state);
                 state.push(Event::Quit);
@@ -1036,6 +1058,8 @@ impl ApplicationHandler for WinitPumpHandler {
                 });
             }
             WindowEvent::Focused(focused) => {
+                #[cfg(target_os = "macos")]
+                self.shared.menus.borrow_mut().refresh();
                 state.window_focused = focused;
                 if !focused {
                     state.reconcile_pointer_buttons(0);
@@ -1469,6 +1493,13 @@ impl WinitPlatformWindow {
         };
         let surface_id = next_surface_id();
         let state = Rc::new(RefCell::new(WinitEventState::new(scale_factor)));
+        #[cfg(target_os = "macos")]
+        shared.menus.borrow_mut().update(
+            &window,
+            surface_id,
+            &request.menu_titles,
+            Rc::downgrade(&state),
+        )?;
         shared.windows.borrow_mut().insert(
             window.id(),
             WinitWindowEntry {
@@ -1846,6 +1877,13 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn set_menu_titles(&mut self, _menu_titles: &str) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        self.shared.menus.borrow_mut().update(
+            &self.window,
+            self.surface_id,
+            _menu_titles,
+            Rc::downgrade(&self.state),
+        )?;
         Ok(())
     }
 
