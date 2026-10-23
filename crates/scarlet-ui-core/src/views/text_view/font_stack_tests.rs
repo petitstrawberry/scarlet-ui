@@ -110,7 +110,7 @@ fn explicit_stack_updates_invalidate_layout_but_clones_and_scroll_reuse_it() {
     let mut object = render_object_with_size(&view, 90., 60.);
     assert_eq!(object.layout.visual_lines[0].width, 24.);
     let lines = object.layout.visual_lines.as_ptr();
-    object.scroll = TextViewScroll { x: 0., y: 20. };
+    object.requested_scroll = TextViewScroll { x: 0., y: 20. };
     object.update(&view.clone());
     assert_eq!(object.layout.visual_lines.as_ptr(), lines);
     assert_eq!(object.scroll.y, 20.);

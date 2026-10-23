@@ -1490,7 +1490,7 @@ fn update_without_scroll_state_preserves_internal_scroll() {
     let selection = State::new(StateId::new(1241), TextSelection::collapsed(0));
     let view = TextView::new(text.clone(), selection.clone());
     let mut render_object = render_object_with_size(&view, 120.0, 56.0);
-    render_object.scroll = render_object.layout.clamp_scroll(TextViewScroll {
+    render_object.requested_scroll = render_object.layout.clamp_scroll(TextViewScroll {
         x: 0.0,
         y: render_object.layout.line_height * 2.0,
     });

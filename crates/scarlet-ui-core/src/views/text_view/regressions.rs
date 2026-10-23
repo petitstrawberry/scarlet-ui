@@ -539,7 +539,7 @@ fn hover_reports_scrolled_unicode_byte_and_leave_without_selection_or_scroll_cha
     .line_numbers(true)
     .on_hover(move |hit| observed.lock().unwrap().push(hit));
     let mut object = render_object_with_size(&view, 180.0, 90.0);
-    object.scroll = TextViewScroll {
+    object.requested_scroll = TextViewScroll {
         x: 10.0,
         y: object.layout.line_height * 2.0 + 4.0,
     };
@@ -634,10 +634,105 @@ fn caret_geometry_binding_tracks_layout_selection_scroll_and_ime_only_when_chang
 
 #[test]
 fn borderless_document_surface_has_square_fill_and_no_control_outline() {
-    let view=TextView::new(State::new(StateId::new(7190),"code".into()),State::new(StateId::new(7191),TextSelection::collapsed(0))).borderless().autofocus(true);
-    let object=render_object_with_size(&view,240.0,120.0);
-    let mut context=PaintContext::new();assert!(object.paint(&mut context,Point::ZERO));
-    assert!(!context.commands().iter().any(|command|matches!(command,PaintCommand::FillRoundedRect{..}|PaintCommand::StrokeRoundedRect{..})),"a document pane must not paint a rounded form control");
-    let regular=render_object_with_size(&TextView::new(view.text_state().unwrap().clone(),view.selection_state().clone()),240.0,120.0);
-    assert_eq!(object.cursor_rect(),regular.cursor_rect());
+    let view = TextView::new(
+        State::new(StateId::new(7190), "code".into()),
+        State::new(StateId::new(7191), TextSelection::collapsed(0)),
+    )
+    .borderless()
+    .autofocus(true);
+    let object = render_object_with_size(&view, 240.0, 120.0);
+    let mut context = PaintContext::new();
+    assert!(object.paint(&mut context, Point::ZERO));
+    assert!(
+        !context.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillRoundedRect { .. } | PaintCommand::StrokeRoundedRect { .. }
+        )),
+        "a document pane must not paint a rounded form control"
+    );
+    let regular = render_object_with_size(
+        &TextView::new(
+            view.text_state().unwrap().clone(),
+            view.selection_state().clone(),
+        ),
+        240.0,
+        120.0,
+    );
+    assert_eq!(object.cursor_rect(), regular.cursor_rect());
+}
+
+#[test]
+fn parent_measurement_probes_do_not_reset_the_committed_editor_scroll() {
+    let view = TextView::new(
+        State::new(
+            StateId::new(7192),
+            "long line ".repeat(160) + &"\nlast".repeat(60),
+        ),
+        State::new(StateId::new(7193), TextSelection::collapsed(0)),
+    );
+    let mut object = render_object_with_size(&view, 240.0, 120.0);
+    handle_text_view_mouse(
+        &view,
+        &mut object,
+        &MouseEvent::Wheel {
+            delta_x: -800,
+            delta_y: -1500,
+            x: 100,
+            y: 60,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
+        },
+    );
+    let committed = object.scroll;
+    assert!(committed.x > 0.0 && committed.y > 0.0);
+    object.layout(LayoutConstraints::tight(1600.0, 1400.0));
+    object.layout(LayoutConstraints::tight(240.0, 120.0));
+    object.flush_layout_notifications();
+    assert_eq!(
+        object.scroll, committed,
+        "intrinsic measurement must not commit a temporary viewport's scroll clamp"
+    );
+}
+
+#[test]
+fn selection_drag_cancels_hover_and_does_not_schedule_more_hover_requests() {
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let observed = hits.clone();
+    let view = TextView::new(
+        State::new(StateId::new(7194), "alpha beta gamma".into()),
+        State::new(StateId::new(7195), TextSelection::collapsed(0)),
+    )
+    .on_hover(move |hit| observed.lock().unwrap().push(hit));
+    let mut object = render_object_with_size(&view, 300.0, 120.0);
+    handle_text_view_mouse(&view, &mut object, &MouseEvent::Moved { x: 25, y: 20 });
+    assert!(hits.lock().unwrap().last().unwrap().is_some());
+    handle_text_view_mouse(
+        &view,
+        &mut object,
+        &MouseEvent::ButtonPressed {
+            button: MouseButton::Left,
+            x: 25,
+            y: 20,
+            click_count: 1,
+        },
+    );
+    assert_eq!(hits.lock().unwrap().last(), Some(&None));
+    let count = hits.lock().unwrap().len();
+    for x in [45, 65, 85] {
+        handle_text_view_mouse(&view, &mut object, &MouseEvent::Moved { x, y: 20 });
+    }
+    assert_eq!(hits.lock().unwrap().len(), count);
+    assert_ne!(view.selection.get().anchor, view.selection.get().caret);
+    handle_text_view_mouse(
+        &view,
+        &mut object,
+        &MouseEvent::ButtonReleased {
+            button: MouseButton::Left,
+            x: 85,
+            y: 20,
+            click_count: 1,
+        },
+    );
+    handle_text_view_mouse(&view, &mut object, &MouseEvent::Moved { x: 90, y: 20 });
+    assert_eq!(hits.lock().unwrap().len(), count + 1);
 }

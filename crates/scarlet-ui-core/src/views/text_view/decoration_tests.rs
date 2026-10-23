@@ -220,7 +220,7 @@ fn decoration_updates_preserve_layout_selection_scroll_and_composition() {
     let mut object = render_object_with_size(&view, 90., 80.);
     object.selection = TextSelection::collapsed(1);
     view.selection.set(object.selection);
-    object.scroll = TextViewScroll { x: 12., y: 40. };
+    object.requested_scroll = TextViewScroll { x: 12., y: 40. };
     object.compute_layout();
     object.set_preedit_state("日", 3, 3, &[]);
     let storage = object.layout.visual_lines.as_ptr();
@@ -303,7 +303,7 @@ fn painting_large_scrolled_documents_emits_only_visible_rows_and_columns() {
             color: blue(),
         }]);
     let mut object = render_object_with_size(&view, 150., 90.);
-    object.scroll = TextViewScroll {
+    object.requested_scroll = TextViewScroll {
         x: 1200.5,
         y: 600.25,
     };

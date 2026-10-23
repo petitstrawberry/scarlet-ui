@@ -243,7 +243,7 @@ pub(crate) fn handle_text_view_mouse(
     event: &MouseEvent,
 ) -> bool {
     match *event {
-        MouseEvent::Moved { x, y } | MouseEvent::Entered { x, y } => {
+        MouseEvent::Moved { x, y } | MouseEvent::Entered { x, y } if !render_object.dragging => {
             if let Some(callback) = &view.on_hover {
                 callback(render_object.hit_at_point(Point::new(x as f32, y as f32)));
             }
@@ -262,6 +262,9 @@ pub(crate) fn handle_text_view_mouse(
             y,
             click_count,
         } => {
+            if let Some(callback) = &view.on_hover {
+                callback(None);
+            }
             if render_object.pointer_modifiers.primary()
                 && let Some(callback) = &view.on_modified_click
                 && let Some(hit) = render_object.hit_at_point(Point::new(x as f32, y as f32))
@@ -489,6 +492,7 @@ fn set_scroll(
     requested: super::TextViewScroll,
 ) {
     let clamped = render_object.layout.clamp_scroll(requested);
+    render_object.requested_scroll = clamped;
     if clamped == render_object.scroll {
         return;
     }

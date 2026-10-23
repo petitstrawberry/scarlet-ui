@@ -372,7 +372,10 @@ impl TextView {
 
     /// Render a flat document surface without a form-control outline or rounded corners.
     /// Text metrics, padding and selection geometry are unchanged.
-    pub fn borderless(mut self) -> Self {self.borderless=true;self}
+    pub fn borderless(mut self) -> Self {
+        self.borderless = true;
+        self
+    }
 
     /// Set the focused border color.
     ///
@@ -563,6 +566,9 @@ pub struct TextViewRenderObject {
     text_document: TextDocument,
     selection: TextSelection,
     scroll: TextViewScroll,
+    // Preserve the requested offset across intermediate parent measurement passes.
+    requested_scroll: TextViewScroll,
+    scroll_state: Option<State<TextViewScroll>>,
     wrap_mode: WrapMode,
     preedit: String,
     preedit_cursor_byte: u32,
@@ -642,6 +648,8 @@ impl TextViewRenderObject {
             text_document,
             selection,
             scroll,
+            requested_scroll: scroll,
+            scroll_state: view.scroll.clone(),
             wrap_mode,
             preedit: String::new(),
             preedit_cursor_byte: 0,
@@ -711,7 +719,7 @@ impl TextViewRenderObject {
                 + caret.size.width;
             self.layout.content_width = base_width.max(composition_end);
         }
-        self.scroll = self.layout.set_scroll(self.scroll);
+        self.scroll = self.layout.set_scroll(self.requested_scroll);
     }
 
     fn publish_caret_rect(&self) {
@@ -878,6 +886,13 @@ impl ElementRenderObject for TextViewRenderObject {
     }
 
     fn flush_layout_notifications(&mut self) {
+        // Only the final viewport may commit a clamp (for example after resize).
+        self.requested_scroll = self.scroll;
+        if let Some(state) = &self.scroll_state {
+            if state.get() != self.scroll {
+                state.set(self.scroll);
+            }
+        }
         self.publish_caret_rect();
     }
 
@@ -962,8 +977,9 @@ impl ElementRenderObject for TextViewRenderObject {
         let selection_changed = self.selection != selection;
         self.selection = selection;
         if let Some(scroll) = &view.scroll {
-            self.scroll = scroll.get();
+            self.requested_scroll = scroll.get();
         }
+        self.scroll_state = view.scroll.clone();
         self.wrap_mode = view
             .wrap_mode
             .as_ref()
