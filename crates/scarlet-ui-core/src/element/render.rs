@@ -1155,6 +1155,17 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
         use crate::event::{Event, MouseButton, MouseEvent, Phase};
 
+        if let Event::ModifiersChanged(modifiers) = _event {
+            if let Some(object) = self
+                .render_object
+                .as_any_mut()
+                .downcast_mut::<crate::views::TextViewRenderObject>()
+            {
+                object.pointer_modifiers = *modifiers;
+            }
+            return false;
+        }
+
         let disabled_button = self
             .view
             .as_any()
@@ -1304,8 +1315,10 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     return true;
                 }
                 let handled = match key_event {
-                    KeyEvent::Pressed { modifiers, keycode: KeyCode::Enter | KeyCode::Space }
-                        if modifiers.control || modifiers.alt || modifiers.super_key => false,
+                    KeyEvent::Pressed {
+                        modifiers,
+                        keycode: KeyCode::Enter | KeyCode::Space,
+                    } if modifiers.control || modifiers.alt || modifiers.super_key => false,
                     KeyEvent::Pressed { keycode, .. } => match keycode {
                         KeyCode::Enter | KeyCode::Space if object.is_expanded() => {
                             if let Some(index) = object
@@ -1328,8 +1341,10 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         }
                         KeyCode::PageUp | KeyCode::PageDown if object.is_expanded() => {
                             let last = select.option_count().saturating_sub(1);
-                            let current = object.hovered_index()
-                                .unwrap_or_else(|| select.selected_index().get()).min(last);
+                            let current = object
+                                .hovered_index()
+                                .unwrap_or_else(|| select.selected_index().get())
+                                .min(last);
                             let next = if *keycode == KeyCode::PageUp {
                                 current.saturating_sub(object.page_step())
                             } else {

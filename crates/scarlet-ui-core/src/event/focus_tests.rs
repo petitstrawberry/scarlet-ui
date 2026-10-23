@@ -566,3 +566,62 @@ fn editor_and_slider_navigation_do_not_scroll_the_enclosing_form() {
     assert_eq!(single.get(), "single line");
     assert_eq!(text.get(), "line\n".repeat(50));
 }
+
+#[test]
+fn modifier_only_primary_click_reports_text_hit_without_selecting_then_plain_click_selects() {
+    use crate::event::{MouseButton, MouseEvent};
+    use crate::views::TextViewHit;
+    use core::cell::RefCell;
+    let selection = state(TextSelection::collapsed(0));
+    let hits = Rc::new(RefCell::new(Vec::<TextViewHit>::new()));
+    let calls = hits.clone();
+    let mut pipeline = pipeline(
+        TextView::new(state(String::from("hello 日本")), selection.clone())
+            .on_modified_click(move |hit| calls.borrow_mut().push(hit)),
+    );
+    let primary = KeyModifiers {
+        control: !cfg!(target_os = "macos"),
+        super_key: cfg!(target_os = "macos"),
+        ..KeyModifiers::empty()
+    };
+    pipeline.handle_event(&Event::ModifiersChanged(primary));
+    let press = Event::Mouse(MouseEvent::ButtonPressed {
+        button: MouseButton::Left,
+        x: 35,
+        y: 20,
+        click_count: 1,
+    });
+    assert!(pipeline.handle_event(&press));
+    assert_eq!(hits.borrow().len(), 1);
+    assert!(hits.borrow()[0].byte_offset > 0);
+    assert_eq!(hits.borrow()[0].position, Point::new(35.0, 20.0));
+    assert_eq!(selection.get(), TextSelection::collapsed(0));
+    pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 75, y: 20 }));
+    assert_eq!(selection.get(), TextSelection::collapsed(0));
+    pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+        button: MouseButton::Left,
+        x: 75,
+        y: 20,
+        click_count: 1,
+    }));
+    pipeline.handle_event(&Event::ModifiersChanged(KeyModifiers::empty()));
+    assert!(pipeline.handle_event(&press));
+    assert!(selection.get().caret.byte > 0);
+    assert_eq!(hits.borrow().len(), 1);
+    pipeline.teardown();
+}
+
+#[test]
+fn primary_modifier_uses_command_on_macos_and_control_elsewhere() {
+    let control = KeyModifiers {
+        control: true,
+        ..KeyModifiers::empty()
+    };
+    let meta = KeyModifiers {
+        super_key: true,
+        ..KeyModifiers::empty()
+    };
+    assert_eq!(control.primary(), !cfg!(target_os = "macos"));
+    assert_eq!(meta.primary(), cfg!(target_os = "macos"));
+    assert!(!KeyModifiers::empty().primary());
+}

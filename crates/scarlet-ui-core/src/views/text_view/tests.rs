@@ -674,7 +674,8 @@ fn primary_key(c: char) -> KeyEvent {
     KeyEvent::Pressed {
         keycode: KeyCode::Char(c),
         modifiers: KeyModifiers {
-            control: true,
+            control: !cfg!(target_os = "macos"),
+            super_key: cfg!(target_os = "macos"),
             ..KeyModifiers::empty()
         },
     }

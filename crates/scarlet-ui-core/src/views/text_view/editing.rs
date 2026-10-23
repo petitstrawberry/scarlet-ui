@@ -243,12 +243,35 @@ pub(crate) fn handle_text_view_mouse(
     event: &MouseEvent,
 ) -> bool {
     match *event {
+        MouseEvent::Moved { x, y } | MouseEvent::Entered { x, y } => {
+            if let Some(callback) = &view.on_hover {
+                callback(render_object.hit_at_point(Point::new(x as f32, y as f32)));
+            }
+        }
+        MouseEvent::Exited { .. } => {
+            if let Some(callback) = &view.on_hover {
+                callback(None);
+            }
+        }
+        _ => {}
+    }
+    match *event {
         MouseEvent::ButtonPressed {
             button: MouseButton::Left,
             x,
             y,
             click_count,
-        } => handle_primary_click(view, render_object, x, y, click_count),
+        } => {
+            if render_object.pointer_modifiers.primary()
+                && let Some(callback) = &view.on_modified_click
+                && let Some(hit) = render_object.hit_at_point(Point::new(x as f32, y as f32))
+            {
+                render_object.dragging = false;
+                callback(hit);
+                return true;
+            }
+            handle_primary_click(view, render_object, x, y, click_count)
+        }
         MouseEvent::Moved { x, y } => handle_drag_selection(view, render_object, x, y),
         MouseEvent::ButtonReleased {
             button: MouseButton::Left,
@@ -319,6 +342,7 @@ fn handle_primary_shortcut(
         'a' | 'A' => {
             select_all(render_object);
             view.selection_state().set(render_object.selection);
+            render_object.publish_caret_rect();
             true
         }
         'c' | 'C' => {
@@ -379,6 +403,7 @@ fn handle_primary_click(
     }
     update_desired_x(render_object);
     view.selection_state().set(render_object.selection);
+    render_object.publish_caret_rect();
     true
 }
 
@@ -395,6 +420,7 @@ fn handle_drag_selection(
         render_object.selection.caret = position;
         update_desired_x(render_object);
         view.selection_state().set(render_object.selection);
+        render_object.publish_caret_rect();
     }
     true
 }
@@ -417,6 +443,7 @@ fn scroll_view(
 fn finish_caret_change(view: &TextView, render_object: &mut TextViewRenderObject) {
     ensure_caret_visible(view, render_object);
     view.selection_state().set(render_object.selection);
+    render_object.publish_caret_rect();
 }
 
 pub(super) fn ensure_caret_visible(view: &TextView, render_object: &mut TextViewRenderObject) {
@@ -469,6 +496,7 @@ fn set_scroll(
     if let Some(scroll) = view.scroll.as_ref() {
         scroll.set(clamped);
     }
+    render_object.publish_caret_rect();
 }
 
 fn hit_test_mouse(render_object: &TextViewRenderObject, x: i32, y: i32) -> Option<TextPosition> {

@@ -2621,6 +2621,8 @@ impl SWSPlatformWindow {
                         let pressed = input.value != 0;
                         if Self::is_modifier_key(code) {
                             self.update_modifier_state(code, pressed);
+                            let modifiers = self.current_modifiers();
+                            self.push_event(Event::ModifiersChanged(modifiers));
                             return;
                         }
                         let mapped_char = self.map_key_char_with_modifiers(code);
@@ -2635,8 +2637,10 @@ impl SWSPlatformWindow {
                             );
                         }
                         let modifiers = self.current_modifiers();
-                        for event in keyboard::keyboard_events(mapped, mapped_char, modifiers, pressed)
-                            .into_iter().flatten()
+                        for event in
+                            keyboard::keyboard_events(mapped, mapped_char, modifiers, pressed)
+                                .into_iter()
+                                .flatten()
                         {
                             self.push_event(Event::Keyboard(event));
                         }
@@ -2856,6 +2860,7 @@ impl SWSPlatformWindow {
                 self.text_input_sync.invalidate();
                 if window_id != self.surface_id {
                     self.reset_transient_modifiers();
+                    self.push_event(Event::ModifiersChanged(KeyModifiers::empty()));
                     self.pointer_lock_requested = None;
                     if self.pointer_locked {
                         self.flush_pending_relative_motion();

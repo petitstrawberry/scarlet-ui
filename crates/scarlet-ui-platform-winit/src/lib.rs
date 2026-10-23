@@ -543,6 +543,13 @@ impl WinitEventState {
         }));
     }
 
+    fn push_modifiers(&mut self, modifiers: KeyModifiers) {
+        if self.modifiers != modifiers {
+            self.modifiers = modifiers;
+            self.push(Event::ModifiersChanged(modifiers));
+        }
+    }
+
     fn push_keyboard_input(&mut self, key: &Key, state: WinitElementState) {
         let keycode = map_key(key);
         let modifiers = self.modifiers;
@@ -1038,12 +1045,12 @@ impl ApplicationHandler for WinitPumpHandler {
                     release_native_pointer_lock(&window, &mut state);
                     state.manual_move_active = false;
                     state.ime_preedit_active = false;
-                    state.modifiers = KeyModifiers::empty();
+                    state.push_modifiers(KeyModifiers::empty());
                     state.discard_pending_empty_preedit();
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
-                state.modifiers = map_modifiers(modifiers.state());
+                state.push_modifiers(map_modifiers(modifiers.state()));
             }
             WindowEvent::CursorMoved { position, .. } => {
                 if state.manual_move_active {
@@ -2027,6 +2034,29 @@ fn map_wheel_phase(phase: TouchPhase) -> WheelPhase {
 mod tests {
     use super::*;
     use scarlet_ui_core::platform::{WindowFrame, WindowTitleBar};
+
+    #[test]
+    fn modifier_only_changes_publish_command_control_and_release_for_pointer_actions() {
+        let mut state = WinitEventState::new(1.0);
+        for native in [
+            ModifiersState::SUPER,
+            ModifiersState::CONTROL,
+            ModifiersState::empty(),
+        ] {
+            let modifiers = map_modifiers(native);
+            state.push_modifiers(modifiers);
+            assert_eq!(state.modifiers, modifiers);
+            assert!(
+                matches!(state.pop(), Some(Event::ModifiersChanged(actual)) if actual == modifiers)
+            );
+            assert!(
+                state.pop().is_none(),
+                "modifier changes must not synthesize text"
+            );
+            state.push_modifiers(modifiers);
+            assert!(state.pop().is_none());
+        }
+    }
 
     #[test]
     fn application_shortcuts_emit_keys_without_printable_text() {

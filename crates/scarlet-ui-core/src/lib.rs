@@ -48,6 +48,7 @@ extern crate scarlet_ui_macros;
 
 pub mod application;
 pub mod buffer;
+pub mod clipboard;
 mod clock;
 pub mod color;
 pub mod command;
@@ -57,7 +58,6 @@ pub mod element;
 pub mod error;
 pub mod event;
 pub mod file_dialog;
-pub mod clipboard;
 pub mod geometry;
 pub mod graphics;
 pub mod icon;
@@ -171,7 +171,7 @@ pub use views::{
 };
 pub use views::{
     EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,
-    TextStyleSpan, TextView, TextViewRenderObject, TextViewScroll, WrapMode,
+    TextStyleSpan, TextView, TextViewHit, TextViewRenderObject, TextViewScroll, WrapMode,
 };
 pub use views::{NavigationLink, NavigationPresentation, NavigationView};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
@@ -232,7 +232,7 @@ pub mod prelude {
     };
     pub use crate::views::{
         EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,
-        TextStyleSpan, TextView, TextViewRenderObject, TextViewScroll, WrapMode,
+        TextStyleSpan, TextView, TextViewHit, TextViewRenderObject, TextViewScroll, WrapMode,
     };
     pub use crate::views::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};
     pub use crate::views::{

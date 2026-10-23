@@ -456,3 +456,178 @@ fn viewport_height_changes_reuse_metrics_and_refresh_visible_range() {
     );
     assert_same_layout(&object.layout, &fresh, &document);
 }
+
+#[test]
+fn selection_drag_keeps_scrolled_editor_geometry_without_ancestor_layout() {
+    use crate::pipeline::RenderingPipeline;
+    use crate::state::generate_state_id;
+    use crate::view::ViewExt;
+    use crate::views::{Text, VStack, Window};
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    let selection = State::new(generate_state_id(), TextSelection::collapsed(0));
+    let scroll = State::new(generate_state_id(), TextViewScroll::default());
+    let layouts = Arc::new(AtomicUsize::new(0));
+    let count = layouts.clone();
+    let view = TextView::new(
+        State::new(
+            generate_state_id(),
+            "日本 long editor line ".repeat(30) + &"\nrow".repeat(100),
+        ),
+        selection.clone(),
+    )
+    .line_numbers(true)
+    .wrap_mode(WrapMode::None)
+    .scroll_state(scroll.clone())
+    .reveal_selection_on_change(true)
+    .on_geometry_change(
+        move |geometry| {
+            count.fetch_add(1, Ordering::Relaxed);
+            geometry.size()
+        },
+        |_| {},
+    );
+    let mut pipeline = RenderingPipeline::new();
+    pipeline.set_paint_enabled(false);
+    pipeline.set_root(
+        Window::new("Selection", VStack::new((view, Text::new("status"))))
+            .decorated(false)
+            .size(Size::new(320.0, 180.0))
+            .create_element(),
+    );
+    pipeline.layout_initial();
+    pipeline.render();
+    scroll.set(TextViewScroll { x: 0.0, y: 60.0 });
+    pipeline.render();
+    let baseline = layouts.load(Ordering::Relaxed);
+    let initial_scroll = scroll.get();
+    assert!(
+        pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonPressed {
+            button: MouseButton::Left,
+            x: 55,
+            y: 40,
+            click_count: 1,
+        }))
+    );
+    let anchor = selection.get().anchor;
+    for y in [45, 55, 65, 55, 45] {
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Moved { x: 65, y })));
+        pipeline.render();
+        assert_eq!(selection.get().anchor, anchor);
+        assert_eq!(scroll.get(), initial_scroll);
+        assert_eq!(
+            layouts.load(Ordering::Relaxed),
+            baseline,
+            "selection must not re-run ancestor measurement passes"
+        );
+    }
+    pipeline.teardown();
+}
+
+#[test]
+fn hover_reports_scrolled_unicode_byte_and_leave_without_selection_or_scroll_changes() {
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let observed = hits.clone();
+    let selection = State::new(StateId::new(7160), TextSelection::collapsed(0));
+    let view = TextView::new(
+        State::new(
+            StateId::new(7161),
+            "日本 e\u{301} 👩‍💻 long line\n".repeat(20),
+        ),
+        selection.clone(),
+    )
+    .line_numbers(true)
+    .on_hover(move |hit| observed.lock().unwrap().push(hit));
+    let mut object = render_object_with_size(&view, 180.0, 90.0);
+    object.scroll = TextViewScroll {
+        x: 10.0,
+        y: object.layout.line_height * 2.0 + 4.0,
+    };
+    object.compute_layout();
+    let expected_byte = "日本 e\u{301} 👩‍💻 long line\n".repeat(3).len() + "日本 ".len();
+    let caret = object
+        .layout
+        .cursor_rect(TextPosition::new(expected_byte), &object.text_document);
+    let point = Point::new(
+        caret.origin.x,
+        (caret.origin.y + caret.size.height / 2.0).round(),
+    );
+    assert!(point.x > object.layout.text_origin_x);
+    let initial_scroll = object.scroll;
+    assert!(!handle_text_view_mouse(
+        &view,
+        &mut object,
+        &MouseEvent::Moved {
+            x: point.x as i32,
+            y: point.y as i32,
+        }
+    ));
+    assert_eq!(
+        hits.lock().unwrap().last().copied().flatten(),
+        Some(TextViewHit {
+            byte_offset: expected_byte,
+            position: point,
+        })
+    );
+    for event in [
+        MouseEvent::Moved { x: 0, y: 40 },
+        MouseEvent::Exited { x: 500, y: 40 },
+    ] {
+        handle_text_view_mouse(&view, &mut object, &event);
+        assert_eq!(hits.lock().unwrap().last(), Some(&None));
+    }
+    assert_eq!(selection.get(), TextSelection::collapsed(0));
+    assert_eq!(object.scroll, initial_scroll);
+    assert!(!object.dragging);
+}
+
+#[test]
+fn caret_geometry_binding_tracks_layout_selection_scroll_and_ime_only_when_changed() {
+    use crate::geometry::Rect;
+    use crate::state::{Listenable, generate_state_id};
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    let rect = State::new(generate_state_id(), Rect::from_xywh(0.0, 0.0, 0.0, 0.0));
+    let notifications = Arc::new(AtomicUsize::new(0));
+    let count = notifications.clone();
+    rect.subscribe_any(Arc::new(move || {
+        count.fetch_add(1, Ordering::Relaxed);
+    }));
+    let selection = State::new(generate_state_id(), TextSelection::collapsed(0));
+    let scroll = State::new(generate_state_id(), TextViewScroll::default());
+    let view = TextView::new(
+        State::new(generate_state_id(), "日本 text\n".repeat(30)),
+        selection.clone(),
+    )
+    .caret_rect_state(rect.clone())
+    .scroll_state(scroll.clone())
+    .autofocus(true);
+    let mut object = render_object_with_size(&view, 200.0, 90.0);
+    object.flush_layout_notifications();
+    assert_eq!(rect.get(), object.cursor_rect());
+    let baseline = notifications.load(Ordering::Relaxed);
+    for _ in 0..5 {
+        object.update(&view);
+        object.layout(LayoutConstraints::tight(200.0, 90.0));
+    }
+    assert_eq!(notifications.load(Ordering::Relaxed), baseline);
+    // Parent stacks may measure a temporary larger viewport before assigning
+    // the final one. Observers must see only the completed layout geometry.
+    object.layout(LayoutConstraints::tight(200.0, 300.0));
+    object.layout(LayoutConstraints::tight(200.0, 90.0));
+    object.flush_layout_notifications();
+    assert_eq!(notifications.load(Ordering::Relaxed), baseline);
+    handle_text_view_keyboard(&view, &mut object, key(KeyCode::Right));
+    assert_eq!(rect.get(), object.cursor_rect());
+    assert!(rect.get().origin.x > object.padding);
+    selection.set(TextSelection::collapsed("日本 text\n".repeat(3).len()));
+    object.update(&view);
+    assert_eq!(rect.get(), object.cursor_rect());
+    let before_scroll = rect.get();
+    scroll.set(TextViewScroll { x: 0.0, y: 10.0 });
+    object.update(&view);
+    assert_eq!(rect.get().origin.y, before_scroll.origin.y - 10.0);
+    object.set_preedit_state("入力", 6, 3, &[]);
+    assert_eq!(rect.get(), object.text_input_state().cursor_rect);
+    object.clear_preedit();
+    assert_eq!(rect.get(), object.cursor_rect());
+}

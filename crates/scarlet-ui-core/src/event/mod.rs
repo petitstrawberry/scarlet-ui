@@ -62,6 +62,9 @@ pub enum Event {
     /// A gesture accepted by the touch arena for that widget path.
     TouchGesture(TouchGesture),
 
+    /// Current native modifier state, including modifier-only changes.
+    ModifiersChanged(KeyModifiers),
+
     /// Keyboard event
     Keyboard(KeyEvent),
     /// Native gamepad snapshot, separate from optional menu navigation keys.
@@ -233,14 +236,17 @@ pub struct KeyModifiers {
 impl KeyModifiers {
     /// Returns the application shortcut modifier state.
     ///
-    /// Scarlet applications use Control for ordinary shortcuts. Super is
-    /// reserved for desktop-global actions such as the application launcher.
+    /// Uses Command (Super/Meta) on macOS and Control on other platforms.
     ///
     /// # Returns
     ///
-    /// `true` when Control is pressed.
+    /// `true` when the platform's primary modifier is pressed.
     pub fn primary(self) -> bool {
-        self.control
+        if cfg!(target_os = "macos") {
+            self.super_key
+        } else {
+            self.control
+        }
     }
 
     /// Returns empty keyboard modifiers.

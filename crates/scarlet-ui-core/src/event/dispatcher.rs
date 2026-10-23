@@ -91,6 +91,7 @@ pub struct EventDispatcher {
     /// (non-trackpad) wheel gestures via `WHEEL_GESTURE_IDLE`.
     wheel_last_event_at: Option<Instant>,
     left_button_down: bool,
+    modifiers: crate::event::KeyModifiers,
     focused_id: Option<ElementId>,
     focused_path: Vec<ElementId>,
     /// Relative-motion handler selected by the most recent pointer press.
@@ -147,6 +148,7 @@ impl EventDispatcher {
             path_origins_scratch: Vec::new(),
             wheel_last_event_at: None,
             left_button_down: false,
+            modifiers: crate::event::KeyModifiers::empty(),
             focused_id: None,
             focused_path: Vec::new(),
             pointer_lock_candidate_id: None,
@@ -298,6 +300,10 @@ impl EventDispatcher {
             self.cancel_animations(element_tree);
         }
         match event {
+            Event::ModifiersChanged(modifiers) => {
+                self.modifiers = *modifiers;
+                false
+            }
             Event::Quit => {
                 // Quit event is handled at application level
                 self.handle_quit(element_tree);
@@ -318,7 +324,14 @@ impl EventDispatcher {
             Event::Mouse(mouse_event) => self.dispatch_mouse(element_tree, mouse_event),
             Event::TouchFrame(frame) => self.dispatch_touch_frame(element_tree, frame),
             Event::Touch(_) | Event::TouchGesture(_) => false,
-            Event::Keyboard(key_event) => self.dispatch_keyboard(element_tree, key_event),
+            Event::Keyboard(key_event) => {
+                if let crate::event::KeyEvent::Pressed { modifiers, .. }
+                | crate::event::KeyEvent::Released { modifiers, .. } = key_event
+                {
+                    self.modifiers = *modifiers;
+                }
+                self.dispatch_keyboard(element_tree, key_event)
+            }
             Event::Gamepad(_) => {
                 // Route to element focus, or the window root when none exists.
                 let path = self
@@ -357,7 +370,23 @@ impl EventDispatcher {
                         .is_some_and(|e| e.handle_event(event, Phase::Target))
                 }
             }
-            Event::Focus(focus_event) => self.dispatch_focus(element_tree, focus_event),
+            Event::Focus(focus_event) => {
+                if *focus_event == crate::event::FocusEvent::Lost {
+                    self.modifiers = crate::event::KeyModifiers::empty();
+                    if self.left_button_down {
+                        let point = self.captured_point.unwrap_or(Point::ZERO);
+                        self.dispatch_mouse(
+                            element_tree,
+                            &crate::event::MouseEvent::ButtonCancelled {
+                                button: crate::event::MouseButton::Left,
+                                x: point.x as i32,
+                                y: point.y as i32,
+                            },
+                        );
+                    }
+                }
+                self.dispatch_focus(element_tree, focus_event)
+            }
             Event::Lifecycle(lifecycle_event) => {
                 self.dispatch_lifecycle(element_tree, lifecycle_event)
             }
@@ -1055,6 +1084,7 @@ impl EventDispatcher {
                         event,
                         *path_origins.last().unwrap_or(&Point::ZERO),
                     ));
+                    target.handle_event(&Event::ModifiersChanged(self.modifiers), Phase::Target);
                     handled = target.handle_event(&localized, Phase::Target);
                     if handled {
                         handled_id = Some(target_id);
@@ -1084,6 +1114,25 @@ impl EventDispatcher {
                         }
                     }
                 }
+            }
+
+            // A divider or scrollbar can claim a press during bubbling even
+            // though a child was hit first. Deliver the whole drag to that
+            // handler; otherwise the child can consume release and leave the
+            // ancestor dragging after the physical button is up.
+            if matches!(
+                event,
+                crate::event::MouseEvent::ButtonPressed {
+                    button: crate::event::MouseButton::Left,
+                    ..
+                }
+            ) && !handled_in_capture
+                && let Some(id) = handled_id
+                && let Some(handler_path) = element_tree.find_path_ids(id)
+            {
+                self.captured_id = Some(id);
+                self.captured_path = handler_path;
+                self.captured_point = Some(point);
             }
 
             // Lock the wheel gesture onto the element that actually handled

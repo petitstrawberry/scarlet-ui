@@ -47,6 +47,15 @@ enum TextBinding {
     Document(State<TextDocument>),
 }
 
+/// A text hit at a widget-local pointer position.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextViewHit {
+    /// Absolute UTF-8 byte offset at the nearest grapheme boundary.
+    pub byte_offset: usize,
+    /// Pointer coordinates in logical pixels relative to the TextView viewport.
+    pub position: Point,
+}
+
 /// Multi-line editable text view.
 #[derive(Clone)]
 pub struct TextView {
@@ -75,6 +84,9 @@ pub struct TextView {
     on_copy: Option<Arc<dyn for<'a> Fn(Cow<'a, str>) + 'static>>,
     on_paste: Option<Arc<dyn Fn() -> Option<Cow<'static, str>> + 'static>>,
     on_text_change: Option<Arc<dyn Fn(&EditDelta) + 'static>>,
+    on_hover: Option<Arc<dyn Fn(Option<TextViewHit>) + 'static>>,
+    on_modified_click: Option<Arc<dyn Fn(TextViewHit) + 'static>>,
+    caret_rect: Option<State<Rect>>,
 }
 
 impl TextView {
@@ -137,6 +149,9 @@ impl TextView {
             on_copy: None,
             on_paste: None,
             on_text_change: None,
+            on_hover: None,
+            on_modified_click: None,
+            caret_rect: None,
         }
     }
 
@@ -451,6 +466,29 @@ impl TextView {
         self
     }
 
+    /// Observe pointer movement without changing selection. Receives `None`
+    /// on exit or outside editable content. Use captured `State` for updates;
+    /// applications own hover delays and cancellation.
+    pub fn on_hover(mut self, callback: impl Fn(Option<TextViewHit>) + 'static) -> Self {
+        self.on_hover = Some(Arc::new(callback));
+        self
+    }
+
+    /// Handle a primary-modifier left press (Command on macOS, Control elsewhere).
+    /// Installing this callback consumes that press without moving the selection.
+    pub fn on_modified_click(mut self, callback: impl Fn(TextViewHit) + 'static) -> Self {
+        self.on_modified_click = Some(Arc::new(callback));
+        self
+    }
+
+    /// Publish the caret rectangle in widget-local logical pixels after geometry
+    /// changes. Writes only when different; this output is not a view listenable.
+    /// Anchor overlays to this state without reserving editor layout space.
+    pub fn caret_rect_state(mut self, rect: State<Rect>) -> Self {
+        self.caret_rect = Some(rect);
+        self
+    }
+
     /// Return the bound string state when using the convenience constructor.
     ///
     /// # Returns
@@ -527,6 +565,8 @@ pub struct TextViewRenderObject {
     focused: bool,
     autofocus: bool,
     dragging: bool,
+    pub(crate) pointer_modifiers: crate::event::KeyModifiers,
+    caret_rect: Option<State<Rect>>,
     desired_x: Option<f32>,
     size: Size,
     layout: TextViewLayout,
@@ -603,6 +643,8 @@ impl TextViewRenderObject {
             focused: view.autofocus,
             autofocus: view.autofocus,
             dragging: false,
+            pointer_modifiers: crate::event::KeyModifiers::empty(),
+            caret_rect: view.caret_rect.clone(),
             desired_x: None,
             size: Size::ZERO,
             layout,
@@ -662,6 +704,26 @@ impl TextViewRenderObject {
             self.layout.content_width = base_width.max(composition_end);
         }
         self.scroll = self.layout.set_scroll(self.scroll);
+    }
+
+    fn publish_caret_rect(&self) {
+        if let Some(state) = &self.caret_rect {
+            let rect = self.text_input_cursor_rect();
+            if state.get() != rect {
+                state.set(rect);
+            }
+        }
+    }
+
+    /// Resolve a pointer hit without changing selection or scrolling.
+    pub fn hit_at_point(&self, position: Point) -> Option<TextViewHit> {
+        if !Rect::new(Point::ZERO, self.size).contains(position) {
+            return None;
+        }
+        self.hit_test(position).map(|hit| TextViewHit {
+            byte_offset: self.text_document.clamp_position(hit).byte,
+            position,
+        })
     }
 
     /// Convert a widget-local point to a text position.
@@ -757,6 +819,7 @@ impl TextViewRenderObject {
         self.preedit_spans.clear();
         self.preedit_spans.extend_from_slice(spans);
         self.compute_layout();
+        self.publish_caret_rect();
     }
 
     /// Clear the active IME preedit state.
@@ -768,6 +831,7 @@ impl TextViewRenderObject {
         self.preedit_spans.clear();
         if had_preedit {
             self.compute_layout();
+            self.publish_caret_rect();
         }
     }
 
@@ -803,6 +867,10 @@ impl ElementRenderObject for TextViewRenderObject {
         self.size = constraints.constrain(desired);
         self.compute_layout();
         self.size
+    }
+
+    fn flush_layout_notifications(&mut self) {
+        self.publish_caret_rect();
     }
 
     fn size(&self) -> Size {
@@ -892,6 +960,7 @@ impl ElementRenderObject for TextViewRenderObject {
             .as_ref()
             .map(State::get)
             .unwrap_or(view.static_wrap_mode);
+        self.caret_rect = view.caret_rect.clone();
         self.placeholder.clone_from(&view.placeholder);
         self.font_size = view.font_size;
         let font_changed = self.font_stack.as_deref().map(FontStack::cache_id)
@@ -919,11 +988,15 @@ impl ElementRenderObject for TextViewRenderObject {
                 editing::ensure_caret_visible(view, self);
             }
         }
+        self.publish_caret_rect();
         crate::element::UpdateResult::Updated
     }
 
     fn update_needs_layout(&self) -> bool {
-        true
+        // TextView fills its constraints; selection, scroll, text and styling
+        // only change internal geometry, already refreshed in update(). Avoid
+        // re-running ancestor measurement passes on every selection event.
+        false
     }
 }
 
