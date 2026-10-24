@@ -10,6 +10,7 @@ extern crate alloc;
 extern crate scarlet_std as std;
 
 mod backend;
+mod backing_refresh;
 mod clipboard;
 mod file_dialog;
 mod file_dialog_policy;
@@ -19,9 +20,11 @@ mod sink;
 mod text_input_sync;
 
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use backing_refresh::BackingRefresh;
 pub use backend::{
     DEFAULT_GPU_DEVICE, Error as SgfxPaintError, Result as SgfxPaintResult, SgfxPaintBackend,
     Stage as SgfxPaintStage,
@@ -493,6 +496,7 @@ impl SgfxFrameSink for SwsSgfxFrameSink {
 
 struct SwsSgfxPaintBackend {
     backend: SgfxPaintBackend<SwsSgfxFrameSink>,
+    backing_refresh: Rc<BackingRefresh>,
 }
 
 impl PaintBackend for SwsSgfxPaintBackend {
@@ -510,6 +514,9 @@ impl PaintBackend for SwsSgfxPaintBackend {
         logical_damage: Option<&[Rect]>,
         physical_damage: Option<&[DamageRect]>,
     ) -> Result<BackendFrame<'a>> {
+        if self.backing_refresh.take_sgfx_replacement() {
+            self.backend.invalidate_backing();
+        }
         self.backend
             .render(context, background_color, logical_damage, physical_damage)
     }
@@ -733,6 +740,7 @@ pub struct SWSPlatformWindow {
     pending_frame_callback_id: Option<u64>,
     fullscreen: bool,
     tablet_managed: bool,
+    backing_refresh: Rc<BackingRefresh>,
     suspended: bool,
     pointer_locked: bool,
     pointer_lock_requested: Option<bool>,
@@ -1309,6 +1317,7 @@ impl SWSPlatformWindow {
             pending_frame_callback_id: None,
             fullscreen: false,
             tablet_managed: false,
+            backing_refresh: Rc::new(BackingRefresh::default()),
             suspended: false,
             pointer_locked: false,
             pointer_lock_requested: None,
@@ -2001,7 +2010,10 @@ impl PlatformWindow for SWSPlatformWindow {
                     backend.backend_kind()
                 );
                 self.renderer_backend = RendererBackendKind::Sgfx;
-                Ok(Some(Box::new(SwsSgfxPaintBackend { backend })))
+                Ok(Some(Box::new(SwsSgfxPaintBackend {
+                    backend,
+                    backing_refresh: self.backing_refresh.clone(),
+                })))
             }
             Err(error)
                 if self.requested_renderer_backend == RequestedRendererBackend::Auto
@@ -2119,13 +2131,17 @@ impl PlatformWindow for SWSPlatformWindow {
                 surface.width() == physical_width && surface.height() == physical_height
             })
             .unwrap_or(false);
-        if self.current_size == new_size && surface_is_current {
+        if !self
+            .backing_refresh
+            .needs_resize(self.current_size == new_size, surface_is_current)
+        {
             return Ok(());
         }
 
         self.conn
             .resize_window(self.surface_id, physical_width, physical_height)
             .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
+        self.backing_refresh.backing_replaced();
         if self.window_geometry_supported
             && let Some(geometry) = physical_geometry
         {
@@ -2743,6 +2759,7 @@ impl SWSPlatformWindow {
                 let tablet_managed = state_flags & SWS_TABLET_MANAGED != 0;
                 if tablet_managed != self.tablet_managed {
                     self.tablet_managed = tablet_managed;
+                    self.backing_refresh.decoration_changed();
                     if scarlet_ui_core::debug::frame_log_enabled() {
                         logln!("[Tablet] surface={} managed={} size={:?}", self.surface_id, tablet_managed, self.current_size);
                     }

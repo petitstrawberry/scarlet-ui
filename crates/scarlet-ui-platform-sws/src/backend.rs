@@ -181,6 +181,7 @@ pub struct SgfxPaintBackend<S> {
     backend_kind: BackendKind,
     render_failed: bool,
     full_redraw_required: bool,
+    backing_invalidated: bool,
     #[cfg(feature = "std")]
     profiling: bool,
 }
@@ -247,6 +248,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             backend_kind,
             render_failed: false,
             full_redraw_required: false,
+            backing_invalidated: false,
             #[cfg(feature = "std")]
             profiling: std::env::var("SCARLET_UI_PROFILE").as_deref() == Ok("1"),
         };
@@ -717,11 +719,18 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         Ok(())
     }
 
+    /// Replace the shared images after a native backing handshake, including
+    /// same-extent decoration changes. Retain old images until SWS releases them.
+    pub(super) fn invalidate_backing(&mut self) {
+        self.backing_invalidated = true;
+        self.full_redraw_required = true;
+    }
+
     fn ensure_session(&mut self) -> Result<()> {
         let matches = self.encoder.as_ref().is_some_and(|encoder| {
             encoder.width() == self.physical_width && encoder.height() == self.physical_height
         });
-        if matches && self.session.is_some() {
+        if matches && self.session.is_some() && !self.backing_invalidated {
             return Ok(());
         }
 
@@ -765,6 +774,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         }
         self.encoder = Some(encoder);
         self.generation = next_generation;
+        self.backing_invalidated = false;
         self.slots = [SlotState::new(); PRESENTATION_SLOT_COUNT];
         self.next_slot = 0;
         self.front_slot = None;
