@@ -313,7 +313,7 @@ impl EventDispatcher {
                 self.handle_resize(element_tree, *width, *height);
                 false
             }
-            Event::FullscreenChanged { .. } => false,
+            Event::FullscreenConfigure { .. } | Event::FullscreenChanged { .. } => false,
             Event::TabletPresentationChanged { .. }
             | Event::InputPanelOcclusionChanged { .. } => false,
             Event::FrameReady { .. } | Event::WindowSuspendedChanged { .. } => false,

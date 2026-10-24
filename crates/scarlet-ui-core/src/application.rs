@@ -1068,6 +1068,17 @@ fn handle_window_event<A: Application>(
         Event::Window(crate::event::WindowEvent::CloseRequested) => {
             return Ok(handle_window_close_request(app, slot, close_ids));
         }
+        Event::FullscreenConfigure {
+            width,
+            height,
+            fullscreen,
+        } => {
+            // One event keeps the CSD rebuild and extent indivisible even at
+            // the per-tick event limit. Resize permits a replacement frame
+            // without cancelling the outstanding callback for the old frame.
+            app.on_window_fullscreen_changed(&slot.context, fullscreen);
+            return handle_window_event(app, slot, Event::Resize { width, height }, close_ids);
+        }
         Event::Resize { width, height } => {
             if crate::debug::frame_log_enabled() {
                 crate::logln!("[WindowSize] configure {}x{}", width, height);
@@ -2953,6 +2964,72 @@ mod tests {
 
         fn as_any(&self) -> &dyn Any {
             self
+        }
+    }
+
+    #[test]
+    fn fullscreen_configure_confirms_csd_and_resizes_with_one_frame_grant() {
+        #[derive(Clone)]
+        struct FullscreenApp {
+            confirmed: bool,
+            resizes: Vec<(bool, u32, u32)>,
+        }
+        impl Application for FullscreenApp {
+            fn scenes(&self) -> impl Scene {
+                Window::new("Fullscreen", Text::new("Content")).decorated(!self.confirmed)
+            }
+            fn on_window_fullscreen_changed(&mut self, _: &WindowContext, fullscreen: bool) {
+                self.confirmed = fullscreen;
+            }
+            fn on_window_resize(&mut self, _: &WindowContext, width: u32, height: u32) {
+                self.resizes.push((self.confirmed, width, height));
+            }
+        }
+        impl View for FullscreenApp {
+            fn create_element(&self) -> Box<dyn Element> {
+                Text::new("Content").create_element()
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let mut app = FullscreenApp {
+            confirmed: false,
+            resizes: Vec::new(),
+        };
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: Rc::new(RefCell::new(EnvironmentRunnerProbe::default())),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slot = runner.create_slot(&mut app, declaration, true).unwrap();
+        for (fullscreen, width, height) in [(true, 1920, 1200), (false, 800, 600), (true, 800, 600)]
+        {
+            slot.frame_pacing_enabled = true;
+            slot.frame_ready = false;
+            slot.frame_request_outstanding = true;
+            handle_window_event(
+                &mut app,
+                &mut slot,
+                Event::FullscreenConfigure {
+                    width,
+                    height,
+                    fullscreen,
+                },
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(app.resizes.last(), Some(&(fullscreen, width, height)));
+            assert_eq!(
+                slot.pipeline.window_size(),
+                Size::new(width as f32, height as f32)
+            );
+            assert!(slot.frame_ready);
+            assert!(slot.frame_request_outstanding);
+            request_next_frame(&mut slot);
+            assert!(!slot.frame_ready);
         }
     }
 

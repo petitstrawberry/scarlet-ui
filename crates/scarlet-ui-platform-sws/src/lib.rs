@@ -12,6 +12,7 @@ extern crate scarlet_std as std;
 mod backend;
 mod backing_refresh;
 mod clipboard;
+mod configure_batch;
 mod file_dialog;
 mod file_dialog_policy;
 mod keyboard;
@@ -741,6 +742,7 @@ pub struct SWSPlatformWindow {
     fullscreen: bool,
     tablet_managed: bool,
     backing_refresh: Rc<BackingRefresh>,
+    configure_batch: configure_batch::ConfigureBatch,
     suspended: bool,
     pointer_locked: bool,
     pointer_lock_requested: Option<bool>,
@@ -1047,7 +1049,7 @@ impl SWSPlatformWindow {
     }
 
     fn effective_geometry_insets(&self) -> EdgeInsets {
-        if self.tablet_managed { EdgeInsets::ZERO } else { self.window_geometry_insets }
+        if self.tablet_managed || self.fullscreen { EdgeInsets::ZERO } else { self.window_geometry_insets }
     }
 
     fn physical_to_logical_pos(&self, value: i32) -> i32 {
@@ -1318,6 +1320,7 @@ impl SWSPlatformWindow {
             fullscreen: false,
             tablet_managed: false,
             backing_refresh: Rc::new(BackingRefresh::default()),
+            configure_batch: configure_batch::ConfigureBatch::default(),
             suspended: false,
             pointer_locked: false,
             pointer_lock_requested: None,
@@ -1885,6 +1888,19 @@ impl PlatformWindow for SWSPlatformWindow {
                 self.handle_sws_event(ev);
             }
             self.flush_pending_relative_motion();
+            if let Some(configure) = self.configure_batch.take() {
+                // State and extent belong to the same frame. State-only
+                // notifications remain staged until their configure arrives.
+                let (width, height) = configure.size;
+                self.needs_full_present = true;
+                if let Some(fullscreen) = configure.fullscreen {
+                    // Fullscreen can change CSD without changing the extent.
+                    self.backing_refresh.decoration_changed();
+                    self.push_event(Event::FullscreenConfigure { width, height, fullscreen });
+                } else {
+                    self.push_event(Event::Resize { width, height });
+                }
+            }
         }
 
         if self.pending_head < self.pending_events.len() {
@@ -2735,12 +2751,7 @@ impl SWSPlatformWindow {
                 if surface_id == self.surface_id {
                     let logical_width = self.physical_to_logical_len(width);
                     let logical_height = self.physical_to_logical_len(height);
-                    self.current_size = Size::new(logical_width as f32, logical_height as f32);
-                    self.needs_full_present = true;
-                    self.push_event(Event::Resize {
-                        width: logical_width,
-                        height: logical_height,
-                    });
+                    self.configure_batch.resize(logical_width, logical_height);
                     if debug {
                         logln!(
                             "[SWSPlatformWindow] SurfaceConfigure: physical={}x{} logical={}x{}",
@@ -2771,7 +2782,7 @@ impl SWSPlatformWindow {
                 let fullscreen = state_flags & sws::window_state::FULLSCREEN != 0;
                 if fullscreen != self.fullscreen {
                     self.fullscreen = fullscreen;
-                    self.push_event(Event::FullscreenChanged { fullscreen });
+                    self.configure_batch.fullscreen(fullscreen);
                 }
                 let suspended = state_flags & sws::window_state::SUSPENDED != 0;
                 if suspended != self.suspended {

@@ -31,6 +31,14 @@ pub enum Event {
     /// Platform notification of a new logical surface size (not a resize request).
     Resize { width: u32, height: u32 },
 
+    /// Apply a confirmed fullscreen state and its logical backing size together.
+    /// No frame may be painted between the decoration callback and resize.
+    FullscreenConfigure {
+        width: u32,
+        height: u32,
+        fullscreen: bool,
+    },
+
     /// Window fullscreen state changed on the platform.
     FullscreenChanged { fullscreen: bool },
 
