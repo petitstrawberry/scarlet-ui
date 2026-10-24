@@ -1814,6 +1814,7 @@ mod tests {
                     crate::geometry::Point::ZERO,
                     Size::new(1.0, 20.0),
                 ),
+                automatic_software_keyboard: true,
                 surrounding_text: "日本語".into(),
                 cursor_byte: 9,
                 anchor_byte: 0,

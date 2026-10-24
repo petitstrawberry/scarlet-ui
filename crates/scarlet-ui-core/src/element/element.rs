@@ -62,6 +62,9 @@ pub struct TextInputElementState {
     pub cursor_byte: u32,
     /// Byte offset of the selection anchor within `surrounding_text`.
     pub anchor_byte: u32,
+    /// Whether focus may automatically show a software keyboard. This does not
+    /// disable hardware keyboard input, selection, IME, or an explicit panel request.
+    pub automatic_software_keyboard: bool,
 }
 
 impl WindowSizeLimits {

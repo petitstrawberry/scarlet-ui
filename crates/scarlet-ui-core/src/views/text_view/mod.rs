@@ -66,6 +66,7 @@ pub struct TextView {
     static_wrap_mode: WrapMode,
     reveal_selection_on_change: bool,
     autofocus: bool,
+    automatic_software_keyboard: bool,
     placeholder: String,
     font_size: f32,
     font_stack: Option<Arc<FontStack>>,
@@ -129,6 +130,7 @@ impl TextView {
             static_wrap_mode: WrapMode::None,
             reveal_selection_on_change: false,
             autofocus: false,
+            automatic_software_keyboard: true,
             placeholder: String::new(),
             font_size: 14.0,
             font_stack: None,
@@ -169,6 +171,16 @@ impl TextView {
     /// user focus changes; changing the value explicitly requests that focus.
     pub fn autofocus(mut self, autofocus: bool) -> Self {
         self.autofocus = autofocus;
+        self
+    }
+
+    /// Allow focus to automatically show a software keyboard (default: `true`).
+    ///
+    /// Setting this to `false` preserves editing, selection, hardware keyboard
+    /// input and IME composition. Platforms may still honor explicit requests
+    /// to show the keyboard. Rebuilding with a new value updates a focused editor.
+    pub fn automatic_software_keyboard(mut self, allow: bool) -> Self {
+        self.automatic_software_keyboard = allow;
         self
     }
 
@@ -577,6 +589,7 @@ pub struct TextViewRenderObject {
     preedit_spans: Vec<u8>,
     focused: bool,
     autofocus: bool,
+    automatic_software_keyboard: bool,
     dragging: bool,
     pub(crate) pointer_modifiers: crate::event::KeyModifiers,
     caret_rect: Option<State<Rect>>,
@@ -659,6 +672,7 @@ impl TextViewRenderObject {
             preedit_spans: Vec::new(),
             focused: view.autofocus,
             autofocus: view.autofocus,
+            automatic_software_keyboard: view.automatic_software_keyboard,
             dragging: false,
             pointer_modifiers: crate::event::KeyModifiers::empty(),
             caret_rect: view.caret_rect.clone(),
@@ -870,6 +884,7 @@ impl TextViewRenderObject {
             surrounding_text: self.text_document.as_str().into_owned(),
             cursor_byte: self.selection.caret.byte as u32,
             anchor_byte: self.selection.anchor.byte as u32,
+            automatic_software_keyboard: self.automatic_software_keyboard,
         }
     }
 }
@@ -1027,6 +1042,7 @@ impl ElementRenderObject for TextViewRenderObject {
             .map(State::get)
             .unwrap_or(view.static_wrap_mode);
         self.caret_rect = view.caret_rect.clone();
+        self.automatic_software_keyboard = view.automatic_software_keyboard;
         self.placeholder.clone_from(&view.placeholder);
         self.font_size = view.font_size;
         let font_changed = self.font_stack.as_deref().map(FontStack::cache_id)

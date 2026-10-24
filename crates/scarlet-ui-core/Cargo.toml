@@ -11,7 +11,7 @@ preview = ["std", "dep:inventory", "dep:libloading"]
 
 [dependencies]
 scarlet-scroll-motion = { path = "../scarlet-scroll-motion" }
-scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", rev = "74b92fe8c43ba71467dd70083411c4574de01079", package = "scarlet-std", optional = true }
+scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", rev = "5d0fe3ac8c97289a28599bac22fca4ac26a5f9ca", package = "scarlet-std", optional = true }
 libm = { version = "0.2", default-features = false }
 scarlet-ui-macros = { path = "../scarlet-ui-macros" }
 scarlet-ui-icons-tabler = { path = "../scarlet-ui-icons-tabler" }

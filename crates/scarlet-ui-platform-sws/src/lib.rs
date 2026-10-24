@@ -37,7 +37,7 @@ use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::element::{TextInputElementState, WindowSizeLimits};
 use scarlet_ui_core::error::{Error, Result};
 use scarlet_ui_core::event::{
-    Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
+    Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase, WindowEvent,
 };
 use scarlet_ui_core::geometry::{EdgeInsets, Point, Rect, Size};
 use scarlet_ui_core::input_environment::{InputEnvironment, WindowingMode};
@@ -69,6 +69,18 @@ use sws_client as sws;
 // payload and decoder are unchanged; keep the shared-image SDK ABI aligned
 // with SGFX instead of requiring every graphics backend to upgrade for this bit.
 const SWS_TABLET_MANAGED: u32 = 1 << 4;
+
+fn window_close_request_event(window_id: u32, surface_id: u32) -> Option<Event> {
+    (window_id == surface_id).then_some(Event::Window(WindowEvent::CloseRequested))
+}
+
+fn text_input_content_hint(automatic_software_keyboard: bool) -> u32 {
+    if automatic_software_keyboard {
+        sws_protocol::text_input_content_hints::NONE
+    } else {
+        sws_protocol::text_input_content_hints::NO_AUTO_SOFTWARE_KEYBOARD
+    }
+}
 
 #[cfg(feature = "std")]
 use std::time::{Duration, Instant};
@@ -1483,7 +1495,7 @@ impl SWSPlatformWindow {
                 text: &state.surrounding_text,
                 cursor: state.cursor_byte,
                 anchor: state.anchor_byte,
-                hint: sws_protocol::text_input_content_hints::NONE,
+                hint: text_input_content_hint(state.automatic_software_keyboard),
                 purpose: sws_protocol::text_input_content_purpose::NORMAL,
             },
             |request| {
@@ -1516,7 +1528,11 @@ impl SWSPlatformWindow {
         }
         if self.input_panel_show_pending {
             self.input_panel_show_pending = false;
-            let _ = self.conn.show_text_input_panel(context_id);
+            // This pending request comes from touch focus, not an explicit
+            // application request. Keep IME enabled even when auto-show is off.
+            if state.automatic_software_keyboard {
+                let _ = self.conn.show_text_input_panel(context_id);
+            }
         }
     }
 
@@ -2848,6 +2864,12 @@ impl SWSPlatformWindow {
                     environment,
                 )));
             }
+            SwsEvent::WindowCloseRequested { window_id } => {
+                if let Some(event) = window_close_request_event(window_id, self.surface_id) {
+                    // Keep the window alive while the application confirms or cancels.
+                    self.push_event(event);
+                }
+            }
             SwsEvent::SurfaceDestroyed { surface_id } => {
                 if surface_id == self.surface_id {
                     self.queue_quit();
@@ -3004,6 +3026,53 @@ impl SWSPlatformWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_keyboard_policy_changes_the_committed_hint_without_disabling_ime() {
+        use text_input_sync::{Request, State, SyncResult, TextInputSync};
+        let mut sync = TextInputSync::default();
+        for (serial, automatic) in [(1, true), (2, false), (3, true)] {
+            let mut requests = Vec::new();
+            assert_eq!(
+                sync.synchronize(
+                    7,
+                    serial,
+                    State {
+                        rect: (0, 0, 1, 20),
+                        text: "123",
+                        cursor: 3,
+                        anchor: 0,
+                        hint: text_input_content_hint(automatic),
+                        purpose: sws_protocol::text_input_content_purpose::NORMAL,
+                    },
+                    |request| {
+                        requests.push(request);
+                        true
+                    },
+                ),
+                SyncResult::Committed,
+            );
+            let expected_hint = if automatic { 0 } else { 1 << 10 };
+            assert_eq!(
+                requests,
+                vec![
+                    Request::CursorRect(7, (0, 0, 1, 20)),
+                    Request::SurroundingText(7, 3, 0, "123"),
+                    Request::ContentType(7, expected_hint, 0),
+                    Request::Commit(7, serial),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn compositor_close_request_uses_application_confirmation() {
+        assert!(matches!(
+            window_close_request_event(27, 27),
+            Some(Event::Window(WindowEvent::CloseRequested)),
+        ));
+        assert!(window_close_request_event(28, 27).is_none());
+    }
 
     #[test]
     fn sws_enables_the_standard_normal_window_shadow_by_default() {

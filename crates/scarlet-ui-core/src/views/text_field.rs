@@ -38,6 +38,7 @@ pub struct TextField {
     blur_on_submit: bool,
     blur_on_empty: bool,
     autofocus: bool,
+    automatic_software_keyboard: bool,
     background_color: Color,
     border_color: Color,
     focused_border_color: Color,
@@ -60,6 +61,7 @@ impl TextField {
             blur_on_submit: false,
             blur_on_empty: false,
             autofocus: false,
+            automatic_software_keyboard: true,
             background_color: style::surface_color(&palette, style::SurfaceRole::Canvas),
             border_color: palette.divider(),
             focused_border_color: style::focus_highlight(&palette),
@@ -126,6 +128,16 @@ impl TextField {
     /// Set whether this field receives keyboard focus when its element is created.
     pub fn autofocus(mut self, autofocus: bool) -> Self {
         self.autofocus = autofocus;
+        self
+    }
+
+    /// Allow focus to automatically show a software keyboard (default: `true`).
+    ///
+    /// Setting this to `false` preserves editing, selection, hardware keyboard
+    /// input and IME composition. Platforms may still honor explicit requests
+    /// to show the keyboard. Rebuilding with a new value updates a focused editor.
+    pub fn automatic_software_keyboard(mut self, allow: bool) -> Self {
+        self.automatic_software_keyboard = allow;
         self
     }
 
@@ -259,6 +271,7 @@ pub struct TextFieldRenderObject {
     preedit_spans: alloc::vec::Vec<u8>,
     focused: bool,
     autofocus: bool,
+    automatic_software_keyboard: bool,
     dragging: bool,
     placeholder: String,
     background_color: Color,
@@ -293,6 +306,7 @@ impl TextFieldRenderObject {
             preedit_spans: alloc::vec::Vec::new(),
             focused: view.autofocus,
             autofocus: view.autofocus,
+            automatic_software_keyboard: view.automatic_software_keyboard,
             dragging: false,
             placeholder: view.placeholder.clone(),
             background_color: view.background_color,
@@ -449,6 +463,7 @@ impl ElementRenderObject for TextFieldRenderObject {
         };
         self.focused = focused;
         self.autofocus = view.autofocus;
+        self.automatic_software_keyboard = view.automatic_software_keyboard;
         self.placeholder.clone_from(&view.placeholder);
         self.background_color = view.background_color;
         self.border_color = view.border_color;
@@ -549,6 +564,7 @@ impl TextFieldRenderObject {
             surrounding_text: self.text_document.as_str().into_owned(),
             cursor_byte: self.selection.caret.byte as u32,
             anchor_byte: self.selection.anchor.byte as u32,
+            automatic_software_keyboard: self.automatic_software_keyboard,
         }
     }
 

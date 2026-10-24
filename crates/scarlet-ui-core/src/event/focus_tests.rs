@@ -55,6 +55,179 @@ fn focused_count(element: &dyn Element) -> usize {
 }
 
 #[test]
+fn automatic_keyboard_policy_follows_focus_without_disabling_ime() {
+    let normal = state(String::new());
+    let suppressed = state(String::new());
+    let mut pipeline = pipeline(VStack::new((
+        TextField::new(normal.clone()).frame(200.0, 32.0),
+        TextField::new(suppressed.clone())
+            .automatic_software_keyboard(false)
+            .frame(200.0, 32.0),
+        Button::new("Done"),
+    )));
+    for _ in 0..2 {
+        assert!(tab(&mut pipeline, false));
+        assert!(
+            pipeline
+                .focused_text_input_state()
+                .unwrap()
+                .automatic_software_keyboard
+        );
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c: 'a' })));
+        assert!(tab(&mut pipeline, false));
+        assert!(
+            !pipeline
+                .focused_text_input_state()
+                .unwrap()
+                .automatic_software_keyboard
+        );
+        assert!(pipeline.handle_event(&Event::TextInputCommit {
+            context_id: 1,
+            serial: 1,
+            text: "語".into(),
+        }));
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c: 'b' })));
+        assert!(tab(&mut pipeline, false));
+        assert!(pipeline.focused_text_input_state().is_none());
+    }
+    assert_eq!(normal.get(), "aa");
+    assert_eq!(suppressed.get(), "語b語b");
+}
+
+#[derive(Clone)]
+struct AutomaticKeyboardEditor {
+    text: State<String>,
+    selection: State<TextSelection>,
+    automatic: State<bool>,
+    multiline: bool,
+}
+
+impl View for AutomaticKeyboardEditor {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(crate::element::ComponentElement::new_with_builder(
+            self.clone(),
+            |view| {
+                if view.multiline {
+                    Box::new(
+                        TextView::new(view.text.clone(), view.selection.clone())
+                            .automatic_software_keyboard(view.automatic.get())
+                            .autofocus(true)
+                            .frame(200.0, 64.0),
+                    )
+                } else {
+                    Box::new(
+                        TextField::new(view.text.clone())
+                            .automatic_software_keyboard(view.automatic.get())
+                            .autofocus(true)
+                            .frame(200.0, 32.0),
+                    )
+                }
+            },
+        ))
+    }
+    fn listenables(&self) -> Vec<&dyn crate::state::Listenable> {
+        vec![&self.automatic]
+    }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+#[test]
+fn automatic_keyboard_toggle_preserves_focus_selection_and_active_composition() {
+    for multiline in [false, true] {
+        let editor = AutomaticKeyboardEditor {
+            text: state(String::from("ab")),
+            selection: state(TextSelection::collapsed(2)),
+            automatic: state(true),
+            multiline,
+        };
+        let mut pipeline = pipeline(editor.clone());
+        pipeline.render_for_present().unwrap();
+        let id = focused(&pipeline);
+        // Select the final character using an external keyboard.
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Pressed {
+            keycode: KeyCode::Left,
+            modifiers: KeyModifiers {
+                shift: true,
+                ..KeyModifiers::empty()
+            },
+        })));
+        let selection = pipeline.focused_text_input_state().unwrap();
+        assert_ne!(selection.cursor_byte, selection.anchor_byte);
+        assert!(selection.automatic_software_keyboard);
+        assert!(pipeline.handle_event(&Event::TextInputPreedit {
+            context_id: 1,
+            serial: 1,
+            cursor_byte: 3,
+            anchor_byte: 3,
+            text: "語".into(),
+            spans: vec![],
+        }));
+        let composing_caret = pipeline.focused_text_input_state().unwrap().cursor_rect;
+        for automatic in [false, true, false] {
+            editor.automatic.set(automatic);
+            pipeline.render_for_present().unwrap();
+            let input = pipeline
+                .focused_text_input_state()
+                .expect("IME remains enabled");
+            assert_eq!(focused(&pipeline), id);
+            assert_eq!(input.automatic_software_keyboard, automatic);
+            assert_eq!(input.surrounding_text, "ab");
+            assert_eq!(
+                (input.cursor_byte, input.anchor_byte),
+                (selection.cursor_byte, selection.anchor_byte)
+            );
+            assert_eq!(
+                input.cursor_rect, composing_caret,
+                "preedit survives policy rebuild"
+            );
+        }
+        assert!(pipeline.handle_event(&Event::TextInputCommit {
+            context_id: 1,
+            serial: 2,
+            text: "語".into(),
+        }));
+        assert_eq!(editor.text.get(), "a語");
+        assert!(
+            pipeline.handle_event(&Event::TextInputDeleteSurroundingText {
+                context_id: 1,
+                serial: 3,
+                before_bytes: 3,
+                after_bytes: 0,
+            })
+        );
+        assert_eq!(editor.text.get(), "a");
+        assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c: 'z' })));
+        assert_eq!(editor.text.get(), "az");
+    }
+}
+
+#[test]
+fn text_view_defaults_to_automatic_keyboard_for_both_document_bindings() {
+    use crate::views::TextDocument;
+    let text = String::from("editable");
+    for view in [
+        TextView::new(
+            state(text.clone()),
+            state(TextSelection::collapsed(text.len())),
+        ),
+        TextView::with_document(
+            state(TextDocument::from_str(&text)),
+            state(TextSelection::collapsed(text.len())),
+        ),
+    ] {
+        let pipeline = pipeline(view.autofocus(true));
+        assert!(
+            pipeline
+                .focused_text_input_state()
+                .unwrap()
+                .automatic_software_keyboard
+        );
+    }
+}
+
+#[test]
 fn tab_and_shift_tab_visit_nested_enabled_controls_once_and_wrap() {
     let calls = Rc::new(Cell::new(0));
     let count = calls.clone();
