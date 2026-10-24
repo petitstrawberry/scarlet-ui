@@ -58,6 +58,7 @@ pub fn path_circle(center: Point, radius: f32) -> Path {
 
 pub fn path_rounded_rect(rect: Rect, corner_radius: f32) -> Path {
     let r = corner_radius
+        .max(0.0)
         .min(rect.size.width / 2.0)
         .min(rect.size.height / 2.0);
     let corner_segments = (libm::ceilf(r * 0.75) as usize).clamp(8, 32);
@@ -73,7 +74,8 @@ pub fn path_rounded_rect(rect: Rect, corner_radius: f32) -> Path {
         (x1 - r, y0 + r, 3.0 * core::f32::consts::FRAC_PI_2),
     ];
     for (cx, cy, start_angle) in corners {
-        for i in 0..corner_segments {
+        // Include both tangents so adjacent corners join along straight edges.
+        for i in 0..=corner_segments {
             let t =
                 start_angle + core::f32::consts::FRAC_PI_2 * (i as f32) / (corner_segments as f32);
             pts.push(Point::new(cx + r * libm::cosf(t), cy + r * libm::sinf(t)));
@@ -1395,6 +1397,7 @@ impl CpuPaintRenderer {
 
     fn rebuild_scaled_rounded_rect(&mut self, rect: Rect, corner_radius: f32) {
         let radius = corner_radius
+            .max(0.0)
             .min(rect.size.width / 2.0)
             .min(rect.size.height / 2.0);
         let corner_segments = (libm::ceilf(radius * 0.75) as usize).clamp(8, 32);
@@ -1412,9 +1415,10 @@ impl CpuPaintRenderer {
         self.scratch.scaled_points.clear();
         self.scratch
             .scaled_points
-            .reserve(corner_segments.saturating_mul(4));
+            .reserve(corner_segments.saturating_add(1).saturating_mul(4));
         for (center_x, center_y, start_angle) in corners {
-            for index in 0..corner_segments {
+            // The endpoint is the tangent where the next straight edge begins.
+            for index in 0..=corner_segments {
                 let angle = start_angle
                     + core::f32::consts::FRAC_PI_2 * index as f32 / corner_segments as f32;
                 self.scratch.scaled_points.push(Point::new(
@@ -2435,7 +2439,7 @@ mod tests {
         assert_eq!(t.len(), 3);
 
         let rr = path_rounded_rect(Rect::new(Point::new(0.0, 0.0), Size::new(40.0, 40.0)), 8.0);
-        assert_eq!(rr.len(), 32);
+        assert_eq!(rr.len(), 36);
     }
 
     #[test]
@@ -3143,3 +3147,7 @@ mod tests {
         eprintln!("visual dump written to {}", path.display());
     }
 }
+
+#[cfg(test)]
+#[path = "renderer/rounded_geometry_tests.rs"]
+mod rounded_geometry_tests;
