@@ -1,5 +1,6 @@
 //! Native direct-touch contacts and a surface-local gesture arena.
 
+use crate::geometry::{Point, Rect};
 use alloc::vec::Vec;
 
 const MOVE_SLOP_SQUARED: i64 = 8 * 8;
@@ -128,6 +129,8 @@ struct Contact {
     start_ns: u64,
     scrollable: bool,
     drag_axis: Option<TouchDragAxis>,
+    press_bounds: Option<Rect>,
+    press_cancelled: bool,
     mode: Mode,
 }
 
@@ -150,8 +153,20 @@ impl TouchArena {
         scrollable: bool,
         drag_axis: Option<TouchDragAxis>,
     ) -> Vec<TouchGesture> {
+        self.process_with_press_bounds(change, scrollable, drag_axis, None)
+    }
+
+    /// Standard buttons retain a press inside their original bounds. Gesture
+    /// competition still wins: scrolling, dragging and multitouch cancel it.
+    pub(crate) fn process_with_press_bounds(
+        &mut self,
+        change: TouchChange,
+        scrollable: bool,
+        drag_axis: Option<TouchDragAxis>,
+        press_bounds: Option<Rect>,
+    ) -> Vec<TouchGesture> {
         match change.phase {
-            TouchPhase::Down => self.down(change, scrollable, drag_axis),
+            TouchPhase::Down => self.down(change, scrollable, drag_axis, press_bounds),
             TouchPhase::Move => self.moved(change),
             TouchPhase::Up | TouchPhase::Cancel => self.ended(change),
         }
@@ -162,6 +177,7 @@ impl TouchArena {
         change: TouchChange,
         scrollable: bool,
         drag_axis: Option<TouchDragAxis>,
+        press_bounds: Option<Rect>,
     ) -> Vec<TouchGesture> {
         self.contacts.retain(|contact| contact.id != change.id);
         self.contacts.push(Contact {
@@ -173,6 +189,8 @@ impl TouchArena {
             start_ns: change.time_ns,
             scrollable,
             drag_axis,
+            press_bounds,
+            press_cancelled: false,
             mode: Mode::Pending,
         });
         if self.contacts.len() == 2 {
@@ -247,10 +265,26 @@ impl TouchArena {
         let delta_y = change.y.saturating_sub(previous.y);
         match previous.mode {
             Mode::Pending => {
+                if let Some(bounds) = previous.press_bounds {
+                    if !bounds.contains(Point::new(change.x as f32, change.y as f32)) {
+                        self.contacts[index].press_cancelled = true;
+                        if !previous.scrollable && previous.drag_axis.is_none() {
+                            self.contacts[index].mode = Mode::Suppressed;
+                            return alloc::vec![TouchGesture::CancelPress { id: change.id }];
+                        }
+                    }
+                    if !previous.scrollable && previous.drag_axis.is_none() {
+                        return Vec::new();
+                    }
+                }
                 let total_x = i64::from(change.x) - i64::from(previous.start_x);
                 let total_y = i64::from(change.y) - i64::from(previous.start_y);
                 if total_x * total_x + total_y * total_y < MOVE_SLOP_SQUARED {
-                    return Vec::new();
+                    return if self.contacts[index].press_cancelled {
+                        alloc::vec![TouchGesture::CancelPress { id: change.id }]
+                    } else {
+                        Vec::new()
+                    };
                 }
                 let drag_claimed = !previous.scrollable
                     || match previous.drag_axis {
@@ -341,10 +375,17 @@ impl TouchArena {
             Mode::Pending => {
                 let total_x = i64::from(change.x) - i64::from(contact.start_x);
                 let total_y = i64::from(change.y) - i64::from(contact.start_y);
-                if total_x * total_x + total_y * total_y >= MOVE_SLOP_SQUARED {
+                let button = contact.press_bounds.is_some();
+                if contact.press_cancelled
+                    || contact.press_bounds.is_some_and(|bounds| {
+                        !bounds.contains(Point::new(change.x as f32, change.y as f32))
+                    })
+                    || ((!button || contact.scrollable || contact.drag_axis.is_some())
+                        && total_x * total_x + total_y * total_y >= MOVE_SLOP_SQUARED)
+                {
                     return alloc::vec![TouchGesture::CancelPress { id: change.id }];
                 }
-                if change.time_ns.saturating_sub(contact.start_ns) >= LONG_PRESS_NS {
+                if !button && change.time_ns.saturating_sub(contact.start_ns) >= LONG_PRESS_NS {
                     alloc::vec![TouchGesture::LongPress {
                         id: change.id,
                         x: change.x,
@@ -400,6 +441,98 @@ fn distance(first: Contact, second: Contact) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn button_bounds_keep_release_activation_but_scroll_and_exit_cancel() {
+        let bounds = Some(Rect::from_xywh(0.0, 0.0, 100.0, 50.0));
+        for (scrollable, moved_x, release_ns, tap) in [
+            (false, 45, 50_000_000, true),
+            (false, 25, 650_000_000, true),
+            (false, 45, 650_000_000, true),
+            (true, 25, 650_000_000, true),
+            (true, 45, 50_000_000, false),
+            (true, 101, 50_000_000, false),
+            (false, 101, 50_000_000, false),
+        ] {
+            let mut arena = TouchArena::default();
+            arena.process_with_press_bounds(
+                change(1, TouchPhase::Down, 25, 25, 1),
+                scrollable,
+                None,
+                bounds,
+            );
+            let movement =
+                arena.process(change(1, TouchPhase::Move, moved_x, 25, 20_000_000), false);
+            if scrollable && moved_x != 25 {
+                assert!(movement.iter().any(|event| matches!(
+                    event,
+                    TouchGesture::Scroll {
+                        phase: GesturePhase::Started,
+                        ..
+                    }
+                )));
+            }
+            // Returning inside after leaving bounds must not revive the press.
+            let ended = arena.process(change(1, TouchPhase::Up, 25, 25, release_ns), false);
+            assert_eq!(
+                ended
+                    .iter()
+                    .any(|event| matches!(event, TouchGesture::Tap { .. })),
+                tap
+            );
+        }
+    }
+
+    #[test]
+    fn button_bounds_do_not_revive_cancelled_or_multitouch_contacts() {
+        let bounds = Some(Rect::from_xywh(0.0, 0.0, 100.0, 50.0));
+        for multitouch in [false, true] {
+            let mut arena = TouchArena::default();
+            arena.process_with_press_bounds(
+                change(1, TouchPhase::Down, 25, 25, 1),
+                false,
+                None,
+                bounds,
+            );
+            if multitouch {
+                let events = arena.process_with_press_bounds(
+                    change(2, TouchPhase::Down, 50, 25, 2),
+                    false,
+                    None,
+                    bounds,
+                );
+                assert!(events.contains(&TouchGesture::CancelPress { id: 1 }));
+                arena.process(change(2, TouchPhase::Up, 50, 25, 3), false);
+            } else {
+                arena.process(change(1, TouchPhase::Cancel, 25, 25, 2), false);
+            }
+            assert!(
+                arena
+                    .process(change(1, TouchPhase::Up, 25, 25, 650_000_000), false)
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn uncoalesced_release_position_obeys_button_bounds_and_scroll_competition() {
+        for (scrollable, x, tap) in [(false, 45, true), (false, 100, false), (true, 45, false)] {
+            let mut arena = TouchArena::default();
+            arena.process_with_press_bounds(
+                change(1, TouchPhase::Down, 25, 25, 1),
+                scrollable,
+                None,
+                Some(Rect::from_xywh(0.0, 0.0, 100.0, 50.0)),
+            );
+            let ended = arena.process(change(1, TouchPhase::Up, x, 25, 650_000_000), false);
+            assert_eq!(
+                ended
+                    .iter()
+                    .any(|event| matches!(event, TouchGesture::Tap { .. })),
+                tap
+            );
+        }
+    }
 
     fn change(id: u64, phase: TouchPhase, x: i32, y: i32, time_ns: u64) -> TouchChange {
         TouchChange {

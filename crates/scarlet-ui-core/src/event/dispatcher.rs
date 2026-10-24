@@ -9,7 +9,7 @@ use crate::event::{
     Event, GesturePhase, TouchArena, TouchChange, TouchDragAxis, TouchFrame, TouchGesture,
     TouchPhase,
 };
-use crate::geometry::Point;
+use crate::geometry::{Point, Rect};
 use alloc::vec::Vec;
 use core::time::Duration;
 use scarlet_scroll_motion::{ScrollMomentum, ScrollVelocityTracker};
@@ -110,6 +110,7 @@ struct TouchRoute {
     path: Vec<ElementId>,
     scrollable: bool,
     drag_axis: Option<TouchDragAxis>,
+    press_bounds: Option<Rect>,
     scroll_target: Option<ElementId>,
     scroll_last_consumer: Option<ElementId>,
     scroll_consumers: Vec<ElementId>,
@@ -463,11 +464,18 @@ impl EventDispatcher {
                             })
                     })
                 });
+                let press_bounds = path.last().zip(origins.last()).and_then(|(id, origin)| {
+                    let element = element_tree.find_element_mut(*id)?;
+                    element.render_object()?
+                        .keeps_touch_press_within_bounds()
+                        .then(|| Rect::new(*origin, element.bounds().size))
+                });
                 self.touch_routes.push(TouchRoute {
                     id: change.id,
                     path,
                     scrollable,
                     drag_axis,
+                    press_bounds,
                     scroll_target: None,
                     scroll_last_consumer: None,
                     scroll_consumers: Vec::new(),
@@ -496,6 +504,7 @@ impl EventDispatcher {
             }
             let scrollable = self.touch_routes[route_index].scrollable;
             let drag_axis = self.touch_routes[route_index].drag_axis;
+            let press_bounds = self.touch_routes[route_index].press_bounds;
             if change.phase == TouchPhase::Move {
                 self.touch_routes[route_index]
                     .velocity
@@ -526,7 +535,7 @@ impl EventDispatcher {
             let mut completed_scroll = false;
             for gesture in self
                 .touch_arena
-                .process_with_drag_axis(change, scrollable, drag_axis)
+                .process_with_press_bounds(change, scrollable, drag_axis, press_bounds)
             {
                 let primary_id = gesture.primary_id();
                 if matches!(gesture, TouchGesture::CancelPress { .. })
@@ -2609,12 +2618,20 @@ mod tests {
     }
 
     fn repeating_button_fixture() -> (ElementTree, EventDispatcher, Rc<Cell<u32>>) {
+        button_fixture(true)
+    }
+
+    fn button_fixture(repeat: bool) -> (ElementTree, EventDispatcher, Rc<Cell<u32>>) {
         let activations = Rc::new(Cell::new(0));
         let callback_activations = activations.clone();
-        let root = Button::new("delete")
-            .on_click(move || callback_activations.set(callback_activations.get() + 1))
-            .repeat_while_pressed(Duration::from_millis(420), Duration::from_millis(55))
-            .frame(100.0, 50.0);
+        let button = Button::new("delete")
+            .on_click(move || callback_activations.set(callback_activations.get() + 1));
+        let button = if repeat {
+            button.repeat_while_pressed(Duration::from_millis(420), Duration::from_millis(55))
+        } else {
+            button
+        };
+        let root = button.frame(100.0, 50.0);
         let mut tree = ElementTree::new();
         tree.set_root(root.create_element());
         tree.layout(LayoutConstraints::tight(100.0, 50.0));
@@ -2642,6 +2659,70 @@ mod tests {
                 touch_major: None,
             }],
         })
+    }
+
+    #[test]
+    fn standard_button_releases_activate_after_in_bounds_motion_and_long_holds() {
+        for (x, time_ns) in [(45, 50_000_000), (25, 650_000_000), (45, 650_000_000)] {
+            let (mut tree, mut dispatcher, activations) = button_fixture(false);
+            dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Down, 1));
+            let mut moved = button_touch(TouchPhase::Move, 20_000_000);
+            if let Event::TouchFrame(frame) = &mut moved {
+                frame.changes[0].x = x;
+            }
+            dispatcher.dispatch(&mut tree, &moved);
+            assert_eq!(activations.get(), 0);
+            let mut release = button_touch(TouchPhase::Up, time_ns);
+            if let Event::TouchFrame(frame) = &mut release {
+                frame.changes[0].x = x;
+            }
+            dispatcher.dispatch(&mut tree, &release);
+            assert_eq!(activations.get(), 1);
+            dispatcher.dispatch(&mut tree, &release);
+            assert_eq!(activations.get(), 1);
+        }
+    }
+
+    #[test]
+    fn standard_button_exit_then_return_never_activates() {
+        let (mut tree, mut dispatcher, activations) = button_fixture(false);
+        dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Down, 1));
+        let mut outside = button_touch(TouchPhase::Move, 20_000_000);
+        if let Event::TouchFrame(frame) = &mut outside {
+            frame.changes[0].x = 101;
+        }
+        dispatcher.dispatch(&mut tree, &outside);
+        dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Move, 30_000_000));
+        dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Up, 650_000_000));
+        assert_eq!(activations.get(), 0);
+    }
+
+    #[test]
+    fn button_press_policy_rebuilds_preserve_enabled_and_repeat_semantics() {
+        let (mut tree, mut dispatcher, activations) = button_fixture(false);
+        let target = tree.keyboard_focus_candidates()[0];
+        for (enabled, repeat) in [(true, false), (true, true), (true, false), (false, false), (true, false)] {
+            let count = activations.clone();
+            let button = Button::new("delete")
+                .enabled(enabled)
+                .on_click(move || count.set(count.get() + 1));
+            let button = if repeat {
+                button.repeat_while_pressed(Duration::from_millis(420), Duration::from_millis(55))
+            } else {
+                button
+            };
+            tree.find_element_mut(target).unwrap().update(&button);
+            let before = activations.get();
+            dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Down, 1));
+            assert_eq!(activations.get(), before + u32::from(enabled && repeat));
+            let mut moved = button_touch(TouchPhase::Move, 20_000_000);
+            if let Event::TouchFrame(frame) = &mut moved {
+                frame.changes[0].x = 45;
+            }
+            dispatcher.dispatch(&mut tree, &moved);
+            dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Up, 650_000_000));
+            assert_eq!(activations.get(), before + u32::from(enabled));
+        }
     }
 
     #[test]

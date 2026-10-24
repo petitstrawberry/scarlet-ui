@@ -373,6 +373,13 @@ pub trait RenderObject: Any {
         false
     }
 
+    /// Retain an ordinary release activation while the contact stays within
+    /// this target's bounds, regardless of hold duration or in-bounds drift.
+    /// Scrolling, dragging, multitouch and leaving the bounds still cancel it.
+    fn keeps_touch_press_within_bounds(&self) -> bool {
+        false
+    }
+
     /// Direction in which this control can claim a drag from `local_point`.
     fn touch_drag_axis(&self, _local_point: Point) -> Option<crate::event::TouchDragAxis> {
         None

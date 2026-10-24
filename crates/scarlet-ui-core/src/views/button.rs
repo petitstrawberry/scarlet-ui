@@ -357,6 +357,7 @@ impl Button {
             self.padding,
         );
         render_object.enabled = self.enabled;
+        render_object.repeats_on_press = self.press_repeat.is_some();
         render_object.icon_size = self.icon_size;
         render_object.hover_background_color = self.hover_background_color;
         render_object.pressed_background_color = self.pressed_background_color;
@@ -382,6 +383,7 @@ impl View for Button {
 /// Button RenderObject - handles button rendering and interaction
 pub struct ButtonRenderObject {
     enabled: bool,
+    repeats_on_press: bool,
     focused: bool,
     keyboard_pressed: Option<crate::event::KeyCode>,
     label: String,
@@ -477,6 +479,7 @@ impl ButtonRenderObject {
     ) -> Self {
         Self {
             enabled: true,
+            repeats_on_press: false,
             focused: false,
             keyboard_pressed: None,
             label,
@@ -578,6 +581,10 @@ impl ButtonRenderObject {
 }
 
 impl ElementRenderObject for ButtonRenderObject {
+    fn keeps_touch_press_within_bounds(&self) -> bool {
+        self.enabled && !self.repeats_on_press
+    }
+
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
         let intrinsic = self.estimate_size();
 
@@ -797,6 +804,7 @@ impl ElementRenderObject for ButtonRenderObject {
             return crate::element::UpdateResult::Replaced;
         };
         if self.enabled == button.enabled
+            && self.repeats_on_press == button.press_repeat.is_some()
             && self.label == button.label
             && self.icon == button.icon
             && self.icon_size == button.icon_size
@@ -814,6 +822,7 @@ impl ElementRenderObject for ButtonRenderObject {
             return crate::element::UpdateResult::NoChange;
         }
         self.enabled = button.enabled;
+        self.repeats_on_press = button.press_repeat.is_some();
         if !self.enabled {
             self.focused = false;
             self.keyboard_pressed = None;
