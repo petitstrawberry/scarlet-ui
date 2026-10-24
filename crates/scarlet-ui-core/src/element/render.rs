@@ -140,6 +140,11 @@ pub trait RenderObject: Any {
     /// Get the current size
     fn size(&self) -> Size;
 
+    /// Adjust only internal scrolling for a local keyboard-covered rectangle.
+    fn avoid_input_occlusion(&mut self, _occlusion: Option<Rect>, _caret: Option<Rect>, _reveal: bool) -> bool {
+        false
+    }
+
     /// Deliver notifications collected during the most recent layout pass.
     ///
     /// Called after the element tree has finished layout so callbacks can
@@ -1150,6 +1155,18 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         render_object
             .is_focused()
             .then(|| render_object.text_input_state())
+    }
+
+    fn avoid_input_occlusion(&mut self, occlusion: Option<Rect>, caret: Option<Rect>, reveal: bool) -> bool {
+        if !self.render_object.avoid_input_occlusion(occlusion, caret, reveal) {
+            return false;
+        }
+        match self.render_object.apply_scroll_offset(&mut self.children) {
+            ScrollOffsetUpdate::ChildrenChanged => crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id),
+            ScrollOffsetUpdate::NeedsComposite => crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id),
+            _ => crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id),
+        }
+        true
     }
 
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {

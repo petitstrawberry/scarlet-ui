@@ -459,7 +459,7 @@ pub(super) fn ensure_caret_visible(view: &TextView, render_object: &mut TextView
     let clip_left = BORDER_WIDTH;
     let clip_top = BORDER_WIDTH;
     let clip_right = (render_object.size.width - BORDER_WIDTH).max(clip_left);
-    let clip_bottom = (render_object.size.height - BORDER_WIDTH).max(clip_top);
+    let clip_bottom = (render_object.visible_bottom() - BORDER_WIDTH).max(clip_top);
     let reveal_left = render_object
         .layout
         .text_origin_x
@@ -468,7 +468,7 @@ pub(super) fn ensure_caret_visible(view: &TextView, render_object: &mut TextView
     let reveal_right =
         (render_object.size.width - render_object.padding).clamp(reveal_left, clip_right);
     let reveal_bottom =
-        (render_object.size.height - render_object.padding).clamp(reveal_top, clip_bottom);
+        (render_object.visible_bottom() - render_object.padding).clamp(reveal_top, clip_bottom);
     let mut requested = render_object.scroll;
 
     if caret.origin.x < reveal_left {

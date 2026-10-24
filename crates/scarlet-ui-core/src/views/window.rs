@@ -1146,6 +1146,10 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
 pub struct WindowRenderElement<C: View + Clone + WindowViewInfo> {
     id: ElementId,
     view: C,
+    // Authoritative platform state, independent of the application's declaration.
+    tablet_presented: bool,
+    // Presentation-only translation for fixed-layout content above an input panel.
+    content_pan_y: f32,
     render_object: WindowRenderObject,
     children: Vec<Box<dyn Element>>,
     position: Point,
@@ -1173,6 +1177,8 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
         Self {
             id: ElementId::generate(),
             view,
+            tablet_presented: false,
+            content_pan_y: 0.0,
             render_object,
             children,
             position: Point::ZERO,
@@ -1206,6 +1212,101 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
     /// Get mutable reference to the WindowRenderObject
     pub fn render_object_mut(&mut self) -> &mut WindowRenderObject {
         &mut self.render_object
+    }
+
+    fn effective_window_info(&self) -> WindowInfo {
+        let mut info = self.view.window_info();
+        if self.tablet_presented {
+            info.decoration = WindowDecoration::NONE;
+            info.corner_radius = 0.0;
+            info.window_geometry_insets = EdgeInsets::ZERO;
+            info.shadow_elevation = ElevationRole::Flat;
+        }
+        info
+    }
+
+    // Reconcile chrome separately: positional reconciliation of an unkeyed
+    // titlebar against unkeyed content would replace the mounted content.
+    fn reconcile_titlebar_presence(&mut self, info: &WindowInfo) -> bool {
+        let had_titlebar = self.titlebar_child_index().is_some();
+        let needs_titlebar = info.decoration.title_bar.is_custom();
+        if had_titlebar == needs_titlebar {
+            return false;
+        }
+        if had_titlebar {
+            let mut titlebar = self.children.remove(0);
+            if self.mounted {
+                titlebar.unmount();
+            }
+        } else {
+            let mut titlebar = WindowTitleBarView::new(
+                info.title.clone(),
+                info.decoration.frame.is_custom(),
+            )
+            .create_element();
+            if self.mounted {
+                titlebar.mount(&MountContext::new(self.pipeline_id));
+            }
+            self.children.insert(0, titlebar);
+        }
+        if self.mounted {
+            crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id);
+        }
+        true
+    }
+
+    fn set_tablet_presented(&mut self, active: bool) {
+        if self.tablet_presented == active {
+            return;
+        }
+        self.tablet_presented = active;
+        if !active {
+            self.set_content_pan(0.0);
+        }
+        let mut info = self.effective_window_info();
+        // Presentation changes do not resize the platform surface. Its current
+        // layout size remains authoritative until the platform sends a resize.
+        info.size = self.render_object.size;
+        self.reconcile_titlebar_presence(&info);
+        self.render_object.update_from_window_info(&info);
+        self.render_object.clear_buffer();
+        // Platform presentation is also replayed after the pipeline's layout
+        // phase when a rebuild creates a new Window. Refresh child geometry
+        // now so this frame's caret avoidance, hit testing and paint all use
+        // the effective chrome, without changing the allocated surface size.
+        self.layout(LayoutConstraints::tight(info.size.width, info.size.height));
+
+        // A gesture begun on desktop chrome must not activate after a mode
+        // transition, including a subsequent return to desktop presentation.
+        self.pressed_button = 0;
+        self.touch_pressed_button = None;
+        self.last_mouse_x = -1;
+        self.last_mouse_y = -1;
+        self.last_mouse_pressed = false;
+        self.pending_window_action = None;
+        if self.mounted {
+            crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
+        }
+    }
+
+    fn set_content_pan(&mut self, pan: f32) -> bool {
+        let pan = pan.max(0.0);
+        if self.content_pan_y == pan {
+            return false;
+        }
+        if let Some(content) = self.children.last_mut() {
+            let position = content.position();
+            content.set_position(Point::new(
+                position.x,
+                position.y + self.content_pan_y - pan,
+            ));
+        }
+        self.content_pan_y = pan;
+        if self.mounted {
+            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+            crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id);
+        }
+        true
     }
 
     fn titlebar_child_index(&self) -> Option<usize> {
@@ -1247,7 +1348,10 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
     }
 
     fn titlebar_button_at(&self, x: i32, y: i32) -> Option<u8> {
-        if y < 0 || y >= titlebar_height() as i32 {
+        if !self.render_object.decoration.title_bar.is_custom()
+            || y < 0
+            || y >= titlebar_height() as i32
+        {
             return None;
         }
         let width = self.render_object.window_geometry_size().width as u32;
@@ -1441,29 +1545,27 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
         let Some(typed_view) = new_view.as_any().downcast_ref::<C>() else {
             return UpdateResult::Replaced;
         };
-        if typed_view.window_decoration() != self.render_object.decoration {
-            return UpdateResult::Replaced;
-        }
-
-        let window_info = typed_view.window_info();
+        self.view = typed_view.clone();
+        let window_info = self.effective_window_info();
+        let chrome_changed = self.reconcile_titlebar_presence(&window_info);
         let mut child_views: Vec<Box<dyn View>> = Vec::new();
-        if typed_view.uses_custom_title_bar() {
+        if window_info.decoration.title_bar.is_custom() {
             child_views.push(Box::new(WindowTitleBarView::new(
                 window_info.title.clone(),
-                typed_view.uses_custom_frame(),
+                window_info.decoration.frame.is_custom(),
             )));
         }
         if let Some(content) = typed_view.content_view() {
             child_views.push(content.clone_view());
         }
 
-        self.view = typed_view.clone();
         let render_result = self.render_object.update_from_window_info(&window_info);
         let mount_context = self.mounted.then(|| MountContext::new(self.pipeline_id));
         let child_result =
             crate::element::update_children(&mut self.children, child_views, mount_context);
 
-        if matches!(render_result, UpdateResult::Updated)
+        if chrome_changed
+            || matches!(render_result, UpdateResult::Updated)
             || matches!(child_result, UpdateResult::Updated)
         {
             if self.mounted {
@@ -1497,8 +1599,47 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
-        self.render_object
-            .layout_with_children(constraints, &mut self.children)
+        let size = self
+            .render_object
+            .layout_with_children(constraints, &mut self.children);
+        if let Some(content) = self.children.last_mut() {
+            let position = content.position();
+            content.set_position(Point::new(position.x, position.y - self.content_pan_y));
+        }
+        size
+    }
+
+    fn avoid_input_occlusion(
+        &mut self,
+        occlusion: Option<Rect>,
+        caret: Option<Rect>,
+        reveal: bool,
+    ) -> bool {
+        let (Some(occlusion), Some(caret)) = (occlusion, caret) else {
+            return self.set_content_pan(0.0);
+        };
+        if !self.tablet_presented {
+            return self.set_content_pan(0.0);
+        }
+        if !reveal {
+            return false;
+        }
+        // The caret already includes our current pan and any adjustment made
+        // by inner scroll views. Compute the absolute pan from its unpanned
+        // position so repeated reveal passes never accumulate translation.
+        let overlaps_x = caret.origin.x < occlusion.origin.x + occlusion.size.width
+            && caret.origin.x + caret.size.width > occlusion.origin.x;
+        let unpanned_top = caret.origin.y + self.content_pan_y;
+        let pan = if overlaps_x
+            && occlusion.size.width > 0.0
+            && occlusion.size.height > 0.0
+            && unpanned_top < occlusion.origin.y + occlusion.size.height
+        {
+            (unpanned_top + caret.size.height - occlusion.origin.y).max(0.0)
+        } else {
+            0.0
+        };
+        self.set_content_pan(pan)
     }
 
     fn position(&self) -> Point {
@@ -1550,6 +1691,10 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
     }
 
     fn handle_event(&mut self, event: &crate::event::Event, phase: crate::event::Phase) -> bool {
+        if let crate::event::Event::TabletPresentationChanged { active } = event {
+            self.set_tablet_presented(*active);
+            return true;
+        }
         if let Some(handled) = self.handle_touch_titlebar_event(event, phase) {
             return handled;
         }
@@ -1693,7 +1838,7 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
     }
 
     fn get_window_info(&self) -> Option<WindowInfo> {
-        Some(self.view.window_info())
+        Some(self.effective_window_info())
     }
 
     fn get_window_size_limits(&self) -> Option<WindowSizeLimits> {
@@ -2524,6 +2669,10 @@ impl ElementRenderObject for WindowRenderObject {
         UpdateResult::NoChange
     }
 }
+
+#[cfg(test)]
+#[path = "window_tablet_tests.rs"]
+mod tablet_tests;
 
 #[cfg(test)]
 mod tests {

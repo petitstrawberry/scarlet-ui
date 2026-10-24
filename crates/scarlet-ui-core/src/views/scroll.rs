@@ -643,6 +643,7 @@ pub struct ScrollViewRenderObject<V: View> {
     axes: ScrollAxis,
     configured_content_size: Option<Size>,
     content_bottom_inset: f32,
+    keyboard_bottom_inset: f32,
     wheel_scale: f32,
     horizontal_wheel_direction: ScrollWheelDirection,
     vertical_wheel_direction: ScrollWheelDirection,
@@ -682,6 +683,7 @@ impl<V: View> ScrollViewRenderObject<V> {
             axes,
             configured_content_size: content_size,
             content_bottom_inset: 0.0,
+            keyboard_bottom_inset: 0.0,
             wheel_scale,
             horizontal_wheel_direction: ScrollWheelDirection::Normal,
             vertical_wheel_direction: ScrollWheelDirection::Normal,
@@ -773,7 +775,7 @@ impl<V: View> ScrollViewRenderObject<V> {
     }
 
     fn max_offset_y(&self) -> f32 {
-        (self.content_size.height - self.viewport_size.height).max(0.0)
+        (self.content_size.height + self.keyboard_bottom_inset - self.viewport_size.height).max(0.0)
     }
 
     fn clamp_offsets(&mut self) {
@@ -807,7 +809,7 @@ impl<V: View> ScrollViewRenderObject<V> {
         let viewport_extent = if horizontal {
             self.viewport_size.width
         } else {
-            (self.viewport_size.height - self.content_bottom_inset).max(1.0)
+            (self.viewport_size.height - self.content_bottom_inset - self.keyboard_bottom_inset).max(1.0)
         };
         let viewport_bottom = viewport_top + viewport_extent;
         let next_offset = if item_top < viewport_top {
@@ -1064,6 +1066,31 @@ impl<V: View> ScrollViewRenderObject<V> {
 }
 
 impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V> {
+    fn avoid_input_occlusion(&mut self, occlusion: Option<Rect>, caret: Option<Rect>, reveal: bool) -> bool {
+        let before = (self.keyboard_bottom_inset, self.offset());
+        self.keyboard_bottom_inset = occlusion.filter(|area| {
+            caret.is_some() && self.axes.allows_y() && area.size.height > 0. && area.size.width > 0.
+                && area.origin.x < self.viewport_size.width && area.origin.x + area.size.width > 0.
+                && area.origin.y > 0. && area.origin.y < self.viewport_size.height
+        }).map_or(0., |area| self.viewport_size.height - area.origin.y);
+        self.clamp_offsets();
+        if self.keyboard_bottom_inset > 0. && (reveal || before.0 != self.keyboard_bottom_inset) {
+            if let Some(caret) = caret {
+                let bottom = self.viewport_size.height - self.keyboard_bottom_inset;
+                if caret.origin.y + caret.size.height > bottom {
+                    self.set_offset(self.offset_x, self.offset_y + caret.origin.y + caret.size.height - bottom);
+                } else if caret.origin.y < 0. {
+                    self.set_offset(self.offset_x, self.offset_y + caret.origin.y);
+                }
+            }
+        }
+        if before != (self.keyboard_bottom_inset, self.offset()) {
+            self.selection_scroll_pending = false;
+            return true;
+        }
+        false
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         let width = finite_viewport_axis(constraints.min_width, constraints.max_width);
         let height = finite_viewport_axis(constraints.min_height, constraints.max_height);

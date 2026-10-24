@@ -426,6 +426,13 @@ pub trait Element {
         None
     }
 
+    /// Adjust scrolling for a keyboard overlay without changing layout size.
+    /// Both rectangles use this element's local coordinates. `reveal` is false
+    /// during manual scrolling, so the keyboard never pulls the caret back.
+    fn avoid_input_occlusion(&mut self, _occlusion: Option<Rect>, _caret: Option<Rect>, _reveal: bool) -> bool {
+        false
+    }
+
     /// Drop cached buffers for this element and its descendants.
     fn clear_buffers(&mut self) {
         for child in self.children_mut().iter_mut() {

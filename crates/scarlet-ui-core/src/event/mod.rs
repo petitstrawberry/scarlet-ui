@@ -34,6 +34,14 @@ pub enum Event {
     /// Window fullscreen state changed on the platform.
     FullscreenChanged { fullscreen: bool },
 
+    /// The compositor presents this app scene without desktop window chrome.
+    /// This does not change the application's explicit fullscreen state.
+    TabletPresentationChanged { active: bool },
+
+    /// Keyboard-covered rectangle in window-local logical coordinates.
+    /// The backing surface and app layout keep their full size.
+    InputPanelOcclusionChanged { occlusion: Option<crate::geometry::Rect> },
+
     /// One compositor-paced frame opportunity is ready for this window.
     FrameReady {
         /// Compositor monotonic timestamp in nanoseconds.

@@ -314,6 +314,8 @@ impl EventDispatcher {
                 false
             }
             Event::FullscreenChanged { .. } => false,
+            Event::TabletPresentationChanged { .. }
+            | Event::InputPanelOcclusionChanged { .. } => false,
             Event::FrameReady { .. } | Event::WindowSuspendedChanged { .. } => false,
             Event::InputEnvironmentChanged(_) => false,
             Event::PointerLockChanged { locked } => {

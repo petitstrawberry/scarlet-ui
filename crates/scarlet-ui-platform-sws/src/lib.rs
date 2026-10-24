@@ -727,6 +727,7 @@ pub struct SWSPlatformWindow {
     next_frame_callback_id: u64,
     pending_frame_callback_id: Option<u64>,
     fullscreen: bool,
+    tablet_managed: bool,
     suspended: bool,
     pointer_locked: bool,
     pointer_lock_requested: Option<bool>,
@@ -1032,6 +1033,10 @@ impl SWSPlatformWindow {
         ((value as i64).saturating_mul(scale_milli as i64) / 1000) as i32
     }
 
+    fn effective_geometry_insets(&self) -> EdgeInsets {
+        if self.tablet_managed { EdgeInsets::ZERO } else { self.window_geometry_insets }
+    }
+
     fn physical_to_logical_pos(&self, value: i32) -> i32 {
         ((value as i64).saturating_mul(1000) / self.scale_milli as i64) as i32
     }
@@ -1298,6 +1303,7 @@ impl SWSPlatformWindow {
             next_frame_callback_id: 1,
             pending_frame_callback_id: None,
             fullscreen: false,
+            tablet_managed: false,
             suspended: false,
             pointer_locked: false,
             pointer_lock_requested: None,
@@ -2081,7 +2087,7 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn managed_size(&self) -> Size {
-        Self::logical_managed_size(self.current_size, self.window_geometry_insets)
+        Self::logical_managed_size(self.current_size, self.effective_geometry_insets())
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
@@ -2097,7 +2103,7 @@ impl PlatformWindow for SWSPlatformWindow {
         let physical_width = self.logical_to_physical_len(width);
         let physical_height = self.logical_to_physical_len(height);
         let physical_geometry = Self::physical_window_geometry(
-            self.window_geometry_insets,
+            self.effective_geometry_insets(),
             physical_width,
             physical_height,
             self.scale_milli,
@@ -2130,7 +2136,7 @@ impl PlatformWindow for SWSPlatformWindow {
 
     fn resize_managed(&mut self, width: u32, height: u32) -> Result<()> {
         let (surface_width, surface_height) =
-            Self::logical_surface_size_for_managed(width, height, self.window_geometry_insets);
+            Self::logical_surface_size_for_managed(width, height, self.effective_geometry_insets());
         self.resize(surface_width, surface_height)
     }
 
@@ -2729,6 +2735,17 @@ impl SWSPlatformWindow {
                 surface_id,
                 state_flags,
             } if surface_id == self.surface_id => {
+                let tablet_managed = state_flags & sws::window_state::TABLET_MANAGED != 0;
+                if tablet_managed != self.tablet_managed {
+                    self.tablet_managed = tablet_managed;
+                    if scarlet_ui_core::debug::frame_log_enabled() {
+                        logln!("[Tablet] surface={} managed={} size={:?}", self.surface_id, tablet_managed, self.current_size);
+                    }
+                    self.surface_regions_cache = None;
+                    self.needs_full_present = true;
+                    self.text_input_sync.invalidate();
+                    self.push_event(Event::TabletPresentationChanged { active: tablet_managed });
+                }
                 let fullscreen = state_flags & sws::window_state::FULLSCREEN != 0;
                 if fullscreen != self.fullscreen {
                     self.fullscreen = fullscreen;
@@ -2780,6 +2797,18 @@ impl SWSPlatformWindow {
                     width: self.current_size.width.max(1.0) as u32,
                     height: self.current_size.height.max(1.0) as u32,
                 });
+            }
+            SwsEvent::InputPanelOcclusion(area) if area.window_id == self.surface_id => {
+                let occlusion = (area.width > 0 && area.height > 0).then(|| Rect::from_xywh(
+                    self.physical_to_logical_pos(area.x) as f32,
+                    self.physical_to_logical_pos(area.y) as f32,
+                    self.physical_to_logical_len(area.width) as f32,
+                    self.physical_to_logical_len(area.height) as f32,
+                ));
+                if scarlet_ui_core::debug::frame_log_enabled() {
+                    logln!("[InputPanel] surface={} occlusion={:?} size={:?}", self.surface_id, occlusion, self.current_size);
+                }
+                self.push_event(Event::InputPanelOcclusionChanged { occlusion });
             }
             SwsEvent::InputEnvironmentChanged(environment) => {
                 self.push_event(Event::InputEnvironmentChanged(map_sws_input_environment(

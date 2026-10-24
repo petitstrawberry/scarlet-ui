@@ -583,6 +583,7 @@ pub struct TextViewRenderObject {
     desired_x: Option<f32>,
     size: Size,
     layout: TextViewLayout,
+    keyboard_bottom: Option<f32>,
     placeholder: String,
     font_size: f32,
     font_stack: Option<Arc<FontStack>>,
@@ -664,6 +665,7 @@ impl TextViewRenderObject {
             desired_x: None,
             size: Size::ZERO,
             layout,
+            keyboard_bottom: None,
             placeholder: view.placeholder.clone(),
             font_size: view.font_size,
             font_stack: view.font_stack.clone(),
@@ -705,6 +707,7 @@ impl TextViewRenderObject {
             );
         }
         self.layout.set_viewport(self.size);
+        self.layout.viewport_height = (self.visible_bottom() - self.padding * 2.0).max(1.0);
         let base_width = match self.wrap_mode {
             WrapMode::None => self.layout.max_line_width,
             WrapMode::Soft => self.layout.viewport_width,
@@ -721,6 +724,10 @@ impl TextViewRenderObject {
             self.layout.content_width = base_width.max(composition_end);
         }
         self.scroll = self.layout.set_scroll(self.requested_scroll);
+    }
+
+    pub(super) fn visible_bottom(&self) -> f32 {
+        self.keyboard_bottom.unwrap_or(self.size.height).min(self.size.height)
     }
 
     fn publish_caret_rect(&self) {
@@ -868,6 +875,34 @@ impl TextViewRenderObject {
 }
 
 impl ElementRenderObject for TextViewRenderObject {
+    fn avoid_input_occlusion(&mut self, occlusion: Option<Rect>, _caret: Option<Rect>, reveal: bool) -> bool {
+        let before = (self.keyboard_bottom, self.scroll);
+        self.keyboard_bottom = occlusion.filter(|area| {
+            self.focused && area.size.width > 0. && area.size.height > 0.
+                && area.origin.x < self.size.width && area.origin.x + area.size.width > 0.
+                && area.origin.y >= self.padding * 2. + self.layout.line_height
+                && area.origin.y < self.size.height
+        }).map(|area| area.origin.y);
+        self.compute_layout();
+        if self.keyboard_bottom.is_some() && (reveal || before.0 != self.keyboard_bottom) {
+            let caret = self.text_input_cursor_rect();
+            let bottom = self.visible_bottom() - self.padding;
+            let mut requested = self.scroll;
+            if caret.origin.y + caret.size.height > bottom {
+                requested.y += caret.origin.y + caret.size.height - bottom;
+            } else if caret.origin.y < self.padding {
+                requested.y -= self.padding - caret.origin.y;
+            }
+            self.scroll = self.layout.set_scroll(requested);
+        }
+        self.requested_scroll = self.scroll;
+        if before.1 != self.scroll {
+            if let Some(state) = &self.scroll_state { state.set(self.scroll); }
+            self.publish_caret_rect();
+        }
+        before != (self.keyboard_bottom, self.scroll)
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         let desired = Size::new(
             if constraints.max_width.is_finite() {

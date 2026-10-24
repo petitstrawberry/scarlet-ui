@@ -25,6 +25,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 const MAX_PRESENT_DAMAGE_RECTS: usize = 4;
+
+#[path = "input_panel.rs"]
+mod input_panel;
 const MAX_REPAINT_BOUNDARY_CACHE_PIXELS: u64 = 16_000_000;
 
 struct PaintCache {
@@ -89,6 +92,7 @@ pub struct RenderingPipeline {
     window_size: Size,
     scale_milli: u32,
     event_dispatcher: EventDispatcher,
+    overlays: input_panel::OverlayState,
     paint_renderer: Option<CpuPaintRenderer>,
     paint_backend: Box<dyn PaintBackend>,
     last_paint_bounds: BTreeMap<ElementId, Rect>,
@@ -122,6 +126,7 @@ impl RenderingPipeline {
             window_size: Size::new(800.0, 600.0),
             scale_milli: 1000,
             event_dispatcher: EventDispatcher::new(),
+            overlays: Default::default(),
             paint_renderer: None,
             paint_backend: Box::new(CpuPaintBackend::new(
                 Size::new(800.0, 600.0),
@@ -596,7 +601,10 @@ impl RenderingPipeline {
             &mut self.element_tree,
             self.window_size,
             !self.paint_enabled,
-            |tree| self.event_dispatcher.reconcile_keyboard_focus(tree),
+            |tree| {
+                self.event_dispatcher.reconcile_keyboard_focus(tree);
+                self.overlays.apply(tree);
+            },
         );
         if crate::debug::is_enabled() {
             crate::logln!("[RenderingPipeline] flush() completed");
@@ -3156,7 +3164,10 @@ impl RenderingPipeline {
             &mut self.element_tree,
             self.window_size,
             false,
-            |tree| self.event_dispatcher.reconcile_keyboard_focus(tree),
+            |tree| {
+                self.event_dispatcher.reconcile_keyboard_focus(tree);
+                self.overlays.apply(tree);
+            },
         );
         let layout_us = started.map(|start| start.elapsed().as_micros());
         let background_color = self.extract_background_color();
@@ -3191,6 +3202,11 @@ impl RenderingPipeline {
     /// In a full implementation, this would route events through the
     /// EventDispatcher to the target elements.
     pub fn handle_event(&mut self, _event: &crate::event::Event) -> bool {
+        if self.overlays.handle_event(_event) {
+            self.overlays.apply_presentation(&mut self.element_tree);
+            self.request_redraw();
+            return true;
+        }
         let started = (crate::debug::frame_log_enabled()
             && matches!(
                 _event,

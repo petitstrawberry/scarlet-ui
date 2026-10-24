@@ -879,6 +879,9 @@ enum Presentation {
 fn present_window<A: Application>(app: &mut A, slot: &mut WindowSlot<A>) -> Result<Presentation> {
     slot.retry_render = false;
     let result = present_pipeline(&mut slot.pipeline, slot.window.as_mut());
+    // Layout may reveal the focused caret above an input-panel overlay. Publish
+    // its final position before waiting so IME candidates follow the same frame.
+    sync_text_input(slot.window.as_mut(), &slot.pipeline);
     // render_for_present flushes scene rebuilds even when there is no pixel
     // damage (or the renderer rejects a frame). Read the resulting WindowInfo,
     // not the creation-time declaration or a separately rebuilt app snapshot.
@@ -1066,6 +1069,9 @@ fn handle_window_event<A: Application>(
             return Ok(handle_window_close_request(app, slot, close_ids));
         }
         Event::Resize { width, height } => {
+            if crate::debug::frame_log_enabled() {
+                crate::logln!("[WindowSize] configure {}x{}", width, height);
+            }
             let new_size = Size::new(width as f32, height as f32);
             if slot.window.apply_resize(width, height).is_ok() {
                 sync_output_scale(&mut slot.pipeline, slot.window.as_ref());
