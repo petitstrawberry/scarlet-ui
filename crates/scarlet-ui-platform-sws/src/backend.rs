@@ -497,13 +497,27 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         let slot = self.next_slot;
         let identity = self.identity(slot)?;
         if let Some(retained) = self.slots[slot].retained {
-            self.sink
-                .wait_until_released(retained)
-                .map_err(|source| Error::Sink {
+            match self.sink.wait_until_released(retained) {
+                Ok(()) => self.slots[slot].retained = None,
+                // The sink has consumed an asynchronous rejection of this
+                // exact commit. Its GPU work already completed before commit;
+                // SWS never accepted this use, so the slot is safe to reuse.
+                // Report admission pressure without poisoning the renderer.
+                Err(SgfxSinkError::BufferBusy) => {
+                    self.slots[slot].retained = None;
+                    self.slots[slot].content_valid = false;
+                    self.slots[slot].needs_full_commit = true;
+                    self.full_redraw_required = true;
+                    return Err(Error::FrameNotPresented(RenderFailure {
+                        kind: RenderFailureKind::Busy,
+                        reason: "SWS rejected a queued frame while its presentation queue was full".into(),
+                    }));
+                }
+                Err(source) => return Err(Error::Sink {
                     stage: Stage::WaitForRelease,
                     source,
-                })?;
-            self.slots[slot].retained = None;
+                }),
+            }
         }
         #[cfg(feature = "std")]
         let profile_released = self.profiling.then(Instant::now);
@@ -800,7 +814,9 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                 if let Some(identity) = retired.identities[slot] {
                     if let Some(retained) = retired.retained[slot] {
                         match self.sink.wait_until_released(retained) {
-                            Ok(()) | Err(SgfxSinkError::BackendLost { .. }) => {
+                            Ok(())
+                            | Err(SgfxSinkError::BufferBusy)
+                            | Err(SgfxSinkError::BackendLost { .. }) => {
                                 retired.retained[slot] = None;
                             }
                             Err(source) => {
