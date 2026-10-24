@@ -1227,7 +1227,8 @@ impl<'a> Canvas<'a> {
         if alpha <= 0.0 {
             return;
         }
-        if alpha >= 1.0 {
+        // Full glyph coverage is still translucent when the text color is.
+        if alpha >= 1.0 && color.a >= 1.0 {
             self.put_pixel_physical(x, y, color);
             return;
         }
@@ -1672,3 +1673,32 @@ mod text_run_tests {
 
 #[cfg(test)]
 mod typography_tests;
+
+#[cfg(test)]
+mod text_alpha_tests {
+    use super::*;
+
+    #[test]
+    fn full_coverage_keeps_translucent_text_composited_over_opaque_background() {
+        let mut bytes = [255u8; 8];
+        let mut canvas = Canvas::new(&mut bytes, 2, 1);
+        let disabled = Color::rgba(0.0, 0.0, 0.0, 0.25);
+        canvas.put_pixel_physical_alpha(0, 0, disabled, 254.0 / 255.0);
+        canvas.put_pixel_physical_alpha(1, 0, disabled, 1.0);
+        let edge = canvas.get_pixel_physical(0, 0);
+        let core = canvas.get_pixel_physical(1, 0);
+        assert_eq!(core.a, 1.0);
+        assert!((core.r - 0.75).abs() < 1.0 / 255.0);
+        assert!((edge.r - core.r).abs() <= 1.0 / 255.0);
+    }
+
+    #[test]
+    fn zero_alpha_text_leaves_background_intact_even_at_full_coverage() {
+        let mut bytes = [30u8, 60, 90, 255];
+        let original = bytes;
+        Canvas::new(&mut bytes, 1, 1).put_pixel_physical_alpha(
+            0, 0, Color::rgba(0.0, 0.0, 0.0, 0.0), 1.0,
+        );
+        assert_eq!(bytes, original);
+    }
+}
