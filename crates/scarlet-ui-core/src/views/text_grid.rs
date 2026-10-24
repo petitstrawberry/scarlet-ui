@@ -611,7 +611,7 @@ impl TextGridRenderObject {
         ((self.cell_height - line_height as f32) / 2.0).max(0.0)
     }
 
-    fn repaint_cell(&self, canvas: &mut graphics::Canvas<'_>, index: usize) {
+    fn repaint_cell(&self, canvas: &mut graphics::Canvas<'_>, index: usize, background_only: bool) {
         let columns = self.grid.columns();
         if columns == 0 {
             return;
@@ -645,7 +645,10 @@ impl TextGridRenderObject {
             foreground = dim_color(foreground);
         }
 
-        canvas.fill_rect(x, y, w, h, background);
+        if background_only {
+            canvas.fill_rect(x, y, w, h, background);
+            return;
+        }
 
         if cell.ch != ' ' && cell.ch != '\0' {
             let mut encoded = [0u8; 4];
@@ -771,7 +774,13 @@ impl TextGridRenderObject {
         );
     }
 
-    fn paint_cell(&self, ctx: &mut PaintContext, origin: Point, index: usize) {
+    fn paint_cell(
+        &self,
+        ctx: &mut PaintContext,
+        origin: Point,
+        index: usize,
+        background_only: bool,
+    ) {
         let columns = self.grid.columns();
         if columns == 0 {
             return;
@@ -805,13 +814,16 @@ impl TextGridRenderObject {
             foreground = dim_color(foreground);
         }
 
-        ctx.fill_rect(
-            Rect::new(
-                Point::new(origin.x + x as f32, origin.y + y as f32),
-                Size::new(w as f32, h as f32),
-            ),
-            background,
-        );
+        if background_only {
+            ctx.fill_rect(
+                Rect::new(
+                    Point::new(origin.x + x as f32, origin.y + y as f32),
+                    Size::new(w as f32, h as f32),
+                ),
+                background,
+            );
+            return;
+        }
 
         if cell.ch != ' ' && cell.ch != '\0' {
             let drew_box = super::text_grid_boxdraw::paint_box_drawing_char(
@@ -988,10 +1000,12 @@ impl ElementRenderObject for TextGridRenderObject {
                 let visible_columns = self.visible_columns(width);
                 let visible_rows = self.visible_rows(height);
                 let columns = self.grid.columns();
-                for row in 0..visible_rows {
-                    let row_start = row.saturating_mul(columns);
-                    for column in 0..visible_columns {
-                        self.repaint_cell(&mut canvas, row_start + column);
+                for background_only in [true, false] {
+                    for row in 0..visible_rows {
+                        let row_start = row.saturating_mul(columns);
+                        for column in 0..visible_columns {
+                            self.repaint_cell(&mut canvas, row_start + column, background_only);
+                        }
                     }
                 }
                 self.full_repaint = false;
@@ -1000,8 +1014,10 @@ impl ElementRenderObject for TextGridRenderObject {
                 let mut dirty_cells = core::mem::take(&mut self.dirty_cells);
                 dirty_cells.sort_unstable();
                 dirty_cells.dedup();
-                for index in dirty_cells {
-                    self.repaint_cell(&mut canvas, index);
+                for background_only in [true, false] {
+                    for &index in &dirty_cells {
+                        self.repaint_cell(&mut canvas, index, background_only);
+                    }
                 }
             }
             self.repaint_remainder(&mut canvas, width, height);
@@ -1027,10 +1043,15 @@ impl ElementRenderObject for TextGridRenderObject {
         let visible_columns = self.visible_columns(width);
         let visible_rows = self.visible_rows(height);
         let columns = self.grid.columns();
-        for row in 0..visible_rows {
-            let row_start = row.saturating_mul(columns);
-            for column in 0..visible_columns {
-                self.paint_cell(ctx, origin, row_start + column);
+        // At fractional output scales, adjacent background rectangles can
+        // cover the same physical pixel. Paint them before any glyph ink so
+        // the next cell cannot erase a descender or an antialiased edge.
+        for background_only in [true, false] {
+            for row in 0..visible_rows {
+                let row_start = row.saturating_mul(columns);
+                for column in 0..visible_columns {
+                    self.paint_cell(ctx, origin, row_start + column, background_only);
+                }
             }
         }
         self.paint_remainder(ctx, origin, width, height);

@@ -2,6 +2,41 @@ use super::*;
 use crate::{renderer::PaintCommand, state::generate_state_id};
 
 #[test]
+fn adjacent_backgrounds_preserve_fractional_scale_glyph_edges() {
+    let font = FontStack::new(include_bytes!("../testing/fonts/metrics-primary.ttf")).unwrap();
+    let mut grid = TextGridBuffer::new(2, 2, TextGridCell::blank(Color::WHITE, Color::BLACK));
+    grid.write_text(0, 0, "A", Color::WHITE, Color::BLACK);
+    let mut object = TextGridRenderObject::new(
+        grid,
+        7.0,
+        15.0,
+        10.0,
+        Some(font.clone()),
+        Color::BLACK,
+        None,
+        Color::WHITE,
+    );
+    object.layout(LayoutConstraints::tight(14.0, 30.0));
+    let mut paint = PaintContext::new();
+    object.paint(&mut paint, Point::ZERO);
+    let mut reference = PaintContext::new();
+    reference.draw_text_with_font_stack(Point::ZERO, "A", Color::WHITE, 10.0, Arc::new(font));
+    for scale in [1000, 1250, 1500, 2000] {
+        let mut actual =
+            crate::renderer::CpuPaintRenderer::new(Size::new(14.0, 30.0), scale, Color::BLACK);
+        let mut expected =
+            crate::renderer::CpuPaintRenderer::new(Size::new(14.0, 30.0), scale, Color::BLACK);
+        actual.execute(&paint);
+        expected.execute(&reference);
+        assert_eq!(
+            actual.buffer().as_slice(),
+            expected.buffer().as_slice(),
+            "scale {scale}"
+        );
+    }
+}
+
+#[test]
 fn retained_grid_paint_preserves_explicit_fonts_for_plain_and_bold_cells() {
     let font = FontStack::new(include_bytes!("../testing/fonts/metrics-primary.ttf")).unwrap();
     let mut grid = TextGridBuffer::new(2, 1, TextGridCell::new('W', Color::WHITE, Color::BLACK));
