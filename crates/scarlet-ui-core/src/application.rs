@@ -1458,6 +1458,10 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
             });
             self.subscriptions.push(listenable.subscribe_any(callback));
         }
+        // State can change after scene construction but before subscriptions
+        // exist (notably the shell's first workspace snapshot). Reconcile once
+        // after subscribing so its first frame cannot retain the old scene.
+        crate::pipeline::mark_element_dirty(self.pipeline_id, self.id);
         if let Some(ref mut child) = self.child {
             child.mount(ctx);
         }
@@ -1691,6 +1695,7 @@ mod tests {
     struct ScopedSceneApp {
         clock: crate::state::State<u32>,
         content: crate::state::State<u32>,
+        built: Rc<RefCell<Vec<u32>>>,
     }
 
     impl View for ScopedSceneApp {
@@ -1707,6 +1712,7 @@ mod tests {
 
     impl Application for ScopedSceneApp {
         fn scenes(&self) -> impl Scene {
+            self.built.borrow_mut().push(self.content.get());
             (
                 Window::new("Status", Text::new(alloc::format!("{}", self.clock.get())))
                     .size(Size::new(100.0, 30.0)),
@@ -1725,6 +1731,7 @@ mod tests {
         let app = ScopedSceneApp {
             clock: crate::state::State::new(StateId::new(8101), 0),
             content: crate::state::State::new(StateId::new(8102), 0),
+            built: Rc::new(RefCell::new(Vec::new())),
         };
         let create = |key: SceneWindowKey| {
             let mut pipeline = RenderingPipeline::new();
@@ -1757,6 +1764,30 @@ mod tests {
             "teardown must remove the scoped subscriptions"
         );
         status.teardown();
+    }
+
+    #[test]
+    fn scoped_scene_reads_updates_between_construction_and_subscription() {
+        let app = ScopedSceneApp {
+            clock: crate::state::State::new(StateId::new(8111), 0),
+            content: crate::state::State::new(StateId::new(8112), 0),
+            built: Rc::new(RefCell::new(Vec::new())),
+        };
+        let mut pipeline = RenderingPipeline::new();
+        let root = SceneWindowRootElement::new(app.clone(), "home".into(), pipeline.pipeline_id());
+        assert_eq!(app.built.borrow().last(), Some(&0));
+        // Simulate a shell workspace event arriving before the root subscribes.
+        app.content.set(7);
+        pipeline.set_root(Box::new(root));
+        pipeline.layout_initial();
+        pipeline.render().unwrap();
+        assert_eq!(
+            app.built.borrow().last(),
+            Some(&7),
+            "first frame must use the current state without another event"
+        );
+        assert!(!pipeline.has_dirty());
+        pipeline.teardown();
     }
 
     #[derive(Clone)]
