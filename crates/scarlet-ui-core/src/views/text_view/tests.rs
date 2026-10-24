@@ -24,6 +24,8 @@ mod font_stack_tests;
 mod performance;
 #[path = "regressions.rs"]
 mod regressions;
+#[path = "touch_scroll_tests.rs"]
+mod touch_scroll_tests;
 
 #[test]
 fn document_round_trips_full_text() {

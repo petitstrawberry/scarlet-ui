@@ -7,7 +7,10 @@ use core::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{BORDER_WIDTH, TabMode, TextPosition, TextSelection, TextView, TextViewRenderObject};
-use crate::event::{Event, FocusEvent, KeyCode, KeyEvent, MouseButton, MouseEvent};
+use crate::element::ElementRenderObject;
+use crate::event::{
+    Event, FocusEvent, GesturePhase, KeyCode, KeyEvent, MouseButton, MouseEvent, TouchGesture,
+};
 use crate::geometry::Point;
 
 enum CaretMove {
@@ -426,6 +429,35 @@ fn handle_drag_selection(
         render_object.publish_caret_rect();
     }
     true
+}
+
+/// Apply direct-touch motion through the same cached scroll path as the wheel.
+pub(crate) fn handle_text_view_scroll_gesture(
+    view: &TextView,
+    render_object: &mut TextViewRenderObject,
+    gesture: &TouchGesture,
+) -> bool {
+    let (phase, delta_x, delta_y) = match *gesture {
+        TouchGesture::Scroll {
+            phase, delta_x, delta_y, ..
+        }
+        | TouchGesture::ScrollMomentum {
+            phase, delta_x, delta_y, ..
+        } => (phase, delta_x, delta_y),
+        _ => return false,
+    };
+    if matches!(phase, GesturePhase::Ended | GesturePhase::Cancelled) {
+        return false;
+    }
+    // The dispatcher starts momentum with zero delta before sending movement.
+    // Acknowledge that handshake, but let clamped movement bubble at an edge.
+    let momentum_start = matches!(
+        gesture,
+        TouchGesture::ScrollMomentum {
+            phase: GesturePhase::Started, ..
+        }
+    ) && render_object.accepts_touch_scroll();
+    scroll_view(view, render_object, delta_x, delta_y) || momentum_start
 }
 
 fn scroll_view(

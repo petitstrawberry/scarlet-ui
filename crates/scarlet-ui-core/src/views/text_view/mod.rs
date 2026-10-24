@@ -22,7 +22,7 @@ pub use decoration::{TextDiagnosticSpan, TextStyleSpan};
 pub use document::{EditDelta, TextDocument, TextPosition};
 pub(crate) use editing::{
     handle_text_view_focus, handle_text_view_keyboard, handle_text_view_mouse,
-    handle_text_view_text_input, handle_text_view_touch,
+    handle_text_view_scroll_gesture, handle_text_view_text_input, handle_text_view_touch,
 };
 pub use layout::{TextViewLayout, VisualLine};
 pub use selection::{TabMode, TextSelection, TextViewScroll, WrapMode};
@@ -875,6 +875,11 @@ impl TextViewRenderObject {
 }
 
 impl ElementRenderObject for TextViewRenderObject {
+    fn accepts_touch_scroll(&self) -> bool {
+        self.layout.content_width > self.layout.viewport_width
+            || self.layout.content_height > self.layout.viewport_height
+    }
+
     fn avoid_input_occlusion(&mut self, occlusion: Option<Rect>, _caret: Option<Rect>, reveal: bool) -> bool {
         let before = (self.keyboard_bottom, self.scroll);
         self.keyboard_bottom = occlusion.filter(|area| {

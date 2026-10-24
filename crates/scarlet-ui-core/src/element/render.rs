@@ -1601,6 +1601,26 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
         if let Event::TouchGesture(gesture) = _event {
             if matches!(_phase, Phase::Target | Phase::Bubble)
+                && matches!(
+                    gesture,
+                    crate::event::TouchGesture::Scroll { .. }
+                        | crate::event::TouchGesture::ScrollMomentum { .. }
+                )
+                && let Some(view) = self.view.as_any().downcast_ref::<crate::views::TextView>()
+                && let Some(render_object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::TextViewRenderObject>()
+            {
+                let handled = crate::views::text_view::handle_text_view_scroll_gesture(
+                    view, render_object, gesture,
+                );
+                if handled {
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                }
+                return handled;
+            }
+            if matches!(_phase, Phase::Target | Phase::Bubble)
                 && let crate::event::TouchGesture::Tap { x, y, .. } = gesture
                 && self
                     .render_object
