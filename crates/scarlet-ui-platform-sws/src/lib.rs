@@ -61,6 +61,11 @@ pub use sink::{
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code, rel_code};
 use sws_client as sws;
 
+// Optional WINDOW_STATE_CHANGED bit introduced by SWS 7aa475f3. The wire
+// payload and decoder are unchanged; keep the shared-image SDK ABI aligned
+// with SGFX instead of requiring every graphics backend to upgrade for this bit.
+const SWS_TABLET_MANAGED: u32 = 1 << 4;
+
 #[cfg(feature = "std")]
 use std::time::{Duration, Instant};
 
@@ -2735,7 +2740,7 @@ impl SWSPlatformWindow {
                 surface_id,
                 state_flags,
             } if surface_id == self.surface_id => {
-                let tablet_managed = state_flags & sws::window_state::TABLET_MANAGED != 0;
+                let tablet_managed = state_flags & SWS_TABLET_MANAGED != 0;
                 if tablet_managed != self.tablet_managed {
                     self.tablet_managed = tablet_managed;
                     if scarlet_ui_core::debug::frame_log_enabled() {
