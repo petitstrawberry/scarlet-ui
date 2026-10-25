@@ -30,13 +30,13 @@ scarlet-ui-core = { path = "../scarlet-ui-core", default-features = false }
 scarlet-ui-renderer-sgfx = { path = "../scarlet-ui-renderer-sgfx", default-features = false }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
-scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", rev = "153ba86112ace49becf3d38a2ae34692b2149cb0", package = "scarlet-std", optional = true }
-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "3ae35ccdcef154560f0dc384044f2d9b268f2dba", package = "sgfx", default-features = false, features = ["backend-dynamic", "backend-scarlet-virgl", "backend-scarlet-adreno"] }
-sws-client = { git = "https://github.com/petitstrawberry/Scarlet", rev = "153ba86112ace49becf3d38a2ae34692b2149cb0", package = "sws-client", default-features = false }
-sws-protocol = { git = "https://github.com/petitstrawberry/Scarlet", rev = "153ba86112ace49becf3d38a2ae34692b2149cb0", package = "sws-protocol", default-features = false }
+scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", rev = "5d0fe3ac8c97289a28599bac22fca4ac26a5f9ca", package = "scarlet-std", optional = true }
+sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "5cb1fb27596af49d54cb33851e553249de8230a9", package = "sgfx", default-features = false, features = ["backend-dynamic"] }
+sws-client = { git = "https://github.com/petitstrawberry/Scarlet", rev = "5d0fe3ac8c97289a28599bac22fca4ac26a5f9ca", package = "sws-client", default-features = false }
+sws-protocol = { git = "https://github.com/petitstrawberry/Scarlet", rev = "5d0fe3ac8c97289a28599bac22fca4ac26a5f9ca", package = "sws-protocol", default-features = false }
 
-sbus-client = { git = "https://github.com/petitstrawberry/Scarlet", rev = "153ba86112ace49becf3d38a2ae34692b2149cb0", default-features = false }
-scarlet-desktop-config = { git = "https://github.com/petitstrawberry/Scarlet", rev = "153ba86112ace49becf3d38a2ae34692b2149cb0", default-features = false }
+sbus-client = { git = "https://github.com/petitstrawberry/Scarlet", rev = "5d0fe3ac8c97289a28599bac22fca4ac26a5f9ca", default-features = false }
+scarlet-desktop-config = { git = "https://github.com/petitstrawberry/Scarlet", rev = "5d0fe3ac8c97289a28599bac22fca4ac26a5f9ca", default-features = false }
 
 [lib]
 name = "scarlet_ui_platform_sws"
