@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "feature/desktop-quality" ]
   workflow_dispatch:
 
 permissions:
@@ -12,7 +12,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  SCARLET_TOOLCHAIN: github:petitstrawberry/scarlet-rust-nix/074b722ac3c0d69daa8d4560996e23474c373d7c#scarlet-rust-toolchain
+  SCARLET_TOOLCHAIN: github:petitstrawberry/scarlet-rust-nix/79f356924d1a93b55904c6b2733d0b3da5ce0de5#scarlet-rust-toolchain
 
 jobs:
   build:
@@ -92,3 +92,6 @@ jobs:
         run: cargo tree --locked -p scarlet-ui --no-default-features --features std,platform-sws --target '${{ matrix.target }}' --invert sgfx-core
       - name: Check std-enabled SWS integration
         run: cargo check --locked -p scarlet-ui --no-default-features --features std,platform-sws --target '${{ matrix.target }}'
+      - name: Build native window C ABI
+        if: matrix.target == 'aarch64-unknown-scarlet'
+        run: cargo build --locked -p scarlet-ui-window-c --release --target '${{ matrix.target }}'
