@@ -78,6 +78,7 @@ pub mod state;
 pub(crate) mod testing;
 pub mod view;
 pub mod views;
+pub mod window_chrome;
 
 #[doc(hidden)]
 pub mod __private {

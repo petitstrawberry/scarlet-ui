@@ -2017,6 +2017,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-ui-window-c"
+version = "1.0.0"
+dependencies = [
+ "scarlet-ui-core",
+]
+
+[[package]]
 name = "scoped-tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

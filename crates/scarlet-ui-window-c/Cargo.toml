@@ -1,0 +1,15 @@
+[package]
+name = "scarlet-ui-window-c"
+version = "1.0.0"
+edition = "2024"
+description = "C ABI for ScarletUI window chrome around externally rendered content"
+
+[lib]
+name = "scarlet_ui_window"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+scarlet-ui-core = { path = "../scarlet-ui-core" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("scarlet"))'] }
