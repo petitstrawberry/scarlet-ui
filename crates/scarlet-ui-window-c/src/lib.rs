@@ -201,3 +201,37 @@ pub unsafe extern "C" fn scarlet_ui_frame_destroy(ptr: *mut ScarletUiFrame) {
         drop(unsafe { Box::from_raw(ptr) });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ffi_reconfiguration_preserves_valid_state_after_invalid_input() {
+        unsafe {
+            let frame = scarlet_ui_frame_create();
+            let title = c"External content";
+            assert_eq!(
+                scarlet_ui_frame_configure(frame, title.as_ptr(), 324, 276, 1000, 3),
+                0
+            );
+            assert_eq!(
+                scarlet_ui_frame_configure(frame, title.as_ptr(), 0, 0, 1000, 3),
+                -1
+            );
+            let mut view = std::mem::MaybeUninit::<FrameView>::uninit();
+            assert_eq!(scarlet_ui_frame_render(frame, view.as_mut_ptr()), 0);
+            let view = view.assume_init();
+            assert_eq!((view.width, view.height), (324, 276));
+            assert!(view.bytes >= (view.stride * view.height) as usize);
+            assert!(view.clip_count > 0);
+            assert_eq!(
+                scarlet_ui_frame_configure(frame, title.as_ptr(), 321, 241, 1000, 0),
+                0
+            );
+            let mut view = std::mem::MaybeUninit::<FrameView>::uninit();
+            assert_eq!(scarlet_ui_frame_render(frame, view.as_mut_ptr()), 0);
+            assert_eq!(view.assume_init().insets, ChromeInsets::default());
+            scarlet_ui_frame_destroy(frame);
+        }
+    }
+}
