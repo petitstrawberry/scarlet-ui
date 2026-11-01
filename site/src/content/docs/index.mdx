@@ -1,0 +1,29 @@
+---
+title: ScarletUI
+description: Cross-platform, declarative UI for Rust.
+template: splash
+prev: false
+next: false
+hero:
+  tagline: 'Cross-platform, declarative UI for Rust.<span class="platform-list">Linux · macOS · Windows · Scarlet · Web</span>'
+  image:
+    html: |
+      <div data-scarlet-specimen data-state="fallback" aria-hidden="true">
+        <img src="/assets/widget-factory.png" width="400" height="300" alt="">
+        <canvas id="ui" tabindex="0" inert aria-label="Interactive ScarletUI icon browser"></canvas>
+      </div>
+  actions:
+    - text: Get started
+      link: /getting-started/
+      icon: right-arrow
+    - text: Try in your browser
+      link: /try/
+      variant: minimal
+---
+
+import LiveSpecimen from '../../components/LiveSpecimen.astro';
+import CounterExample from '../../components/CounterExample.astro';
+
+<LiveSpecimen />
+
+<CounterExample />

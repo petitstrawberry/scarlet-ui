@@ -9,6 +9,18 @@ thread_local! {
 }
 #[wasm_bindgen]
 pub async fn start() -> std::result::Result<(), JsValue> {
+    start_app(factory::WidgetFactory::new()).await
+}
+
+/// Run the small shared-widget specimen used by the homepage.
+#[wasm_bindgen]
+pub async fn start_specimen() -> std::result::Result<(), JsValue> {
+    start_app(factory::Specimen::new()).await
+}
+
+async fn start_app<A: scarlet_ui::Application + scarlet_ui::View>(
+    app: A,
+) -> std::result::Result<(), JsValue> {
     console_error_panic_hook::set_once();
     stop();
     let generation = GENERATION.with(std::cell::Cell::get);
@@ -21,7 +33,7 @@ pub async fn start() -> std::result::Result<(), JsValue> {
         .and_then(|document| document.get_element_by_id("ui"))
         .ok_or_else(|| JsValue::from_str("Missing #ui canvas"))?
         .dyn_into()?;
-    let app = scarlet_ui::run_web(canvas, factory::WidgetFactory::new()).await?;
+    let app = scarlet_ui::run_web(canvas, app).await?;
     // An intervening stop/restart invalidates this asynchronous initialization.
     // Dropping the stale handle cancels its frame before it can run.
     if GENERATION.with(std::cell::Cell::get) == generation {
@@ -43,4 +55,24 @@ pub fn stop() {
 #[wasm_bindgen]
 pub fn runtime_error() -> Option<String> {
     APP.with(|slot| slot.borrow().as_ref().and_then(scarlet_ui::WebApp::error))
+}
+
+/// Pause frames without resetting the specimen's controls.
+#[wasm_bindgen]
+pub fn pause() {
+    APP.with(|slot| {
+        if let Some(app) = slot.borrow().as_ref() {
+            app.pause();
+        }
+    });
+}
+
+/// Resume frames after the embed becomes visible again.
+#[wasm_bindgen]
+pub fn resume() {
+    APP.with(|slot| {
+        if let Some(app) = slot.borrow().as_ref() {
+            app.resume();
+        }
+    });
 }

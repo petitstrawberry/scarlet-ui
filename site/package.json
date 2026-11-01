@@ -1,0 +1,21 @@
+{
+  "name": "scarlet-ui-site",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/sync-docs.mjs && astro dev",
+    "start": "node scripts/sync-docs.mjs && astro dev",
+    "build": "node scripts/sync-docs.mjs && astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.42.8",
+    "astro": "7.4.4",
+    "sharp": "0.35.3"
+  },
+  "engines": {
+    "node": ">=24.22.1"
+  }
+}

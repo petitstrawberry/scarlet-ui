@@ -1,16 +1,27 @@
-# Browser Samples
+# Website and browser samples
 
-The static Samples landing launches the existing Widget Factory and Counter
-WebGPU examples. It does not replace their ScarletUI views with HTML widgets.
-The landing is responsive HTML; each app retains its full-window canvas.
-Existing `docs/` content is unchanged.
+The project website uses the official Astro Starlight theme in `site/`.
+It introduces ScarletUI as a cross-platform Rust toolkit and publishes selected
+repository documentation without modifying the original Markdown sources.
+The homepage embeds a small real ScarletUI/SGFX icon browser. It is not
+an HTML recreation: supported browsers load the same Widget Factory Wasm
+module and render Tabler icons through IconView, with reactive category, icon
+selection and stroke-width controls. A second, independent counter pairs its
+compiled Rust view source with the actual rendered result below the hero.
 
-## Build
+The surrounding documentation remains usable without JavaScript or WebGPU.
+A static capture stays in place when GPU support is unavailable or startup
+fails. The live runner pauses offscreen and in hidden tabs, preserving state;
+page disposal stops it. Document wheel scrolling, touch panning and Tab focus
+navigation are not captured by the embedded specimen.
 
-Python 3.11+, Rust with edition-2024 support, and the matching wasm-bindgen CLI
-are required. From the repository root:
+## Build and preview
+
+Use Node 24, Python 3.11+, Rust supporting edition 2024, and the matching
+wasm-bindgen CLI. From the repository root:
 
 ```sh
+npm ci --prefix site --ignore-scripts
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.128 --locked
 python3 tools/build-web-samples.py
@@ -18,80 +29,66 @@ python3 tools/build-web-samples.py --check target/web-samples
 python3 -m http.server 8765 --bind 127.0.0.1 --directory target/web-samples
 ```
 
-Open `http://localhost:8765/`. The default build uses `--release --locked`,
-checks the CLI version against Cargo.lock, generates JavaScript/WASM, copies
-only static assets and records file hashes in `build-manifest.json`.
-`CARGO_TARGET_DIR` is honored for Rust build artifacts. Use `--profile dev` for
-local iteration or `--output PATH` for a different static output directory.
-An existing output is replaced only if it carries this script's generated
-marker. Generated artifacts stay under ignored `target/` by default.
+Open `http://localhost:8765/`. The build compiles both examples with
+`--release --locked`, imports the existing reference documentation, builds
+Starlight, generates matching JavaScript/Wasm bindings, validates local links,
+and records file hashes in `build-manifest.json`. Generated files remain under
+ignored directories. `CARGO_TARGET_DIR` is honored; `--profile dev` selects a
+debug Wasm build. Existing output is replaced only when it carries this tool's
+generated marker. Source archives record unknown Git identity as null.
 
-Routes are relative: `./widget-factory/` and `./counter/`. The output can live
-at a site root or under a project prefix such as `/scarlet-ui/`, without
-rewriting its URLs. Serve `.wasm` as `application/wasm`, JavaScript as a
-JavaScript MIME type, and use HTTPS except on localhost. No credentials,
-backend service, browser flags, CDN scripts or cross-origin isolation headers
-are required by the page. An available WebGPU adapter is required to run apps.
+This combined Starlight artifact is configured for a **site root**, not an
+arbitrary project prefix. Generated theme assets use root-relative URLs.
+The standalone example modules still use relative JS/Wasm paths. Serve Wasm
+as `application/wasm` and JavaScript with its JavaScript MIME type. No CDN,
+credentials, backend service or browser security flags are required.
+
+Routes: `/` introduction, `/getting-started/`, `/reference/` pages, `/try/`
+browser selection, `/counter/`, and `/widget-factory/`. The two full-window
+sample URLs are unchanged. `site/README.md` describes the theme and document
+import/update path; original `docs/` files remain authoritative.
 
 ## GitHub Pages
 
-The deployable payload is the **contents** of `target/web-samples/`, not the
-repository or `docs/`. Configure the repository's Pages source as **GitHub
-Actions** and use the separately scoped Samples workflow to build/upload this
-artifact and deploy it through GitHub Pages **after merging to main**. Pull
-requests only build and test; manual deployments are also restricted to main.
-A deployment requires the relevant
-Pages settings/environment permissions; building or opening a PR does not by
-itself make the site live. Do not replace an existing documentation deployment
-without deciding how its routes will coexist.
+The approved destination is **https://ui.scarlet-os.org/**. The payload is the
+contents of `target/web-samples`, not the repository. Deployment remains
+main-only after merge, gated on package and actual browser-smoke success and
+the protected `github-pages` environment. PRs never deploy. Manual dispatch
+also requires main; this workflow does not change DNS, custom-domain settings,
+HTTPS enforcement or environment protection.
 
-The approved production destination is **https://ui.scarlet-os.org/**, with
-Counter at `/counter/` and Widget Factory at `/widget-factory/`. The owner
-configures DNS (`ui` CNAME to `petitstrawberry.github.io`) and the repository's
-Pages custom domain; the workflow does not change DNS, domain settings or
-HTTPS enforcement. Enable HTTPS enforcement in Pages when the certificate is
-ready. The deployment guard accepts only this custom hostname at the root,
-not the inherited `ichigo.dev/scarlet-ui` destination. It validates GitHub's
-reported URL, publishes only an HTTPS environment link, and checks TLS before
-deploying (a 404 is normal before the first publish). HTTP in API metadata is
-not treated as permission to serve the app insecurely.
+The destination guard validates the exact custom host and root path, verifies
+DNS/TLS without bypassing certificates, and publishes an HTTPS environment
+link. HTTP returned in GitHub API metadata is not permission to serve the site
+insecurely. Unrelated hosts and the old project-prefix destination are rejected.
+The owner manages DNS/CNAME and Pages settings separately.
 
-The package still uses no root-absolute asset paths, so local previews or other
-packaging consumers can use a project prefix such as `/scarlet-ui/` unchanged. `.nojekyll` is included. Verify the published HTTPS
-landing, both sample routes, and JavaScript/WASM content types after deployment.
-No browser security flag is needed or recommended for visiting the page; if an
-adapter is unavailable, the sample reports that limitation instead.
-
-`build-manifest.json` records the checkout commit/dirty state when Git metadata
-is present. Both fields are `null` for a source archive or unavailable Git.
-
-## Static checks
+## Checks
 
 ```sh
 python3 tools/test_web_samples.py
 python3 tools/test_pages_destination.py
 node --test samples/capability.test.cjs
+node --test site/scripts/*.test.mjs
 ```
 
-These tests exercise package-path validation and capability/error states without
-a browser or GPU. They are not render tests.
+Static checks cover artifact paths, imported documentation integrity, adapter
+messages and the specimen's asynchronous visibility/disposal races. Browser
+checks additionally inspect real GPU pixels, icon/category/stroke selection,
+independent counter state, full-demo clicks and slider changes,
+pause/resume state, wheel scrolling, narrow layouts, links and Back navigation.
+The optional `/try/` capability check does not request identifying adapter
+information or guarantee later device initialization.
 
-## What to verify
+## Browser limitations
 
-- Landing at desktop and narrow mobile widths; keyboard focus and launch links.
-- Capability check with an available adapter, no adapter, missing WebGPU API,
-  insecure context and JavaScript disabled. A positive adapter check does not
-  claim hardware acceleration or guarantee later device initialization.
-- Launch each app from both the site root and a project-prefix preview, check relative JS/WASM requests
-  and startup error messages, then use browser Back to return to the samples.
-- In a compatible environment: Counter clicks and Widget Factory controls,
-  menu actions, resize and DPR changes. Compiling a package alone does not
-  establish successful GPU execution.
-
-Canvas accessibility, IME composition, clipboard integration and other backend
-limits are documented in the individual example READMEs. The landing remains
-usable without WebGPU and explains unsupported configurations. It does not
-recommend weakening browser security settings.
+Each web application instance uses one canvas/window and WebGPU. The homepage
+loads independent Factory and counter modules for its two examples. It has no WebGL or
+Canvas2D fallback. Canvas accessibility, IME/dead-key composition, clipboard
+integration and device-loss recovery are not implemented. The homepage's
+static fallback is an image, not an accessible interactive replacement.
+Native toolkit use and reading HTML documentation do not require WebGPU.
+No security-weakening flags are recommended for normal visitors.
 
 ## CI boundaries
 

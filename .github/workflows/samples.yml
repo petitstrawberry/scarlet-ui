@@ -18,10 +18,17 @@ env:
 jobs:
   package:
     runs-on: ubuntu-latest
+    env:
+      ASTRO_TELEMETRY_DISABLED: "1"
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install pinned Starlight dependencies
+        run: npm ci --ignore-scripts --prefix site
       - name: Install Rust and WebAssembly target
         run: rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
       - name: Install matching JavaScript binding generator
@@ -31,6 +38,7 @@ jobs:
           python3 tools/test_web_samples.py
           python3 tools/test_pages_destination.py
           node --test samples/capability.test.cjs
+          node --test site/scripts/*.test.mjs
       - name: Build and validate the static samples
         run: python3 tools/build-web-samples.py
       - name: Save reviewable static output
