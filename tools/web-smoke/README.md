@@ -9,7 +9,7 @@ npm ci --ignore-scripts
 test -x /opt/google/chrome/chrome
 google-chrome --version
 npm test
-npm run smoke
+xvfb-run --auto-servernum npm run smoke
 ```
 
 Optional arguments: `node smoke.mjs /absolute/site /absolute/artifacts`.
@@ -28,7 +28,9 @@ arbitrary workflow variables. Pages, workers and WebSockets must not contact
 external services: context routing allows only the exact local HTTP origin and
 service workers are blocked. Do not reuse this profile for everyday browsing.
 
-Chromium is launched with `chromiumSandbox: true`, never `--no-sandbox`.
+Chrome runs in headed mode under the runner-provided Xvfb display, with
+`chromiumSandbox: true`, never `--no-sandbox`. Headless presentation failed the
+standalone GPU preflight on this runner; there is no automatic fallback.
 `chrome://sandbox` must confirm namespace and seccomp-BPF sandbox layers; missing
 sandbox support is a failure, not a reason to alter runner sysctls/AppArmor or
 turn off the sandbox. SwiftShader uses the specifically approved unsafe-WebGPU

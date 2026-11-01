@@ -38,7 +38,9 @@ are required by the page. An available WebGPU adapter is required to run apps.
 The deployable payload is the **contents** of `target/web-samples/`, not the
 repository or `docs/`. Configure the repository's Pages source as **GitHub
 Actions** and use the separately scoped Samples workflow to build/upload this
-artifact and deploy it through GitHub Pages. A deployment requires the relevant
+artifact and deploy it through GitHub Pages **after merging to main**. Pull
+requests only build and test; manual deployments are also restricted to main.
+A deployment requires the relevant
 Pages settings/environment permissions; building or opening a PR does not by
 itself make the site live. Do not replace an existing documentation deployment
 without deciding how its routes will coexist.

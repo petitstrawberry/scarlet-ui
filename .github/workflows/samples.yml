@@ -4,8 +4,7 @@ on:
   pull_request:
     branches: ["main"]
   push:
-    # The scoped preview branch permits the explicitly requested pre-merge site.
-    branches: ["main", "feat/webgpu-wasm-20261101"]
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
@@ -38,6 +37,7 @@ jobs:
         with:
           name: web-samples
           path: target/web-samples
+          include-hidden-files: true
           if-no-files-found: error
       - name: Prepare Pages artifact
         if: github.event_name != 'pull_request'
@@ -73,6 +73,7 @@ jobs:
         run: |
           test -x /opt/google/chrome/chrome
           /opt/google/chrome/chrome --version
+          command -v xvfb-run
       - name: Test routing, environment and pixel helpers
         working-directory: tools/web-smoke
         run: npm test
@@ -80,7 +81,7 @@ jobs:
         # Explicitly approved ephemeral software-GPU test. Renderer sandbox must
         # stay enabled; GPU-process isolation may be absent. No secrets or writes.
         working-directory: tools/web-smoke
-        run: npm run smoke
+        run: xvfb-run --auto-servernum npm run smoke
       - name: Save screenshots, sandbox diagnostics and failure report
         if: always()
         uses: actions/upload-artifact@v4
@@ -90,12 +91,11 @@ jobs:
           if-no-files-found: warn
 
   deploy:
+    # Publish only after merge; PRs build/test but never deploy.
     if: >-
       github.event_name != 'pull_request' &&
       github.repository == 'petitstrawberry/scarlet-ui' &&
-      (github.ref == 'refs/heads/main' ||
-      (github.ref == 'refs/heads/feat/webgpu-wasm-20261101' &&
-      (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[deploy samples]'))))
+      github.ref == 'refs/heads/main'
     needs: [package, browser-smoke]
     runs-on: ubuntu-latest
     permissions:

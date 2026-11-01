@@ -71,7 +71,8 @@ const toggleRegion=width=>({x:200,y:120,width:width-210,height:45});
 
 try {
   browser=await chromium.launch({
-    headless:true,
+    // Exercise the headed compositor under CI Xvfb, matching local GPU QA.
+    headless:false,
     // Ubuntu's existing Chrome package policy permits sandboxed namespaces.
     // Do not use an unprofiled downloaded developer build or alter AppArmor.
     channel:'chrome',
