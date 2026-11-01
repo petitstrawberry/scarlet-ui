@@ -6,15 +6,18 @@ on an ephemeral `127.0.0.1` port. It does not open the public Pages site.
 ```sh
 cd tools/web-smoke
 npm ci --ignore-scripts
-npx playwright install --with-deps chromium
+test -x /opt/google/chrome/chrome
+google-chrome --version
 npm test
 npm run smoke
 ```
 
 Optional arguments: `node smoke.mjs /absolute/site /absolute/artifacts`.
-Node 22+ and a Linux runner with working Chromium namespace/seccomp sandboxing
-are required. Browser installation may need system-package permissions in the
-fresh CI runner. Installation network access is separate from test runtime.
+Node 22+ and a Linux runner with Google Chrome stable already installed at its
+standard package path are required. The Ubuntu runner supplies the Chrome
+package and its existing AppArmor policy; this test neither installs a browser
+nor modifies that policy. The Playwright client is pinned; the runner Chrome
+version is logged by CI. Dependency setup network access is separate from runtime.
 
 ## Isolation
 

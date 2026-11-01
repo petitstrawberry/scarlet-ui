@@ -62,7 +62,9 @@ const toggleRegion=width=>({x:200,y:120,width:width-210,height:45});
 try {
   browser=await chromium.launch({
     headless:true,
-    channel:'chromium',
+    // Ubuntu's existing Chrome package policy permits sandboxed namespaces.
+    // Do not use an unprofiled downloaded developer build or alter AppArmor.
+    channel:'chrome',
     chromiumSandbox:true,
     env:browserEnvironment(),
     args:['--use-angle=swiftshader','--enable-features=Vulkan','--disable-vulkan-surface','--enable-unsafe-webgpu','--disable-background-networking'],

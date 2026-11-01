@@ -76,6 +76,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
+        include:
+          - os: windows-latest
+            # The existing preview demo Rust dylib exceeds MSVC's export limit.
+            # Keep core/platform tests and preview macro doctests enabled.
+            test_excludes: --exclude scarlet-ui-preview-source
     env:
       RUSTUP_TOOLCHAIN: nightly-2025-12-31
       CARGO_TARGET_DIR: target/native
@@ -95,7 +100,7 @@ jobs:
       - name: Run shared host tests
         # Uses each OS's font discovery backend; no Linux fontconfig setup.
         # These are unit/integration/doc tests, not an interactive GPU smoke test.
-        run: cargo test --locked --verbose --workspace --exclude scarlet-ui-platform-sws
+        run: cargo test --locked --verbose --workspace --exclude scarlet-ui-platform-sws ${{ matrix.test_excludes }}
       - name: Test preview macro registration examples
         run: cargo test --locked -p scarlet-ui-macros --features preview --doc
 

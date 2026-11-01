@@ -67,9 +67,12 @@ jobs:
       - name: Install pinned smoke dependencies
         working-directory: tools/web-smoke
         run: npm ci --ignore-scripts
-      - name: Install isolated test browser
-        working-directory: tools/web-smoke
-        run: npx playwright install --with-deps chromium
+      - name: Verify the runner's sandbox-supported Chrome
+        # Ubuntu supplies an AppArmor profile for this installed browser. Do not
+        # disable user namespace policy or retry a failed sandbox without it.
+        run: |
+          test -x /opt/google/chrome/chrome
+          /opt/google/chrome/chrome --version
       - name: Test routing, environment and pixel helpers
         working-directory: tools/web-smoke
         run: npm test
