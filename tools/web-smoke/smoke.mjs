@@ -67,7 +67,8 @@ try {
     channel:'chrome',
     chromiumSandbox:true,
     env:browserEnvironment(),
-    args:['--use-angle=swiftshader','--enable-features=Vulkan','--disable-vulkan-surface','--enable-unsafe-webgpu','--disable-background-networking'],
+    // Required for the read-only Browser.getBrowserCommandLine diagnostic.
+    args:['--enable-automation','--use-angle=swiftshader','--enable-features=Vulkan','--disable-vulkan-surface','--enable-unsafe-webgpu','--disable-background-networking'],
   });
   const browserSession=await browser.newBrowserCDPSession();
   const command=await browserSession.send('Browser.getBrowserCommandLine');

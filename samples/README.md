@@ -78,3 +78,23 @@ Canvas accessibility, IME composition, clipboard integration and other backend
 limits are documented in the individual example READMEs. The landing remains
 usable without WebGPU and explains unsupported configurations. It does not
 recommend weakening browser security settings.
+
+## CI boundaries
+
+- macOS/Windows: explicit native/common crates (core, scroll motion, icons,
+  macros, facade, winit, both renderers and Widget Factory), including optional
+  core preview APIs, plus preview-macro
+  doctests. These jobs do not select the web platform or counter packages.
+- Linux host: existing full workspace suite except target-specific SWS,
+  including preview tooling. The preview demo dylib currently exceeds MSVC's
+  export limit; Windows native preview support is not claimed.
+- Web: the platform's 20 pure menu/damage tests run on a Linux host, followed by
+  counter/Factory `wasm32-unknown-unknown` builds. Pure logic tests are not browser
+  tests. Static packaging has its own path/capability validation.
+- The separate isolated software-WebGPU job renders and clicks actual canvas
+  pixels. See `tools/web-smoke/README.md` for its scoped security conditions and
+  fail-closed sandbox/adapter assertions; it is not a hardware-GPU benchmark.
+
+This separation is deliberate: sharing a workspace is not a reason to select
+browser-only packages in every native platform job. A failing platform-specific
+tool should be diagnosed separately rather than quietly reducing common tests.
