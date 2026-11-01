@@ -173,38 +173,82 @@ try {
   }
   const whole=frame=>({x:4,y:4,width:frame.width-8,height:frame.height-8});
   const initial=await specimenPixels('specimen-initial',frame=>hasTextOnWhite(frame,whole(frame),100));
-  // Match the responsive native IconView specimen geometry, not DOM stand-ins.
+  // The paper is a real SGFX surface. Its overlay forwards pointer input only;
+  // use ordinary world-coordinate mouse/touch input, never forced canvas clicks.
   const width=initial.width;
-  const tabWidth=(width-44)/3;
-  const cellWidth=(width-172)/3;
-  const previewRegion={x:width-128,y:70,width:112,height:140};
-  const gridRegion={x:16,y:58,width:width-160,height:178};
-  assert.ok(coloredPixels(initial,previewRegion,red).count>60,'Actual enlarged Tabler icon must render');
+  const paper={x:14,y:50,width:width-28,height:180};
+  const blue=(r,g,b)=>b>120&&b-r>35&&b-g>15;
+  const green=(r,g,b)=>g>95&&g>r*1.3&&g>b*1.1;
+  const paperInk=frame=>coloredPixels(frame,paper,(r,g,b)=>Math.min(r,g,b)<180).count;
   async function specimenClick(x,y) {
-    await canvas.click({position:{x,y}});
+    const bounds=await canvas.boundingBox();
+    await page.mouse.click(bounds.x+x,bounds.y+y);
     await page.mouse.move(0,0);
   }
-  // Select Star in Interface: enlarged icon changes, not merely a button highlight.
-  await specimenClick(16+(cellWidth+6)+cellWidth/2,78);
-  const selected=await specimenPixels('specimen-icon-selected',frame=>
-    changedPixels(initial,frame,previewRegion)>80 && hasTextOnWhite(frame,whole(frame),100));
-  // Files changes the grid's actual symbols and resets the enlarged selection.
-  await specimenClick(16+(tabWidth+6)+tabWidth/2,31);
-  const files=await specimenPixels('specimen-category-files',frame=>
-    changedPixels(selected,frame,gridRegion)>150 && changedPixels(selected,frame,previewRegion)>80);
-  // Download is third-row first-column; assert its distinct enlarged glyph.
-  await specimenClick(16+cellWidth/2,58+2*46+20);
-  const download=await specimenPixels('specimen-download',frame=>
-    changedPixels(files,frame,previewRegion)>80);
-  // Stroke weight must alter the icon itself, not just the selected text button.
-  await specimenClick(16+tabWidth/2,263);
-  const thin=await specimenPixels('specimen-thin',frame=>
-    changedPixels(download,frame,previewRegion)>30);
-  const thinInk=coloredPixels(thin,previewRegion,red).count;
-  await specimenClick(16+2*(tabWidth+6)+tabWidth/2,263);
-  const adjusted=await specimenPixels('specimen-bold',frame=>
-    coloredPixels(frame,previewRegion,red).count>thinInk+60);
+  async function drawStroke(y) {
+    const bounds=await canvas.boundingBox();
+    await page.mouse.move(bounds.x+45,bounds.y+y);
+    await page.mouse.down();
+    try { await page.mouse.move(bounds.x+width-70,bounds.y+y,{steps:12}); }
+    finally { await page.mouse.up(); }
+    await page.mouse.move(0,0);
+  }
+  assert.ok(paperInk(initial)>100,'Initial SGFX drawing must render');
+  await drawStroke(72);
+  await specimenPixels('sketch-mouse-stroke',frame=>changedPixels(initial,frame,paper)>100);
+  await specimenClick(width-95,25);
+  await specimenPixels('sketch-undo',frame=>changedPixels(initial,frame,paper)===0);
+  await specimenClick(width-40,25);
+  const cleared=await specimenPixels('sketch-clear',frame=>paperInk(frame)<10);
+  // Clear is intentionally not undoable: it discards the drawing, not a stroke.
+  await specimenClick(width-95,25);
+  await specimenPixels('sketch-clear-not-undoable',frame=>changedPixels(cleared,frame,paper)===0);
+  await specimenClick(88,255); // blue palette, outside the input overlay
+  await specimenClick(161,255); // narrow stock Slider setting
+  await drawStroke(100);
+  const thin=await specimenPixels('sketch-blue-thin',frame=>coloredPixels(frame,paper,blue).count>60);
+  const thinBlue=coloredPixels(thin,paper,blue).count;
+  await specimenClick(width-15,255); // wide stock Slider setting
+  await drawStroke(145);
+  await specimenPixels('sketch-blue-thick',frame=>coloredPixels(frame,paper,blue).count>thinBlue*2);
+  await specimenClick(width-95,25);
+  await specimenPixels('sketch-undo-thick',frame=>changedPixels(thin,frame,paper)===0);
+  await specimenClick(120,255); // green
+  // Simulated touch on this same isolated localhost context, not real-device QA.
+  const touch=await context.newCDPSession(page);
+  await touch.send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
+  try {
+    const bounds=await canvas.boundingBox();
+    const point=x=>({x:bounds.x+x,y:bounds.y+185,id:1,radiusX:2,radiusY:2,force:1});
+    await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[point(50)]});
+    for(let index=1;index<=8;index++)
+      await touch.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[point(50+(width-125)*index/8)]});
+    await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+  } finally {
+    await touch.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});
+    await touch.send('Emulation.setTouchEmulationEnabled',{enabled:false});
+    await touch.detach();
+  }
+  const adjusted=await specimenPixels('sketch-simulated-touch',frame=>
+    coloredPixels(frame,paper,green).count>100&&coloredPixels(frame,paper,blue).count>=thinBlue);
+  await canvas.focus();
+  await page.keyboard.press('Tab');
+  assert.equal(await canvas.evaluate(element=>document.activeElement===element),false,'Tab must leave the embedded canvas');
+  report.checks.push('real SGFX mouse stroke, palette/width, Undo/Clear and CDP-simulated touch drawing');
   await screenshot('homepage');
+  await page.setViewportSize({width:375,height:640});
+  await canvas.scrollIntoViewIfNeeded();
+  await specimenPixels('sketch-normalized-resize',frame=> {
+    if(frame.width>=width) return false;
+    const resizedPaper={x:14,y:50,width:frame.width-28,height:180};
+    for(const color of [blue,green]) {
+      const before=coloredPixels(adjusted,paper,color);
+      const after=coloredPixels(frame,resizedPaper,color);
+      if(after.count<50||Math.abs((before.x-12)/(width-24)-(after.x-12)/(frame.width-24))>0.03||
+         Math.abs(before.y-after.y)>2) return false;
+    }
+    return true;
+  });
   // Wheel input over the embedded canvas must remain owned by the document.
   await page.setViewportSize({width:500,height:360});
   await canvas.scrollIntoViewIfNeeded();
@@ -232,7 +276,7 @@ try {
     changedPixels(adjusted,frame,whole(frame))===0);
   assert.equal(await page.evaluate(async()=>
     (await import('/widget-factory/pkg/scarlet_ui_widget_factory.js')).runtime_error()),undefined);
-  report.checks.push('live Tabler icon/category/stroke pixels, document wheel and pause/resume state retention');
+  report.checks.push('Sketch normalized resize, document wheel and pause/resume drawing retention');
   await page.getByRole('combobox',{name:'Select theme'}).selectOption('dark');
   await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark');
   await canvas.scrollIntoViewIfNeeded();

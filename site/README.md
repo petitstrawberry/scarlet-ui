@@ -69,3 +69,45 @@ independent state.
 Search is disabled with Starlight’s official `pagefind: false` configuration.
 This omits the default search component (including its dialog and keyboard
 shortcut) and search index instead of hiding an active UI with CSS.
+
+## Link previews
+
+`npm run build` generates static, page-specific sharing PNGs and metadata after
+Astro renders the pages. `tools/build-web-samples.py` repeats the same step after
+adding the standalone samples, so their routes receive cards too. There is no
+runtime image service, API key, or network font dependency.
+
+The pipeline reads each rendered title, description and canonical URL rather
+than maintaining a second page catalog. For imported reference pages that only
+have the generic site description, it uses a bounded excerpt of the first real
+source paragraph. Explicit page descriptions take precedence. The homepage
+keeps its visible `ScarletUI` heading while using a descriptive browser/social
+title. Error/noindex pages are excluded.
+
+Artwork uses the shared `scripts/social-image.mjs` template and repository
+fonts. Each route uses its own title and source description. The homepage adds
+a few genuine stock-control crops, not an icon catalog or a new logo; see
+`assets/sharing/PROVENANCE.md` for capture/update details. Images are 1200×630 PNGs;
+long text wraps and scales within fixed safe margins or fails the build instead
+of being silently clipped. The font license is in `assets/fonts/LICENSE`.
+
+Run `node --test scripts/*.test.mjs` for controller, source and image regressions.
+The build additionally runs the Python metadata parser tests and generated-HTML
+checks, including unique tags, absolute URLs, all card paths and PNG dimensions.
+For a sandbox with an unwritable default font cache, set `XDG_CACHE_HOME` to a
+writable local build-cache directory; this does not affect shipped assets.
+
+## Drawing specimen
+
+The homepage Sketch is the real Rust `Specimen` in Widget Factory, rendered by
+SGFX. Its paths use normalized paper coordinates so resizing preserves the
+composition. Undo removes the latest stroke; Clear empties the drawing (it is
+not undoable). The bounded model accepts up to 128 strokes / 4096 total points;
+Clear recovers that budget. A stable mesh handle with revisions avoids creating
+a GPU resource for each pointer move.
+
+The invisible `data-drawing-input` region matches only the paper bounds. It
+forwards pointer events to the existing platform-web canvas handler and applies
+`touch-action: none` there; the rest of the specimen retains page pan/zoom.
+Wheel and keyboard events are not intercepted. Test this boundary when changing
+paper geometry; JavaScript unit tests and the browser smoke cover the mapping.

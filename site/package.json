@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node scripts/sync-docs.mjs && astro dev",
     "start": "node scripts/sync-docs.mjs && astro dev",
-    "build": "node scripts/sync-docs.mjs && astro build",
+    "build": "node scripts/sync-docs.mjs && astro build && python3 scripts/test_social_metadata.py && python3 scripts/social-metadata.py dist && node --test scripts/metadata-built.check.mjs",
     "preview": "astro preview",
     "astro": "astro"
   },
