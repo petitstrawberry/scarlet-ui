@@ -81,6 +81,7 @@ try {
     // Required for the read-only Browser.getBrowserCommandLine diagnostic.
     args:['--enable-automation','--use-angle=swiftshader','--enable-features=Vulkan','--disable-vulkan-surface','--enable-unsafe-webgpu','--disable-background-networking'],
   });
+  report.browserVersion=browser.version();
   const browserSession=await browser.newBrowserCDPSession();
   const command=await browserSession.send('Browser.getBrowserCommandLine');
   assert(!command.arguments.some(x=>['--no-sandbox','--disable-setuid-sandbox','--disable-gpu-sandbox'].includes(x)), 'Forbidden explicit sandbox-disabling flag');
@@ -161,26 +162,40 @@ try {
 
   setPhase('GPU clear and mapped-buffer preflight');
   await bounded(page.evaluate(async()=>{
+    const step=name=>console.info('SCARLET_GPU_DIAGNOSTIC '+JSON.stringify({kind:'preflight-step',step:name,at:new Date().toISOString()}));
+    step('request adapter');
     const adapter=await navigator.gpu.requestAdapter();
     if(!adapter) throw Error('GPU presentation preflight has no adapter');
+    step('request device');
     const device=await adapter.requestDevice();
+    step('create mapped 4096 buffer');
     device.addEventListener('uncapturederror',event=>console.error(`Preflight GPU error: ${event.error.message}`));
     const buffer=device.createBuffer({size:4096,usage:GPUBufferUsage.COPY_SRC,mappedAtCreation:true});
+    step('get mapped range');
     new Uint8Array(buffer.getMappedRange()).fill(0);
     buffer.unmap();buffer.destroy();
+    step('mapped buffer initialized and destroyed');
     const canvas=document.createElement('canvas');
     canvas.id='gpu-presentation-probe';canvas.width=256;canvas.height=128;
     Object.assign(canvas.style,{position:'fixed',left:'0',top:'0',width:'256px',height:'128px',zIndex:'9999'});
     document.body.append(canvas);
     const context=canvas.getContext('webgpu');
     if(!context) throw Error('GPU presentation preflight has no canvas context');
+    step('configure canvas');
     context.configure({device,format:navigator.gpu.getPreferredCanvasFormat(),alphaMode:'opaque'});
+    step('create command encoder');
     const encoder=device.createCommandEncoder();
+    step('get current texture and begin render pass');
     const pass=encoder.beginRenderPass({colorAttachments:[{view:context.getCurrentTexture().createView(),clearValue:{r:0.125,g:0.75,b:0.25,a:1},loadOp:'clear',storeOp:'store'}]});
-    pass.end();device.queue.submit([encoder.finish()]);
+    pass.end();
+    step('submit clear pass');
+    device.queue.submit([encoder.finish()]);
+    step('wait submitted work');
     await device.queue.onSubmittedWorkDone();
+    step('submitted work complete');
     globalThis.cleanupGpuProbe=()=>{context.unconfigure();device.destroy();canvas.remove();};
     await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    step('two animation frames complete');
   }),15000,'GPU clear/buffer preflight');
   await untilPixels('gpu-clear-probe',img=>coloredPixels(img,{x:10,y:10,width:200,height:100},(r,g,b)=>g>r+50 && g>b+50).count>19000);
   await page.evaluate(()=>{cleanupGpuProbe();delete globalThis.cleanupGpuProbe;});

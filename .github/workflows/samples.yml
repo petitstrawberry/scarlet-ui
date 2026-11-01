@@ -81,6 +81,8 @@ jobs:
         # Explicitly approved ephemeral software-GPU test. Renderer sandbox must
         # stay enabled; GPU-process isolation may be absent. No secrets or writes.
         working-directory: tools/web-smoke
+        env:
+          DEBUG: pw:browser
         run: xvfb-run --auto-servernum npm run smoke
       - name: Save screenshots, sandbox diagnostics and failure report
         if: always()
