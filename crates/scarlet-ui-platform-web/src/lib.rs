@@ -38,6 +38,7 @@ struct FrameLoop {
     tick: Option<Tick>,
     frame: Option<gloo_render::AnimationFrame>,
     error: Option<String>,
+    paused: bool,
 }
 
 /// Owns the application, GPU resources, event listeners and scheduled frame.
@@ -49,8 +50,32 @@ pub struct WebApp {
 impl WebApp {
     /// Whether the application is still accepting animation frames.
     pub fn is_running(&self) -> bool {
-        self.state.borrow().tick.is_some()
+        let state = self.state.borrow();
+        !state.paused && state.tick.is_some()
     }
+    /// Suspend animation frames while retaining application state and GPU resources.
+    /// The embedding page should blur/inert the canvas while it is paused;
+    /// event listeners remain installed until this handle is dropped.
+    pub fn pause(&self) {
+        let mut state = self.state.borrow_mut();
+        state.paused = true;
+        state.frame.take();
+    }
+
+    /// Resume a paused application. Repeated calls do not create extra RAF loops.
+    /// A terminally stopped or failed application cannot be restarted this way.
+    pub fn resume(&self) {
+        let restart = {
+            let mut state = self.state.borrow_mut();
+            let restart = state.paused && state.tick.is_some();
+            state.paused = false;
+            restart
+        };
+        if restart {
+            schedule_frame(&self.state);
+        }
+    }
+
     /// The terminal runtime error, if rendering or event processing failed.
     pub fn error(&self) -> Option<String> {
         self.state.borrow().error.clone()
@@ -58,6 +83,9 @@ impl WebApp {
 }
 
 fn schedule_frame(state: &Rc<RefCell<FrameLoop>>) {
+    if state.borrow().paused {
+        return;
+    }
     let weak = Rc::downgrade(state);
     let frame = gloo_render::request_animation_frame(move |_| {
         let Some(state) = weak.upgrade() else {
@@ -111,6 +139,7 @@ pub async fn run<A: Application + View>(
         tick: Some(Box::new(tick)),
         frame: None,
         error: None,
+        paused: false,
     }));
     schedule_frame(&state);
     Ok(WebApp { state })

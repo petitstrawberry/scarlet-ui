@@ -22,7 +22,7 @@ async function bounded(promise, milliseconds, description) {
   try { return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(`${description} timed out`)),milliseconds);})]); }
   finally { clearTimeout(timer); }
 }
-const MIME = {'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.wasm':'application/wasm','.json':'application/json','.txt':'text/plain; charset=utf-8'};
+const MIME = {'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.wasm':'application/wasm','.json':'application/json','.txt':'text/plain; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.webp':'image/webp','.woff2':'font/woff2'};
 let browser, context, page;
 const server = http.createServer(async (request, response) => {
   try {
@@ -143,11 +143,202 @@ try {
     }
   });
   page.on('crash',()=>failure('crash','Browser page crashed'));
-  setPhase('landing');
+  {
+  setPhase('toolkit homepage and live specimen');
   await page.goto(origin+'/',{waitUntil:'domcontentloaded'});
-  assert.equal(await page.locator('h1').textContent(),'Try ScarletUIin your browser.');
-  assert.equal(await page.locator('a[href="./widget-factory/"]').count(),1);
-  assert.equal(await page.locator('a[href="./counter/"]').count(),1);
+  assert.equal((await page.locator('h1').innerText()).trim(),'ScarletUI');
+  assert.equal((await page.locator('.platform-list').textContent()).trim(),'Linux · macOS · Windows · Scarlet · Web');
+  const tryLink=page.getByRole('link',{name:'Try in your browser',exact:true});
+  assert.equal(await tryLink.getAttribute('href'),'/try/');
+  assert.equal(await page.locator('#check-gpu').count(),0);
+  const specimen=page.locator('.hero [data-scarlet-specimen]');
+  const canvas=specimen.locator('canvas');
+  await canvas.scrollIntoViewIfNeeded();
+  await page.waitForFunction(()=> {
+    const host=document.querySelector('.hero [data-scarlet-specimen]');
+    return host?.dataset.state==='live' && host.dataset.rendered==='true';
+  },null,{timeout:45000});
+  async function specimenFrame(name) {
+    return PNG.sync.read(await canvas.screenshot({path:path.join(output,name+'.png')}));
+  }
+  async function specimenPixels(name,predicate) {
+    const deadline=Date.now()+12000;
+    do {
+      assert.equal(errors.length,0,errors.join('\n'));
+      const frame=await specimenFrame(name);
+      if(predicate(frame)) return frame;
+      await sleep(150);
+    } while(Date.now()<deadline);
+    throw Error('Specimen pixel assertion timed out: '+name);
+  }
+  const whole=frame=>({x:4,y:4,width:frame.width-8,height:frame.height-8});
+  const initial=await specimenPixels('specimen-initial',frame=>hasTextOnWhite(frame,whole(frame),100));
+  // Match the responsive native IconView specimen geometry, not DOM stand-ins.
+  const width=initial.width;
+  const tabWidth=(width-44)/3;
+  const cellWidth=(width-172)/3;
+  const previewRegion={x:width-128,y:70,width:112,height:140};
+  const gridRegion={x:16,y:58,width:width-160,height:178};
+  assert.ok(coloredPixels(initial,previewRegion,red).count>60,'Actual enlarged Tabler icon must render');
+  async function specimenClick(x,y) {
+    await canvas.click({position:{x,y}});
+    await page.mouse.move(0,0);
+  }
+  // Select Star in Interface: enlarged icon changes, not merely a button highlight.
+  await specimenClick(16+(cellWidth+6)+cellWidth/2,78);
+  const selected=await specimenPixels('specimen-icon-selected',frame=>
+    changedPixels(initial,frame,previewRegion)>80 && hasTextOnWhite(frame,whole(frame),100));
+  // Files changes the grid's actual symbols and resets the enlarged selection.
+  await specimenClick(16+(tabWidth+6)+tabWidth/2,31);
+  const files=await specimenPixels('specimen-category-files',frame=>
+    changedPixels(selected,frame,gridRegion)>150 && changedPixels(selected,frame,previewRegion)>80);
+  // Download is third-row first-column; assert its distinct enlarged glyph.
+  await specimenClick(16+cellWidth/2,58+2*46+20);
+  const download=await specimenPixels('specimen-download',frame=>
+    changedPixels(files,frame,previewRegion)>80);
+  // Stroke weight must alter the icon itself, not just the selected text button.
+  await specimenClick(16+tabWidth/2,263);
+  const thin=await specimenPixels('specimen-thin',frame=>
+    changedPixels(download,frame,previewRegion)>30);
+  const thinInk=coloredPixels(thin,previewRegion,red).count;
+  await specimenClick(16+2*(tabWidth+6)+tabWidth/2,263);
+  const adjusted=await specimenPixels('specimen-bold',frame=>
+    coloredPixels(frame,previewRegion,red).count>thinInk+60);
+  await screenshot('homepage');
+  // Wheel input over the embedded canvas must remain owned by the document.
+  await page.setViewportSize({width:500,height:360});
+  await canvas.scrollIntoViewIfNeeded();
+  const box=await canvas.boundingBox();
+  await page.mouse.move(box.x+box.width/2,Math.min(340,Math.max(20,box.y+box.height/2)));
+  const beforeScroll=await page.evaluate(()=>scrollY);
+  await page.mouse.wheel(0,beforeScroll>0 ? -600 : 600);
+  await page.waitForFunction(before=>Math.abs(scrollY-before)>0,beforeScroll);
+  await page.evaluate(()=>scrollTo(0,0));
+  await page.waitForFunction(()=>document.querySelector('.hero [data-scarlet-specimen]')?.dataset.state==='paused');
+  await page.setViewportSize({width:960,height:640});
+  await canvas.scrollIntoViewIfNeeded();
+  await page.waitForFunction(()=>document.querySelector('.hero [data-scarlet-specimen]')?.dataset.state==='live');
+  await page.mouse.move(0,0);
+  await specimenPixels('specimen-resumed',frame=>frame.width===adjusted.width&&
+    changedPixels(adjusted,frame,whole(frame))===0);
+  assert.equal(await page.evaluate(async()=>
+    (await import('/widget-factory/pkg/scarlet_ui_widget_factory.js')).runtime_error()),undefined);
+  report.checks.push('live Tabler icon/category/stroke pixels, document wheel and pause/resume state retention');
+  await page.getByRole('combobox',{name:'Select theme'}).selectOption('dark');
+  await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark');
+  await canvas.scrollIntoViewIfNeeded();
+  await specimenPixels('specimen-dark',frame=>hasTextOnWhite(frame,whole(frame),100));
+  await screenshot('homepage-dark');
+  await page.getByRole('combobox',{name:'Select theme'}).selectOption('light');
+  await page.waitForFunction(()=>document.documentElement.dataset.theme==='light');
+  report.checks.push('Starlight dark theme with readable native canvas surface');
+  // The lower example is a different compiled Wasm module with its own state.
+  const example=page.locator('[data-scarlet-specimen][data-start="start_example"]');
+  const counterCanvas=example.locator('#counter-example');
+  await counterCanvas.scrollIntoViewIfNeeded();
+  await page.waitForFunction(()=> {
+    const host=document.querySelector('[data-start="start_example"]');
+    return host?.dataset.state==='live' && host.dataset.rendered==='true';
+  },null,{timeout:45000});
+  async function examplePixels(name,predicate) {
+    const deadline=Date.now()+12000;
+    do {
+      assert.equal(errors.length,0,errors.join('\n'));
+      const frame=PNG.sync.read(await counterCanvas.screenshot({path:path.join(output,name+'.png')}));
+      if(predicate(frame)) return frame;
+      await sleep(150);
+    } while(Date.now()<deadline);
+    throw Error('Embedded counter pixel assertion timed out: '+name);
+  }
+  const counterInitial=await examplePixels('embedded-counter-initial',frame=>hasTextOnWhite(frame,whole(frame),50));
+  let increment;
+  for(let y=20;y<counterInitial.height-12&&!increment;y++) {
+    let start=-1;
+    for(let x=8;x<counterInitial.width-8;x++) {
+      const offset=(y*counterInitial.width+x)*4;
+      const [r,g,b]=counterInitial.data.subarray(offset,offset+3);
+      const match=Math.min(r,g,b)>=210&&Math.max(r,g,b)<=250&&Math.max(r,g,b)-Math.min(r,g,b)<12;
+      if(match&&start<0) start=x;
+      if((!match||x===counterInitial.width-9)&&start>=0) {
+        if(x-start>16&&x-start<180) {increment={x:(start+x)/2,y:y+8};break;}
+        start=-1;
+      }
+    }
+  }
+  assert.ok(increment,'Rendered embedded +1 button must exist');
+  const countArea={x:8,y:8,width:counterInitial.width-16,height:increment.y-24};
+  assert.ok(countArea.height>10,'Counter glyph region must be above its button');
+  assert.ok(hasTextOnWhite(counterInitial,countArea,20),'The initial numeric glyph must render above +1');
+  await counterCanvas.click({position:increment});
+  await page.mouse.move(0,0);
+  const counterClicked=await examplePixels('embedded-counter-clicked',frame=>
+    changedPixels(counterInitial,frame,countArea)>12&&hasTextOnWhite(frame,countArea,20));
+  assert.equal(await page.evaluate(async()=>
+    (await import('/counter/pkg/scarlet_ui_web_counter.js')).runtime_error()),undefined);
+  await canvas.scrollIntoViewIfNeeded();
+  await page.waitForFunction(()=>document.querySelector('.hero [data-scarlet-specimen]')?.dataset.state==='live');
+  await page.mouse.move(0,0);
+  await specimenPixels('hero-after-counter',frame=>frame.width===adjusted.width&&changedPixels(adjusted,frame,whole(frame))===0);
+  await counterCanvas.scrollIntoViewIfNeeded();
+  await page.waitForFunction(()=>document.querySelector('[data-start="start_example"]')?.dataset.state==='live');
+  await page.mouse.move(0,0);
+  await examplePixels('embedded-counter-retained',frame=>changedPixels(counterClicked,frame,whole(frame))===0);
+  report.checks.push('compiled lower counter increments independently and both embedded modules retain state');
+  // Measure CSS boxes, not screenshot crop widths: scrollbars can change capture
+  // dimensions without changing the document's real layout viewport.
+  assert.equal((await page.locator('.counter-preview .preview-label').textContent()).trim(),'Preview');
+  for(const viewportWidth of [500,390,375]) {
+    await page.setViewportSize({width:viewportWidth,height:640});
+    await page.locator('.counter-example').scrollIntoViewIfNeeded();
+    const layout=await page.evaluate(()=> {
+      const box=selector=> {
+        const element=document.querySelector(selector);
+        if(!element) throw Error('Missing narrow-layout element: '+selector);
+        const rect=element.getBoundingClientRect();
+        const style=getComputedStyle(element);
+        const insetLeft=parseFloat(style.paddingLeft)+parseFloat(style.borderLeftWidth);
+        const insetRight=parseFloat(style.paddingRight)+parseFloat(style.borderRightWidth);
+        return {left:rect.left,right:rect.right,contentLeft:rect.left+insetLeft,contentRight:rect.right-insetRight};
+      };
+      return {
+        viewport:document.documentElement.clientWidth,
+        scrollWidth:document.documentElement.scrollWidth,
+        section:box('.counter-example'),
+        grid:box('.counter-example-layout'),
+        code:box('.counter-code'),
+        frame:box('.counter-code .expressive-code .frame'),
+        pre:box('.counter-code pre'),
+      };
+    });
+    const tolerance=1;
+    assert.ok(layout.scrollWidth<=layout.viewport+tolerance,'No horizontal document overflow at '+viewportWidth);
+    for(const [name,box] of Object.entries(layout).filter(([,value])=>typeof value==='object')) {
+      assert.ok(box.left>=-tolerance&&box.right<=layout.viewport+tolerance,
+        name+' must remain inside the actual client viewport at '+viewportWidth);
+    }
+    for(const [child,parent] of [['grid','section'],['code','grid'],['frame','code']]) {
+      assert.ok(Math.abs(layout[child].left-layout[parent].contentLeft)<=tolerance,
+        child+' must align with its parent content left edge at '+viewportWidth);
+      assert.ok(Math.abs(layout[child].right-layout[parent].contentRight)<=tolerance,
+        child+' must align with its parent content right edge at '+viewportWidth);
+    }
+    assert.ok(layout.pre.left>=layout.frame.left-tolerance&&layout.pre.right<=layout.frame.right+tolerance,
+      'Code pre must remain inside its frame at '+viewportWidth);
+    assert.ok(layout.section.left>0&&layout.viewport-layout.section.right>0,
+      'Both narrow page gutters must remain visible at '+viewportWidth);
+    assert.ok(Math.abs(layout.section.left-(layout.viewport-layout.section.right))<=tolerance,
+      'Narrow page gutters must be equal on both sides at '+viewportWidth);
+    event('narrow-code-layout',{requestedWidth:viewportWidth,...layout});
+  }
+  await page.setViewportSize({width:960,height:640});
+  report.checks.push('narrow code frame respects actual client viewport and section content edges at 500/390/375px');
+
+  await tryLink.click();
+  await page.waitForURL(origin+'/try/');
+  setPhase('browser samples');
+  assert.equal(await page.locator('a[href="/widget-factory/"]').count(),1);
+  assert.equal(await page.locator('a[href="/counter/"]').count(),1);
+  }
   const capability=await page.evaluate(async()=>{
     if(!isSecureContext || !navigator.gpu) return {ok:false,reason:'Secure WebGPU is unavailable'};
     const adapter=await navigator.gpu.requestAdapter();
@@ -159,7 +350,7 @@ try {
   assert.equal(capability.ok,true,`Software WebGPU device required; not a skipped test: ${capability.reason}`);
   await page.locator('#check-gpu').click();
   await page.waitForFunction(()=>document.querySelector('#gpu-status').textContent.includes('adapter is available'));
-  await screenshot('landing');report.checks.push('landing and real adapter/device');
+  await screenshot('try-samples');report.checks.push('toolkit homepage, browser samples and real adapter/device');
 
   setPhase('GPU clear and mapped-buffer preflight');
   await bounded(page.evaluate(async()=>{

@@ -1,0 +1,3 @@
+/* Starlight owns layout and typography; only the project accent is customized. */
+:root { --sl-color-accent-low: #4a1420; --sl-color-accent: #e64758; --sl-color-accent-high: #f9c5cc; }
+:root[data-theme='light'] { --sl-color-accent-low: #fce8eb; --sl-color-accent: #bd2034; --sl-color-accent-high: #641724; }

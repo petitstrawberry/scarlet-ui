@@ -1,0 +1,97 @@
+<script>
+  import { createSpecimenController } from '../scripts/specimen-controller.mjs';
+
+  for (const host of document.querySelectorAll<HTMLElement>('[data-scarlet-specimen]')) {
+    const canvas = host.querySelector<HTMLCanvasElement>('canvas');
+    if (!canvas) continue;
+    // Starlight emits its image slot first. Align DOM/focus order with text-first
+    // presentation without replacing or copying the theme's Hero component.
+    const slot = host.closest('.hero-html');
+    if (slot?.parentElement) slot.parentElement.append(slot);
+    let visible = false;
+    let check: ReturnType<typeof setInterval> | undefined;
+    let revealFrame = 0;
+    const clearCheck = () => { if (check) clearInterval(check); check = undefined; };
+    const controller = createSpecimenController({
+      load: async () => {
+        if (!isSecureContext || !navigator.gpu || !await navigator.gpu.requestAdapter()) {
+          throw new Error('WebGPU unavailable');
+        }
+        const url = new URL(host.dataset.module || '/widget-factory/pkg/scarlet_ui_widget_factory.js', location.origin).href;
+        const app = await import(/* @vite-ignore */ url);
+        await app.default();
+        return {
+          start_specimen: app[host.dataset.start || 'start_specimen'],
+          stop: app.stop, pause: app.pause, resume: app.resume, runtime_error: app.runtime_error,
+        };
+      },
+      setInteractive: (active: boolean) => {
+        canvas.inert = !active;
+        if (!active) canvas.blur();
+      },
+      onState: (state: string) => {
+        host.dataset.state = state;
+        if (state === 'live') host.removeAttribute('aria-hidden');
+        else if (state === 'fallback') host.setAttribute('aria-hidden', 'true');
+        clearCheck();
+        if (state !== 'live') cancelAnimationFrame(revealFrame);
+        if (state === 'live') check = setInterval(() => controller.checkError(), 250);
+      },
+      onLive: () => {
+        // Keep the real static capture until the renderer has had a frame to paint.
+        cancelAnimationFrame(revealFrame);
+        revealFrame = requestAnimationFrame(() => {
+          revealFrame = requestAnimationFrame(() => {
+            if (controller.status === 'live') host.dataset.rendered = 'true';
+          });
+        });
+      },
+      onFallback: () => { delete host.dataset.rendered; },
+    });
+    // Embedded examples do not own document scrolling or Tab.
+    // Do not prevent defaults: browser pan/scroll/focus navigation stays intact.
+    canvas.addEventListener('wheel', event => event.stopImmediatePropagation(), { capture: true, passive: true });
+    for (const type of ['keydown', 'keyup']) {
+      canvas.addEventListener(type, event => {
+        if (event instanceof KeyboardEvent && ['Tab', 'PageUp', 'PageDown', 'Home', 'End', 'Escape'].includes(event.key)) {
+          event.stopImmediatePropagation();
+          if (event.key === 'Escape') canvas.blur();
+        }
+      }, { capture: true });
+    }
+    canvas.addEventListener('pointerdown', () => { delete canvas.dataset.keyboardFocus; }, { capture: true });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Tab') canvas.dataset.keyboardFocus = 'true';
+    }, { capture: true });
+    const update = () => controller.setActive(visible && !document.hidden);
+    const observer = new IntersectionObserver(entries => {
+      visible = entries.some(entry => entry.isIntersecting);
+      update();
+    });
+    observer.observe(host);
+    document.addEventListener('visibilitychange', update);
+    // Preserve resources/state when the browser places this page in its back/forward cache.
+    window.addEventListener('pagehide', event => {
+      cancelAnimationFrame(revealFrame);
+      clearCheck();
+      if (event.persisted) controller.setActive(false);
+      else { observer.disconnect(); controller.dispose(); }
+    });
+    window.addEventListener('pageshow', update);
+  }
+</script>
+<style is:global>
+  /* The theme's built-in hero owns positioning. This slot only sizes its canvas. */
+  .hero .hero-html { order: 2; width: 100%; max-width: 27.5rem; }
+  [data-scarlet-specimen] { position: relative; width: 100%; height: 300px; background: #fff; color-scheme: light; overflow: hidden; }
+  [data-scarlet-specimen] img { width: 100%; height: 100%; object-fit: contain; object-position: center; margin: 0; }
+  [data-scarlet-specimen] canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; border: 0; margin: 0; outline: none; opacity: 0; pointer-events: none; touch-action: pan-y pinch-zoom; }
+  [data-scarlet-specimen][data-rendered='true'] canvas { opacity: 1; pointer-events: auto; }
+  [data-scarlet-specimen][data-rendered='true'] img { visibility: hidden; }
+  [data-scarlet-specimen] canvas[data-keyboard-focus='true']:focus-visible { outline: 2px solid var(--sl-color-text-accent); outline-offset: -2px; }
+  .hero .platform-list { display: block; margin-top: 1rem; font-size: var(--sl-text-sm); }
+  @media (min-width: 50rem) {
+    .hero { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 2rem; padding-block: 2.5rem; align-items: start; }
+    .hero .hero-html { max-width: 25rem; margin-top: 1rem; margin-inline: 0; }
+  }
+</style>

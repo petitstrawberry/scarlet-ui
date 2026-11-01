@@ -1,0 +1,35 @@
+---
+import { Code } from '@astrojs/starlight/components';
+import { extractCounterControls } from '../../scripts/counter-snippet.mjs';
+import counterSource from '../../../examples/web-counter/src/lib.rs?raw';
+
+const code = extractCounterControls(counterSource);
+---
+
+<section class="counter-example" aria-labelledby="counter-example-title">
+  <h2 id="counter-example-title">A counter in Rust</h2>
+  <p>The count is a <code>State&lt;i32&gt;</code>. Updating it redraws the view.</p>
+  <div class="counter-example-layout not-content">
+    <div class="counter-code"><Code code={code} lang="rust" wrap /></div>
+    <div class="counter-preview">
+      <h3 class="preview-label">Preview</h3>
+      <div class="counter-result" data-scarlet-specimen data-module="/counter/pkg/scarlet_ui_web_counter.js" data-start="start_example" data-state="fallback" aria-hidden="true">
+        <img src="/assets/counter-example.png" width="240" height="144" alt="" loading="lazy" />
+        <canvas id="counter-example" tabindex="0" inert aria-label="Interactive counter example"></canvas>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .counter-example { margin-block-start: 2rem; }
+  .counter-example-layout { display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; gap: 1rem; margin-block-start: 1.25rem; }
+  .counter-code { min-width: 0; overflow: auto; }
+  .counter-code :global(.expressive-code) { --ec-codeFontSize: 14px; }
+  .counter-preview { display: grid; grid-template-rows: auto 1fr; align-self: stretch; gap: .75rem; width: 100%; min-width: 0; max-width: 100%; }
+  .preview-label { margin: 0; color: var(--sl-color-text); font-size: var(--sl-text-base); font-weight: 600; line-height: 1.5; text-align: start; }
+  .counter-example .counter-result { width: 240px; max-width: 100%; height: 144px; margin: 0; justify-self: center; align-self: center; background: #fff; }
+  @media (min-width: 50rem) {
+    .counter-example-layout { grid-template-columns: minmax(0, 1.25fr) minmax(0, .75fr); gap: 2rem; }
+  }
+</style>

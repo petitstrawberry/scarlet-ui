@@ -37,6 +37,220 @@ fn tab_bar_placement_for_selection(selection: usize) -> TabBarPlacement {
     }
 }
 
+/// A compact browser of the same Tabler assets used by native ScarletUI.
+/// Separate from Factory so there is no navigation, menu or idle animation.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone)]
+pub(crate) struct Specimen {
+    category: State<usize>,
+    selected: State<usize>,
+    weight: State<IconWeight>,
+    width: State<f32>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl Specimen {
+    pub(crate) fn new() -> Self {
+        Self {
+            category: State::new(StateId::new(120), 0),
+            selected: State::new(StateId::new(121), 0),
+            weight: State::new(StateId::new(122), IconWeight::Normal),
+            width: State::new(StateId::new(123), 400.0),
+        }
+    }
+
+    fn resize_specimen(&self, width: f32) {
+        // The homepage reserves at least 320 logical pixels; derive geometry
+        // from the real canvas width rather than scaling a fixed screenshot.
+        let width = width.max(300.0);
+        if self.width.get() != width {
+            self.width.set(width);
+        }
+    }
+
+    fn tab_width(&self) -> f32 {
+        (self.width.get() - 44.0) / 3.0
+    }
+    fn cell_width(&self) -> f32 {
+        (self.width.get() - 172.0) / 3.0
+    }
+
+    fn icons(&self) -> [(Icon, &'static str); 12] {
+        match self.category.get() {
+            1 => [
+                (Icon::Folder, "Folder"),
+                (Icon::File, "File"),
+                (Icon::FileText, "File text"),
+                (Icon::FolderOpen, "Open folder"),
+                (Icon::Archive, "Archive"),
+                (Icon::FileZip, "ZIP file"),
+                (Icon::Download, "Download"),
+                (Icon::Upload, "Upload"),
+                (Icon::Copy, "Copy"),
+                (Icon::Clipboard, "Clipboard"),
+                (Icon::Trash, "Trash"),
+                (Icon::Link, "Link"),
+            ],
+            2 => [
+                (Icon::Music, "Music"),
+                (Icon::Photo, "Photo"),
+                (Icon::Camera, "Camera"),
+                (Icon::PlayerPlay, "Play"),
+                (Icon::PlayerPause, "Pause"),
+                (Icon::Video, "Video"),
+                (Icon::Microphone, "Microphone"),
+                (Icon::Volume, "Volume"),
+                (Icon::VolumeOff, "Muted"),
+                (Icon::Repeat, "Repeat"),
+                (Icon::FileMusic, "Audio file"),
+                (Icon::Share, "Share"),
+            ],
+            _ => [
+                (Icon::Heart, "Heart"),
+                (Icon::Star, "Star"),
+                (Icon::Bookmark, "Bookmark"),
+                (Icon::Home, "Home"),
+                (Icon::Search, "Search"),
+                (Icon::Settings, "Settings"),
+                (Icon::Bell, "Bell"),
+                (Icon::User, "User"),
+                (Icon::Mail, "Mail"),
+                (Icon::Sun, "Sun"),
+                (Icon::Moon, "Moon"),
+                (Icon::Check, "Check"),
+            ],
+        }
+    }
+
+    fn tint(selected: bool) -> Color {
+        if selected {
+            Color::rgb(184u8, 45u8, 61u8)
+        } else {
+            Color::rgb(64u8, 65u8, 70u8)
+        }
+    }
+
+    fn fill(selected: bool) -> Color {
+        if selected {
+            Color::rgb(255u8, 239u8, 241u8)
+        } else {
+            Color::CLEAR
+        }
+    }
+
+    fn category_button(&self, index: usize, label: &str) -> impl View + Clone + use<> {
+        let app = self.clone();
+        let selected = self.category.get() == index;
+        Button::new(label)
+            .header_style()
+            .font_size(14.0)
+            .background_color(Self::fill(selected))
+            .text_color(Self::tint(selected))
+            .on_click(move || {
+                app.category.set(index);
+                app.selected.set(0);
+            })
+            .frame(self.tab_width(), 30.0)
+    }
+
+    fn weight_button(&self, weight: IconWeight, label: &str) -> impl View + Clone + use<> {
+        let state = self.weight.clone();
+        let selected = self.weight.get() == weight;
+        Button::new(label)
+            .header_style()
+            .font_size(14.0)
+            .background_color(Self::fill(selected))
+            .text_color(Self::tint(selected))
+            .on_click(move || state.set(weight))
+            .frame(self.tab_width(), 30.0)
+    }
+
+    fn cell(&self, index: usize) -> impl View + Clone + use<> {
+        let state = self.selected.clone();
+        let selected = self.selected.get() == index;
+        Button::icon_only(self.icons()[index].0)
+            .header_style()
+            .icon_size(IconSize::Pixels(28))
+            .icon_weight(self.weight.get())
+            .icon_color(Self::tint(selected))
+            .background_color(Self::fill(selected))
+            .on_click(move || state.set(index))
+            .frame(self.cell_width(), 40.0)
+    }
+
+    fn body(&self) -> impl View + Clone + use<> {
+        let (icon, name) = self.icons()[self.selected.get()];
+        vstack![
+            hstack![
+                self.category_button(0, "Interface"),
+                self.category_button(1, "Files"),
+                self.category_button(2, "Media")
+            ]
+            .spacing(6.0),
+            hstack![
+                vstack![
+                    hstack![self.cell(0), self.cell(1), self.cell(2)].spacing(6.0),
+                    hstack![self.cell(3), self.cell(4), self.cell(5)].spacing(6.0),
+                    hstack![self.cell(6), self.cell(7), self.cell(8)].spacing(6.0),
+                    hstack![self.cell(9), self.cell(10), self.cell(11)].spacing(6.0),
+                ]
+                .spacing(6.0),
+                vstack![
+                    IconView::new(icon)
+                        .size(IconSize::Pixels(72))
+                        .weight(self.weight.get())
+                        .color(Self::tint(true)),
+                    Text::new(name).font_size(14.0),
+                ]
+                .spacing(12.0)
+                .frame_width(112.0),
+            ]
+            .spacing(16.0),
+            hstack![
+                self.weight_button(IconWeight::Thin, "Thin"),
+                self.weight_button(IconWeight::Normal, "Regular"),
+                self.weight_button(IconWeight::Bold, "Bold")
+            ]
+            .spacing(6.0),
+        ]
+        .spacing(12.0)
+        .padding(16.0)
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl View for Specimen {
+    fn create_element(&self) -> Box<dyn Element> {
+        self.body().create_element()
+    }
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        vec![&self.category, &self.selected, &self.weight, &self.width]
+    }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl Application for Specimen {
+    fn on_window_created(
+        &mut self,
+        _: &scarlet_ui::WindowContext,
+        window: &mut dyn scarlet_ui::platform::PlatformWindow,
+    ) {
+        self.resize_specimen(window.size().width);
+    }
+    fn on_window_resize(&mut self, _: &scarlet_ui::WindowContext, width: u32, _: u32) {
+        self.resize_specimen(width as f32);
+    }
+    fn scenes(&self) -> impl Scene {
+        WindowGroup::new(
+            "specimen",
+            Window::new("Tabler Icons", self.body()).size(Size::new(self.width.get(), 320.0)),
+        )
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct WidgetFactory {
     slider_value: State<f32>,
@@ -664,6 +878,168 @@ mod tests {
     use super::*;
     use scarlet_ui::event::Phase;
     use scarlet_ui::views::SplitViewRenderObject;
+
+    #[test]
+    fn icon_specimen_selects_categories_icons_and_real_stroke_weights_and_fits_mobile() {
+        use scarlet_ui::renderer::{PaintCommand, PaintContext};
+        use scarlet_ui::{ComponentElement, RenderingPipeline, SceneBuilder};
+        #[derive(Debug)]
+        struct Item {
+            button: bool,
+            bounds: Rect,
+            label: String,
+            icon: Option<Icon>,
+            stroke: f32,
+        }
+        fn items(element: &dyn Element, parent: Point, out: &mut Vec<Item>) {
+            let origin = Point::new(
+                parent.x + element.position().x,
+                parent.y + element.position().y,
+            );
+            if let Some(render) = element.render_object() {
+                let button = render
+                    .as_any()
+                    .is::<scarlet_ui::views::ButtonRenderObject>();
+                if button || render.size() == Size::new(72.0, 72.0) {
+                    let mut paint = PaintContext::new();
+                    render.paint(&mut paint, origin);
+                    let mut item = Item {
+                        button,
+                        bounds: Rect::new(origin, render.size()),
+                        label: String::new(),
+                        icon: None,
+                        stroke: 0.0,
+                    };
+                    for command in paint.commands() {
+                        match command {
+                            PaintCommand::DrawText { text, .. } => item.label = text.clone(),
+                            PaintCommand::DrawIcon { icon, style, .. } => {
+                                item.icon = Some(*icon);
+                                item.stroke = style.get_stroke_width();
+                            }
+                            _ => {}
+                        }
+                    }
+                    out.push(item);
+                }
+            }
+            for child in element.children() {
+                items(child.as_ref(), origin, out);
+            }
+        }
+        fn snapshot(pipeline: &RenderingPipeline) -> Vec<Item> {
+            let mut out = Vec::new();
+            items(
+                pipeline.element_tree().root().unwrap(),
+                Point::ZERO,
+                &mut out,
+            );
+            out
+        }
+        fn click(pipeline: &mut RenderingPipeline, label: &str, icon: Option<Icon>) {
+            let all = snapshot(pipeline);
+            let item = all
+                .iter()
+                .find(|item| item.button && item.label == label && item.icon == icon)
+                .unwrap();
+            let x = (item.bounds.origin.x + item.bounds.size.width * 0.5) as i32;
+            let y = (item.bounds.origin.y + item.bounds.size.height * 0.5) as i32;
+            for event in [
+                MouseEvent::Moved { x, y },
+                MouseEvent::ButtonPressed {
+                    button: MouseButton::Left,
+                    x,
+                    y,
+                    click_count: 1,
+                },
+                MouseEvent::ButtonReleased {
+                    button: MouseButton::Left,
+                    x,
+                    y,
+                    click_count: 1,
+                },
+            ] {
+                pipeline.handle_event(&Event::Mouse(event));
+                pipeline.render_with_damage();
+            }
+        }
+        let mut app = Specimen::new();
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(Box::new(ComponentElement::new_with_builder(
+            app.clone(),
+            |app| {
+                let mut builder = SceneBuilder::new();
+                app.scenes().build(&mut builder);
+                builder.into_declarations().remove(0).view
+            },
+        )));
+        assert!(pipeline.layout_initial().menu_bar.is_none());
+        for width in [320.0, 400.0, 460.0] {
+            app.resize_specimen(width);
+            pipeline.resize(Size::new(width, 320.0));
+            pipeline.render_with_damage();
+            let all = snapshot(&pipeline);
+            assert_eq!(all.iter().filter(|item| item.button).count(), 18);
+            for item in &all {
+                let r = item.bounds;
+                assert!(r.size.width > 0.0 && r.size.height > 0.0);
+                assert!(
+                    r.origin.x >= 0.0
+                        && r.origin.y >= 0.0
+                        && r.origin.x + r.size.width <= width
+                        && r.origin.y + r.size.height <= 320.0,
+                    "{width}: {item:?}"
+                );
+            }
+            eprintln!("icon specimen width={width}: {all:?}");
+        }
+        let preview = snapshot(&pipeline)
+            .into_iter()
+            .find(|item| !item.button)
+            .unwrap();
+        assert_eq!(preview.icon, Some(Icon::Heart));
+        assert_eq!(preview.bounds.size, Size::new(72.0, 72.0));
+        click(&mut pipeline, "", Some(Icon::Star));
+        assert_eq!(app.icons()[app.selected.get()].0, Icon::Star);
+        for width in [320.0, 400.0, 460.0] {
+            app.resize_specimen(width);
+            pipeline.resize(Size::new(width, 320.0));
+            pipeline.render_with_damage();
+            assert_eq!(app.icons()[app.selected.get()].0, Icon::Star);
+            assert_eq!(app.weight.get(), IconWeight::Normal);
+            let preview = snapshot(&pipeline)
+                .into_iter()
+                .find(|item| !item.button)
+                .unwrap();
+            assert_eq!(preview.icon, Some(Icon::Star));
+        }
+        click(&mut pipeline, "Files", None);
+        assert_eq!(app.category.get(), 1);
+        assert_eq!(app.selected.get(), 0);
+        click(&mut pipeline, "", Some(Icon::Download));
+        assert_eq!(app.icons()[app.selected.get()].0, Icon::Download);
+        click(&mut pipeline, "Media", None);
+        assert_eq!(app.icons()[app.selected.get()].0, Icon::Music);
+        for (label, weight) in [
+            ("Thin", IconWeight::Thin),
+            ("Bold", IconWeight::Bold),
+            ("Regular", IconWeight::Normal),
+        ] {
+            click(&mut pipeline, label, None);
+            assert_eq!(app.weight.get(), weight);
+            assert!(
+                snapshot(&pipeline)
+                    .iter()
+                    .filter(|item| item.icon.is_some())
+                    .all(|item| item.stroke == weight.stroke_width())
+            );
+        }
+        click(&mut pipeline, "Interface", None);
+        assert_eq!(app.icons()[app.selected.get()].0, Icon::Heart);
+        app.on_idle();
+        assert_eq!(app.selected.get(), 0);
+        assert_eq!(app.listenables().len(), 4);
+    }
 
     #[test]
     fn factory_navigation_after_text_view_edit_needs_only_one_click() {
