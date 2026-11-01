@@ -461,18 +461,15 @@ impl WebMenu {
                 button: MouseButton::Right,
                 ..
             } => {
+                // Application menus already have a visible menubar. A context
+                // click belongs to the scene/browser, not a duplicate menu tree.
                 self.close();
-                let entries = self
-                    .model
-                    .items()
-                    .iter()
-                    .cloned()
-                    .map(MenuEntry::Item)
-                    .collect();
-                self.open_popup(entries, point, None);
-                self.suppressed_release = Some(MouseButton::Right);
-                (true, None)
+                (false, None)
             }
+            MouseEvent::ButtonReleased {
+                button: MouseButton::Right,
+                ..
+            } => (false, None),
             MouseEvent::ButtonPressed {
                 button: MouseButton::Left,
                 ..
@@ -661,24 +658,17 @@ mod tests {
         );
     }
     #[test]
-    fn context_menu_clamps_to_canvas_and_escape_dismisses() {
+    fn menubar_popup_clamps_to_canvas_and_escape_dismisses() {
         let mut menu = menu();
-        assert!(
-            menu.handle(&Event::Mouse(MouseEvent::ButtonPressed {
-                button: MouseButton::Right,
-                x: 635,
-                y: 475,
-                click_count: 1
-            }))
-            .0
-        );
+        menu.resize(Size::new(180.0, 480.0));
+        menu.open_top(0);
         let popup = &menu.popups[0];
-        assert!(popup.origin.x + popup.render.size().width <= 640.0);
+        assert!(popup.origin.x + popup.render.size().width <= 180.0);
         assert!(popup.origin.y + popup.render.size().height <= 480.0);
         assert!(
             menu.handle(&Event::Keyboard(KeyEvent::Pressed {
                 keycode: KeyCode::Escape,
-                modifiers: KeyModifiers::empty()
+                modifiers: KeyModifiers::empty(),
             }))
             .0
         );
@@ -741,23 +731,33 @@ mod tests {
         );
     }
     #[test]
-    fn context_open_consumes_right_release_after_edge_clamping() {
+    fn right_click_does_not_substitute_application_menu_or_consume_scene_input() {
         let mut menu = menu();
-        menu.handle(&Event::Mouse(MouseEvent::ButtonPressed {
-            button: MouseButton::Right,
-            x: 639,
-            y: 479,
-            click_count: 1,
-        }));
-        assert_eq!(
-            menu.handle(&Event::Mouse(MouseEvent::ButtonReleased {
-                button: MouseButton::Right,
-                x: 639,
-                y: 479,
-                click_count: 1
-            })),
-            (true, None)
-        );
+        for (x, y) in [(639, 479), (10, 10)] {
+            menu.open_top(0);
+            assert_eq!(
+                menu.handle(&Event::Mouse(MouseEvent::ButtonPressed {
+                    button: MouseButton::Right,
+                    x,
+                    y,
+                    click_count: 1,
+                })),
+                (false, None)
+            );
+            assert!(menu.popups.is_empty());
+            assert_eq!(
+                menu.handle(&Event::Mouse(MouseEvent::ButtonReleased {
+                    button: MouseButton::Right,
+                    x,
+                    y,
+                    click_count: 1,
+                })),
+                (false, None)
+            );
+        }
+        assert!(menu.has_menu());
+        menu.open_top(0);
+        assert!(!menu.popups.is_empty(), "the visible menubar still works");
     }
     #[test]
     fn release_dispatches_action_exactly_once() {

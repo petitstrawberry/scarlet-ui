@@ -426,8 +426,74 @@ impl Application for Specimen {
     }
 }
 
+// ScrollView supplies a finite viewport to its child. Factory pages instead
+// measure their rows at that width and their natural height, so stacked examples
+// remain reachable without hand-maintained content-height constants.
+#[derive(Clone)]
+struct FactoryPageContent<V: View + Clone>(V);
+
+impl<V: View + Clone> View for FactoryPageContent<V> {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(
+            scarlet_ui::element::RenderElement::with_view_children_and_updater(
+                self.clone(),
+                |_| FactoryPageLayout(Size::ZERO),
+                |_, _| scarlet_ui::element::UpdateResult::Updated,
+                |view| vec![view.0.clone_view()],
+            ),
+        )
+    }
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        self.0.listenables()
+    }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+struct FactoryPageLayout(Size);
+impl scarlet_ui::element::ElementRenderObject for FactoryPageLayout {
+    fn layout(&mut self, constraints: scarlet_ui::element::LayoutConstraints) -> Size {
+        self.0 = Size::new(constraints.max_width, 0.0);
+        self.0
+    }
+    fn layout_with_children(
+        &mut self,
+        constraints: scarlet_ui::element::LayoutConstraints,
+        children: &mut [Box<dyn Element>],
+    ) -> Size {
+        self.0 = children
+            .first_mut()
+            .map(|child| {
+                child.set_position(Point::ZERO);
+                child.layout(scarlet_ui::element::LayoutConstraints::new(
+                    constraints.max_width,
+                    constraints.max_width,
+                    0.0,
+                    f32::INFINITY,
+                ))
+            })
+            .unwrap_or(Size::ZERO);
+        self.0
+    }
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
+    fn size(&self) -> Size {
+        self.0
+    }
+    fn render(&mut self) {}
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct WidgetFactory {
+    viewport: State<Size>,
     slider_value: State<f32>,
     toggle_on: State<bool>,
     text_value: State<String>,
@@ -447,6 +513,7 @@ impl WidgetFactory {
     pub(crate) fn new() -> Self {
         let cube_mesh = cube_mesh();
         Self {
+            viewport: State::new(StateId::new(29), Size::new(860.0, 560.0)),
             slider_value: State::new(StateId::new(20), 0.42),
             toggle_on: State::new(StateId::new(21), true),
             text_value: State::new(StateId::new(22), String::from("Factory text field")),
@@ -516,24 +583,54 @@ impl WidgetFactory {
         ])
     }
 
-    fn scroll_page<V: View + Clone>(
-        &self,
-        content: V,
-        content_height: f32,
-    ) -> impl View + Clone + use<V> {
-        ScrollView::new(content)
-            .vertical()
-            .content_size(0.0, content_height)
+    const SIDEBAR_WIDTH: f32 = 190.0;
+    const MIN_CONTENT_WIDTH: f32 = 360.0;
+
+    fn content_width(&self) -> f32 {
+        let width = self.viewport.get().width;
+        if width >= Self::SIDEBAR_WIDTH + Self::MIN_CONTENT_WIDTH {
+            width - Self::SIDEBAR_WIDTH
+        } else {
+            width
+        }
+    }
+    fn stacked_rows(&self) -> bool {
+        self.content_width() < 560.0
+    }
+    fn page_padding(&self) -> f32 {
+        if self.stacked_rows() { 16.0 } else { 24.0 }
+    }
+    fn row_width(&self) -> f32 {
+        (self.content_width() - self.page_padding() * 2.0).max(0.0)
+    }
+    fn control_width(&self) -> f32 {
+        (self.row_width() - if self.stacked_rows() { 0.0 } else { 168.0 }).max(0.0)
+    }
+    fn demo_width(&self, preferred: f32) -> f32 {
+        self.control_width().min(preferred)
+    }
+
+    fn scroll_page<V: View + Clone>(&self, content: V) -> impl View + Clone + use<V> {
+        ScrollView::new(FactoryPageContent(content)).vertical()
     }
 
     fn row<V: View + Clone>(&self, name: &str, control: V) -> impl View + Clone + use<V> {
-        hstack! {
-            Text::new(name.to_owned())
-                .font_size(14.0)
-                .frame_width(150.0),
-            control,
+        let label = Text::new(name.to_owned()).font_size(14.0);
+        if self.stacked_rows() {
+            Either::A(
+                vstack![label, control]
+                    .spacing(8.0)
+                    .alignment(Alignment::Leading)
+                    .frame_width(self.row_width()),
+            )
+        } else {
+            Either::B(
+                hstack![label.frame_width(150.0), control]
+                    .spacing(18.0)
+                    .alignment(Alignment::Top)
+                    .frame_width(self.row_width()),
+            )
         }
-        .spacing(18.0)
     }
 
     fn button(&self) -> impl View + Clone + use<> {
@@ -541,11 +638,16 @@ impl WidgetFactory {
     }
 
     fn text_field(&self) -> impl View + Clone + use<> {
-        TextField::new(self.text_value.clone()).placeholder("Enter value")
+        TextField::new(self.text_value.clone())
+            .placeholder("Enter value")
+            .frame_width(self.demo_width(320.0))
     }
 
     fn slider(&self) -> impl View + Clone + use<> {
-        Slider::new(self.slider_value.clone()).min(0.0).max(1.0)
+        Slider::new(self.slider_value.clone())
+            .min(0.0)
+            .max(1.0)
+            .frame_width(self.demo_width(320.0))
     }
 
     fn toggle(&self) -> impl View + Clone + use<> {
@@ -553,7 +655,7 @@ impl WidgetFactory {
     }
 
     fn progress(&self) -> impl View + Clone + use<> {
-        ProgressView::new(0.68)
+        ProgressView::new(0.68).frame_width(self.demo_width(320.0))
     }
 
     fn select(&self) -> impl View + Clone + use<> {
@@ -565,6 +667,7 @@ impl WidgetFactory {
             ],
             self.selected.clone(),
         )
+        .width(self.demo_width(260.0))
     }
 
     fn rectangle(&self) -> impl View + Clone + use<> {
@@ -572,15 +675,20 @@ impl WidgetFactory {
             .fill(Color::rgb(235u8, 242u8, 255u8))
             .corner_radius(8.0)
             .border(1.0, Color::rgb(105u8, 135u8, 210u8))
-            .frame(220.0, 28.0)
+            .frame(self.demo_width(220.0), 28.0)
     }
 
     fn divider(&self) -> impl View + Clone + use<> {
-        Divider::new().frame(220.0, 1.0)
+        Divider::new().frame(self.demo_width(220.0), 1.0)
     }
 
     fn sgfx_cube(&self) -> impl View + Clone + use<> {
-        SgfxCanvas::from_state(self.cube_canvas, 320.0, 220.0, self.cube_frame.clone())
+        SgfxCanvas::from_state(
+            self.cube_canvas,
+            self.row_width().min(320.0),
+            220.0,
+            self.cube_frame.clone(),
+        )
     }
 
     fn text_view(&self) -> impl View + Clone + use<> {
@@ -588,29 +696,30 @@ impl WidgetFactory {
             .placeholder("Type something...")
             .font_size(14.0)
             .padding(8.0)
-            .frame_height(200.0)
+            .frame(self.demo_width(320.0), 200.0)
     }
 
     fn scroll_view(&self) -> impl View + Clone + use<> {
         ScrollView::new(
             vstack! {
                 Text::new("ScrollView content").font_size(16.0),
-                self.row("Track 01", ProgressView::new(0.20).frame(260.0, 18.0)),
-                self.row("Track 02", ProgressView::new(0.42).frame(260.0, 18.0)),
-                self.row("Track 03", ProgressView::new(0.64).frame(260.0, 18.0)),
-                self.row("Track 04", ProgressView::new(0.82).frame(260.0, 18.0)),
-                self.row("Track 05", ProgressView::new(0.34).frame(260.0, 18.0)),
-                self.row("Track 06", ProgressView::new(0.56).frame(260.0, 18.0)),
-                self.row("Track 07", ProgressView::new(0.74).frame(260.0, 18.0)),
-                self.row("Track 08", ProgressView::new(0.12).frame(260.0, 18.0)),
+                hstack![Text::new("Track 01").frame_width(150.0), ProgressView::new(0.20).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 02").frame_width(150.0), ProgressView::new(0.42).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 03").frame_width(150.0), ProgressView::new(0.64).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 04").frame_width(150.0), ProgressView::new(0.82).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 05").frame_width(150.0), ProgressView::new(0.34).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 06").frame_width(150.0), ProgressView::new(0.56).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 07").frame_width(150.0), ProgressView::new(0.74).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 08").frame_width(150.0), ProgressView::new(0.12).frame(260.0, 18.0)].spacing(18.0),
             }
             .spacing(8.0)
+            .alignment(Alignment::Leading)
             .padding(12.0),
         )
         .both_axes()
         .content_size(520.0, 360.0)
         .scrollbar_visibility(ScrollbarVisibility::Always)
-        .frame(320.0, 160.0)
+        .frame(self.demo_width(320.0), 160.0)
     }
 
     fn horizontal_scroll_view(&self) -> impl View + Clone + use<> {
@@ -626,7 +735,7 @@ impl WidgetFactory {
         )
         .horizontal()
         .content_size(560.0, 64.0)
-        .frame(240.0, 64.0)
+        .frame(self.demo_width(240.0), 64.0)
     }
 
     fn vertical_scroll_view(&self) -> impl View + Clone + use<> {
@@ -646,7 +755,7 @@ impl WidgetFactory {
         )
         .vertical()
         .content_size(160.0, 240.0)
-        .frame(160.0, 96.0)
+        .frame(self.demo_width(160.0), 96.0)
     }
 
     fn split_view(&self) -> impl View + Clone + use<> {
@@ -669,7 +778,7 @@ impl WidgetFactory {
         .axis(axis)
         .axis_policy(axis_policy)
         .adaptive_stack_narrow_width(420.0)
-        .frame(320.0, 160.0)
+        .frame(self.demo_width(320.0), 160.0)
     }
 
     fn split_layout_select(&self) -> impl View + Clone + use<> {
@@ -681,7 +790,7 @@ impl WidgetFactory {
             ],
             self.split_layout.clone(),
         )
-        .width(220.0)
+        .width(self.demo_width(220.0))
     }
 
     fn tab_view(&self) -> impl View + Clone + use<> {
@@ -707,7 +816,7 @@ impl WidgetFactory {
         .tab_bar_placement(tab_bar_placement_for_selection(
             self.tab_bar_placement.get(),
         ))
-        .frame(320.0, 150.0)
+        .frame(self.demo_width(320.0), 150.0)
     }
 
     fn tab_bar_placement_select(&self) -> impl View + Clone + use<> {
@@ -719,7 +828,7 @@ impl WidgetFactory {
             ],
             self.tab_bar_placement.clone(),
         )
-        .width(220.0)
+        .width(self.demo_width(220.0))
     }
 
     fn configurable_layouts(&self) -> impl View + Clone + use<> {
@@ -730,6 +839,7 @@ impl WidgetFactory {
             self.row("TabView", self.tab_view()),
         }
         .spacing(16.0)
+        .alignment(Alignment::Leading)
     }
 
     fn overview_page(&self) -> impl View + Clone + use<> {
@@ -743,18 +853,21 @@ impl WidgetFactory {
             self.configurable_layouts(),
         }
         .spacing(16.0)
-        .padding(24.0);
-        self.scroll_page(content, 860.0)
+        .alignment(Alignment::Leading)
+        .padding(self.page_padding());
+        self.scroll_page(content)
     }
 
     fn sgfx_page(&self) -> impl View + Clone + use<> {
-        vstack! {
+        let content = vstack! {
             Text::new("SGFX").font_size(28.0),
             Text::new("SGFX retained canvas").font_size(15.0),
             self.sgfx_cube(),
         }
         .spacing(16.0)
-        .padding(24.0)
+        .alignment(Alignment::Leading)
+        .padding(self.page_padding());
+        self.scroll_page(content)
     }
 
     fn controls_page(&self) -> impl View + Clone + use<> {
@@ -766,8 +879,9 @@ impl WidgetFactory {
             self.row("ProgressView", self.progress()),
         }
         .spacing(16.0)
-        .padding(24.0);
-        self.scroll_page(content, 360.0)
+        .alignment(Alignment::Leading)
+        .padding(self.page_padding());
+        self.scroll_page(content)
     }
 
     fn inputs_page(&self) -> impl View + Clone + use<> {
@@ -776,12 +890,12 @@ impl WidgetFactory {
             self.row("TextField", self.text_field()),
             self.row("Select", self.select()),
             self.row("Slider", self.slider()),
-            Text::new("TextView (multi-line editor)").font_size(14.0),
-            self.text_view(),
+            self.row("TextView", self.text_view()),
         }
         .spacing(16.0)
-        .padding(24.0);
-        self.scroll_page(content, 560.0)
+        .alignment(Alignment::Leading)
+        .padding(self.page_padding());
+        self.scroll_page(content)
     }
 
     fn icons(&self) -> impl View + Clone + use<> {
@@ -823,8 +937,9 @@ impl WidgetFactory {
             self.configurable_layouts(),
         }
         .spacing(16.0)
-        .padding(24.0);
-        self.scroll_page(content, 1040.0)
+        .alignment(Alignment::Leading)
+        .padding(self.page_padding());
+        self.scroll_page(content)
     }
 }
 
@@ -835,6 +950,7 @@ impl View for WidgetFactory {
 
     fn listenables(&self) -> Vec<&dyn Listenable> {
         vec![
+            &self.viewport,
             &self.slider_value,
             &self.toggle_on,
             &self.text_value,
@@ -852,6 +968,17 @@ impl View for WidgetFactory {
 }
 
 impl Application for WidgetFactory {
+    fn on_window_created(
+        &mut self,
+        _: &scarlet_ui::WindowContext,
+        window: &mut dyn scarlet_ui::platform::PlatformWindow,
+    ) {
+        self.viewport.set(window.size());
+    }
+    fn on_window_resize(&mut self, _: &scarlet_ui::WindowContext, width: u32, height: u32) {
+        self.viewport.set(Size::new(width as f32, height as f32));
+    }
+
     fn scenes(&self) -> impl Scene {
         let overview = self.clone();
         let sgfx = self.clone();
@@ -877,7 +1004,8 @@ impl Application for WidgetFactory {
                 }
                 .presentation(NavigationPresentation::Automatic)
                 .shows_icons(true)
-                .sidebar_width(190.0),
+                .sidebar_width(Self::SIDEBAR_WIDTH)
+                .minimum_content_size(Size::new(Self::MIN_CONTENT_WIDTH, 0.0)),
             )
             .size(Size::new(860.0, 560.0))
             .menu_bar(self.menu_model()),
@@ -1053,6 +1181,219 @@ mod tests {
     use super::*;
     use scarlet_ui::event::Phase;
     use scarlet_ui::views::SplitViewRenderObject;
+
+    #[test]
+    fn nested_scroll_demo_starts_with_readable_leading_heading_and_track_labels() {
+        use scarlet_ui::renderer::{PaintCommand, PaintContext};
+        fn labels(element: &dyn Element, origin: Point, out: &mut Vec<(String, Point)>) {
+            let origin = Point::new(
+                origin.x + element.position().x,
+                origin.y + element.position().y,
+            );
+            if let Some(render) = element.render_object()
+                && render.as_any().is::<scarlet_ui::views::TextRenderObject>()
+            {
+                let mut paint = PaintContext::new();
+                render.paint(&mut paint, origin);
+                for command in paint.commands() {
+                    if let PaintCommand::DrawText { text, position, .. } = command {
+                        out.push((text.clone(), *position));
+                    }
+                }
+            }
+            for child in element.children() {
+                labels(child.as_ref(), origin, out);
+            }
+        }
+        let app = WidgetFactory::new();
+        for width in [375.0, 562.0, 1200.0] {
+            app.viewport.set(Size::new(width, 600.0));
+            let mut root = app.scroll_view().create_element();
+            root.layout(LayoutConstraints::tight(app.demo_width(320.0), 160.0));
+            let mut positions = Vec::new();
+            labels(root.as_ref(), Point::ZERO, &mut positions);
+            assert_eq!(positions.len(), 9);
+            for (label, point) in positions {
+                assert_eq!(
+                    point.x, 12.0,
+                    "{label} must start within the initial viewport"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn factory_pages_fit_responsive_widths_and_align_every_row_label() {
+        use scarlet_ui::element::LayoutConstraints;
+        use scarlet_ui::renderer::{PaintCommand, PaintContext};
+        fn inspect(
+            element: &dyn Element,
+            origin: Point,
+            root: bool,
+            width: f32,
+            labels: &mut Vec<(String, Rect)>,
+            extent: &mut f32,
+        ) {
+            let origin = Point::new(
+                origin.x + element.position().x,
+                origin.y + element.position().y,
+            );
+            if let Some(render) = element.render_object() {
+                let bounds = Rect::new(origin, render.size());
+                assert!(
+                    origin.x >= -0.5 && origin.x + bounds.size.width <= width + 0.5,
+                    "{} exceeds page width{}: {:?}",
+                    element.type_name_debug(),
+                    width,
+                    bounds
+                );
+                if render.as_any().is::<FactoryPageLayout>() {
+                    *extent = bounds.size.height;
+                }
+                if *extent > 0.0 {
+                    assert!(
+                        origin.y + bounds.size.height <= *extent + 0.5,
+                        "{} extends below the natural page height: {bounds:?} > {}",
+                        element.type_name_debug(),
+                        *extent
+                    );
+                }
+                if render.as_any().is::<scarlet_ui::views::TextRenderObject>() {
+                    let mut paint = PaintContext::new();
+                    render.paint(&mut paint, origin);
+                    for command in paint.commands() {
+                        if let PaintCommand::DrawText { text, .. } = command {
+                            labels.push((text.clone(), bounds));
+                        }
+                    }
+                }
+                // Deliberately oversized demo content is allowed only inside
+                // a real clipping viewport (nested ScrollView/TextView/TabView).
+                if !root && render.clip_bounds(origin).is_some() {
+                    return;
+                }
+            }
+            for child in element.children() {
+                inspect(child.as_ref(), origin, false, width, labels, extent);
+            }
+        }
+        let app = WidgetFactory::new();
+        app.text_value.set("Retained across resize".into());
+        app.slider_value.set(0.73);
+        for width in [375.0, 390.0, 562.0, 860.0, 1200.0] {
+            app.viewport.set(Size::new(width, 600.0));
+            let pages: Vec<(&str, Box<dyn View>, &[&str])> = vec![
+                (
+                    "Overview",
+                    Box::new(app.overview_page()),
+                    &[
+                        "ProgressView",
+                        "Rectangle",
+                        "Divider",
+                        "ScrollView both",
+                        "Split layout",
+                        "SplitView",
+                        "Tab bar",
+                        "TabView",
+                    ],
+                ),
+                (
+                    "Controls",
+                    Box::new(app.controls_page()),
+                    &["Button", "Toggle", "Slider", "ProgressView"],
+                ),
+                (
+                    "Inputs",
+                    Box::new(app.inputs_page()),
+                    &["TextField", "Select", "Slider", "TextView"],
+                ),
+                (
+                    "Display",
+                    Box::new(app.display_page()),
+                    &[
+                        "Text",
+                        "Rectangle",
+                        "Divider",
+                        "Tabler Icons",
+                        "ScrollView both",
+                        "ScrollView x",
+                        "ScrollView y",
+                        "Split layout",
+                        "SplitView",
+                        "Tab bar",
+                        "TabView",
+                    ],
+                ),
+                ("SGFX", Box::new(app.sgfx_page()), &[]),
+            ];
+            for (name, page, row_labels) in pages {
+                let mut root = page.create_element();
+                root.layout(LayoutConstraints::tight(app.content_width(), 180.0));
+                let mut labels = Vec::new();
+                let mut extent = 0.0;
+                inspect(
+                    root.as_ref(),
+                    Point::ZERO,
+                    true,
+                    app.content_width(),
+                    &mut labels,
+                    &mut extent,
+                );
+                let mut previous_bottom = 0.0;
+                for expected in row_labels {
+                    let (_, bounds) = labels
+                        .iter()
+                        .find(|(label, _)| label == expected)
+                        .unwrap_or_else(|| panic!("missing {expected} in {name}: {labels:?}"));
+                    assert!(
+                        (bounds.origin.x - app.page_padding()).abs() < 0.5,
+                        "{name} {width}: {expected} label is not aligned: {bounds:?}"
+                    );
+                    assert!(bounds.origin.y >= previous_bottom);
+                    previous_bottom = bounds.origin.y + bounds.size.height;
+                }
+                assert!(
+                    extent >= previous_bottom + app.page_padding() - 0.5,
+                    "{name}: natural content height must include final row and bottom padding"
+                );
+                println!(
+                    "{name} window={width} page={} extent={extent} labels={labels:?}",
+                    app.content_width()
+                );
+                // A collapsed/short viewport must not collapse natural content.
+                root.layout(LayoutConstraints::tight(app.content_width(), 0.0));
+                let mut after = 0.0;
+                inspect(
+                    root.as_ref(),
+                    Point::ZERO,
+                    true,
+                    app.content_width(),
+                    &mut Vec::new(),
+                    &mut after,
+                );
+                assert!((after - extent).abs() < 0.5);
+                root.layout(LayoutConstraints::tight(app.content_width(), 180.0));
+                root.handle_event(
+                    &Event::Mouse(MouseEvent::Wheel {
+                        delta_x: 0,
+                        delta_y: -10_000,
+                        x: 4,
+                        y: 80,
+                        phase: scarlet_ui::event::WheelPhase::Started,
+                        source: scarlet_ui::event::ScrollSource::Trackpad,
+                    }),
+                    Phase::Target,
+                );
+                let content_bottom = root.children()[0].position().y + extent;
+                assert!(
+                    (content_bottom - 180.0).abs() < 0.5,
+                    "{name} at {width}: final content must be reachable, bottom={content_bottom}"
+                );
+            }
+        }
+        assert_eq!(app.text_value.get(), "Retained across resize");
+        assert_eq!(app.slider_value.get(), 0.73);
+    }
 
     #[test]
     fn sketch_draws_with_stock_controls_and_retains_normalized_strokes() {
