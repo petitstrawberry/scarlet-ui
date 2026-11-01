@@ -49,3 +49,14 @@ export function hasTextOnWhite(image, rectangle, minimumInk) {
   return coloredPixels(image, rectangle, dark).count > minimumInk &&
     coloredPixels(image, rectangle, white).count > rectangle.width * rectangle.height * 0.6;
 }
+
+// Find a reachable document scroll offset with no vertical intersection.
+// A compact hero can remain visible at scrollY=0, so zero is not a pause test.
+export function offscreenScrollTop({top, bottom, viewportHeight, scrollHeight}) {
+  const maximum = Math.max(0, scrollHeight - viewportHeight);
+  const after = Math.ceil(bottom) + 1;
+  if (after <= maximum) return after;
+  const before = Math.floor(top - viewportHeight) - 1;
+  if (before >= 0 && before <= maximum) return before;
+  throw new Error('Cannot scroll the entire specimen outside this viewport');
+}
