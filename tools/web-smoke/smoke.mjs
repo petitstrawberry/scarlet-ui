@@ -5,14 +5,23 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {chromium} from 'playwright';
 import {PNG} from 'pngjs';
-import {browserEnvironment, localRequest, artifactPath, changedPixels, coloredPixels, red, dark} from './smoke-helpers.mjs';
+import {browserEnvironment, localRequest, artifactPath, changedPixels, coloredPixels, red, dark, hasTextOnWhite} from './smoke-helpers.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(process.argv[2] ?? path.join(here, '../../target/web-samples'));
 const output = path.resolve(process.argv[3] ?? path.join(here, 'artifacts'));
 await fs.mkdir(output, {recursive:true});
-const report = {softwareGpu:true, browserSandboxRequested:true, gpuSandboxMayBeAbsent:true, checks:[], errors:[]};
+const report = {softwareGpu:true, browserSandboxRequested:true, gpuSandboxMayBeAbsent:true, checks:[], errors:[], events:[]};
 const errors = report.errors;
+let phase='setup';
+function event(kind, detail) { report.events.push({at:new Date().toISOString(),phase,kind,detail}); }
+function failure(kind, detail) { errors.push(`${kind}: ${detail}`); event(kind,detail); }
+function setPhase(value) { phase=value;event('phase',value); }
+async function bounded(promise, milliseconds, description) {
+  let timer;
+  try { return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(`${description} timed out`)),milliseconds);})]); }
+  finally { clearTimeout(timer); }
+}
 const MIME = {'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.wasm':'application/wasm','.json':'application/json','.txt':'text/plain; charset=utf-8'};
 let browser, context, page;
 const server = http.createServer(async (request, response) => {
@@ -48,6 +57,7 @@ async function untilPixels(name, predicate, timeout=12000) {
   throw Error(`GPU pixel assertion timed out: ${name}`);
 }
 async function ready(route,module) {
+  setPhase(`start ${route}`);
   await page.goto(origin+route,{waitUntil:'domcontentloaded'});
   await page.waitForFunction(() => document.querySelector('#status')?.hidden || document.querySelector('#status')?.classList.contains('error'),null,{timeout:45000});
   assert.equal(await page.locator('#status').isHidden(),true,await page.locator('#message').textContent());
@@ -99,10 +109,38 @@ try {
     errors.push('Blocked unexpected runtime WebSocket');
     socket.close();
   });
+  // Observe native WebGPU loss before wgpu's own callback, without changing
+  // application code or swallowing a rejection. Include destroyed probe devices.
+  await context.addInitScript(() => {
+    if(!globalThis.GPUAdapter) return;
+    const requestDevice=GPUAdapter.prototype.requestDevice;
+    let nextDevice=0;
+    GPUAdapter.prototype.requestDevice=async function(...args) {
+      const device=await requestDevice.apply(this,args);
+      const id=++nextDevice;
+      const log=value=>console.info('SCARLET_GPU_DIAGNOSTIC '+JSON.stringify({device:id,at:new Date().toISOString(),...value}));
+      let explicitlyDestroyed=false;
+      const destroy=device.destroy.bind(device);
+      device.destroy=()=>{explicitlyDestroyed=true;destroy();};
+      log({kind:'device-created',maxBufferSize:device.limits.maxBufferSize,maxTextureDimension2D:device.limits.maxTextureDimension2D});
+      device.lost.then(info=>log({kind:'device-lost',reason:info.reason,message:info.message,expected:explicitlyDestroyed && info.reason==='destroyed'}));
+      device.addEventListener('uncapturederror',event=>log({kind:'uncaptured-error',message:event.error.message}));
+      return device;
+    };
+  });
   page=await context.newPage();
-  page.on('pageerror',error=>errors.push(`pageerror: ${error.message}`));
-  page.on('console',message=>{if(message.type()==='error') errors.push(`console: ${message.text()}`);});
-  page.on('crash',()=>errors.push('Browser page crashed'));
+  page.on('pageerror',error=>failure('pageerror',error.stack??error.message));
+  page.on('console',message=>{
+    if(message.type()==='error') failure('console',message.text());
+    if(message.type()==='info' && message.text().startsWith('SCARLET_GPU_DIAGNOSTIC ')) {
+      const diagnostic=JSON.parse(message.text().slice('SCARLET_GPU_DIAGNOSTIC '.length));
+      event('gpu-diagnostic',diagnostic);
+      if(diagnostic.kind==='device-lost' && !diagnostic.expected && phase!=='teardown')
+        failure('unexpected-device-lost',`${diagnostic.reason}: ${diagnostic.message}`);
+    }
+  });
+  page.on('crash',()=>failure('crash','Browser page crashed'));
+  setPhase('landing');
   await page.goto(origin+'/',{waitUntil:'domcontentloaded'});
   assert.equal(await page.locator('h1').textContent(),'Try ScarletUIin your browser.');
   assert.equal(await page.locator('a[href="./widget-factory/"]').count(),1);
@@ -120,17 +158,46 @@ try {
   await page.waitForFunction(()=>document.querySelector('#gpu-status').textContent.includes('adapter is available'));
   await screenshot('landing');report.checks.push('landing and real adapter/device');
 
+  setPhase('GPU clear and mapped-buffer preflight');
+  await bounded(page.evaluate(async()=>{
+    const adapter=await navigator.gpu.requestAdapter();
+    if(!adapter) throw Error('GPU presentation preflight has no adapter');
+    const device=await adapter.requestDevice();
+    device.addEventListener('uncapturederror',event=>console.error(`Preflight GPU error: ${event.error.message}`));
+    const buffer=device.createBuffer({size:4096,usage:GPUBufferUsage.COPY_SRC,mappedAtCreation:true});
+    new Uint8Array(buffer.getMappedRange()).fill(0);
+    buffer.unmap();buffer.destroy();
+    const canvas=document.createElement('canvas');
+    canvas.id='gpu-presentation-probe';canvas.width=256;canvas.height=128;
+    Object.assign(canvas.style,{position:'fixed',left:'0',top:'0',width:'256px',height:'128px',zIndex:'9999'});
+    document.body.append(canvas);
+    const context=canvas.getContext('webgpu');
+    if(!context) throw Error('GPU presentation preflight has no canvas context');
+    context.configure({device,format:navigator.gpu.getPreferredCanvasFormat(),alphaMode:'opaque'});
+    const encoder=device.createCommandEncoder();
+    const pass=encoder.beginRenderPass({colorAttachments:[{view:context.getCurrentTexture().createView(),clearValue:{r:0.125,g:0.75,b:0.25,a:1},loadOp:'clear',storeOp:'store'}]});
+    pass.end();device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    globalThis.cleanupGpuProbe=()=>{context.unconfigure();device.destroy();canvas.remove();};
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  }),15000,'GPU clear/buffer preflight');
+  await untilPixels('gpu-clear-probe',img=>coloredPixels(img,{x:10,y:10,width:200,height:100},(r,g,b)=>g>r+50 && g>b+50).count>19000);
+  await page.evaluate(()=>{cleanupGpuProbe();delete globalThis.cleanupGpuProbe;});
+  report.checks.push('mapped 4096-byte buffer and visible WebGPU clear-color frame');
+
   await ready('/counter/','scarlet_ui_web_counter');
-  const initial=await untilPixels('counter-0',img=>coloredPixels(img,titleRegion,dark).count>150 && coloredPixels(img,countRegion,dark).count>50);
+  const initial=await untilPixels('counter-0',img=>hasTextOnWhite(img,titleRegion,150) && hasTextOnWhite(img,countRegion,50));
+  setPhase('counter click');
   await page.mouse.click(150,135);await page.mouse.move(500,500);
-  const incremented=await untilPixels('counter-1',img=>changedPixels(initial,img,countRegion)>12);
-  assert(coloredPixels(incremented,titleRegion,dark).count>150,'Counter title lost during partial repaint');
+  const incremented=await untilPixels('counter-1',img=>hasTextOnWhite(img,countRegion,50) && changedPixels(initial,img,countRegion)>12);
+  assert(hasTextOnWhite(incremented,titleRegion,150),'Counter title lost during partial repaint');
+  setPhase('counter click');
   await page.mouse.click(150,135);await page.mouse.move(500,500);
-  await untilPixels('counter-2',img=>changedPixels(incremented,img,countRegion)>12);
+  await untilPixels('counter-2',img=>hasTextOnWhite(img,countRegion,50) && changedPixels(incremented,img,countRegion)>12);
   report.checks.push('two Counter clicks change rendered count glyphs');
 
   await ready('/widget-factory/','scarlet_ui_widget_factory');
-  await untilPixels('factory-overview',img=>coloredPixels(img,sidebarRegion,dark).count>200);
+  await untilPixels('factory-overview',img=>hasTextOnWhite(img,sidebarRegion,200));
   await page.mouse.click(70,88);await page.mouse.move(900,600);
   let controls=await untilPixels('factory-controls',img=>coloredPixels(img,toggleRegion(960),red).count>60);
   const toggle=coloredPixels(controls,toggleRegion(960),red);
@@ -147,17 +214,18 @@ try {
   const resizedToggle=coloredPixels(controls,toggleRegion(800),red);
   await page.mouse.click(resizedToggle.x,resizedToggle.y);await page.mouse.move(750,550);
   const final=await untilPixels('factory-resized-toggle',img=>coloredPixels(img,toggleRegion(800),red).count<10);
-  assert(coloredPixels(final,sidebarRegion,dark).count>200,'Sidebar disappeared after partial repaint');
+  assert(hasTextOnWhite(final,sidebarRegion,200),'Sidebar disappeared after partial repaint');
   report.checks.push('resize preserves state and correct control hit mapping');
   assert.equal(await page.evaluate(async()=> (await import('./pkg/scarlet_ui_widget_factory.js')).runtime_error()),undefined);
   assert.equal(errors.length,0,errors.join('\n'));
   report.passed=true;
 } catch(error) {
-  report.passed=false;report.failure=error.stack??String(error);process.exitCode=1;
+  report.passed=false;report.failure=error.stack??String(error);event('failure',report.failure);process.exitCode=1;
   if(page) {try {await screenshot('failure');} catch {}}
   console.error(report.failure);
 } finally {
-  await fs.writeFile(path.join(output,'report.json'),JSON.stringify(report,null,2)+'\n');
+  setPhase('teardown');
   await context?.close().catch(()=>{});await browser?.close().catch(()=>{});
+  await fs.writeFile(path.join(output,'report.json'),JSON.stringify(report,null,2)+'\n');
   await new Promise(resolve=>server.close(resolve));
 }

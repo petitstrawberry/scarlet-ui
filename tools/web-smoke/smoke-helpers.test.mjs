@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {browserEnvironment, localRequest, artifactPath, changedPixels, coloredPixels, red} from './smoke-helpers.mjs';
+import {browserEnvironment, localRequest, artifactPath, changedPixels, coloredPixels, red, hasTextOnWhite} from './smoke-helpers.mjs';
 
 test('browser environment strips workflow tokens and unknown keys', () => {
   assert.deepEqual(browserEnvironment({PATH:'/bin', HOME:'/tmp/home', DISPLAY:':99', GITHUB_TOKEN:'secret', ACTIONS_RUNTIME_TOKEN:'secret', AWS_SECRET_ACCESS_KEY:'secret', CUSTOM_SECRET:'secret'}), {PATH:'/bin', HOME:'/tmp/home', DISPLAY:':99'});
@@ -20,4 +20,14 @@ test('pixel assertions inspect real RGB changes within the selected area', () =>
   const area={x:0,y:0,width:2,height:1};
   assert.equal(changedPixels(a,b,area),1);
   assert.equal(coloredPixels(b,area,red).count,1);
+});
+
+test('a black unpresented frame never counts as rendered text', () => {
+  const area={x:0,y:0,width:10,height:10};
+  const image={width:10,height:10,data:new Uint8Array(400)};
+  assert.equal(hasTextOnWhite(image,area,5),false);
+  image.data.fill(255);
+  assert.equal(hasTextOnWhite(image,area,5),false);
+  image.data.fill(0,0,40);
+  assert.equal(hasTextOnWhite(image,area,5),true);
 });

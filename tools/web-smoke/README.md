@@ -38,14 +38,18 @@ exception does **not** authorize disabling the browser/renderer sandbox.
 ## Assertions and evidence
 
 - Real WebGPU adapter and device acquisition must succeed; no skip on failure.
-- Counter title/count pixels must render. Two actual clicks must change the
+- A mapped 4096-byte buffer must allocate, and a WebGPU clear-color canvas must
+  actually appear in a screenshot before any ScarletUI app starts.
+- Counter title/count pixels must render against a white background (black or
+  blank frames do not pass). Two actual clicks must change the
   count glyph pixels while retaining the title.
 - Factory sidebar renders; Controls navigation exposes a red toggle. A click
   removes its red pixels, and a shared View menu action restores them.
 - Resize retains toggle state, and another click uses its new rendered position.
 - No page error, console error, crash or public `runtime_error()` is accepted.
 - `artifacts/` always contains `report.json`; successful/failed frame captures,
-  sandbox diagnostics and screenshots are also retained when available.
+  sandbox diagnostics and screenshots are also retained when available. Timestamped
+  phases and full error stacks distinguish primary failures from teardown errors.
 
 These are pixel/state-transition assertions, not OCR or a full visual snapshot
 suite. They establish software WebGPU rendering and interaction, not exact text

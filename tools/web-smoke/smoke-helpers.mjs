@@ -43,3 +43,9 @@ export function coloredPixels(image, rectangle, predicate) {
 }
 export const red = (r, g, b) => r > 170 && g < 95 && b < 105;
 export const dark = (r, g, b) => r < 150 && g < 150 && b < 150;
+
+export const white = (r, g, b) => r > 235 && g > 235 && b > 235;
+export function hasTextOnWhite(image, rectangle, minimumInk) {
+  return coloredPixels(image, rectangle, dark).count > minimumInk &&
+    coloredPixels(image, rectangle, white).count > rectangle.width * rectangle.height * 0.6;
+}
