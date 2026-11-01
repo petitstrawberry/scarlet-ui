@@ -129,6 +129,9 @@ def build(output: Path, profile: str) -> None:
             source = 'web-counter' if route == 'counter' else route
             shutil.copy2(ROOT / 'examples' / source / 'index.html', demo / 'index.html')
             subprocess.run(['wasm-bindgen', str(target / f'{module}.wasm'), '--target', 'web', '--no-typescript', '--out-dir', str(demo / 'pkg')], check=True, cwd=ROOT)
+        subprocess.run(['python3', str(ROOT / 'site/scripts/social-metadata.py'), str(stage)], check=True, cwd=ROOT)
+        subprocess.run(['node', '--test', str(ROOT / 'site/scripts/metadata-built.check.mjs')], check=True, cwd=ROOT,
+                       env={**os.environ, 'SCARLET_SITE_DIR': str(stage)})
         validate(stage)
         manifest = {
             'format': 1,

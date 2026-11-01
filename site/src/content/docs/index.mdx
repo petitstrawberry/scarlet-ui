@@ -1,6 +1,33 @@
 ---
 title: ScarletUI
-description: Cross-platform, declarative UI for Rust.
+description: A declarative UI toolkit for Rust. Build applications for Linux, macOS, Windows, Scarlet, and the web.
+head:
+  - tag: title
+    content: ScarletUI — Cross-platform UI for Rust
+  - tag: meta
+    attrs: { property: 'og:title', content: 'ScarletUI — Cross-platform UI for Rust' }
+  - tag: meta
+    attrs: { property: 'og:type', content: website }
+  - tag: meta
+    attrs: { name: 'twitter:title', content: 'ScarletUI — Cross-platform UI for Rust' }
+  - tag: meta
+    attrs: { name: 'twitter:description', content: 'A declarative UI toolkit for Rust. Build applications for Linux, macOS, Windows, Scarlet, and the web.' }
+  - tag: meta
+    attrs: { name: 'twitter:card', content: summary_large_image }
+  - tag: meta
+    attrs: { property: 'og:image', content: 'https://ui.scarlet-os.org/assets/social-card.png' }
+  - tag: meta
+    attrs: { property: 'og:image:width', content: '1200' }
+  - tag: meta
+    attrs: { property: 'og:image:height', content: '630' }
+  - tag: meta
+    attrs: { property: 'og:image:type', content: 'image/png' }
+  - tag: meta
+    attrs: { property: 'og:image:alt', content: 'ScarletUI — Cross-platform, declarative UI for Rust, with standard tabs, button, toggle, and slider.' }
+  - tag: meta
+    attrs: { name: 'twitter:image', content: 'https://ui.scarlet-os.org/assets/social-card.png' }
+  - tag: meta
+    attrs: { name: 'twitter:image:alt', content: 'ScarletUI — Cross-platform, declarative UI for Rust, with standard tabs, button, toggle, and slider.' }
 template: splash
 prev: false
 next: false
@@ -10,7 +37,8 @@ hero:
     html: |
       <div data-scarlet-specimen data-state="fallback" aria-hidden="true">
         <img src="/assets/widget-factory.png" width="400" height="300" alt="">
-        <canvas id="ui" tabindex="0" inert aria-label="Interactive ScarletUI icon browser"></canvas>
+        <canvas id="ui" tabindex="0" inert aria-label="Interactive ScarletUI sketch canvas"></canvas>
+        <div data-drawing-input aria-hidden="true"></div>
       </div>
   actions:
     - text: Get started

@@ -37,184 +37,305 @@ fn tab_bar_placement_for_selection(selection: usize) -> TabBarPlacement {
     }
 }
 
-/// A compact browser of the same Tabler assets used by native ScarletUI.
-/// Separate from Factory so there is no navigation, menu or idle animation.
+/// A small drawing app using the shared GPU canvas and ordinary UI controls.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Debug, PartialEq)]
+struct SketchStroke {
+    points: Vec<Point>, // normalized paper coordinates, preserved through resize
+    color: [f32; 4],
+    width: f32,
+}
+
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Clone)]
 pub(crate) struct Specimen {
-    category: State<usize>,
-    selected: State<usize>,
-    weight: State<IconWeight>,
+    strokes: State<Vec<SketchStroke>>,
+    color: State<usize>,
+    line_width: State<f32>,
     width: State<f32>,
+    active: std::rc::Rc<std::cell::Cell<bool>>,
+    revision: std::rc::Rc<std::cell::Cell<u64>>,
+    canvas: SgfxCanvasHandle,
+    mesh: scarlet_ui::SgfxMeshHandle,
+    frame: State<Arc<SgfxCanvasFrame>>,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
 impl Specimen {
+    const PAPER_HEIGHT: f32 = 184.0;
+    const COLORS: [[f32; 4]; 4] = [
+        [0.20, 0.24, 0.29, 1.0],
+        [0.72, 0.24, 0.25, 1.0],
+        [0.22, 0.43, 0.66, 1.0],
+        [0.25, 0.51, 0.40, 1.0],
+    ];
+
     pub(crate) fn new() -> Self {
-        Self {
-            category: State::new(StateId::new(120), 0),
-            selected: State::new(StateId::new(121), 0),
-            weight: State::new(StateId::new(122), IconWeight::Normal),
+        let ink = Self::COLORS[0];
+        let ridge = SketchStroke {
+            points: vec![
+                Point::new(0.12, 0.76),
+                Point::new(0.34, 0.29),
+                Point::new(0.50, 0.57),
+                Point::new(0.64, 0.38),
+                Point::new(0.88, 0.76),
+            ],
+            color: ink,
+            width: 2.5,
+        };
+        let horizon = SketchStroke {
+            points: vec![Point::new(0.12, 0.80), Point::new(0.88, 0.80)],
+            color: ink,
+            width: 2.0,
+        };
+        let sun = SketchStroke {
+            points: (0..=40)
+                .map(|i| {
+                    let t = i as f32 * std::f32::consts::TAU / 40.0;
+                    Point::new(0.73 + t.cos() * 0.055, 0.27 + t.sin() * 0.11)
+                })
+                .collect(),
+            color: Self::COLORS[1],
+            width: 2.5,
+        };
+        let app = Self {
+            strokes: State::new(StateId::new(120), vec![ridge, horizon, sun]),
+            color: State::new(StateId::new(121), 0),
+            line_width: State::new(StateId::new(122), 3.0),
             width: State::new(StateId::new(123), 400.0),
-        }
+            active: Default::default(),
+            revision: Default::default(),
+            canvas: SgfxCanvasHandle::new(),
+            mesh: scarlet_ui::SgfxMeshHandle::new(),
+            frame: State::new(
+                StateId::new(124),
+                Arc::new(SgfxCanvasFrame::new(0, Color::WHITE)),
+            ),
+        };
+        app.refresh_frame();
+        app
     }
 
+    fn paper_width(&self) -> f32 {
+        self.width.get() - 24.0
+    }
     fn resize_specimen(&self, width: f32) {
-        // The homepage reserves at least 320 logical pixels; derive geometry
-        // from the real canvas width rather than scaling a fixed screenshot.
         let width = width.max(300.0);
         if self.width.get() != width {
+            self.active.set(false);
             self.width.set(width);
+            self.refresh_frame();
+        }
+    }
+    fn point(&self, x: i32, y: i32) -> Point {
+        Point::new(
+            (x as f32 / self.paper_width()).clamp(0.0, 1.0),
+            (y as f32 / Self::PAPER_HEIGHT).clamp(0.0, 1.0),
+        )
+    }
+    fn begin_stroke(&self, x: i32, y: i32) {
+        let mut strokes = self.strokes.get();
+        if strokes.len() >= 128 || strokes.iter().map(|s| s.points.len()).sum::<usize>() >= 4096 {
+            return;
+        }
+        strokes.push(SketchStroke {
+            points: vec![self.point(x, y)],
+            color: Self::COLORS[self.color.get()],
+            width: self.line_width.get(),
+        });
+        self.active.set(true);
+        self.strokes.set(strokes);
+        self.refresh_frame();
+    }
+    fn extend_stroke(&self, x: i32, y: i32) {
+        if !self.active.get() {
+            return;
+        }
+        let point = self.point(x, y);
+        let mut strokes = self.strokes.get();
+        // Keep total mesh/upload memory bounded even during a long drawing session.
+        if strokes.iter().map(|s| s.points.len()).sum::<usize>() >= 4096 {
+            return;
+        }
+        let Some(stroke) = strokes.last_mut() else {
+            return;
+        };
+        if stroke.points.len() >= 2048 {
+            return;
+        }
+        if let Some(last) = stroke.points.last() {
+            let dx = (point.x - last.x) * self.paper_width();
+            let dy = (point.y - last.y) * Self::PAPER_HEIGHT;
+            if dx * dx + dy * dy < 1.0 {
+                return;
+            }
+        }
+        stroke.points.push(point);
+        self.strokes.set(strokes);
+        self.refresh_frame();
+    }
+    fn clear(&self) {
+        self.active.set(false);
+        self.strokes.set(Vec::new());
+        self.refresh_frame();
+    }
+    fn undo(&self) {
+        self.active.set(false);
+        let mut strokes = self.strokes.get();
+        if strokes.pop().is_some() {
+            self.strokes.set(strokes);
+            self.refresh_frame();
+        }
+    }
+    fn paper_event(&self, event: &Event) -> bool {
+        match event {
+            Event::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x,
+                y,
+                ..
+            }) => {
+                self.begin_stroke(*x, *y);
+                true
+            }
+            Event::Mouse(MouseEvent::Moved { x, y }) if self.active.get() => {
+                self.extend_stroke(*x, *y);
+                true
+            }
+            Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x,
+                y,
+                ..
+            }) => {
+                let active = self.active.get();
+                self.extend_stroke(*x, *y);
+                self.active.set(false);
+                active
+            }
+            Event::Mouse(MouseEvent::ButtonCancelled { .. })
+            | Event::Focus(scarlet_ui::event::FocusEvent::Lost) => self.active.replace(false),
+            _ => false,
         }
     }
 
-    fn tab_width(&self) -> f32 {
-        (self.width.get() - 44.0) / 3.0
-    }
-    fn cell_width(&self) -> f32 {
-        (self.width.get() - 172.0) / 3.0
-    }
-
-    fn icons(&self) -> [(Icon, &'static str); 12] {
-        match self.category.get() {
-            1 => [
-                (Icon::Folder, "Folder"),
-                (Icon::File, "File"),
-                (Icon::FileText, "File text"),
-                (Icon::FolderOpen, "Open folder"),
-                (Icon::Archive, "Archive"),
-                (Icon::FileZip, "ZIP file"),
-                (Icon::Download, "Download"),
-                (Icon::Upload, "Upload"),
-                (Icon::Copy, "Copy"),
-                (Icon::Clipboard, "Clipboard"),
-                (Icon::Trash, "Trash"),
-                (Icon::Link, "Link"),
-            ],
-            2 => [
-                (Icon::Music, "Music"),
-                (Icon::Photo, "Photo"),
-                (Icon::Camera, "Camera"),
-                (Icon::PlayerPlay, "Play"),
-                (Icon::PlayerPause, "Pause"),
-                (Icon::Video, "Video"),
-                (Icon::Microphone, "Microphone"),
-                (Icon::Volume, "Volume"),
-                (Icon::VolumeOff, "Muted"),
-                (Icon::Repeat, "Repeat"),
-                (Icon::FileMusic, "Audio file"),
-                (Icon::Share, "Share"),
-            ],
-            _ => [
-                (Icon::Heart, "Heart"),
-                (Icon::Star, "Star"),
-                (Icon::Bookmark, "Bookmark"),
-                (Icon::Home, "Home"),
-                (Icon::Search, "Search"),
-                (Icon::Settings, "Settings"),
-                (Icon::Bell, "Bell"),
-                (Icon::User, "User"),
-                (Icon::Mail, "Mail"),
-                (Icon::Sun, "Sun"),
-                (Icon::Moon, "Moon"),
-                (Icon::Check, "Check"),
-            ],
+    fn refresh_frame(&self) {
+        let width = self.paper_width();
+        let height = Self::PAPER_HEIGHT;
+        let mut vertices = Vec::new();
+        let mut triangle = |a: Point, b: Point, c: Point, color: [f32; 4]| {
+            for p in [a, b, c] {
+                vertices.push(SgfxCanvasVertex::new(
+                    [2.0 * p.x / width - 1.0, 1.0 - 2.0 * p.y / height, 0.0, 1.0],
+                    color,
+                ));
+            }
+        };
+        for stroke in self.strokes.get() {
+            let points: Vec<Point> = stroke
+                .points
+                .iter()
+                .map(|p| Point::new(p.x * width, p.y * height))
+                .collect();
+            let radius = stroke.width * 0.5;
+            for pair in points.windows(2) {
+                let a = pair[0];
+                let b = pair[1];
+                let dx = b.x - a.x;
+                let dy = b.y - a.y;
+                let length = (dx * dx + dy * dy).sqrt();
+                if length < 0.001 {
+                    continue;
+                }
+                let nx = -dy / length * radius;
+                let ny = dx / length * radius;
+                let corners = [
+                    Point::new(a.x + nx, a.y + ny),
+                    Point::new(a.x - nx, a.y - ny),
+                    Point::new(b.x - nx, b.y - ny),
+                    Point::new(b.x + nx, b.y + ny),
+                ];
+                triangle(corners[0], corners[1], corners[2], stroke.color);
+                triangle(corners[0], corners[2], corners[3], stroke.color);
+            }
+            // Round joins and end caps, including a visible dot for a tap.
+            for p in points {
+                for i in 0..12 {
+                    let a = i as f32 * std::f32::consts::TAU / 12.0;
+                    let b = (i + 1) as f32 * std::f32::consts::TAU / 12.0;
+                    triangle(
+                        p,
+                        Point::new(p.x + a.cos() * radius, p.y + a.sin() * radius),
+                        Point::new(p.x + b.cos() * radius, p.y + b.sin() * radius),
+                        stroke.color,
+                    );
+                }
+            }
         }
+        let revision = self.revision.get().wrapping_add(1);
+        self.revision.set(revision);
+        let mut frame = SgfxCanvasFrame::new(revision, Color::rgb(252u8, 251u8, 248u8))
+            .reference_aspect(width / height);
+        if !vertices.is_empty() {
+            frame = frame.draw(SgfxCanvasDraw::new(
+                SgfxMesh::with_handle(self.mesh, revision, vertices),
+                [
+                    1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+                ],
+            ));
+        }
+        self.frame.set(Arc::new(frame));
     }
 
-    fn tint(selected: bool) -> Color {
-        if selected {
-            Color::rgb(184u8, 45u8, 61u8)
+    fn swatch(&self, index: usize) -> impl View + Clone + use<> {
+        let selected = self.color.clone();
+        let rgba = Self::COLORS[index];
+        let color = Color::rgba_f32(rgba[0], rgba[1], rgba[2], rgba[3]);
+        let button = Button::new("")
+            .background_color(color)
+            .on_click(move || selected.set(index));
+        let button = if self.color.get() == index {
+            button.icon(Icon::Check).icon_color(Color::WHITE)
         } else {
-            Color::rgb(64u8, 65u8, 70u8)
-        }
+            button
+        };
+        button.frame(26.0, 26.0)
     }
-
-    fn fill(selected: bool) -> Color {
-        if selected {
-            Color::rgb(255u8, 239u8, 241u8)
-        } else {
-            Color::CLEAR
-        }
-    }
-
-    fn category_button(&self, index: usize, label: &str) -> impl View + Clone + use<> {
-        let app = self.clone();
-        let selected = self.category.get() == index;
-        Button::new(label)
-            .header_style()
-            .font_size(14.0)
-            .background_color(Self::fill(selected))
-            .text_color(Self::tint(selected))
-            .on_click(move || {
-                app.category.set(index);
-                app.selected.set(0);
-            })
-            .frame(self.tab_width(), 30.0)
-    }
-
-    fn weight_button(&self, weight: IconWeight, label: &str) -> impl View + Clone + use<> {
-        let state = self.weight.clone();
-        let selected = self.weight.get() == weight;
-        Button::new(label)
-            .header_style()
-            .font_size(14.0)
-            .background_color(Self::fill(selected))
-            .text_color(Self::tint(selected))
-            .on_click(move || state.set(weight))
-            .frame(self.tab_width(), 30.0)
-    }
-
-    fn cell(&self, index: usize) -> impl View + Clone + use<> {
-        let state = self.selected.clone();
-        let selected = self.selected.get() == index;
-        Button::icon_only(self.icons()[index].0)
-            .header_style()
-            .icon_size(IconSize::Pixels(28))
-            .icon_weight(self.weight.get())
-            .icon_color(Self::tint(selected))
-            .background_color(Self::fill(selected))
-            .on_click(move || state.set(index))
-            .frame(self.cell_width(), 40.0)
-    }
-
     fn body(&self) -> impl View + Clone + use<> {
-        let (icon, name) = self.icons()[self.selected.get()];
+        let undo = self.clone();
+        let clear = self.clone();
+        let paper = self.clone();
         vstack![
             hstack![
-                self.category_button(0, "Interface"),
-                self.category_button(1, "Files"),
-                self.category_button(2, "Media")
+                Text::new("Sketch").font_size(18.0),
+                Spacer::new(),
+                Button::new("Undo").on_click(move || undo.undo()),
+                Button::new("Clear").on_click(move || clear.clear())
             ]
-            .spacing(6.0),
+            .spacing(8.0),
+            SgfxCanvas::from_state(
+                self.canvas,
+                self.paper_width(),
+                Self::PAPER_HEIGHT,
+                self.frame.clone()
+            )
+            .on_event(move |e| paper.paper_event(e))
+            .border(Color::rgb(224u8, 223u8, 219u8), 1.0),
             hstack![
-                vstack![
-                    hstack![self.cell(0), self.cell(1), self.cell(2)].spacing(6.0),
-                    hstack![self.cell(3), self.cell(4), self.cell(5)].spacing(6.0),
-                    hstack![self.cell(6), self.cell(7), self.cell(8)].spacing(6.0),
-                    hstack![self.cell(9), self.cell(10), self.cell(11)].spacing(6.0),
-                ]
-                .spacing(6.0),
-                vstack![
-                    IconView::new(icon)
-                        .size(IconSize::Pixels(72))
-                        .weight(self.weight.get())
-                        .color(Self::tint(true)),
-                    Text::new(name).font_size(14.0),
-                ]
-                .spacing(12.0)
-                .frame_width(112.0),
-            ]
-            .spacing(16.0),
-            hstack![
-                self.weight_button(IconWeight::Thin, "Thin"),
-                self.weight_button(IconWeight::Normal, "Regular"),
-                self.weight_button(IconWeight::Bold, "Bold")
+                self.swatch(0),
+                self.swatch(1),
+                self.swatch(2),
+                self.swatch(3),
+                Spacer::new(),
+                Slider::new(self.line_width.clone())
+                    .min(1.0)
+                    .max(8.0)
+                    .frame((self.paper_width() - 144.0).max(100.0), 26.0)
             ]
             .spacing(6.0),
         ]
-        .spacing(12.0)
-        .padding(16.0)
+        .spacing(10.0)
+        .padding(12.0)
     }
 }
 
@@ -224,13 +345,12 @@ impl View for Specimen {
         self.body().create_element()
     }
     fn listenables(&self) -> Vec<&dyn Listenable> {
-        vec![&self.category, &self.selected, &self.weight, &self.width]
+        vec![&self.color, &self.line_width, &self.width]
     }
     fn as_any(&self) -> &dyn core::any::Any {
         self
     }
 }
-
 #[cfg(any(target_arch = "wasm32", test))]
 impl Application for Specimen {
     fn on_window_created(
@@ -246,7 +366,7 @@ impl Application for Specimen {
     fn scenes(&self) -> impl Scene {
         WindowGroup::new(
             "specimen",
-            Window::new("Tabler Icons", self.body()).size(Size::new(self.width.get(), 320.0)),
+            Window::new("Sketch", self.body()).size(Size::new(self.width.get(), 300.0)),
         )
     }
 }
@@ -880,165 +1000,207 @@ mod tests {
     use scarlet_ui::views::SplitViewRenderObject;
 
     #[test]
-    fn icon_specimen_selects_categories_icons_and_real_stroke_weights_and_fits_mobile() {
-        use scarlet_ui::renderer::{PaintCommand, PaintContext};
-        use scarlet_ui::{ComponentElement, RenderingPipeline, SceneBuilder};
-        #[derive(Debug)]
-        struct Item {
-            button: bool,
-            bounds: Rect,
-            label: String,
-            icon: Option<Icon>,
-            stroke: f32,
-        }
-        fn items(element: &dyn Element, parent: Point, out: &mut Vec<Item>) {
-            let origin = Point::new(
-                parent.x + element.position().x,
-                parent.y + element.position().y,
-            );
-            if let Some(render) = element.render_object() {
-                let button = render
-                    .as_any()
-                    .is::<scarlet_ui::views::ButtonRenderObject>();
-                if button || render.size() == Size::new(72.0, 72.0) {
-                    let mut paint = PaintContext::new();
-                    render.paint(&mut paint, origin);
-                    let mut item = Item {
-                        button,
-                        bounds: Rect::new(origin, render.size()),
-                        label: String::new(),
-                        icon: None,
-                        stroke: 0.0,
-                    };
-                    for command in paint.commands() {
-                        match command {
-                            PaintCommand::DrawText { text, .. } => item.label = text.clone(),
-                            PaintCommand::DrawIcon { icon, style, .. } => {
-                                item.icon = Some(*icon);
-                                item.stroke = style.get_stroke_width();
-                            }
-                            _ => {}
-                        }
-                    }
-                    out.push(item);
+    fn sketch_draws_with_stock_controls_and_retains_normalized_strokes() {
+        use scarlet_ui::{ComponentElement, RenderingPipeline};
+        fn bounds<T: 'static>(e: &dyn Element, parent: Point, out: &mut Vec<Rect>) {
+            let p = Point::new(parent.x + e.position().x, parent.y + e.position().y);
+            if let Some(r) = e.render_object() {
+                if r.as_any().is::<T>() {
+                    out.push(Rect::new(p, r.size()));
                 }
             }
-            for child in element.children() {
-                items(child.as_ref(), origin, out);
+            for c in e.children() {
+                bounds::<T>(c.as_ref(), p, out);
             }
         }
-        fn snapshot(pipeline: &RenderingPipeline) -> Vec<Item> {
+        fn rects<T: 'static>(p: &RenderingPipeline) -> Vec<Rect> {
             let mut out = Vec::new();
-            items(
-                pipeline.element_tree().root().unwrap(),
-                Point::ZERO,
-                &mut out,
-            );
+            bounds::<T>(p.element_tree().root().unwrap(), Point::ZERO, &mut out);
             out
         }
-        fn click(pipeline: &mut RenderingPipeline, label: &str, icon: Option<Icon>) {
-            let all = snapshot(pipeline);
-            let item = all
-                .iter()
-                .find(|item| item.button && item.label == label && item.icon == icon)
-                .unwrap();
-            let x = (item.bounds.origin.x + item.bounds.size.width * 0.5) as i32;
-            let y = (item.bounds.origin.y + item.bounds.size.height * 0.5) as i32;
-            for event in [
-                MouseEvent::Moved { x, y },
+        fn event(p: &mut RenderingPipeline, event: MouseEvent) {
+            p.handle_event(&Event::Mouse(event));
+            p.render_with_damage();
+        }
+        fn click(p: &mut RenderingPipeline, r: Rect) {
+            let x = (r.origin.x + r.size.width / 2.) as i32;
+            let y = (r.origin.y + r.size.height / 2.) as i32;
+            event(p, MouseEvent::Moved { x, y });
+            event(
+                p,
                 MouseEvent::ButtonPressed {
                     button: MouseButton::Left,
                     x,
                     y,
                     click_count: 1,
                 },
+            );
+            event(
+                p,
                 MouseEvent::ButtonReleased {
                     button: MouseButton::Left,
                     x,
                     y,
                     click_count: 1,
                 },
-            ] {
-                pipeline.handle_event(&Event::Mouse(event));
-                pipeline.render_with_damage();
-            }
-        }
-        let mut app = Specimen::new();
-        let mut pipeline = RenderingPipeline::new();
-        pipeline.set_root(Box::new(ComponentElement::new_with_builder(
-            app.clone(),
-            |app| {
-                let mut builder = SceneBuilder::new();
-                app.scenes().build(&mut builder);
-                builder.into_declarations().remove(0).view
-            },
-        )));
-        assert!(pipeline.layout_initial().menu_bar.is_none());
-        for width in [320.0, 400.0, 460.0] {
-            app.resize_specimen(width);
-            pipeline.resize(Size::new(width, 320.0));
-            pipeline.render_with_damage();
-            let all = snapshot(&pipeline);
-            assert_eq!(all.iter().filter(|item| item.button).count(), 18);
-            for item in &all {
-                let r = item.bounds;
-                assert!(r.size.width > 0.0 && r.size.height > 0.0);
-                assert!(
-                    r.origin.x >= 0.0
-                        && r.origin.y >= 0.0
-                        && r.origin.x + r.size.width <= width
-                        && r.origin.y + r.size.height <= 320.0,
-                    "{width}: {item:?}"
-                );
-            }
-            eprintln!("icon specimen width={width}: {all:?}");
-        }
-        let preview = snapshot(&pipeline)
-            .into_iter()
-            .find(|item| !item.button)
-            .unwrap();
-        assert_eq!(preview.icon, Some(Icon::Heart));
-        assert_eq!(preview.bounds.size, Size::new(72.0, 72.0));
-        click(&mut pipeline, "", Some(Icon::Star));
-        assert_eq!(app.icons()[app.selected.get()].0, Icon::Star);
-        for width in [320.0, 400.0, 460.0] {
-            app.resize_specimen(width);
-            pipeline.resize(Size::new(width, 320.0));
-            pipeline.render_with_damage();
-            assert_eq!(app.icons()[app.selected.get()].0, Icon::Star);
-            assert_eq!(app.weight.get(), IconWeight::Normal);
-            let preview = snapshot(&pipeline)
-                .into_iter()
-                .find(|item| !item.button)
-                .unwrap();
-            assert_eq!(preview.icon, Some(Icon::Star));
-        }
-        click(&mut pipeline, "Files", None);
-        assert_eq!(app.category.get(), 1);
-        assert_eq!(app.selected.get(), 0);
-        click(&mut pipeline, "", Some(Icon::Download));
-        assert_eq!(app.icons()[app.selected.get()].0, Icon::Download);
-        click(&mut pipeline, "Media", None);
-        assert_eq!(app.icons()[app.selected.get()].0, Icon::Music);
-        for (label, weight) in [
-            ("Thin", IconWeight::Thin),
-            ("Bold", IconWeight::Bold),
-            ("Regular", IconWeight::Normal),
-        ] {
-            click(&mut pipeline, label, None);
-            assert_eq!(app.weight.get(), weight);
-            assert!(
-                snapshot(&pipeline)
-                    .iter()
-                    .filter(|item| item.icon.is_some())
-                    .all(|item| item.stroke == weight.stroke_width())
             );
         }
-        click(&mut pipeline, "Interface", None);
-        assert_eq!(app.icons()[app.selected.get()].0, Icon::Heart);
-        app.on_idle();
-        assert_eq!(app.selected.get(), 0);
-        assert_eq!(app.listenables().len(), 4);
+        let app = Specimen::new();
+        let mut p = RenderingPipeline::new();
+        p.set_root(Box::new(ComponentElement::new_with_builder(
+            app.clone(),
+            |app| Box::new(app.body()),
+        )));
+        p.layout_initial();
+        let initial = app.strokes.get();
+        assert_eq!(initial.len(), 3);
+        assert_eq!(app.frame.get().draw_count(), 1);
+        for width in [320., 400., 460.] {
+            app.resize_specimen(width);
+            p.resize(Size::new(width, 300.));
+            p.render_with_damage();
+            let paper = rects::<scarlet_ui::SgfxCanvasRenderObject>(&p)[0];
+            let buttons = rects::<scarlet_ui::views::ButtonRenderObject>(&p);
+            let slider = rects::<scarlet_ui::views::SliderRenderObject>(&p)[0];
+            eprintln!(
+                "sketch width={width}: paper={paper:?}, buttons={buttons:?}, slider={slider:?}"
+            );
+            for r in buttons.into_iter().chain([paper, slider]) {
+                assert!(
+                    r.origin.x >= 0.
+                        && r.origin.y >= 0.
+                        && r.origin.x + r.size.width <= width + 0.1
+                        && r.origin.y + r.size.height <= 300.1,
+                    "{r:?}"
+                );
+            }
+            assert_eq!(app.strokes.get(), initial);
+        }
+        let buttons = rects::<scarlet_ui::views::ButtonRenderObject>(&p);
+        click(&mut p, buttons[4]);
+        assert_eq!(app.color.get(), 2);
+        let slider = rects::<scarlet_ui::views::SliderRenderObject>(&p)[0];
+        let x = (slider.origin.x + slider.size.width * 0.85) as i32;
+        let y = (slider.origin.y + slider.size.height / 2.) as i32;
+        event(
+            &mut p,
+            MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x,
+                y,
+                click_count: 1,
+            },
+        );
+        event(
+            &mut p,
+            MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x,
+                y,
+                click_count: 1,
+            },
+        );
+        assert!(app.line_width.get() > 5.);
+        let paper = rects::<scarlet_ui::SgfxCanvasRenderObject>(&p)[0];
+        let x = paper.origin.x as i32 + 35;
+        let y = paper.origin.y as i32 + 40;
+        event(
+            &mut p,
+            MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x,
+                y,
+                click_count: 1,
+            },
+        );
+        assert!(app.active.get());
+        event(
+            &mut p,
+            MouseEvent::Moved {
+                x: x + 35,
+                y: y + 20,
+            },
+        );
+        event(
+            &mut p,
+            MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 500,
+                y: y + 30,
+                click_count: 1,
+            },
+        );
+        assert!(!app.active.get());
+        let drawn = app.strokes.get();
+        assert_eq!(drawn.len(), 4);
+        assert_eq!(drawn[3].color, Specimen::COLORS[2]);
+        assert_eq!(drawn[3].width, app.line_width.get());
+        assert!(drawn[3].points.len() >= 3);
+        assert_eq!(drawn[3].points.last().unwrap().x, 1.);
+        app.resize_specimen(320.);
+        p.resize(Size::new(320., 300.));
+        p.render_with_damage();
+        assert_eq!(app.strokes.get(), drawn);
+        let paper = rects::<scarlet_ui::SgfxCanvasRenderObject>(&p)[0];
+        let x = paper.origin.x as i32 + 20;
+        let y = paper.origin.y as i32 + 20;
+        event(
+            &mut p,
+            MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x,
+                y,
+                click_count: 1,
+            },
+        );
+        event(
+            &mut p,
+            MouseEvent::ButtonCancelled {
+                button: MouseButton::Left,
+                x,
+                y,
+            },
+        );
+        assert!(!app.active.get());
+        let canceled = app.strokes.get();
+        event(
+            &mut p,
+            MouseEvent::Moved {
+                x: x + 70,
+                y: y + 20,
+            },
+        );
+        assert_eq!(app.strokes.get(), canceled);
+        let undo = rects::<scarlet_ui::views::ButtonRenderObject>(&p)[0];
+        click(&mut p, undo);
+        assert_eq!(app.strokes.get(), drawn);
+        let clear = rects::<scarlet_ui::views::ButtonRenderObject>(&p)[1];
+        click(&mut p, clear);
+        assert!(app.strokes.get().is_empty());
+        assert_eq!(app.frame.get().draw_count(), 0);
+        app.undo();
+        assert!(app.strokes.get().is_empty());
+    }
+
+    #[test]
+    fn sketch_total_point_budget_recovers_after_clear() {
+        let app = Specimen::new();
+        app.strokes.set(vec![SketchStroke {
+            points: vec![Point::new(0.5, 0.5); 4096],
+            color: Specimen::COLORS[0],
+            width: 3.0,
+        }]);
+        app.begin_stroke(10, 10);
+        assert!(!app.active.get());
+        assert_eq!(app.strokes.get().len(), 1);
+        app.active.set(true);
+        app.extend_stroke(20, 20);
+        assert_eq!(app.strokes.get()[0].points.len(), 4096);
+        app.clear();
+        app.begin_stroke(10, 10);
+        assert!(app.active.get());
+        assert_eq!(app.strokes.get()[0].points.len(), 1);
+        assert_eq!(app.frame.get().draw_count(), 1);
     }
 
     #[test]
