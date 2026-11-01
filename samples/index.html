@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Try ScarletUI's shared Rust widgets and SGFX rendering in your browser with WebGPU.">
+  <title>Samples · ScarletUI</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./capability.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="./" aria-label="ScarletUI samples"><span class="brand-mark" aria-hidden="true">S</span>ScarletUI <span class="section-name">/ Samples</span></a>
+    <a class="source-link" href="https://github.com/petitstrawberry/scarlet-ui">GitHub <span aria-hidden="true">↗</span></a>
+  </header>
+  <main>
+    <section class="intro" aria-labelledby="page-title">
+      <p class="eyebrow">RUST VIEWS · WEBGPU RENDERING</p>
+      <h1 id="page-title">Try ScarletUI<br>in your browser.</h1>
+      <p class="lead">The same widgets, layout and SGFX renderer as the native app.<br class="desktop-break"> Choose a sample and interact with it live.</p>
+    </section>
+    <section class="samples" aria-label="Live samples">
+      <article class="sample-card featured">
+        <div class="card-top"><span class="sample-number">01</span><span class="tag">Full showcase</span></div>
+        <h2>Widget Factory</h2>
+        <p>Explore controls, text editors, menus and scrolling. See the SGFX renderer in action with an animated 3D cube.</p>
+        <ul class="features" aria-label="Widget Factory features"><li>Interactive widgets</li><li>Shared menus</li><li>3D canvas</li></ul>
+        <div class="card-actions"><a class="launch primary" href="./widget-factory/">Open Widget Factory <span aria-hidden="true">→</span></a><a class="code-link" href="https://github.com/petitstrawberry/scarlet-ui/tree/feat/webgpu-wasm-20261101/examples/widget-factory">Source ↗</a></div>
+      </article>
+      <article class="sample-card">
+        <div class="card-top"><span class="sample-number">02</span><span class="tag">Start small</span></div>
+        <h2>Counter</h2>
+        <p>A focused example of text, buttons and reactive state. A small starting point for understanding the browser backend.</p>
+        <ul class="features" aria-label="Counter features"><li>Text + Button</li><li>Reactive state</li></ul>
+        <div class="card-actions"><a class="launch" href="./counter/">Open Counter <span aria-hidden="true">→</span></a><a class="code-link" href="https://github.com/petitstrawberry/scarlet-ui/tree/feat/webgpu-wasm-20261101/examples/web-counter">Source ↗</a></div>
+      </article>
+    </section>
+    <section class="compatibility" aria-labelledby="compatibility-title">
+      <div><h2 id="compatibility-title">Before you launch</h2><p>Samples need JavaScript, HTTPS (or localhost), and an available WebGPU adapter. Browser and device support varies; there is no WebGL or Canvas2D fallback.</p><p id="gpu-status" role="status" aria-live="polite">Check this browser before opening a sample.</p><noscript><p class="notice">JavaScript is disabled. Enable it to check WebGPU support and run the samples.</p></noscript></div>
+      <button id="check-gpu" type="button">Check WebGPU</button>
+    </section>
+    <aside class="note"><span class="note-label">Experimental backend</span><p>Basic pointer, keyboard and wheel input are supported. IME composition, clipboard integration and an accessibility tree for canvas widgets are not yet available. The landing page itself uses ordinary accessible HTML.</p></aside>
+  </main>
+  <footer><p>ScarletUI · Declarative UI for Rust</p><a href="https://github.com/petitstrawberry/scarlet-ui/blob/feat/webgpu-wasm-20261101/samples/README.md">Build & run locally ↗</a></footer>
+</body>
+</html>

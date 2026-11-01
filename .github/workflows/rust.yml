@@ -69,6 +69,36 @@ jobs:
       # The destination crate's preview cfg must be enabled to test registration.
       run: cargo test --locked -p scarlet-ui-macros --features preview --doc
 
+  native:
+    name: Native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2025-12-31
+      CARGO_TARGET_DIR: target/native
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install upstream Rust for native portability checks
+        # Pass the pinned name directly so the command works in bash and pwsh.
+        run: rustup toolchain install nightly-2025-12-31 --profile minimal
+      - name: Show the selected compiler
+        run: |
+          rustc -vV
+          rustc --print sysroot
+      - name: Check SGFX core source identity
+        run: cargo tree --locked -p scarlet-ui --no-default-features --features std,platform-winit --invert sgfx-core
+      - name: Build native winit integration
+        run: cargo build --locked --verbose -p scarlet-ui --no-default-features --features std,platform-winit
+      - name: Run shared host tests
+        # Uses each OS's font discovery backend; no Linux fontconfig setup.
+        # These are unit/integration/doc tests, not an interactive GPU smoke test.
+        run: cargo test --locked --verbose --workspace --exclude scarlet-ui-platform-sws
+      - name: Test preview macro registration examples
+        run: cargo test --locked -p scarlet-ui-macros --features preview --doc
+
   scarlet:
     runs-on: ubuntu-latest
     strategy:

@@ -1,0 +1,125 @@
+name: Web samples
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    # The scoped preview branch permits the explicitly requested pre-merge site.
+    branches: ["main", "feat/webgpu-wasm-20261101"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust and WebAssembly target
+        run: rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+      - name: Install matching JavaScript binding generator
+        run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
+      - name: Test package validation and capability states
+        run: |
+          python3 tools/test_web_samples.py
+          node --test samples/capability.test.cjs
+      - name: Build and validate the static samples
+        run: python3 tools/build-web-samples.py
+      - name: Save reviewable static output
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-samples
+          path: target/web-samples
+          if-no-files-found: error
+      - name: Prepare Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: target/web-samples
+
+  browser-smoke:
+    name: Isolated software WebGPU smoke
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-samples
+          path: target/web-samples
+      - name: Install pinned smoke dependencies
+        working-directory: tools/web-smoke
+        run: npm ci --ignore-scripts
+      - name: Install isolated test browser
+        working-directory: tools/web-smoke
+        run: npx playwright install --with-deps chromium
+      - name: Test routing, environment and pixel helpers
+        working-directory: tools/web-smoke
+        run: npm test
+      - name: Render and interact with localhost samples
+        # Explicitly approved ephemeral software-GPU test. Renderer sandbox must
+        # stay enabled; GPU-process isolation may be absent. No secrets or writes.
+        working-directory: tools/web-smoke
+        run: npm run smoke
+      - name: Save screenshots, sandbox diagnostics and failure report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: software-webgpu-smoke
+          path: tools/web-smoke/artifacts
+          if-no-files-found: warn
+
+  deploy:
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.repository == 'petitstrawberry/scarlet-ui' &&
+      (github.ref == 'refs/heads/main' ||
+      (github.ref == 'refs/heads/feat/webgpu-wasm-20261101' &&
+      (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[deploy samples]'))))
+    needs: [package, browser-smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Read the configured Pages site
+        id: pages
+        uses: actions/configure-pages@v5
+      - name: Verify the approved project site destination
+        env:
+          PAGE_ORIGIN: ${{ steps.pages.outputs.origin }}
+          PAGE_BASE: ${{ steps.pages.outputs.base_path }}
+          PAGE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          assert os.environ["PAGE_ORIGIN"] == "https://petitstrawberry.github.io", "Unexpected Pages host; review before deploying"
+          assert os.environ["PAGE_BASE"].rstrip("/") == "/scarlet-ui", "Unexpected Pages base path"
+          print("Verified Pages destination:", os.environ["PAGE_URL"])
+          PYTHON
+      - name: Deploy the verified artifact
+        id: deployment
+        uses: actions/deploy-pages@v4
