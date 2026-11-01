@@ -45,8 +45,19 @@ Pages settings/environment permissions; building or opening a PR does not by
 itself make the site live. Do not replace an existing documentation deployment
 without deciding how its routes will coexist.
 
-The package uses no root-absolute asset paths, so a project Pages address under
-`/scarlet-ui/` works unchanged. `.nojekyll` is included. Verify the published HTTPS
+The approved production destination is **https://ui.scarlet-os.org/**, with
+Counter at `/counter/` and Widget Factory at `/widget-factory/`. The owner
+configures DNS (`ui` CNAME to `petitstrawberry.github.io`) and the repository's
+Pages custom domain; the workflow does not change DNS, domain settings or
+HTTPS enforcement. Enable HTTPS enforcement in Pages when the certificate is
+ready. The deployment guard accepts only this custom hostname at the root,
+not the inherited `ichigo.dev/scarlet-ui` destination. It validates GitHub's
+reported URL, publishes only an HTTPS environment link, and checks TLS before
+deploying (a 404 is normal before the first publish). HTTP in API metadata is
+not treated as permission to serve the app insecurely.
+
+The package still uses no root-absolute asset paths, so local previews or other
+packaging consumers can use a project prefix such as `/scarlet-ui/` unchanged. `.nojekyll` is included. Verify the published HTTPS
 landing, both sample routes, and JavaScript/WASM content types after deployment.
 No browser security flag is needed or recommended for visiting the page; if an
 adapter is unavailable, the sample reports that limitation instead.
@@ -58,6 +69,7 @@ is present. Both fields are `null` for a source archive or unavailable Git.
 
 ```sh
 python3 tools/test_web_samples.py
+python3 tools/test_pages_destination.py
 node --test samples/capability.test.cjs
 ```
 
@@ -70,7 +82,7 @@ a browser or GPU. They are not render tests.
 - Capability check with an available adapter, no adapter, missing WebGPU API,
   insecure context and JavaScript disabled. A positive adapter check does not
   claim hardware acceleration or guarantee later device initialization.
-- Launch each app from a project-prefix path, check relative JS/WASM requests
+- Launch each app from both the site root and a project-prefix preview, check relative JS/WASM requests
   and startup error messages, then use browser Back to return to the samples.
 - In a compatible environment: Counter clicks and Widget Factory controls,
   menu actions, resize and DPR changes. Compiling a package alone does not

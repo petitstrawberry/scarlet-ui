@@ -29,6 +29,7 @@ jobs:
       - name: Test package validation and capability states
         run: |
           python3 tools/test_web_samples.py
+          python3 tools/test_pages_destination.py
           node --test samples/capability.test.cjs
       - name: Build and validate the static samples
         run: python3 tools/build-web-samples.py
@@ -108,23 +109,47 @@ jobs:
       cancel-in-progress: false
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.destination.outputs.page_url }}
     steps:
       - name: Read the configured Pages site
         id: pages
         uses: actions/configure-pages@v5
-      - name: Verify the approved project site destination
+      - name: Verify the approved custom site destination
+        id: destination
         env:
           PAGE_ORIGIN: ${{ steps.pages.outputs.origin }}
           PAGE_BASE: ${{ steps.pages.outputs.base_path }}
           PAGE_URL: ${{ steps.pages.outputs.base_url }}
         run: |
           python3 - <<'PYTHON'
+          # BEGIN TESTED DESTINATION GUARD
           import os
-          assert os.environ["PAGE_ORIGIN"] == "https://petitstrawberry.github.io", "Unexpected Pages host; review before deploying"
-          assert os.environ["PAGE_BASE"].rstrip("/") == "/scarlet-ui", "Unexpected Pages base path"
-          print("Verified Pages destination:", os.environ["PAGE_URL"])
+          from urllib.parse import urlsplit
+
+          origin = os.environ["PAGE_ORIGIN"]
+          base = os.environ["PAGE_BASE"]
+          url = os.environ["PAGE_URL"]
+          allowed_origins = {"https://ui.scarlet-os.org", "http://ui.scarlet-os.org"}
+          # GitHub's API can report http metadata even when TLS is available.
+          # Accept only this exact hostname, and never publish an HTTP link.
+          if origin not in allowed_origins or base not in ("", "/"):
+              raise ValueError("Unexpected Pages destination; expected ui.scarlet-os.org at site root")
+          if url not in (origin, origin + "/"):
+              raise ValueError("Pages URL does not match the approved root destination")
+          if urlsplit(url).netloc != "ui.scarlet-os.org":
+              raise ValueError("Unexpected Pages authority")
+          canonical_url = "https://ui.scarlet-os.org/"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"page_url={canonical_url}\n")
+          print("Verified Pages destination:", canonical_url)
+          # END TESTED DESTINATION GUARD
           PYTHON
+      - name: Verify HTTPS is available before publishing
+        # A first deployment can return 404. TLS/DNS must still succeed. Do not
+        # follow redirects to another host or bypass certificate verification.
+        env:
+          PAGE_URL: ${{ steps.destination.outputs.page_url }}
+        run: curl --proto '=https' --tlsv1.2 --head --silent --show-error --max-time 30 --output /dev/null "$PAGE_URL"
       - name: Deploy the verified artifact
         id: deployment
         uses: actions/deploy-pages@v4
