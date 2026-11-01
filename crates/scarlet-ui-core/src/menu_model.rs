@@ -1,7 +1,7 @@
 //! Menu model definitions for application menu bars.
 
 use crate::os::{Mutex, spawn_detached};
-use crate::views::{MenuBar, MenuItem};
+use crate::views::{MenuAction, MenuBar, MenuItem, MenuItemContent};
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -25,6 +25,7 @@ pub struct MenuItemModel {
     id: String,
     title: String,
     enabled: bool,
+    checked: bool,
     shortcut: Option<String>,
     children: Vec<MenuEntry>,
     on_activate: Option<MenuCallback>,
@@ -36,6 +37,7 @@ impl MenuItemModel {
             id: id.into(),
             title: title.into(),
             enabled: true,
+            checked: false,
             shortcut: None,
             children: Vec::new(),
             on_activate: None,
@@ -56,6 +58,16 @@ impl MenuItemModel {
     pub fn shortcut(mut self, shortcut: impl Into<String>) -> Self {
         self.shortcut = Some(shortcut.into());
         self
+    }
+
+    /// Set the checked state shown by native and in-process menus.
+    pub fn checked(mut self, checked: bool) -> Self {
+        self.checked = checked;
+        self
+    }
+
+    pub fn checked_value(&self) -> bool {
+        self.checked
     }
 
     pub fn children(mut self, children: Vec<MenuEntry>) -> Self {
@@ -86,6 +98,31 @@ impl MenuItemModel {
 
     pub fn children_value(&self) -> &[MenuEntry] {
         &self.children
+    }
+
+    /// Build the existing shared menu row, preserving its action and metadata.
+    /// Submenu opening is owned by the caller using [`Self::children_value`].
+    /// Commands follow the same deferred execution policy as native menu events.
+    pub fn to_menu_content(&self) -> MenuItemContent {
+        let mut content = MenuItemContent::new(self.title())
+            .enabled(self.enabled)
+            .checked(self.checked);
+        if let Some(shortcut) = &self.shortcut {
+            content = content.shortcut(shortcut.clone());
+        }
+        if !self.children.is_empty() {
+            content = content.action(MenuAction::Submenu);
+        }
+        if self.enabled {
+            if let Some(callback) = &self.on_activate {
+                let callback = Arc::clone(callback);
+                content = content.callback(move || {
+                    let callback = Arc::clone(&callback);
+                    spawn_detached(move || callback());
+                });
+            }
+        }
+        content
     }
 }
 
@@ -130,7 +167,19 @@ impl MenuBarModel {
         let items = self
             .items
             .iter()
-            .map(|item| MenuItem::new(item.title()))
+            .map(|item| {
+                let mut view = MenuItem::new(item.title());
+                if item.enabled && item.children.is_empty() {
+                    if let Some(callback) = &item.on_activate {
+                        let callback = Arc::clone(callback);
+                        view = view.on_click(move || {
+                            let callback = Arc::clone(&callback);
+                            spawn_detached(move || callback());
+                        });
+                    }
+                }
+                view
+            })
             .collect();
         MenuBar::new(items)
     }
@@ -150,6 +199,12 @@ fn write_menu_item_json(out: &mut String, item: &MenuItemModel) {
     push_json_string(out, item.title());
     out.push_str("\",\"enabled\":");
     out.push_str(if item.enabled_value() {
+        "true"
+    } else {
+        "false"
+    });
+    out.push_str(",\"checked\":");
+    out.push_str(if item.checked_value() {
         "true"
     } else {
         "false"
@@ -251,6 +306,9 @@ fn collect_callbacks(
     item: &MenuItemModel,
     registry: &mut BTreeMap<MenuCallbackKey, MenuCallback>,
 ) {
+    if !item.enabled_value() {
+        return;
+    }
     if let Some(callback) = &item.on_activate {
         registry.insert((window_id, item.id().to_string()), callback.clone());
     }
@@ -282,6 +340,61 @@ mod tests {
 
         assert!(json.contains("\"title\":\"Open…\""));
         assert!(json.contains("\"shortcut\":\"Ctrl+O\""));
+    }
+
+    #[test]
+    fn menu_conversion_preserves_checked_disabled_shortcut_and_submenu_metadata() {
+        let item = MenuItemModel::new("toggle", "Visible")
+            .checked(true)
+            .enabled(false)
+            .shortcut("Ctrl+V");
+        let row = item.to_menu_content();
+        assert!(row.checked_value());
+        assert!(!row.enabled_value());
+        assert_eq!(row.label(), "Visible");
+        assert_eq!(row.shortcut_value(), Some("Ctrl+V"));
+        let parent = MenuItemModel::new("view", "View")
+            .children(vec![MenuEntry::Item(item), MenuEntry::Separator]);
+        assert!(matches!(
+            parent.to_menu_content().action_value(),
+            crate::views::MenuAction::Submenu
+        ));
+        let json = MenuBarModel::new(vec![parent]).to_json();
+        assert!(json.contains("\"enabled\":false,\"checked\":true,\"shortcut\":\"Ctrl+V\""));
+        assert!(json.contains("{\"separator\":true}"));
+    }
+
+    #[test]
+    fn converted_cloned_command_invokes_original_callback_deferred() {
+        let (sent, received) = std::sync::mpsc::channel();
+        let item = MenuItemModel::new("run", "Run").on_activate(Arc::new(move || {
+            sent.send(()).unwrap();
+        }));
+        let row = item.to_menu_content().clone();
+        row.get_callback().unwrap()();
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("original callback invoked");
+    }
+
+    #[test]
+    fn disabled_menu_commands_and_descendants_are_not_registered() {
+        let window_id = 0xfeee;
+        let callback: super::MenuCallback = Arc::new(|| panic!("disabled command ran"));
+        let menu = MenuBarModel::new(vec![
+            MenuItemModel::new("disabled", "Disabled")
+                .enabled(false)
+                .on_activate(callback.clone()),
+            MenuItemModel::new("parent", "Parent")
+                .enabled(false)
+                .children(vec![MenuEntry::Item(
+                    MenuItemModel::new("child", "Child").on_activate(callback),
+                )]),
+        ]);
+        register_menu_callbacks(window_id, &menu);
+        assert!(!invoke_menu_callback(window_id, "disabled"));
+        assert!(!invoke_menu_callback(window_id, "child"));
+        unregister_menu_callbacks(window_id);
     }
 
     #[test]

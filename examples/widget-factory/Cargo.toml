@@ -3,11 +3,22 @@ name = "scarlet-ui-widget-factory"
 version = "1.0.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib"]
+
 [dependencies]
 scarlet-ui-macros = { path = "../../crates/scarlet-ui-macros" }
 
 [target.'cfg(target_os = "scarlet")'.dependencies]
 scarlet-ui = { path = "../../crates/scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
 
-[target.'cfg(not(target_os = "scarlet"))'.dependencies]
+[target.'cfg(all(not(target_os = "scarlet"), not(target_arch = "wasm32")))'.dependencies]
 scarlet-ui = { path = "../../crates/scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+scarlet-ui = { path = "../../crates/scarlet-ui", default-features = false, features = ["std", "platform-web"] }
+web-time = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement"] }

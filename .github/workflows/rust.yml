@@ -92,3 +92,22 @@ jobs:
         run: cargo tree --locked -p scarlet-ui --no-default-features --features std,platform-sws --target '${{ matrix.target }}' --invert sgfx-core
       - name: Check std-enabled SWS integration
         run: cargo check --locked -p scarlet-ui --no-default-features --features std,platform-sws --target '${{ matrix.target }}'
+
+  wasm:
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      CARGO_TARGET_DIR: target/wasm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install upstream Rust with the WebAssembly target
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
+      - name: Show the selected compiler
+        run: |
+          rustc -vV
+          rustc --print sysroot
+      - name: Build the WebGPU counter for WebAssembly
+        # Compile coverage only; this job does not run a browser or GPU adapter.
+        run: cargo build --locked --verbose --target wasm32-unknown-unknown --lib -p scarlet-ui-web-counter
+      - name: Build Widget Factory for WebAssembly
+        run: cargo build --locked --verbose --target wasm32-unknown-unknown --lib -p scarlet-ui-widget-factory

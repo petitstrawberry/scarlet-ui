@@ -1,0 +1,15 @@
+[package]
+name = "scarlet-ui-platform-web"
+version = "1.0.0"
+edition = "2024"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+scarlet-ui-core = { path = "../scarlet-ui-core" }
+scarlet-ui-renderer-sgfx = { path = "../scarlet-ui-renderer-sgfx" }
+sgfx-backend-wgpu = { git = "https://github.com/petitstrawberry/sgfx", rev = "22e3d283046543239d2f3606dea73d9fcac7abad" }
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement", "HtmlElement", "Element", "DomRect", "PointerEvent", "KeyboardEvent", "WheelEvent", "Event", "AddEventListenerOptions", "EventTarget", "console"] }
+gloo-render = "0.2"
+
+[dev-dependencies]
+scarlet-ui-core = { path = "../scarlet-ui-core" }

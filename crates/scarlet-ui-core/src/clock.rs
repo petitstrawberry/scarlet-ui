@@ -1,6 +1,6 @@
 //! Monotonic-clock compatibility for host and legacy Scarlet builds.
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
 pub(crate) use std::time::Instant;
 
 /// Legacy Scarlet standard-library builds do not expose a monotonic instant.
@@ -20,3 +20,6 @@ impl Instant {
         core::time::Duration::ZERO
     }
 }
+
+#[cfg(all(feature = "std", target_arch = "wasm32"))]
+pub(crate) use web_time::Instant;

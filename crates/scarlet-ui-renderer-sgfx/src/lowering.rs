@@ -5,6 +5,10 @@ mod shadow_cache;
 use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
+use std::time::Instant;
+#[cfg(all(feature = "std", target_arch = "wasm32"))]
+use web_time::Instant;
 
 use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::color::Color as UiColor;
@@ -851,7 +855,7 @@ impl SgfxPaintEncoder {
         render_areas: &[DamageRect],
     ) -> core::result::Result<(), FrameError<E::Error>> {
         #[cfg(feature = "std")]
-        let started = scarlet_ui_core::debug::frame_log_enabled().then(std::time::Instant::now);
+        let started = scarlet_ui_core::debug::frame_log_enabled().then(Instant::now);
         let render_areas = self.validate_render_areas(render_areas)?;
         let target = *self.targets.get(slot).ok_or(Error::InvalidFrame)?;
         if let Some(source_slot) = copy_from {
