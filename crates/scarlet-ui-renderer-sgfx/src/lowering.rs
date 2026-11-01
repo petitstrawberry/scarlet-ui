@@ -5,6 +5,10 @@ mod shadow_cache;
 use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
+use std::time::Instant;
+#[cfg(all(feature = "std", target_arch = "wasm32"))]
+use web_time::Instant;
 
 use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::color::Color as UiColor;
@@ -851,7 +855,7 @@ impl SgfxPaintEncoder {
         render_areas: &[DamageRect],
     ) -> core::result::Result<(), FrameError<E::Error>> {
         #[cfg(feature = "std")]
-        let started = scarlet_ui_core::debug::frame_log_enabled().then(std::time::Instant::now);
+        let started = scarlet_ui_core::debug::frame_log_enabled().then(Instant::now);
         let render_areas = self.validate_render_areas(render_areas)?;
         let target = *self.targets.get(slot).ok_or(Error::InvalidFrame)?;
         if let Some(source_slot) = copy_from {
@@ -3245,6 +3249,19 @@ fn truncated(value: f32) -> f32 {
     (value as i32) as f32
 }
 
+// Every text-rendering fixture initializes the same stack before rendering.
+// Once prevents parallel tests from replacing it and invalidating warm caches.
+#[cfg(test)]
+fn ensure_test_font() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        scarlet_ui_core::graphics::set_default_font(include_bytes!(
+            "../../../examples/web-counter/assets/DejaVuSans.ttf"
+        ))
+        .expect("the bundled test font must be valid");
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5034,6 +5051,7 @@ mod tests {
 
     #[test]
     fn failed_text_upload_is_retried_through_encode_frame() {
+        ensure_test_font();
         let mut paint = PaintContext::new();
         paint.draw_text(Point::new(4.0, 24.0), "A", UiColor::WHITE, 16.0);
         assert_encode_frame_texture_upload_retry(&paint);

@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/scarlet-ui-platform-web",
+    "examples/web-counter",
     "crates/scarlet-scroll-motion",
     "crates/scarlet-ui",
     "crates/scarlet-ui-core",

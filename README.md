@@ -147,6 +147,14 @@ Frame admission, safe discard, and application recovery follow the
 reports transient capacity pressure, rejected frames, and recovery-required GPU
 failures separately; a discarded frame is never reported as presented.
 
+## Browser Samples
+
+The experimental WebGPU backend runs the counter and the shared Widget Factory
+in a browser, including the SGFX canvas and shared menus. See the
+[Samples build and run guide](samples/README.md) for a release-mode static
+package, browser requirements and current limitations. The existing native
+Widget Factory uses the same view definitions.
+
 ## Live Preview
 
 ScarletUI preview is a native desktop development tool. It is separate from the

@@ -367,6 +367,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -706,6 +716,16 @@ dependencies = [
  "khronos_api",
  "log",
  "xml-rs",
+]
+
+[[package]]
+name = "gloo-render"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56008b6744713a8e8d98ac3dcb7d06543d5662358c9c805b4ce2167ad4649833"
+dependencies = [
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
@@ -1891,6 +1911,7 @@ dependencies = [
  "scarlet-ui-core",
  "scarlet-ui-macros",
  "scarlet-ui-platform-sws",
+ "scarlet-ui-platform-web",
  "scarlet-ui-platform-winit",
  "syn 2.0.119",
 ]
@@ -1915,6 +1936,8 @@ dependencies = [
  "syn 2.0.119",
  "unicode-script",
  "unicode-segmentation",
+ "wasm-bindgen-futures",
+ "web-time",
  "zune-jpeg",
 ]
 
@@ -1947,6 +1970,18 @@ dependencies = [
  "sgfx",
  "sws-client",
  "sws-protocol",
+]
+
+[[package]]
+name = "scarlet-ui-platform-web"
+version = "1.0.0"
+dependencies = [
+ "gloo-render",
+ "scarlet-ui-core",
+ "scarlet-ui-renderer-sgfx",
+ "sgfx-backend-wgpu 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=22e3d283046543239d2f3606dea73d9fcac7abad)",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
@@ -1992,6 +2027,7 @@ dependencies = [
  "libm",
  "scarlet-ui-core",
  "sgfx-core",
+ "web-time",
 ]
 
 [[package]]
@@ -2006,11 +2042,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-ui-web-counter"
+version = "1.0.0"
+dependencies = [
+ "console_error_panic_hook",
+ "scarlet-ui",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "scarlet-ui-widget-factory"
 version = "1.0.0"
 dependencies = [
+ "console_error_panic_hook",
  "scarlet-ui",
  "scarlet-ui-macros",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]
@@ -2099,7 +2151,7 @@ dependencies = [
  "scarlet-std",
  "sgfx-backend-abi 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=0ee6b41669904ced227f01cc435933c646a60c75)",
  "sgfx-backend-loader",
- "sgfx-backend-wgpu",
+ "sgfx-backend-wgpu 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=0ee6b41669904ced227f01cc435933c646a60c75)",
  "sgfx-core",
  "wgpu",
 ]
@@ -2133,6 +2185,21 @@ dependencies = [
  "pollster",
  "raw-window-handle",
  "sgfx-core",
+ "wgpu",
+]
+
+[[package]]
+name = "sgfx-backend-wgpu"
+version = "1.0.0"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=22e3d283046543239d2f3606dea73d9fcac7abad#22e3d283046543239d2f3606dea73d9fcac7abad"
+dependencies = [
+ "bytemuck",
+ "naga",
+ "pollster",
+ "raw-window-handle",
+ "sgfx-core",
+ "web-sys",
+ "web-time",
  "wgpu",
 ]
 

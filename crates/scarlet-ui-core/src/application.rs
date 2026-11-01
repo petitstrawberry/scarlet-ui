@@ -347,6 +347,42 @@ impl ApplicationRunner {
         self.run_loop(app, &mut slots)
     }
 
+    /// Own an application and prepare a non-blocking tick callback.
+    ///
+    /// Event-driven platforms call it once per frame and stop on `None` or error.
+    /// Initialization and scene subscriptions match [`Self::run`], but this path
+    /// never enters the backend's blocking event loop. The callback owns the
+    /// application, windows, and dialog cleanup guard until it is dropped.
+    /// Calls after termination return `None` without invoking application hooks.
+    pub fn into_tick<A: Application + View>(
+        mut self,
+        mut app: A,
+    ) -> Result<impl FnMut() -> Result<Option<Duration>> + 'static> {
+        let guard = crate::file_dialog::RunnerDialogGuard;
+        crate::debug::set_enabled(app.debug_logging());
+        crate::debug::set_wheel_log_enabled(wheel_log_env_enabled());
+        crate::platform::install_platform_window_defaults(self.backend.window_defaults());
+        install_input_environment(self.backend.initial_input_environment());
+        app.init();
+        let declarations = collect_scene_declarations(&app)?
+            .into_iter()
+            .find(|declaration| declaration.opens_at_launch)
+            .into_iter()
+            .collect();
+        let mut slots = self.create_slots(&mut app, declarations)?;
+        let mut state = RunnerLoopState::new();
+        let mut finished = false;
+        Ok(move || {
+            let _ = &guard;
+            if finished {
+                return Ok(None);
+            }
+            let result = Self::run_cycle(self.backend.as_mut(), &mut app, &mut slots, &mut state);
+            finished = !matches!(result, Ok(Some(_)));
+            result
+        })
+    }
+
     fn create_slots<A: Application + View>(
         &mut self,
         app: &mut A,
@@ -415,6 +451,11 @@ impl ApplicationRunner {
         };
 
         let mut window = backend.create_window(request)?;
+        if let Some(menu_bar) = &window_info.menu_bar {
+            menu_model::register_menu_callbacks(window.surface_id(), menu_bar);
+            let _ = window.set_menu_model(menu_bar);
+        }
+
         sync_output_scale(&mut pipeline, window.as_ref());
         let negotiated_size = window.size();
         if negotiated_size != window_info.size {
@@ -422,13 +463,6 @@ impl ApplicationRunner {
         }
         if let Some(paint_backend) = window.take_paint_backend()? {
             pipeline.set_paint_backend(paint_backend);
-        }
-
-        if let Some(menu_bar) = window_info.menu_bar {
-            if !menu_json.is_empty() {
-                let _ = window.set_menu_titles(&menu_json);
-                menu_model::register_menu_callbacks(window.surface_id(), &menu_bar);
-            }
         }
 
         if !limits.resizable {
@@ -801,7 +835,29 @@ enum Presentation {
 fn present_window<A: Application>(app: &mut A, slot: &mut WindowSlot<A>) -> Result<Presentation> {
     slot.retry_render = false;
     match present_pipeline(&mut slot.pipeline, slot.window.as_mut()) {
-        Ok(presentation) => Ok(presentation),
+        Ok(presentation) => {
+            // Read the retained scene after rebuilding, not every idle RAF.
+            if slot.window.wants_menu_model_updates() {
+                fn find_menu(element: &dyn Element) -> Option<menu_model::MenuBarModel> {
+                    if let Some(info) = element.get_window_info() {
+                        return info.menu_bar;
+                    }
+                    element
+                        .children()
+                        .iter()
+                        .find_map(|child| find_menu(child.as_ref()))
+                }
+                let model = slot
+                    .pipeline
+                    .element_tree()
+                    .root()
+                    .and_then(find_menu)
+                    .unwrap_or_default();
+                menu_model::register_menu_callbacks(slot.window.surface_id(), &model);
+                let _ = slot.window.set_menu_model(&model);
+            }
+            Ok(presentation)
+        }
         Err(Error::RenderFailure(failure)) => {
             app.on_render_error(&slot.context, &failure);
             match failure.kind {
@@ -2187,6 +2243,49 @@ mod tests {
             );
             assert_eq!(app.shutdowns.get(), 1);
         }
+    }
+
+    #[test]
+    fn owned_tick_selects_launch_scene_and_shuts_down_only_once() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        for (launch, expected) in [
+            ([true, true], Some("one")),
+            ([false, true], Some("two")),
+            ([false, false], None),
+        ] {
+            let app = SceneContractApp::new(launch);
+            let observed = app.clone();
+            let mut tick = scene_contract_runner().into_tick(app).unwrap();
+            assert_eq!(observed.shutdowns.get(), 0);
+            assert_eq!(
+                observed
+                    .created
+                    .borrow()
+                    .first()
+                    .map(|ctx| ctx.scene_key.as_str()),
+                expected
+            );
+            // This application's idle hook dismisses its window; empty scenes
+            // terminate on the same first tick without ever blocking.
+            assert!(tick().unwrap().is_none());
+            assert_eq!(observed.shutdowns.get(), 1);
+            assert!(tick().unwrap().is_none());
+            assert_eq!(observed.shutdowns.get(), 1);
+        }
+    }
+
+    #[test]
+    fn owned_tick_rejects_duplicate_scenes_before_creating_windows() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let mut app = SceneContractApp::new([true, true]);
+        app.keys = ["same", "same"];
+        let observed = app.clone();
+        assert!(matches!(
+            scene_contract_runner().into_tick(app),
+            Err(Error::DuplicateSceneWindowKey)
+        ));
+        assert!(observed.created.borrow().is_empty());
+        assert_eq!(observed.shutdowns.get(), 0);
     }
 
     #[test]

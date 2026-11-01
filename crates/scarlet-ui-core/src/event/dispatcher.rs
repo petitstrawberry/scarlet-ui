@@ -1961,6 +1961,167 @@ mod tests {
     use core::cell::Cell;
     use core::cell::RefCell;
 
+    #[test]
+    fn navigation_click_after_text_view_edit_activates_on_first_release() {
+        use crate::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
+        use crate::pipeline::RenderingPipeline;
+        use crate::state::{Listenable, State};
+        use crate::views::{
+            NavigationLink, ScrollView, Text, TextDocument, TextSelection, TextView,
+        };
+        #[derive(Clone)]
+        struct Root {
+            text: State<TextDocument>,
+            selection: State<TextSelection>,
+            builds: Rc<Cell<usize>>,
+        }
+        impl Root {
+            fn body(&self) -> impl View + Clone + use<> {
+                let text = self.text.clone();
+                let selection = self.selection.clone();
+                let nav = crate::navigation! {
+                    NavigationLink::new("Inputs", move || {
+                        ScrollView::new(TextView::with_document(text.clone(), selection.clone()).frame(300.0, 180.0))
+                            .vertical().content_size(300.0, 560.0)
+                    }),
+                    NavigationLink::new("Display", || Text::new("Display page")),
+                };
+                if self.builds.get() == 0 {
+                    nav.selected_index_state().set(0);
+                }
+                self.builds.set(self.builds.get() + 1);
+                nav
+            }
+        }
+        impl View for Root {
+            fn create_element(&self) -> Box<dyn Element> {
+                Box::new(crate::element::ComponentElement::new_with_builder(
+                    self.clone(),
+                    |root| Box::new(root.body()),
+                ))
+            }
+            fn listenables(&self) -> Vec<&dyn Listenable> {
+                alloc::vec![&self.text, &self.selection]
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+        fn selected_in_tree(element: &dyn Element) -> Option<usize> {
+            if let Some(sidebar) = element.render_object().and_then(|render| {
+                render
+                    .as_any()
+                    .downcast_ref::<crate::views::navigation::NavigationSidebarRenderObject>()
+            }) {
+                return Some(sidebar.selected_index().get());
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| selected_in_tree(child.as_ref()))
+        }
+        fn contains_editor(element: &dyn Element) -> bool {
+            element
+                .render_object()
+                .is_some_and(|render| render.as_any().is::<crate::views::TextViewRenderObject>())
+                || element
+                    .children()
+                    .iter()
+                    .any(|child| contains_editor(child.as_ref()))
+        }
+        let _environment = crate::input_environment::install_test_input_environment(
+            crate::InputEnvironment::desktop(),
+        );
+        for render_between_pointer_events in [false, true] {
+            let text = State::new(
+                crate::state::generate_state_id(),
+                TextDocument::from_str("Type here..."),
+            );
+            let selection = State::new(crate::state::generate_state_id(), TextSelection::default());
+            let builds = Rc::new(Cell::new(0));
+            let root = Root {
+                text: text.clone(),
+                selection,
+                builds: builds.clone(),
+            };
+            let mut pipeline = RenderingPipeline::new();
+            pipeline.set_root(root.create_element());
+            pipeline.layout_initial();
+            pipeline.render_with_damage();
+            for event in [
+                MouseEvent::Moved { x: 240, y: 25 },
+                MouseEvent::ButtonPressed {
+                    button: MouseButton::Left,
+                    x: 240,
+                    y: 25,
+                    click_count: 1,
+                },
+                MouseEvent::ButtonReleased {
+                    button: MouseButton::Left,
+                    x: 240,
+                    y: 25,
+                    click_count: 1,
+                },
+            ] {
+                pipeline.handle_event(&Event::Mouse(event));
+                if render_between_pointer_events {
+                    pipeline.render_with_damage();
+                }
+            }
+            pipeline.render_with_damage();
+            for event in [
+                KeyEvent::Pressed {
+                    keycode: KeyCode::End,
+                    modifiers: KeyModifiers::default(),
+                },
+                KeyEvent::Char { c: 'x' },
+                KeyEvent::Pressed {
+                    keycode: KeyCode::Backspace,
+                    modifiers: KeyModifiers::default(),
+                },
+            ] {
+                assert!(pipeline.handle_event(&Event::Keyboard(event)));
+                pipeline.render_with_damage();
+            }
+
+            for event in [
+                MouseEvent::Moved { x: 10, y: 45 },
+                MouseEvent::ButtonPressed {
+                    button: MouseButton::Left,
+                    x: 10,
+                    y: 45,
+                    click_count: 1,
+                },
+                MouseEvent::ButtonReleased {
+                    button: MouseButton::Left,
+                    x: 10,
+                    y: 45,
+                    click_count: 1,
+                },
+            ] {
+                pipeline.handle_event(&Event::Mouse(event));
+                if render_between_pointer_events {
+                    pipeline.render_with_damage();
+                }
+            }
+            pipeline.render_with_damage();
+            assert!(
+                builds.get() > 1,
+                "editing must rebuild fresh navigation views"
+            );
+            assert!(
+                !contains_editor(pipeline.element_tree().root().unwrap()),
+                "actual page must switch to Display"
+            );
+            assert_eq!(text.get().line_text(0).unwrap().as_ref(), "Type here...");
+            assert_eq!(
+                selected_in_tree(pipeline.element_tree().root().unwrap()),
+                Some(1),
+                "first click should navigate after editing"
+            );
+        }
+    }
+
     struct WheelTestElement {
         id: ElementId,
         position: Point,

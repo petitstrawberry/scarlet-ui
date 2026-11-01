@@ -27,7 +27,7 @@ pub use scarlet_std::sync::Mutex;
 ///
 /// This is used for callbacks that may perform blocking IPC or filesystem I/O
 /// and therefore must not run on the application event loop.
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
 pub fn spawn_detached<F>(task: F)
 where
     F: FnOnce() + Send + 'static,
@@ -42,4 +42,12 @@ where
     F: FnOnce() + Send + 'static,
 {
     drop(scarlet_std::thread::spawn(task));
+}
+
+/// Defer a callback to a browser microtask. Browser callbacks must not block.
+#[cfg(all(feature = "std", target_arch = "wasm32"))]
+pub fn spawn_detached<F: FnOnce() + Send + 'static>(task: F) {
+    wasm_bindgen_futures::spawn_local(async move {
+        task();
+    });
 }

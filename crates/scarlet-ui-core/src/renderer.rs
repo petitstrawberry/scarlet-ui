@@ -812,6 +812,11 @@ impl<'a> PaintContext<'a> {
         other.append_flattened(self, Point::ZERO);
     }
 
+    /// Append commands at a logical offset, remapping buffers and retained lists.
+    pub fn append_at(&mut self, other: &'a PaintContext<'_>, origin: Point) {
+        other.append_flattened(self, origin);
+    }
+
     pub fn commands(&self) -> &[PaintCommand] {
         &self.commands
     }
@@ -2349,6 +2354,36 @@ fn inset_rect(rect: Rect, inset: f32) -> Rect {
 mod tests {
     use super::*;
     use crate::testing::alloc_counter::measure_allocations;
+
+    #[test]
+    fn append_at_translates_nested_geometry_text_and_remaps_buffers() {
+        let mut local = PaintContext::new();
+        local.draw_text(Point::new(1.25, 2.75), "Menu offset", Color::BLACK, 13.0);
+        local.stroke_rect(Rect::from_xywh(1.0, 2.0, 8.0, 9.0), 1.0, Color::BLACK);
+        local.draw_temporary_buffer(
+            Rect::from_xywh(2.0, 3.0, 4.0, 5.0),
+            Buffer::new(Size::new(4.0, 5.0)),
+        );
+        let mut nested = PaintContext::new();
+        nested.draw_display_list(Point::new(3.0, 4.0), local.into_display_list());
+        let mut output = PaintContext::new();
+        output.draw_temporary_buffer(
+            Rect::from_xywh(0.0, 0.0, 1.0, 1.0),
+            Buffer::new(Size::new(1.0, 1.0)),
+        );
+        output.append_at(&nested, Point::new(10.0, 20.0));
+        assert!(
+            matches!(&output.commands()[1], PaintCommand::DrawText { position, .. } if *position == Point::new(14.25, 26.75))
+        );
+        assert!(
+            matches!(&output.commands()[2], PaintCommand::StrokeRect { rect, .. } if rect.origin == Point::new(14.0, 26.0))
+        );
+        assert!(
+            matches!(&output.commands()[3], PaintCommand::DrawBuffer { dst, buffer_idx } if dst.origin == Point::new(15.0, 27.0) && *buffer_idx == 1)
+        );
+        assert_eq!(output.buffers().len(), 2);
+        assert_eq!(output.buffer(BufferHandle(1)).unwrap().width(), 4);
+    }
 
     #[test]
     fn grouped_display_lists_preserve_shared_image_identity() {

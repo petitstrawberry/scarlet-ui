@@ -626,6 +626,16 @@ pub trait PlatformWindow: Any {
     /// Update menu titles for the window (format: "menu1|menu2|menu3")
     fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()>;
 
+    /// Install a shared menu model. Native backends retain their existing JSON bridge.
+    fn set_menu_model(&mut self, model: &crate::menu_model::MenuBarModel) -> Result<()> {
+        self.set_menu_titles(&model.to_json())
+    }
+
+    /// Opt in to refreshed menu models after scene presentation (for in-canvas menus).
+    fn wants_menu_model_updates(&self) -> bool {
+        false
+    }
+
     /// Synchronize focused text-input state with the backend.
     fn sync_text_input(&mut self, _state: Option<&TextInputElementState>) {}
 

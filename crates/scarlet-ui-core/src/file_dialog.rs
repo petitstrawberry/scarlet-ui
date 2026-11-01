@@ -387,7 +387,12 @@ mod tests {
         let mut options = FileDialog::new(FileDialogMode::Save);
         options.initial_directory = Some(FileDialogPath::from("relative"));
         assert!(options.validate().is_err());
-        options.initial_directory = Some(FileDialogPath::from("/tmp"));
+        // A rooted Unix path is not absolute on Windows (it lacks a drive).
+        #[cfg(feature = "std")]
+        let directory = FileDialogPath::from(std::env::temp_dir());
+        #[cfg(not(feature = "std"))]
+        let directory = FileDialogPath::from("/tmp");
+        options.initial_directory = Some(directory);
         for name in ["", "../x", "..", "a/b", "a\\b", "a\0b"] {
             options.default_name = Some(name.into());
             assert!(options.validate().is_err(), "{name}");

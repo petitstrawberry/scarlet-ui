@@ -18,10 +18,10 @@ use crate::logln as println;
 use crate::os::File;
 use crate::os::Mutex;
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
 mod font_discovery;
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
 use font_discovery::{DiscoveredFont, FontDiscovery};
 
 static CURRENT_SCALE_MILLI: AtomicU32 = AtomicU32::new(1000);
@@ -276,6 +276,9 @@ fn glyph_cache_get_or_rasterize(
     font_stack_id: usize,
     font_slot: u8,
 ) -> Option<GlyphMask> {
+    #[cfg(test)]
+    text_run_tests::GLYPH_CACHE_LOOKUPS.with(|count| count.set(count.get() + 1));
+
     let key = GlyphRasterKey {
         codepoint: ch as u32,
         size_px: scaled.scale.y as u16,
@@ -419,7 +422,7 @@ impl FontStack {
 struct DefaultFontState {
     font: Option<FontRef<'static>>,
     fallback_fonts: Vec<FontRef<'static>>,
-    #[cfg(feature = "std")]
+    #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
     discovery: Option<FontDiscovery>,
     cache_id: usize,
     load_attempted: bool,
@@ -428,7 +431,7 @@ struct DefaultFontState {
 static DEFAULT_FONT: Mutex<DefaultFontState> = Mutex::new(DefaultFontState {
     font: None,
     fallback_fonts: Vec::new(),
-    #[cfg(feature = "std")]
+    #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
     discovery: None,
     cache_id: 0,
     load_attempted: false,
@@ -455,7 +458,7 @@ pub fn set_default_font(font_bytes: &'static [u8]) -> Result<(), InvalidFont> {
     let font = FontRef::try_from_slice(font_bytes)?;
     let mut state = DEFAULT_FONT.lock();
     state.font = Some(font);
-    #[cfg(feature = "std")]
+    #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
     {
         state.discovery = None;
     }
@@ -487,7 +490,7 @@ pub fn set_default_font_stack(font_stack: FontStack) {
     let mut state = DEFAULT_FONT.lock();
     state.font = Some(primary);
     state.fallback_fonts = fallbacks;
-    #[cfg(feature = "std")]
+    #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
     {
         state.discovery = None;
     }
@@ -512,7 +515,7 @@ pub fn add_default_font_fallback(font_bytes: &'static [u8]) -> Result<(), Invali
     let font = FontRef::try_from_slice(font_bytes)?;
     let mut state = DEFAULT_FONT.lock();
     state.fallback_fonts.push(font);
-    #[cfg(feature = "std")]
+    #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
     {
         state.discovery = None;
     }
@@ -530,7 +533,7 @@ pub fn add_default_font_fallback(font_bytes: &'static [u8]) -> Result<(), Invali
 pub fn clear_default_font_fallbacks() {
     let mut state = DEFAULT_FONT.lock();
     state.fallback_fonts.clear();
-    #[cfg(feature = "std")]
+    #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
     {
         state.discovery = None;
     }
@@ -579,7 +582,7 @@ fn read_font_file(path: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
 fn load_fonts_from_rootfs_once() {
     let should_try = {
         let mut state = DEFAULT_FONT.lock();
@@ -643,13 +646,13 @@ fn load_fonts_from_rootfs_once() {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
 fn discovered_font_ref(font: DiscoveredFont) -> Result<FontRef<'static>, InvalidFont> {
     let leaked: &'static [u8] = Box::leak(font.bytes.into_boxed_slice());
     FontRef::try_from_slice_and_index(leaked, font.index)
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
 fn ensure_default_font_coverage(text: &str) {
     let mut changed = false;
     let mut state = DEFAULT_FONT.lock();
@@ -696,7 +699,7 @@ fn clone_default_font_stack() -> Option<FontStack> {
 
 fn default_font_stack_for_text(text: &str) -> Option<FontStack> {
     load_fonts_from_rootfs_once();
-    #[cfg(feature = "std")]
+    #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
     ensure_default_font_coverage(text);
     clone_default_font_stack()
 }
@@ -1383,6 +1386,12 @@ fn contains_rounded_rect(rect: Rect, corner_radius: f32, px: f32, py: f32) -> bo
 #[cfg(test)]
 mod text_run_tests {
     use super::*;
+
+    std::thread_local! {
+        // Like the allocation counter, observe only work done by this test's
+        // thread; unrelated parallel tests can legitimately populate the cache.
+        pub(super) static GLYPH_CACHE_LOOKUPS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    }
     fn glyph(bytes: usize) -> RasterizedGlyph {
         RasterizedGlyph {
             key: GlyphRasterKey {
@@ -1461,12 +1470,9 @@ mod text_run_tests {
             return;
         }
         GLYPH_CACHE.lock().entries.clear();
+        let lookups_before = GLYPH_CACHE_LOOKUPS.with(core::cell::Cell::get);
         let second = rasterize_text_cached(text, 13., 1000);
         assert!(Arc::ptr_eq(&first, &second));
-        assert!(
-            GLYPH_CACHE.lock().entries.is_empty(),
-            "Warm text should not rerasterize evicted masks"
-        );
         let work = crate::testing::alloc_counter::measure_allocations(|| {
             for _ in 0..100 {
                 assert!(Arc::ptr_eq(&first, &rasterize_text_cached(text, 13., 1000)));
@@ -1476,6 +1482,15 @@ mod text_run_tests {
             work.allocations, 0,
             "Warm runs must not allocate glyph arrays or masks"
         );
+        assert_eq!(
+            GLYPH_CACHE_LOOKUPS.with(core::cell::Cell::get),
+            lookups_before,
+            "Warm text must not consult the glyph cache or rerasterize evicted masks"
+        );
         assert_eq!(first.as_ref(), rasterize_text(text, 13., 1000).as_slice());
     }
 }
+
+// Browser applications provide fonts explicitly; there is no system font filesystem.
+#[cfg(all(feature = "std", target_arch = "wasm32"))]
+fn load_fonts_from_rootfs_once() {}

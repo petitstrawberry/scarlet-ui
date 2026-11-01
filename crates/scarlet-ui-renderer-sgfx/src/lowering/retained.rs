@@ -606,6 +606,7 @@ mod tests {
         }
     }
     fn encoder() -> SgfxPaintEncoder {
+        super::super::ensure_test_font();
         SgfxPaintEncoder::new(200, 120, false).unwrap()
     }
     fn shape() -> Arc<DisplayList> {

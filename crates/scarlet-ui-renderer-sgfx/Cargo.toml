@@ -21,3 +21,6 @@ sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "77e64a81115d78f
 [lib]
 name = "scarlet_ui_renderer_sgfx"
 path = "src/lib.rs"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
