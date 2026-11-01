@@ -4,6 +4,7 @@
 mod damage;
 mod menu;
 mod paint;
+mod touch;
 use scarlet_ui_core::{
     Application, ApplicationRunner, Buffer, Error, Result, View,
     event::{
@@ -192,9 +193,15 @@ struct WebWindow {
     paint: Option<Box<dyn PaintBackend>>,
     listeners: Vec<(&'static str, Closure<dyn FnMut(PointerEvent)>)>,
     input_listeners: Vec<(&'static str, Closure<dyn FnMut(web_sys::Event)>)>,
+    lifecycle_listeners: Vec<(
+        web_sys::EventTarget,
+        &'static str,
+        Closure<dyn FnMut(web_sys::Event)>,
+    )>,
     original_tab_index: Option<String>,
     menus: Rc<RefCell<menu::WebMenu>>,
     hover_handoff: menu::HoverHandoff,
+    menu_touch: touch::MenuTouchRouting,
 }
 impl WebWindow {
     fn new_canvas(
@@ -214,11 +221,14 @@ impl WebWindow {
             paint: Some(paint),
             listeners: Vec::new(),
             input_listeners: Vec::new(),
+            lifecycle_listeners: Vec::new(),
             original_tab_index,
             menus,
             hover_handoff: menu::HoverHandoff::default(),
+            menu_touch: touch::MenuTouchRouting::default(),
         };
         let pressed = Rc::new(Cell::new(None));
+        let touches = Rc::new(RefCell::new(touch::TouchContacts::default()));
         for kind in [
             "pointermove",
             "pointerdown",
@@ -230,8 +240,9 @@ impl WebWindow {
             let canvas = window.canvas.clone();
             let events = window.events.clone();
             let pressed = pressed.clone();
+            let touches = touches.clone();
             let callback = Closure::wrap(Box::new(move |e: PointerEvent| {
-                if !e.is_primary() {
+                if e.pointer_type() != "touch" && !e.is_primary() {
                     return;
                 }
                 let rect = canvas.get_bounding_client_rect();
@@ -241,6 +252,23 @@ impl WebWindow {
                 let y = ((e.client_y() as f64 - rect.top()) * canvas.client_height() as f64
                     / rect.height().max(1.0))
                 .floor() as i32;
+                if e.pointer_type() == "touch" {
+                    if kind == "pointerdown" {
+                        let _ = canvas.focus();
+                        let _ = canvas.set_pointer_capture(e.pointer_id());
+                    }
+                    let frame =
+                        touches
+                            .borrow_mut()
+                            .pointer(kind, e.pointer_id(), x, y, e.time_stamp());
+                    if let Some(frame) = frame {
+                        events.borrow_mut().push_back(Event::TouchFrame(frame));
+                    }
+                    if matches!(kind, "pointerup" | "pointercancel") {
+                        let _ = canvas.release_pointer_capture(e.pointer_id());
+                    }
+                    return;
+                }
                 let button = match e.button() {
                     1 => MouseButton::Middle,
                     2 => MouseButton::Right,
@@ -284,6 +312,41 @@ impl WebWindow {
                 .add_event_listener_with_callback(kind, callback.as_ref().unchecked_ref())?;
             window.listeners.push((kind, callback));
         }
+        let events = window.events.clone();
+        let blur_touches = touches.clone();
+        window.listen("blur", move |event| {
+            if let Some(frame) = blur_touches.borrow_mut().cancel_all(event.time_stamp()) {
+                events.borrow_mut().push_back(Event::TouchFrame(frame));
+            }
+        })?;
+        if let Some(browser) = web_sys::window() {
+            for kind in ["blur", "pagehide"] {
+                let events = window.events.clone();
+                let contacts = touches.clone();
+                window.listen_lifecycle(browser.clone().into(), kind, move |event| {
+                    // Queue cancellation even while RAF is paused. On resume it
+                    // precedes new contacts, so the arena cannot retain a drag.
+                    if let Some(frame) = contacts.borrow_mut().cancel_all(event.time_stamp()) {
+                        events.borrow_mut().push_back(Event::TouchFrame(frame));
+                    }
+                })?;
+            }
+            if let Some(document) = browser.document() {
+                let events = window.events.clone();
+                window.listen_lifecycle(
+                    document.clone().into(),
+                    "visibilitychange",
+                    move |event| {
+                        if document.hidden() {
+                            if let Some(frame) = touches.borrow_mut().cancel_all(event.time_stamp())
+                            {
+                                events.borrow_mut().push_back(Event::TouchFrame(frame));
+                            }
+                        }
+                    },
+                )?;
+            }
+        }
         window.install_keyboard_and_wheel()?;
         let menus = window.menus.clone();
         window.listen("contextmenu", move |event| {
@@ -292,6 +355,18 @@ impl WebWindow {
             }
         })?;
         Ok(window)
+    }
+
+    fn listen_lifecycle(
+        &mut self,
+        target: web_sys::EventTarget,
+        kind: &'static str,
+        callback: impl FnMut(web_sys::Event) + 'static,
+    ) -> std::result::Result<(), JsValue> {
+        let callback = Closure::wrap(Box::new(callback) as Box<dyn FnMut(web_sys::Event)>);
+        target.add_event_listener_with_callback(kind, callback.as_ref().unchecked_ref())?;
+        self.lifecycle_listeners.push((target, kind, callback));
+        Ok(())
     }
 
     fn listen(
@@ -518,6 +593,10 @@ fn map_key(key: &str) -> KeyCode {
 
 impl Drop for WebWindow {
     fn drop(&mut self) {
+        for (target, kind, listener) in &self.lifecycle_listeners {
+            let _ =
+                target.remove_event_listener_with_callback(kind, listener.as_ref().unchecked_ref());
+        }
         for (kind, listener) in &self.input_listeners {
             let _ = self
                 .canvas
@@ -559,7 +638,13 @@ impl PlatformWindow for WebWindow {
         }
         loop {
             let mut event = self.events.borrow_mut().pop_front()?;
-            let (consumed, action) = self.menus.borrow_mut().handle(&event);
+            let (consumed, action) = if let Event::TouchFrame(frame) = &mut event {
+                let mut menus = self.menus.borrow_mut();
+                let action = self.menu_touch.route(frame, |event| menus.handle(event));
+                (frame.changes.is_empty(), action)
+            } else {
+                self.menus.borrow_mut().handle(&event)
+            };
             if let Event::Mouse(mouse) = &event {
                 let offset = self.menus.borrow().height() as i32;
                 if let Some(exit) = self.hover_handoff.route(mouse, consumed, offset) {
@@ -595,6 +680,11 @@ impl PlatformWindow for WebWindow {
                     | MouseEvent::ButtonCancelled { y, .. }
                     | MouseEvent::Wheel { y, .. } => *y -= offset,
                     _ => {}
+                }
+            }
+            if let Event::TouchFrame(ref mut frame) = event {
+                for change in &mut frame.changes {
+                    change.y -= offset;
                 }
             }
             return Some(event);

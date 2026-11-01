@@ -54,6 +54,7 @@ pub(crate) struct Specimen {
     line_width: State<f32>,
     width: State<f32>,
     active: std::rc::Rc<std::cell::Cell<bool>>,
+    touch_id: std::rc::Rc<std::cell::Cell<Option<u64>>>,
     revision: std::rc::Rc<std::cell::Cell<u64>>,
     canvas: SgfxCanvasHandle,
     mesh: scarlet_ui::SgfxMeshHandle,
@@ -104,6 +105,7 @@ impl Specimen {
             line_width: State::new(StateId::new(122), 3.0),
             width: State::new(StateId::new(123), 400.0),
             active: Default::default(),
+            touch_id: Default::default(),
             revision: Default::default(),
             canvas: SgfxCanvasHandle::new(),
             mesh: scarlet_ui::SgfxMeshHandle::new(),
@@ -123,6 +125,7 @@ impl Specimen {
         let width = width.max(300.0);
         if self.width.get() != width {
             self.active.set(false);
+            self.touch_id.set(None);
             self.width.set(width);
             self.refresh_frame();
         }
@@ -176,11 +179,13 @@ impl Specimen {
     }
     fn clear(&self) {
         self.active.set(false);
+        self.touch_id.set(None);
         self.strokes.set(Vec::new());
         self.refresh_frame();
     }
     fn undo(&self) {
         self.active.set(false);
+        self.touch_id.set(None);
         let mut strokes = self.strokes.get();
         if strokes.pop().is_some() {
             self.strokes.set(strokes);
@@ -188,7 +193,54 @@ impl Specimen {
         }
     }
     fn paper_event(&self, event: &Event) -> bool {
+        use scarlet_ui::event::{GesturePhase, TouchGesture, TouchPhase};
         match event {
+            Event::Touch(change) => {
+                match change.phase {
+                    TouchPhase::Down if self.touch_id.get().is_none() => {
+                        self.active.set(false);
+                        self.begin_stroke(change.x, change.y);
+                        if self.active.get() {
+                            self.touch_id.set(Some(change.id));
+                        }
+                    }
+                    TouchPhase::Down => self.active.set(false),
+                    TouchPhase::Move if self.touch_id.get() == Some(change.id) => {
+                        self.extend_stroke(change.x, change.y);
+                    }
+                    TouchPhase::Up | TouchPhase::Cancel
+                        if self.touch_id.get() == Some(change.id) =>
+                    {
+                        if change.phase == TouchPhase::Up {
+                            self.extend_stroke(change.x, change.y);
+                        }
+                        self.active.set(false);
+                        self.touch_id.set(None);
+                    }
+                    _ => return false,
+                }
+                true
+            }
+            // The arena cancels a pending press both when a drag wins and when
+            // another contact intervenes. Only an awarded drag may resume it.
+            Event::TouchGesture(TouchGesture::CancelPress { id })
+                if self.touch_id.get() == Some(*id) =>
+            {
+                self.active.set(false);
+                true
+            }
+            Event::TouchGesture(TouchGesture::Drag { id, phase, .. })
+                if self.touch_id.get() == Some(*id) =>
+            {
+                match phase {
+                    GesturePhase::Started => self.active.set(true),
+                    GesturePhase::Cancelled | GesturePhase::Ended => self.active.set(false),
+                    GesturePhase::Moved => {}
+                }
+                true
+            }
+            Event::TouchGesture(TouchGesture::Pinch { .. }) => self.active.replace(false),
+
             Event::Mouse(MouseEvent::ButtonPressed {
                 button: MouseButton::Left,
                 x,
@@ -214,7 +266,10 @@ impl Specimen {
                 active
             }
             Event::Mouse(MouseEvent::ButtonCancelled { .. })
-            | Event::Focus(scarlet_ui::event::FocusEvent::Lost) => self.active.replace(false),
+            | Event::Focus(scarlet_ui::event::FocusEvent::Lost) => {
+                self.touch_id.set(None);
+                self.active.replace(false)
+            }
             _ => false,
         }
     }
@@ -1180,6 +1235,80 @@ mod tests {
         assert_eq!(app.frame.get().draw_count(), 0);
         app.undo();
         assert!(app.strokes.get().is_empty());
+    }
+
+    #[test]
+    fn sketch_direct_touch_routes_local_coordinates_and_cancels_multitouch() {
+        use scarlet_ui::event::{TouchChange, TouchFrame, TouchPhase};
+        use scarlet_ui::{ComponentElement, RenderingPipeline};
+        let app = Specimen::new();
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(Box::new(ComponentElement::new_with_builder(
+            app.clone(),
+            |app| Box::new(app.body()),
+        )));
+        pipeline.layout_initial();
+        pipeline.resize(Size::new(400.0, 300.0));
+        pipeline.render_with_damage();
+        let mut serial = 0;
+        let mut send = |id, phase, x, y| {
+            serial += 1;
+            pipeline.handle_event(&Event::TouchFrame(TouchFrame {
+                seat_id: 0,
+                serial,
+                time_ns: serial * 16_000_000,
+                changes: vec![TouchChange {
+                    seat_id: 0,
+                    serial,
+                    time_ns: serial * 16_000_000,
+                    id,
+                    phase,
+                    x,
+                    y,
+                    pressure: None,
+                    touch_major: None,
+                }],
+            }));
+            pipeline.render_with_damage();
+        };
+        send(1, TouchPhase::Down, 32, 68);
+        assert_eq!(app.strokes.get().len(), 4);
+        assert_eq!(
+            app.strokes.get()[3].points[0],
+            Point::new(20.0 / 376.0, 20.0 / 184.0)
+        );
+        send(1, TouchPhase::Move, 90, 100);
+        assert!(
+            app.active.get(),
+            "awarded drag keeps drawing after press cancellation"
+        );
+        send(1, TouchPhase::Up, 450, 250);
+        assert!(!app.active.get());
+        assert_eq!(
+            app.strokes.get()[3].points.last(),
+            Some(&Point::new(1.0, 1.0))
+        );
+        let released = app.strokes.get();
+        send(1, TouchPhase::Move, 100, 100);
+        assert_eq!(app.strokes.get(), released);
+
+        // A second finger outside the paper must cancel even a pending stroke.
+        send(2, TouchPhase::Down, 32, 68);
+        send(3, TouchPhase::Down, 20, 250);
+        assert!(!app.active.get());
+        let interrupted = app.strokes.get();
+        send(2, TouchPhase::Move, 150, 120);
+        send(3, TouchPhase::Up, 20, 250);
+        send(2, TouchPhase::Up, 150, 120);
+        assert_eq!(app.strokes.get(), interrupted);
+        send(4, TouchPhase::Down, 40, 80);
+        send(4, TouchPhase::Move, 80, 110);
+        send(4, TouchPhase::Cancel, 80, 110);
+        let canceled = app.strokes.get();
+        send(4, TouchPhase::Move, 120, 130);
+        assert_eq!(app.strokes.get(), canceled);
+        assert!(!app.active.get());
+        assert_eq!(app.touch_id.get(), None);
     }
 
     #[test]

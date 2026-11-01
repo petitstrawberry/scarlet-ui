@@ -485,6 +485,71 @@ try {
   const final=await untilPixels('factory-resized-toggle',img=>coloredPixels(img,toggleRegion(800),red).count<10);
   assert(hasTextOnWhite(final,sidebarRegion,200),'Sidebar disappeared after partial repaint');
   report.checks.push('resize preserves state and correct control hit mapping');
+  setPhase('Factory real touch scrolling and gesture recovery');
+  const factoryTouch=await context.newCDPSession(page);
+  let factoryContact=false;
+  async function factoryGesture(points,cancel=false) {
+    const point=([x,y])=>({x,y,id:1,radiusX:3,radiusY:3,force:1});
+    try {
+      await factoryTouch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[point(points[0])]});
+      factoryContact=true;
+      for(const position of points.slice(1)) {
+        await factoryTouch.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[point(position)]});
+        await sleep(20);
+      }
+      await factoryTouch.send('Input.dispatchTouchEvent',{type:cancel?'touchCancel':'touchEnd',touchPoints:[]});
+      factoryContact=false;
+    } finally {
+      if(factoryContact) {
+        await factoryTouch.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});
+        factoryContact=false;
+      }
+    }
+  }
+  const drag=(x,from,to)=>Array.from({length:13},(_,index)=>[x,from+(to-from)*index/12]);
+  try {
+    await factoryTouch.send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
+    await factoryGesture([[70,168]]);
+    const displayLabels={x:210,y:60,width:140,height:450};
+    const display=await untilPixels('factory-touch-display',img=>
+      hasTextOnWhite(img,sidebarRegion,200)&&changedPixels(final,img,displayLabels)>150);
+    const documentBefore=await page.evaluate(()=>({x:scrollX,y:scrollY}));
+    // The label column is inside the outer ScrollView but outside its nested
+    // scroll demos. A finger drag must move rendered UI, not the HTML document.
+    await factoryGesture(drag(260,480,160));
+    const scrolled=await untilPixels('factory-touch-scroll',img=>
+      changedPixels(display,img,displayLabels)>200&&hasTextOnWhite(img,sidebarRegion,200));
+    assert.deepEqual(await page.evaluate(()=>({x:scrollX,y:scrollY})),documentBefore,
+      'Factory touch scrolling must not scroll the host document');
+    assert.equal(changedPixels(display,scrolled,{x:0,y:200,width:185,height:300}),0,
+      'Touch scrolling must not move or erase the fixed sidebar');
+    // Cancellation releases gesture ownership, allowing another independent drag.
+    await factoryGesture(drag(260,240,300),true);
+    const afterCancel=await screenshot('factory-touch-cancel');
+    await factoryGesture(drag(260,220,440));
+    await untilPixels('factory-touch-scroll-again',img=>changedPixels(afterCancel,img,displayLabels)>150);
+    assert.deepEqual(await page.evaluate(()=>({x:scrollX,y:scrollY})),documentBefore);
+    await factoryGesture([[70,88]]);
+    await untilPixels('factory-touch-controls',img=>changedPixels(final,img,{x:200,y:40,width:590,height:200})<100);
+    // Subsequent taps and horizontal Slider gestures must still reach controls.
+    await factoryGesture([[resizedToggle.x,resizedToggle.y]]);
+    await untilPixels('factory-touch-toggle-on',img=>coloredPixels(img,toggleRegion(800),red).count>60);
+    await factoryGesture([[resizedToggle.x,resizedToggle.y]]);
+    const touchOff=await untilPixels('factory-touch-toggle-off',img=>coloredPixels(img,toggleRegion(800),red).count<10);
+    const sliderRegion={x:390,y:165,width:385,height:30};
+    await factoryGesture(Array.from({length:13},(_,index)=>[500+240*index/12,180]));
+    await untilPixels('factory-touch-slider',img=>changedPixels(touchOff,img,sliderRegion)>100);
+    report.checks.push('CDP-simulated Factory touch scrolls internal content, survives cancellation/repeated gestures, and preserves tap/slider input');
+  } finally {
+    try {
+      if(factoryContact)
+        await factoryTouch.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});
+    } finally {
+      try { await factoryTouch.send('Emulation.setTouchEmulationEnabled',{enabled:false}); }
+      finally { await factoryTouch.detach(); }
+    }
+  }
+
   assert.equal(await page.evaluate(async()=> (await import('./pkg/scarlet_ui_widget_factory.js')).runtime_error()),undefined);
   assert.equal(errors.length,0,errors.join('\n'));
   report.passed=true;

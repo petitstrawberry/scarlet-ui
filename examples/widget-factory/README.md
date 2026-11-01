@@ -28,6 +28,10 @@ font is shared with the counter; see its `assets/LICENSE`. Native usage is still
 
 - Pointer capture, keyboard key presses/releases, ordinary Unicode characters,
   navigation/editing keys, modifiers, wheel scrolling and canvas focus.
+- Finger contacts enter the shared touch gesture arena: taps activate controls,
+  drags scroll content after the movement threshold, and horizontal Slider drags
+  keep their own axis. Cancellation/blur ends active contacts without a click.
+  Mouse and pen input keep their existing pointer behavior.
 - Wheel pixel/line/page units are converted to logical CSS pixels; DPR affects
   backing resolution, not logical input coordinates. Ctrl+wheel/browser zoom
   shortcuts remain browser-owned.
@@ -71,7 +75,7 @@ state and reopen; invoke reset and nested presets; dismiss with outside click
 and Escape; right-click near canvas edges and confirm clamping/hit-testing;
 verify Ctrl+L belongs to the browser; repeat after resize/125% zoom.
 
-Current menu limits: opening is click/right-click (no Alt/F10, typeahead or touch
+Current menu limits: opening is click/tap/right-click (no Alt/F10, typeahead or touch
 long-press); context popup uses the window's complete menu model, not a per-widget
 provider. Dropdown width follows shared label/shortcut/chevron measurements and is
 clamped to the canvas; oversized menus do not yet scroll. The included demo menus fit. Accessibility and
