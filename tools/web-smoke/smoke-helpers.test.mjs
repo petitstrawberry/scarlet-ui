@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {browserEnvironment, localRequest, artifactPath, changedPixels, coloredPixels, red, hasTextOnWhite} from './smoke-helpers.mjs';
+import {browserEnvironment, localRequest, artifactPath, changedPixels, coloredPixels, red, hasTextOnWhite, offscreenScrollTop} from './smoke-helpers.mjs';
 
 test('browser environment strips workflow tokens and unknown keys', () => {
   assert.deepEqual(browserEnvironment({PATH:'/bin', HOME:'/tmp/home', DISPLAY:':99', GITHUB_TOKEN:'secret', ACTIONS_RUNTIME_TOKEN:'secret', AWS_SECRET_ACCESS_KEY:'secret', CUSTOM_SECRET:'secret'}), {PATH:'/bin', HOME:'/tmp/home', DISPLAY:':99'});
@@ -30,4 +30,21 @@ test('a black unpresented frame never counts as rendered text', () => {
   assert.equal(hasTextOnWhite(image,area,5),false);
   image.data.fill(0,0,40);
   assert.equal(hasTextOnWhite(image,area,5),true);
+});
+
+test('offscreen scroll geometry does not mistake a partly visible compact hero for paused', () => {
+  const bounds={top:300,bottom:600,viewportHeight:360,scrollHeight:1200};
+  const target=offscreenScrollTop(bounds);
+  assert.equal(target,601);
+  assert.ok(bounds.bottom-target<0);
+  assert.ok(target<=bounds.scrollHeight-bounds.viewportHeight);
+});
+test('offscreen scroll can place a lower specimen below the viewport when the bottom is clamped', () => {
+  const bounds={top:700,bottom:900,viewportHeight:360,scrollHeight:1000};
+  const target=offscreenScrollTop(bounds);
+  assert.equal(target,339);
+  assert.ok(bounds.top-target>bounds.viewportHeight);
+});
+test('unreachable offscreen geometry fails rather than weakening the pause assertion', () => {
+  assert.throws(()=>offscreenScrollTop({top:100,bottom:400,viewportHeight:360,scrollHeight:500}),/Cannot scroll/);
 });

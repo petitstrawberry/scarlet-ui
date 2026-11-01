@@ -5,7 +5,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {chromium} from 'playwright';
 import {PNG} from 'pngjs';
-import {browserEnvironment, localRequest, artifactPath, changedPixels, coloredPixels, red, dark, hasTextOnWhite} from './smoke-helpers.mjs';
+import {browserEnvironment, localRequest, artifactPath, changedPixels, coloredPixels, red, dark, hasTextOnWhite, offscreenScrollTop} from './smoke-helpers.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(process.argv[2] ?? path.join(here, '../../target/web-samples'));
@@ -213,7 +213,16 @@ try {
   const beforeScroll=await page.evaluate(()=>scrollY);
   await page.mouse.wheel(0,beforeScroll>0 ? -600 : 600);
   await page.waitForFunction(before=>Math.abs(scrollY-before)>0,beforeScroll);
-  await page.evaluate(()=>scrollTo(0,0));
+  const heroBounds=await canvas.evaluate(element=> {
+    const box=element.getBoundingClientRect();
+    return {top:box.top+scrollY,bottom:box.bottom+scrollY,viewportHeight:innerHeight,scrollHeight:document.documentElement.scrollHeight};
+  });
+  await page.evaluate(target=>scrollTo(0,target),offscreenScrollTop(heroBounds));
+  // Establish actual non-intersection before expecting the observer to pause RAF.
+  await page.waitForFunction(()=> {
+    const box=document.querySelector('.hero [data-scarlet-specimen]').getBoundingClientRect();
+    return box.bottom<0 || box.top>innerHeight;
+  });
   await page.waitForFunction(()=>document.querySelector('.hero [data-scarlet-specimen]')?.dataset.state==='paused');
   await page.setViewportSize({width:960,height:640});
   await canvas.scrollIntoViewIfNeeded();
