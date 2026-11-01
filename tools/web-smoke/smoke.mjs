@@ -550,6 +550,80 @@ try {
     }
   }
 
+
+  setPhase('Factory browser-owned context menu');
+  await page.mouse.move(740,520);
+  const beforeContext=await screenshot('factory-before-contextmenu');
+  const contextMenuObserved=page.evaluate(()=>new Promise(resolve=>{
+    window.addEventListener('contextmenu',event=>resolve({prevented:event.defaultPrevented}),{once:true});
+  }));
+  await page.mouse.click(740,520,{button:'right'});
+  const contextMenu=await bounded(contextMenuObserved,5000,'Browser contextmenu event');
+  assert.equal(contextMenu.prevented,false,'Factory must not suppress the browser context menu');
+  const afterContext=await screenshot('factory-no-app-contextmenu');
+  assert.equal(changedPixels(beforeContext,afterContext,{x:200,y:300,width:590,height:290}),0,
+    'Right-click must not synthesize an application menu popup');
+  await page.keyboard.press('Escape');
+  report.checks.push('toolbar menus retained while right-click remains browser-owned without an application fallback');
+
+  setPhase('Factory responsive page matrix');
+  // Geometry comes from the real NavigationView layout: bottom52 below550px,
+  // sidebar190 otherwise; demo rows stack when content width is below560px.
+  for(const viewportWidth of [375,390,562,960]) {
+    await page.setViewportSize({width:viewportWidth,height:640});
+    const sidebar=viewportWidth>=550;
+    const pageX=sidebar?190:0;
+    const stacked=viewportWidth-pageX<560;
+    const padding=stacked?16:24;
+    const heading={x:pageX+padding,y:44,width:Math.min(260,viewportWidth-pageX-padding*2),height:42};
+    const content={x:pageX+padding,y:44,width:viewportWidth-pageX-padding*2,height:500};
+    async function navigateFactory(index) {
+      await page.mouse.click(sidebar?70:(index+0.5)*viewportWidth/5,sidebar?48+40*index:620);
+      await page.mouse.move(viewportWidth-2,30);
+    }
+    // Reset through the existing toolbar action, not through injected app state.
+    await page.mouse.click(35,14);
+    await page.mouse.move(35,48);await page.mouse.click(35,48);
+    await page.mouse.move(viewportWidth-2,30);
+    for(const [index,name] of ['overview','controls','inputs','display','sgfx'].entries()) {
+      const before=await screenshot('factory-'+viewportWidth+'-before-'+name);
+      await navigateFactory(index);
+      const frame=await untilPixels('factory-'+viewportWidth+'-'+name,img=>
+        img.width===viewportWidth&&hasTextOnWhite(img,heading,70)&&changedPixels(before,img,heading)>20);
+      assert.ok(hasTextOnWhite(frame,{...content,height:78},100),'Actual '+name+' heading/content must render at '+viewportWidth);
+      assert.deepEqual(await page.evaluate(()=>({x:scrollX,y:scrollY})),{x:0,y:0},
+        'Factory must remain a viewport-filling canvas');
+      const size=await page.locator('canvas').evaluate(canvas=>({
+        css:canvas.getBoundingClientRect().width,backing:canvas.width,client:document.documentElement.clientWidth,
+        overflow:document.documentElement.scrollWidth,
+      }));
+      assert.equal(size.css,size.client);
+      assert.equal(size.backing,viewportWidth);
+      assert.ok(size.overflow<=size.client,'No horizontal browser overflow at '+viewportWidth);
+      if(name==='controls') {
+        const toggleArea={x:pageX+padding,y:stacked?164:128,width:viewportWidth-pageX-padding*2,height:40};
+        const on=coloredPixels(frame,toggleArea,red);
+        assert.ok(on.count>60,'Responsive Toggle must be visible at '+viewportWidth);
+        await page.mouse.click(on.x,on.y);await page.mouse.move(viewportWidth-2,30);
+        await untilPixels('factory-'+viewportWidth+'-toggle-off',img=>coloredPixels(img,toggleArea,red).count<10);
+        await page.mouse.click(on.x,on.y);await page.mouse.move(viewportWidth-2,30);
+        await untilPixels('factory-'+viewportWidth+'-toggle-on',img=>coloredPixels(img,toggleArea,red).count>60);
+      }
+      if(name==='inputs') {
+        const selectX=pageX+padding+(stacked?0:168);
+        const selectY=28+(stacked?146:110);
+        await page.mouse.click(selectX+80,selectY+14);
+        const popupArea={x:selectX,y:selectY,width:Math.min(230,viewportWidth-selectX),height:145};
+        await untilPixels('factory-'+viewportWidth+'-select',img=>changedPixels(frame,img,popupArea)>500);
+        await page.keyboard.press('Escape');
+      }
+      if(name==='sgfx') {
+        // The retained 3D canvas must animate, not merely render a text heading.
+        await untilPixels('factory-'+viewportWidth+'-sgfx-animation',img=>changedPixels(frame,img,content)>100);
+      }
+    }
+  }
+  report.checks.push('all five GPU-rendered Factory pages and controls reachable at 375/390/562/960px; Select and animated SGFX remain usable');
   assert.equal(await page.evaluate(async()=> (await import('./pkg/scarlet_ui_widget_factory.js')).runtime_error()),undefined);
   assert.equal(errors.length,0,errors.join('\n'));
   report.passed=true;

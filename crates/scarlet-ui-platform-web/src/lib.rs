@@ -348,12 +348,6 @@ impl WebWindow {
             }
         }
         window.install_keyboard_and_wheel()?;
-        let menus = window.menus.clone();
-        window.listen("contextmenu", move |event| {
-            if menus.borrow().has_menu() {
-                event.prevent_default();
-            }
-        })?;
         Ok(window)
     }
 

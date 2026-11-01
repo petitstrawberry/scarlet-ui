@@ -24,6 +24,22 @@ Open localhost:8765 in a browser with an available WebGPU adapter. The embedded
 font is shared with the counter; see its `assets/LICENSE`. Native usage is still
 `cargo run -p scarlet-ui-widget-factory`.
 
+## Responsive showcase layout
+
+Factory pages share a leading label column on wide content areas. Narrow pages
+stack each label above its control; TextView follows the same row structure.
+Demo viewports are bounded by the available content width, while the deliberately
+oversized content inside ScrollView demos remains scrollable. Page height is
+measured from its rows instead of fixed height constants, including the SGFX page.
+Navigation uses the existing automatic sidebar/bottom-bar policy with a useful
+content-width threshold. The browser canvas follows its CSS viewport: the native
+window's initial size is not a minimum browser width.
+
+Select keeps its preferred width unless the parent supplies a smaller maximum.
+Tiny or zero allocations do not paint text/indicators outside their bounds.
+Its expanded list still opens downward at the control width; this change does
+not introduce a viewport-repositioning popup system.
+
 ## Browser input / limitations
 
 - Pointer capture, keyboard key presses/releases, ordinary Unicode characters,
@@ -57,8 +73,7 @@ build is not evidence that these browser checks passed.
 
 `WidgetFactory::menu_model()` supplies `Window::menu_bar()` on both targets.
 Web uses the existing ScarletUI MenuBar/MenuItem/Menu rendering components at
-the top of the canvas, with dropdowns/submenus and a right-click popup using the
-same model. It reserves layout space rather than covering the application.
+the top of the canvas, with dropdowns/submenus using the shared model. It reserves layout space rather than covering the application.
 Actions use the existing menu callback registry; enabled and checked state are
 refreshed from the scene model after rendering. The demo provides reset,
 disabled, checked-toggle, nested slider-preset and text-setting commands.
@@ -72,12 +87,14 @@ is unchanged; this work does **not** add macOS NSMenu support.
 
 Menu QA: open each root; ensure disabled rows cannot activate; toggle the check
 state and reopen; invoke reset and nested presets; dismiss with outside click
-and Escape; right-click near canvas edges and confirm clamping/hit-testing;
+and Escape; confirm a right-click does not duplicate the application menu;
 verify Ctrl+L belongs to the browser; repeat after resize/125% zoom.
 
-Current menu limits: opening is click/tap/right-click (no Alt/F10, typeahead or touch
-long-press); context popup uses the window's complete menu model, not a per-widget
-provider. Dropdown width follows shared label/shortcut/chevron measurements and is
+Current menu limits: opening is click/tap (no Alt/F10, typeahead or touch
+long-press). Right-click events remain available to the scene and the browser;
+the platform no longer substitutes the window menu for a context menu. Shared
+menu components and native platform menu delivery are unchanged. Dropdown width
+follows shared label/shortcut/chevron measurements and is
 clamped to the canvas; oversized menus do not yet scroll. The included demo menus fit. Accessibility and
 native macOS menu integration remain separate work.
 

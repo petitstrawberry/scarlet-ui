@@ -90,7 +90,10 @@ impl Select {
         self
     }
 
-    /// Set the control width.
+    /// Set the preferred control width.
+    ///
+    /// Finite parent width constraints may allocate a narrower control, including
+    /// zero width. Use an explicit remaining-width frame inside a labeled row.
     ///
     /// # Arguments
     ///
@@ -372,6 +375,9 @@ impl SelectRenderObject {
         row_height: u32,
         color: Color,
     ) {
+        if width <= 44 {
+            return;
+        }
         let text_y = y + ((row_height as i32 - 15) / 2).max(0);
         let max_chars = ((width.saturating_sub(44) / 8) as usize).max(1);
         if label.chars().count() > max_chars {
@@ -395,6 +401,9 @@ impl SelectRenderObject {
     }
 
     fn draw_select(&mut self) {
+        if self.size.width <= 0.0 {
+            return;
+        }
         let w = libm::ceilf(self.size.width) as u32;
         let h = libm::ceilf(self.popup_height()) as u32;
         let row_h = libm::ceilf(self.effective_row_height()) as u32;
@@ -435,12 +444,14 @@ impl SelectRenderObject {
         } else {
             Self::draw_label(&mut canvas, &self.placeholder, 0, w, row_h, subtle);
         }
-        Self::draw_chevron(
-            &mut canvas,
-            w.saturating_sub(24) as i32,
-            ((row_h as i32 - 6) / 2).max(0),
-            subtle,
-        );
+        if w >= 24 {
+            Self::draw_chevron(
+                &mut canvas,
+                w.saturating_sub(24) as i32,
+                ((row_h as i32 - 6) / 2).max(0),
+                subtle,
+            );
+        }
 
         if self.expanded {
             let active = hovered_index.or(Some(selected_index));
@@ -457,7 +468,7 @@ impl SelectRenderObject {
                 canvas.fill_rect(0, y, w, row_h, row_background);
                 canvas.draw_line(0, y, w as i32, y, border.with_opacity(0.55));
                 Self::draw_label(&mut canvas, label, y, w, row_h, text);
-                if index == selected_index {
+                if index == selected_index && w >= 24 {
                     Self::draw_checkmark(&mut canvas, w, y, row_h, subtle);
                 }
                 y += row_h as i32;
@@ -470,7 +481,7 @@ impl SelectRenderObject {
 impl ElementRenderObject for SelectRenderObject {
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
         let mut width = self.width.max(constraints.min_width).max(120.0);
-        if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
+        if constraints.max_width.is_finite() && constraints.max_width >= 0.0 {
             width = width.min(constraints.max_width);
         }
         let height = self.effective_row_height();
@@ -517,7 +528,7 @@ impl ElementRenderObject for SelectRenderObject {
                 height: self.popup_height(),
             },
         };
-        bounds.contains(point)
+        self.size.width > 0.0 && bounds.contains(point)
     }
 
     fn render(&mut self) {
@@ -534,6 +545,9 @@ impl ElementRenderObject for SelectRenderObject {
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let w = self.size.width;
+        if w <= 0.0 {
+            return true;
+        }
         let row_h = self.effective_row_height();
         let h = self.popup_height();
         let selected_index = self.clamped_selected_index();
@@ -576,27 +590,36 @@ impl ElementRenderObject for SelectRenderObject {
             String::from(label)
         };
         let text_y = origin.y + ((row_h - 15.0) / 2.0).max(0.0);
-        ctx.draw_text(
-            Point::new(origin.x + 12.0, text_y),
-            display_label,
-            label_color,
-            13.0,
-        );
+        // A character-count estimate is not a pixel bound (wide Unicode and
+        // proportional glyphs vary). Clip labels independently of indicators.
+        if w > 44.0 {
+            ctx.push_clip(Rect::from_xywh(origin.x + 12.0, origin.y, w - 44.0, row_h));
+            ctx.draw_text(
+                Point::new(origin.x + 12.0, text_y),
+                display_label,
+                label_color,
+                13.0,
+            );
 
-        let chevron_x = origin.x + (w - 24.0).max(0.0);
-        let chevron_y = origin.y + ((row_h - 6.0) / 2.0).max(0.0);
-        ctx.draw_line(
-            Point::new(chevron_x, chevron_y),
-            Point::new(chevron_x + 5.0, chevron_y + 5.0),
-            1.0,
-            subtle,
-        );
-        ctx.draw_line(
-            Point::new(chevron_x + 5.0, chevron_y + 5.0),
-            Point::new(chevron_x + 10.0, chevron_y),
-            1.0,
-            subtle,
-        );
+            ctx.pop_clip();
+        }
+        // Suppress the indicator when its inset and geometry cannot fit.
+        if w >= 24.0 {
+            let chevron_x = origin.x + (w - 24.0).max(1.0);
+            let chevron_y = origin.y + ((row_h - 6.0) / 2.0).max(0.0);
+            ctx.draw_line(
+                Point::new(chevron_x, chevron_y),
+                Point::new(chevron_x + 5.0, chevron_y + 5.0),
+                1.0,
+                subtle,
+            );
+            ctx.draw_line(
+                Point::new(chevron_x + 5.0, chevron_y + 5.0),
+                Point::new(chevron_x + 10.0, chevron_y),
+                1.0,
+                subtle,
+            );
+        }
 
         if self.expanded {
             let active = self.hovered_index.or(Some(selected_index));
@@ -616,13 +639,17 @@ impl ElementRenderObject for SelectRenderObject {
                     1.0,
                     border.with_opacity(0.55),
                 );
-                ctx.draw_text(
-                    Point::new(origin.x + 12.0, y + ((row_h - 15.0) / 2.0).max(0.0)),
-                    self.options[index].clone(),
-                    text,
-                    13.0,
-                );
-                if index == selected_index {
+                if w > 44.0 {
+                    ctx.push_clip(Rect::from_xywh(origin.x + 12.0, y, w - 44.0, row_h));
+                    ctx.draw_text(
+                        Point::new(origin.x + 12.0, y + ((row_h - 15.0) / 2.0).max(0.0)),
+                        self.options[index].clone(),
+                        text,
+                        13.0,
+                    );
+                    ctx.pop_clip();
+                }
+                if index == selected_index && w >= 24.0 {
                     let cx = origin.x + (w - 22.0).max(0.0);
                     let cy = y + ((row_h - 8.0) / 2.0).max(0.0) + 2.0;
                     ctx.draw_line(
@@ -698,6 +725,110 @@ mod tests {
     use super::*;
     use crate::element::LayoutConstraints;
     use crate::renderer::PaintCommand;
+
+    fn sample_select(expanded: bool) -> SelectRenderObject {
+        SelectRenderObject::new(
+            alloc::vec![String::from("Wide WWWWW label 日本語")],
+            0,
+            expanded,
+            260.0,
+            32.0,
+            String::new(),
+            6,
+        )
+    }
+
+    #[test]
+    fn select_honors_narrow_and_zero_width_constraints_without_changing_preferred_width() {
+        for expanded in [false, true] {
+            let mut select = sample_select(expanded);
+            for width in [260.0, 156.0, 24.0, 8.0, 0.0] {
+                assert_eq!(
+                    select.layout(LayoutConstraints::loose(width, 100.0)).width,
+                    width
+                );
+                let mut ctx = PaintContext::new();
+                select.paint(&mut ctx, Point::ZERO);
+                if width == 0.0 {
+                    assert!(ctx.commands().is_empty());
+                    assert!(!select.hit_test(Point::ZERO));
+                    select.render(); // Zero-width CPU fallback must not underflow.
+                } else if width <= 44.0 {
+                    if width < 24.0 && !expanded {
+                        assert!(
+                            !ctx.commands()
+                                .iter()
+                                .any(|c| matches!(c, PaintCommand::StrokePath { .. }))
+                        );
+                    }
+                    assert!(
+                        !ctx.commands()
+                            .iter()
+                            .any(|c| matches!(c, PaintCommand::DrawText { .. }))
+                    );
+                }
+            }
+            assert_eq!(
+                select
+                    .layout(LayoutConstraints::loose(f32::INFINITY, 100.0))
+                    .width,
+                260.0
+            );
+        }
+    }
+
+    #[test]
+    fn select_labels_are_pixel_clipped_inside_control_and_popup_indicator_gutter() {
+        for expanded in [false, true] {
+            let mut select = sample_select(expanded);
+            select.layout(LayoutConstraints::loose(156.0, 100.0));
+            let origin = Point::new(7.0, 11.0);
+            let mut ctx = PaintContext::new();
+            select.paint(&mut ctx, origin);
+            let mut clips = alloc::vec::Vec::new();
+            let mut labels = 0;
+            for command in ctx.commands() {
+                match command {
+                    PaintCommand::PushClip { rect, .. } => clips.push(*rect),
+                    PaintCommand::PopClip => {
+                        clips.pop().expect("balanced clips");
+                    }
+                    PaintCommand::DrawText { .. } => {
+                        let clip = clips.last().expect("every label is clipped");
+                        assert_eq!(clip.origin.x, origin.x + 12.0);
+                        assert_eq!(clip.size.width, 112.0);
+                        assert_eq!(clip.size.height, select.effective_row_height());
+                        labels += 1;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(clips.is_empty());
+            assert_eq!(labels, if expanded { 2 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn parent_row_can_allocate_select_the_explicit_remaining_width() {
+        use crate::view::ViewExt;
+        use crate::views::{HStack, Text};
+        for available in [324.0, 428.0, 168.0] {
+            let select = Select::new(
+                alloc::vec![String::from("Regular")],
+                State::new(crate::state::generate_state_id(), 0),
+            );
+            let remaining = available - 150.0 - 18.0;
+            let mut row = HStack::new((
+                Text::new("Select").frame_width(150.0),
+                select.frame_width(remaining),
+            ))
+            .spacing(18.0)
+            .create_element();
+            row.layout(LayoutConstraints::loose(available, 100.0));
+            assert_eq!(row.children()[1].bounds().size.width, remaining);
+            assert!(row.bounds().size.width <= available);
+        }
+    }
 
     #[test]
     fn expanding_select_preserves_control_corner_radius() {
