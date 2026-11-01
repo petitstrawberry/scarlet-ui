@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from urllib.parse import urljoin, urlsplit
 
 spec = importlib.util.spec_from_file_location('build_web_samples', Path(__file__).with_name('build-web-samples.py'))
 builder = importlib.util.module_from_spec(spec)
@@ -31,6 +32,20 @@ class PackageValidation(unittest.TestCase):
 
     def test_relative_routes_work_under_arbitrary_prefix(self):
         builder.validate(self.root)
+
+    def test_nested_assets_resolve_at_root_and_project_prefix(self):
+        for base in ('https://ui.scarlet-os.org/', 'https://example.test/scarlet-ui/'):
+            for route, _, module in builder.DEMOS:
+                page = urljoin(base, f'./{route}/')
+                glue = urljoin(page, f'./pkg/{module}.js')
+                wasm = urljoin(glue, f'{module}_bg.wasm')
+                with self.subTest(base=base, route=route):
+                    self.assertEqual(page, f'{base}{route}/')
+                    self.assertEqual(glue, f'{base}{route}/pkg/{module}.js')
+                    self.assertEqual(wasm, f'{base}{route}/pkg/{module}_bg.wasm')
+                    for url in (page + 'index.html', glue, wasm):
+                        relative = urlsplit(url).path.removeprefix(urlsplit(base).path)
+                        self.assertTrue((self.root / relative).is_file())
 
     def test_root_relative_route_is_rejected(self):
         (self.root / 'index.html').write_text('<a href="/counter/">Counter</a>')
