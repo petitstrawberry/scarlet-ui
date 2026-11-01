@@ -584,6 +584,9 @@ try {
     // Reset through the existing toolbar action, not through injected app state.
     await page.mouse.click(35,14);
     await page.mouse.move(35,48);await page.mouse.click(35,48);
+    // Reset is disabled when already at defaults, so selecting it correctly
+    // leaves the dropdown open. Dismiss before sidebar clicks share its bounds.
+    await page.keyboard.press('Escape');
     await page.mouse.move(viewportWidth-2,30);
     for(const [index,name] of ['overview','controls','inputs','display','sgfx'].entries()) {
       const before=await screenshot('factory-'+viewportWidth+'-before-'+name);
