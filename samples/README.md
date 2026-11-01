@@ -74,9 +74,12 @@ node --test site/scripts/*.test.mjs
 
 Static checks cover artifact paths, imported documentation integrity, adapter
 messages and the specimen's asynchronous visibility/disposal races. Browser
-checks additionally inspect real GPU pixels, icon/category/stroke selection,
+checks additionally inspect real GPU pixels, drawing/color/stroke-width changes,
 independent counter state, full-demo clicks and slider changes,
 pause/resume state, wheel scrolling, narrow layouts, links and Back navigation.
+The software-Chromium smoke also uses simulated touch to test Factory internal
+scrolling, cancellation/repeated gestures, taps and Slider drags. This is not
+physical iOS/Safari device coverage.
 The optional `/try/` capability check does not request identifying adapter
 information or guarantee later device initialization.
 

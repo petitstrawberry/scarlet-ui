@@ -2766,4 +2766,59 @@ mod tests {
         assert!(dispatcher.advance_animations(&mut tree, Duration::from_millis(1)));
         assert_eq!(activations.get(), 3);
     }
+    #[test]
+    fn direct_touch_scroll_cancels_button_tap_and_cancel_allows_fresh_tap() {
+        use crate::views::{ScrollView, ScrollViewRenderObject};
+        let clicks = Rc::new(Cell::new(0));
+        let activated = clicks.clone();
+        let button =
+            Button::new("touch target").on_click(move || activated.set(activated.get() + 1));
+        let root = ScrollView::new(button).content_size(100.0, 500.0);
+        let mut tree = ElementTree::new();
+        tree.set_root(root.create_element());
+        tree.layout(LayoutConstraints::tight(100.0, 100.0));
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.set_root(tree.root().unwrap().id());
+        let mut serial = 0;
+        let mut send = |tree: &mut ElementTree, phase, y| {
+            serial += 1;
+            let mut event = button_touch(phase, serial * 16_000_000);
+            if let Event::TouchFrame(frame) = &mut event {
+                frame.changes[0].y = y;
+            }
+            dispatcher.dispatch(tree, &event);
+        };
+        send(&mut tree, TouchPhase::Down, 10);
+        send(&mut tree, TouchPhase::Move, -30);
+        send(&mut tree, TouchPhase::Up, -30);
+        assert_eq!(clicks.get(), 0, "panning from a button must not click it");
+        let offset = tree
+            .root()
+            .unwrap()
+            .render_object()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ScrollViewRenderObject<Button>>()
+            .unwrap()
+            .offset()
+            .1;
+        assert!(
+            offset > 0.0,
+            "the containing scroll view must actually move"
+        );
+
+        // A separate stationary button proves cancellation is not a release,
+        // and a later contact still activates normally.
+        let activated = clicks.clone();
+        let root = Button::new("touch target").on_click(move || activated.set(activated.get() + 1));
+        tree.set_root(root.create_element());
+        tree.layout(LayoutConstraints::tight(100.0, 100.0));
+        send(&mut tree, TouchPhase::Down, 10);
+        send(&mut tree, TouchPhase::Cancel, 10);
+        send(&mut tree, TouchPhase::Up, 10);
+        assert_eq!(clicks.get(), 0);
+        send(&mut tree, TouchPhase::Down, 10);
+        send(&mut tree, TouchPhase::Up, 10);
+        assert_eq!(clicks.get(), 1);
+    }
 }
