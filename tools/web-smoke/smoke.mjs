@@ -79,7 +79,7 @@ try {
     chromiumSandbox:true,
     env:browserEnvironment(),
     // Required for the read-only Browser.getBrowserCommandLine diagnostic.
-    args:['--enable-automation','--use-angle=swiftshader','--enable-features=Vulkan','--disable-vulkan-surface','--enable-unsafe-webgpu','--disable-background-networking'],
+    args:['--enable-automation','--use-angle=swiftshader','--use-vulkan=swiftshader','--use-webgpu-adapter=swiftshader','--enable-features=Vulkan','--disable-vulkan-surface','--enable-unsafe-webgpu','--disable-background-networking'],
   });
   report.browserVersion=browser.version();
   const browserSession=await browser.newBrowserCDPSession();
@@ -124,7 +124,8 @@ try {
       let explicitlyDestroyed=false;
       const destroy=device.destroy.bind(device);
       device.destroy=()=>{explicitlyDestroyed=true;destroy();};
-      log({kind:'device-created',maxBufferSize:device.limits.maxBufferSize,maxTextureDimension2D:device.limits.maxTextureDimension2D});
+      const info=this.info;
+      log({kind:'device-created',adapter:info ? {vendor:info.vendor,architecture:info.architecture,device:info.device,description:info.description,isFallbackAdapter:info.isFallbackAdapter} : null,maxBufferSize:device.limits.maxBufferSize,maxTextureDimension2D:device.limits.maxTextureDimension2D});
       device.lost.then(info=>log({kind:'device-lost',reason:info.reason,message:info.message,expected:explicitlyDestroyed && info.reason==='destroyed'}));
       device.addEventListener('uncapturederror',event=>log({kind:'uncaptured-error',message:event.error.message}));
       return device;

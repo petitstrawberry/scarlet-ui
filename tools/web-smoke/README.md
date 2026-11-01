@@ -29,13 +29,25 @@ external services: context routing allows only the exact local HTTP origin and
 service workers are blocked. Do not reuse this profile for everyday browsing.
 
 Chrome runs in headed mode under the runner-provided Xvfb display, with
-`chromiumSandbox: true`, never `--no-sandbox`. Headless presentation failed the
-standalone GPU preflight on this runner; there is no automatic fallback.
+`chromiumSandbox: true`, never `--no-sandbox`. There is no automatic
+fallback or sandbox-policy change.
 `chrome://sandbox` must confirm namespace and seccomp-BPF sandbox layers; missing
 sandbox support is a failure, not a reason to alter runner sysctls/AppArmor or
 turn off the sandbox. SwiftShader uses the specifically approved unsafe-WebGPU
 and Vulkan-compositing flags. The GPU subprocess may be unsandboxed; this
 exception does **not** authorize disabling the browser/renderer sandbox.
+
+The software backend is selected explicitly for all three consumers:
+ANGLE (`--use-angle=swiftshader`), Chromium's Vulkan compositor
+(`--use-vulkan=swiftshader`) and Dawn WebGPU
+(`--use-webgpu-adapter=swiftshader`). Selecting ANGLE alone left the runner's
+Vulkan compositor unable to initialize (`vkCreateInstance failed: -9`), followed
+by a missing shared-image backing factory and device loss during canvas
+presentation. The standalone mapped-buffer allocation itself succeeded.
+These driver-selection flags do not change sandbox settings. See Chromium's
+[SwiftShader driver documentation](https://chromium.googlesource.com/chromium/src/+/main/docs/gpu/swiftshader.md)
+and [Dawn adapter-selection explanation](https://chromium.googlesource.com/chromium/src/gpu/+/963206a961a7992b048d07f756f87f11fa2e5420).
+The report records actual WebGPU adapter information as well as compositor data.
 
 ## Assertions and evidence
 
