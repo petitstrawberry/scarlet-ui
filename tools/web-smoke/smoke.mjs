@@ -216,18 +216,26 @@ try {
   await specimenClick(120,255); // green
   // Simulated touch on this same isolated localhost context, not real-device QA.
   const touch=await context.newCDPSession(page);
-  await touch.send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
+  let touchActive=false;
   try {
+    await touch.send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
     const bounds=await canvas.boundingBox();
     const point=x=>({x:bounds.x+x,y:bounds.y+185,id:1,radiusX:2,radiusY:2,force:1});
     await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[point(50)]});
+    touchActive=true;
     for(let index=1;index<=8;index++)
       await touch.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[point(50+(width-125)*index/8)]});
     await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+    touchActive=false;
   } finally {
-    await touch.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});
-    await touch.send('Emulation.setTouchEmulationEnabled',{enabled:false});
-    await touch.detach();
+    try {
+      // CDP rejects cancel after a completed end: there is no active contact.
+      if(touchActive)
+        await touch.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});
+    } finally {
+      try { await touch.send('Emulation.setTouchEmulationEnabled',{enabled:false}); }
+      finally { await touch.detach(); }
+    }
   }
   const adjusted=await specimenPixels('sketch-simulated-touch',frame=>
     coloredPixels(frame,paper,green).count>100&&coloredPixels(frame,paper,blue).count>=thinBlue);
