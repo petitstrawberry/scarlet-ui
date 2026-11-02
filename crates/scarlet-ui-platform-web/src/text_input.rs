@@ -64,6 +64,7 @@ pub(crate) struct TextInput {
     composition_selection: Cell<(u32, u32)>,
     composition_expected_selection: Cell<(u32, u32)>,
     updating: Cell<bool>,
+    transferring_focus: Cell<bool>,
     events: Rc<RefCell<VecDeque<Event>>>,
     runner: Weak<RefCell<FrameLoop>>,
     listeners: RefCell<Vec<Listener>>,
@@ -105,6 +106,7 @@ impl TextInput {
             composition_selection: Cell::new((0, 0)),
             composition_expected_selection: Cell::new((0, 0)),
             updating: Cell::new(false),
+            transferring_focus: Cell::new(false),
             events,
             runner,
             listeners: RefCell::new(Vec::new()),
@@ -336,10 +338,11 @@ impl TextInput {
             "blur" => {
                 self.reset_reveal();
                 self.commit_dom();
-                let internal = event
-                    .dyn_ref::<web_sys::FocusEvent>()
-                    .and_then(|e| e.related_target())
-                    .is_some_and(|t| t == self.canvas.clone().into());
+                let internal = self.transferring_focus.get()
+                    || event
+                        .dyn_ref::<web_sys::FocusEvent>()
+                        .and_then(|e| e.related_target())
+                        .is_some_and(|t| t == self.canvas.clone().into());
                 if !internal {
                     self.events
                         .borrow_mut()
@@ -542,7 +545,7 @@ impl TextInput {
             self.element.set_value("");
             self.value.borrow_mut().clear();
             if self.focused() {
-                let _ = self.canvas.focus();
+                self.focus_canvas();
             }
         }
         self.updating.set(false);
@@ -624,6 +627,26 @@ impl TextInput {
         self.element.set_inert(false);
         self.apply_state();
     }
+    /// Only an explicit synchronous canvas/editor handoff is internal. Some
+    /// browsers omit relatedTarget during this handoff; genuine external blur
+    /// (including a null target) must still clear ScarletUI focus.
+    pub fn canvas_blur_is_internal(&self, event: &web_sys::Event) -> bool {
+        self.transferring_focus.get()
+            || event
+                .dyn_ref::<web_sys::FocusEvent>()
+                .and_then(|event| event.related_target())
+                .is_some_and(|target| target == self.element.clone().into())
+    }
+    fn transfer_focus(&self, focus: impl FnOnce()) {
+        let previous = self.transferring_focus.replace(true);
+        focus();
+        self.transferring_focus.set(previous);
+    }
+    pub fn focus_canvas(&self) {
+        self.transfer_focus(|| {
+            let _ = self.canvas.focus();
+        });
+    }
     fn focus_editor(&self) {
         if self.suspended.get() {
             return;
@@ -636,7 +659,9 @@ impl TextInput {
         self.position();
         let options = web_sys::FocusOptions::new();
         options.set_prevent_scroll(true);
-        let _ = self.element.focus_with_options(&options);
+        self.transfer_focus(|| {
+            let _ = self.element.focus_with_options(&options);
+        });
         self.request_reveal(true);
         self.flush();
     }
@@ -1197,6 +1222,101 @@ mod tests {
         field.send("keyup");
         assert_eq!(field.bridge.state.borrow().as_ref().unwrap().cursor_byte, 2);
         assert_eq!(field.bridge.element.selection_start().unwrap(), Some(2));
+    }
+
+    #[wasm_bindgen_test]
+    fn null_related_target_during_explicit_focus_transfer_keeps_core_editor() {
+        let field = Field::new("retained");
+        // Use the production canvas focus listeners; the minimal Field fixture
+        // alone cannot reproduce a canvas blur queued by WebWindow.
+        let mut window = crate::WebWindow {
+            canvas: field.bridge.canvas.clone(),
+            size: Size::new(300.0, 200.0),
+            scale: 1000,
+            events: field.bridge.events.clone(),
+            paint: None,
+            listeners: Vec::new(),
+            input_listeners: Vec::new(),
+            lifecycle_listeners: Vec::new(),
+            original_tab_index: Some("0".into()),
+            menus: Rc::default(),
+            hover_handoff: Default::default(),
+            menu_touch: Default::default(),
+            text_input: field.bridge.clone(),
+        };
+        window.install_keyboard_and_wheel().unwrap();
+        field.bridge.focus_canvas();
+        field.bridge.flush();
+        assert!(field.bridge.state.borrow().is_some());
+        let canvas = field.bridge.canvas.clone();
+        // Emulate the missing relatedTarget while focus() is synchronously
+        // dispatching events, independent of the test browser's native value.
+        let inject = Closure::wrap(Box::new(move |_: web_sys::Event| {
+            canvas
+                .dispatch_event(&web_sys::FocusEvent::new("blur").unwrap())
+                .unwrap();
+        }) as Box<dyn FnMut(web_sys::Event)>);
+        field
+            .bridge
+            .element
+            .add_event_listener_with_callback("focus", inject.as_ref().unchecked_ref())
+            .unwrap();
+        field.bridge.focus_editor();
+        assert!(field.bridge.focused());
+        assert!(field.bridge.state.borrow().is_some());
+        assert_eq!(field.text.get(), "retained");
+        field
+            .bridge
+            .element
+            .remove_event_listener_with_callback("focus", inject.as_ref().unchecked_ref())
+            .unwrap();
+        // A later null-target external canvas blur is not a handoff and must
+        // not be swallowed by a flag left set until another event/frame.
+        field.bridge.focus_canvas();
+        field
+            .bridge
+            .canvas
+            .dispatch_event(&web_sys::FocusEvent::new("blur").unwrap())
+            .unwrap();
+        field.bridge.flush();
+        assert!(field.bridge.state.borrow().is_none());
+    }
+
+    #[wasm_bindgen_test]
+    fn null_related_target_editor_to_canvas_handoff_is_scoped() {
+        let field = Field::new("menu selection");
+        field.bridge.element.set_selection_range(2, 5).unwrap();
+        field.send("select");
+        let before = field.bridge.state.borrow().clone().unwrap();
+        let editor = field.bridge.element.clone();
+        let inject = Closure::wrap(Box::new(move |_: web_sys::Event| {
+            editor
+                .dispatch_event(&web_sys::FocusEvent::new("blur").unwrap())
+                .unwrap();
+        }) as Box<dyn FnMut(web_sys::Event)>);
+        field
+            .bridge
+            .canvas
+            .add_event_listener_with_callback("focus", inject.as_ref().unchecked_ref())
+            .unwrap();
+        field.bridge.focus_canvas();
+        field.bridge.flush();
+        assert!(!field.bridge.focused());
+        let after = field.bridge.state.borrow().clone().unwrap();
+        assert_eq!(
+            (before.cursor_byte, before.anchor_byte),
+            (after.cursor_byte, after.anchor_byte)
+        );
+        field
+            .bridge
+            .canvas
+            .remove_event_listener_with_callback("focus", inject.as_ref().unchecked_ref())
+            .unwrap();
+        // Genuine external textarea blur retains its existing focus-loss policy.
+        field.bridge.focus_editor();
+        field.bridge.element.blur().unwrap();
+        assert!(field.bridge.state.borrow().is_none());
+        assert!(!field.bridge.transferring_focus.get());
     }
 
     #[wasm_bindgen_test]
