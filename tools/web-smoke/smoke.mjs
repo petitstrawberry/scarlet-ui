@@ -554,11 +554,16 @@ try {
   setPhase('Factory browser-owned context menu');
   await page.mouse.move(740,520);
   const beforeContext=await screenshot('factory-before-contextmenu');
-  const contextMenuObserved=page.evaluate(()=>new Promise(resolve=>{
-    window.addEventListener('contextmenu',event=>resolve({prevented:event.defaultPrevented}),{once:true});
-  }));
+  // Await listener installation, not the event: an unawaited evaluate can race
+  // the input command and miss the only contextmenu event entirely.
+  await page.evaluate(()=> {
+    window.__scarletContextMenuObserved=new Promise(resolve=> {
+      window.addEventListener('contextmenu',event=>resolve({prevented:event.defaultPrevented}),{once:true});
+    });
+  });
   await page.mouse.click(740,520,{button:'right'});
-  const contextMenu=await bounded(contextMenuObserved,5000,'Browser contextmenu event');
+  const contextMenu=await bounded(page.evaluate(()=>window.__scarletContextMenuObserved),5000,'Browser contextmenu event');
+  await page.evaluate(()=> { delete window.__scarletContextMenuObserved; });
   assert.equal(contextMenu.prevented,false,'Factory must not suppress the browser context menu');
   const afterContext=await screenshot('factory-no-app-contextmenu');
   assert.equal(changedPixels(beforeContext,afterContext,{x:200,y:300,width:590,height:290}),0,
