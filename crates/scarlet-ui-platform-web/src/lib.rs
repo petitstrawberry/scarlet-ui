@@ -301,7 +301,7 @@ impl WebWindow {
                     if e.is_primary() && e.button() == 0 && menus.borrow().owns_pointer(y) {
                         // Menu keyboard navigation belongs to the canvas, not
                         // to the hidden editor. Internal blur retains selection.
-                        let _ = canvas.focus();
+                        text_input.focus_canvas();
                     }
                     if e.is_primary() && e.button() == 0 && !menus.borrow().owns_pointer(y) {
                         tap.set(Some((e.pointer_id(), x, y)));
@@ -328,7 +328,7 @@ impl WebWindow {
                 if e.pointer_type() == "touch" {
                     if kind == "pointerdown" {
                         if !text_input.focused() {
-                            let _ = canvas.focus();
+                            text_input.focus_canvas();
                         }
                         let _ = canvas.set_pointer_capture(e.pointer_id());
                     }
@@ -353,7 +353,7 @@ impl WebWindow {
                 let event = match kind {
                     "pointerdown" => {
                         if !text_input.focused() {
-                            let _ = canvas.focus();
+                            text_input.focus_canvas();
                         }
                         pressed.set(Some(button));
                         let _ = canvas.set_pointer_capture(e.pointer_id());
@@ -393,13 +393,9 @@ impl WebWindow {
         }
         let events = window.events.clone();
         let blur_touches = touches.clone();
-        let editor = window.text_input.element.clone();
+        let editor = window.text_input.clone();
         window.listen("blur", move |event| {
-            if event
-                .dyn_ref::<web_sys::FocusEvent>()
-                .and_then(|e| e.related_target())
-                .is_some_and(|t| t == editor.clone().into())
-            {
+            if editor.canvas_blur_is_internal(&event) {
                 return;
             }
             if let Some(frame) = blur_touches.borrow_mut().cancel_all(event.time_stamp()) {
@@ -558,13 +554,9 @@ impl WebWindow {
         for kind in ["focus", "blur"] {
             let events = self.events.clone();
             let held_keys = held_keys.clone();
-            let editor = self.text_input.element.clone();
+            let editor = self.text_input.clone();
             self.listen(kind, move |event| {
-                let internal = kind == "blur"
-                    && event
-                        .dyn_ref::<web_sys::FocusEvent>()
-                        .and_then(|e| e.related_target())
-                        .is_some_and(|t| t == editor.clone().into());
+                let internal = kind == "blur" && editor.canvas_blur_is_internal(&event);
                 let mut events = events.borrow_mut();
                 if kind == "blur" {
                     for (_, keycode) in held_keys.borrow_mut().drain(..) {
