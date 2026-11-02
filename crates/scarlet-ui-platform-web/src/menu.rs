@@ -97,6 +97,12 @@ impl WebMenu {
     pub fn has_menu(&self) -> bool {
         !self.model.items().is_empty()
     }
+    pub fn is_open(&self) -> bool {
+        !self.popups.is_empty() || self.top.is_some()
+    }
+    pub fn owns_pointer(&self, y: i32) -> bool {
+        !self.popups.is_empty() || self.top.is_some() || (y as f32) < self.height()
+    }
     pub fn height(&self) -> f32 {
         if self.has_menu() { BAR_HEIGHT } else { 0.0 }
     }

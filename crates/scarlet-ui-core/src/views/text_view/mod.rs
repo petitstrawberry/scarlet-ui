@@ -689,6 +689,8 @@ impl TextViewRenderObject {
     /// Cursor rectangle, surrounding text, and selection byte offsets.
     pub(crate) fn text_input_state(&self) -> TextInputElementState {
         TextInputElementState {
+            editor_id: None,
+            input_rect: Rect::new(Point::ZERO, self.size),
             cursor_rect: self.text_input_cursor_rect(),
             surrounding_text: self.text_document.as_str().into_owned(),
             cursor_byte: self.selection.caret.byte as u32,

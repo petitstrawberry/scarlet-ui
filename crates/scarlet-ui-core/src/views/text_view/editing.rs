@@ -196,6 +196,26 @@ pub(crate) fn handle_text_view_text_input(
     }
 
     match event {
+        Event::TextInputSelection {
+            cursor_byte,
+            anchor_byte,
+        } => {
+            let text = render_object.text_document.as_str();
+            let boundary = |byte: u32| {
+                let mut byte = (byte as usize).min(text.len());
+                while !text.is_char_boundary(byte) {
+                    byte -= 1;
+                }
+                byte
+            };
+            render_object.selection = TextSelection {
+                caret: TextPosition::new(boundary(*cursor_byte)),
+                anchor: TextPosition::new(boundary(*anchor_byte)),
+            };
+            drop(text);
+            finish_caret_change(view, render_object);
+            true
+        }
         Event::TextInputCommit { text, .. } => {
             render_object.clear_preedit();
             insert_text(view, render_object, text);

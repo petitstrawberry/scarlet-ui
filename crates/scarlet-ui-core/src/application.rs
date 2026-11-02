@@ -620,6 +620,8 @@ impl ApplicationRunner {
                 && frame_granted
             {
                 let presentation = present_window(app, slot)?;
+                // Layout/scroll during presentation may move the focused caret.
+                sync_text_input(slot.window.as_mut(), &slot.pipeline);
                 match presentation {
                     Presentation::Cpu => {
                         slot.presented_this_cycle = true;
@@ -1090,6 +1092,10 @@ fn handle_window_event<A: Application>(
             menu_item_id,
         } => {
             let _ = menu_model::invoke_menu_callback(window_id, &menu_item_id);
+        }
+        Event::TextInputSelection { .. } => {
+            slot.pipeline.handle_event(&event);
+            sync_after_event(slot)?;
         }
         Event::TextInputCommit {
             context_id,

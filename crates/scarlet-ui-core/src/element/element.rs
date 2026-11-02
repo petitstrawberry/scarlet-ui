@@ -54,6 +54,11 @@ pub struct WindowSizeLimits {
 /// Text-input state exposed by focused editable elements.
 #[derive(Clone, Debug)]
 pub struct TextInputElementState {
+    /// Retained editor identity, assigned by the element tree at the platform boundary.
+    pub editor_id: Option<ElementId>,
+    /// Editable bounds: local in elements; window-relative and intersected with
+    /// ancestor clips at the platform boundary. Empty when fully clipped.
+    pub input_rect: Rect,
     /// Caret rectangle in element-local coordinates.
     pub cursor_rect: Rect,
     /// Text surrounding the caret that is exposed to the platform IME.
@@ -419,6 +424,11 @@ pub trait Element {
     /// Get per-window size limits if this element represents a Window.
     fn get_window_size_limits(&self) -> Option<WindowSizeLimits> {
         None
+    }
+
+    /// Reveal a caret inside a visible local viewport, or restore with `None`.
+    fn reveal_text_input(&mut self, _request: Option<(Rect, Rect)>) -> bool {
+        false
     }
 
     /// Get text-input state if this element is the focused editable control.

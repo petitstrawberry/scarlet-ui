@@ -409,6 +409,12 @@ pub trait RenderObject: Any {
         size
     }
 
+    /// Opt-in caret reveal. Rectangles are local to this render object.
+    /// `None` removes temporary platform occlusion allowances.
+    fn reveal_text_input(&mut self, _request: Option<(Rect, Rect)>) -> bool {
+        false
+    }
+
     /// Sync child positions after an input event without a full re-layout.
     ///
     /// Scroll-like containers override this to translate their children by the
@@ -1085,6 +1091,24 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         Some(&mut self.render_object)
     }
 
+    fn reveal_text_input(&mut self, request: Option<(Rect, Rect)>) -> bool {
+        if !self.render_object.reveal_text_input(request) {
+            return false;
+        }
+        match self.render_object.apply_scroll_offset(&mut self.children) {
+            ScrollOffsetUpdate::ChildrenChanged => {
+                crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id)
+            }
+            ScrollOffsetUpdate::NeedsComposite => {
+                crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id)
+            }
+            ScrollOffsetUpdate::NeedsPaint | ScrollOffsetUpdate::None => {
+                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id)
+            }
+        }
+        true
+    }
+
     fn text_input_state(&self) -> Option<crate::element::TextInputElementState> {
         if let Some(focusable) = self
             .render_object
@@ -1237,7 +1261,8 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
         if matches!(
             _event,
-            Event::TextInputPreedit { .. }
+            Event::TextInputSelection { .. }
+                | Event::TextInputPreedit { .. }
                 | Event::TextInputCommit { .. }
                 | Event::TextInputDeleteSurroundingText { .. }
                 | Event::TextInputDone { .. }

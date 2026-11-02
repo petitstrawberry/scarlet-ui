@@ -98,6 +98,17 @@ pub enum Event {
         spans: Vec<u8>,
     },
 
+    /// Reveal the focused caret within platform-visible window coordinates.
+    /// `None` restores temporary keyboard occlusion scroll allowances.
+    /// ScrollViews can extend trailing travel for bottom/right occlusion;
+    /// leading-edge reveal remains bounded by the authored scroll origin.
+    TextInputReveal {
+        visible_rect: Option<crate::geometry::Rect>,
+    },
+
+    /// Platform selection in UTF-8 bytes of the surrounding text.
+    TextInputSelection { cursor_byte: u32, anchor_byte: u32 },
+
     /// IME committed text for a text-input context.
     TextInputCommit {
         context_id: u32,
