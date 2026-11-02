@@ -627,6 +627,144 @@ try {
     }
   }
   report.checks.push('all five GPU-rendered Factory pages and controls reachable at 375/390/562/960px; Select and animated SGFX remain usable');
+  setPhase('Factory textarea-backed editing');
+  await page.setViewportSize({width:960,height:640});
+  await page.mouse.click(70,128);await page.mouse.move(950,30);
+  const editor=page.locator('textarea[data-scarlet-text-input]');
+  const fieldPixels={x:382,y:92,width:320,height:34};
+  const viewPixels={x:382,y:222,width:320,height:195};
+  const waitEditor=()=>page.waitForFunction(()=>
+    document.activeElement?.matches('textarea[data-scarlet-text-input]'));
+  const waitValue=value=>page.waitForFunction(value=>
+    document.querySelector('textarea[data-scarlet-text-input]')?.value===value,value);
+  const assertNoEditor=async()=>assert.equal(await editor.evaluate(element=>
+    document.activeElement===element),false,'Non-editor controls must not focus the textarea');
+  await page.mouse.click(450,106);
+  await waitEditor();
+  const fieldBefore=await screenshot('factory-editor-before');
+  await page.keyboard.press('Control+A');
+  await page.keyboard.type('bridge!');
+  await waitValue('bridge!');
+  await page.keyboard.press('Home');
+  await page.keyboard.press('Shift+ArrowRight');
+  await page.keyboard.press('Shift+ArrowRight');
+  assert.deepEqual(await editor.evaluate(element=>[element.selectionStart,element.selectionEnd]),[0,2]);
+  await page.keyboard.type('R');
+  await waitValue('Ridge!');
+  await untilPixels('factory-editor-hardware',img=>changedPixels(fieldBefore,img,fieldPixels)>30);
+  // Browser text insertion exercises Unicode/UTF-16 without pretending that it
+  // is a real OS IME session. Core persistence is checked after blur/refocus.
+  await page.keyboard.press('Control+A');
+  await page.keyboard.insertText('日本😀');
+  await waitValue('日本😀');
+  assert.deepEqual(await editor.evaluate(element=>[element.selectionStart,element.selectionEnd]),[4,4]);
+  await page.mouse.click(740,520);
+  await assertNoEditor();
+  await page.mouse.click(450,106);await waitEditor();await waitValue('日本😀');
+  await page.keyboard.press('Control+A');
+  await editor.evaluate(element=>{
+    element.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true,data:''}));
+    element.value='に';element.setSelectionRange(1,1);
+    element.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertCompositionText',data:'に',isComposing:true}));
+  });
+  await waitValue('に');
+  await editor.evaluate(element=>{
+    element.value='IME-漢字😀';element.setSelectionRange(element.value.length,element.value.length);
+    element.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertCompositionText',data:'IME-漢字😀',isComposing:true}));
+    element.dispatchEvent(new CompositionEvent('compositionend',{bubbles:true,data:'IME-漢字😀'}));
+    // Chromium may deliver a final non-composing input after compositionend.
+    element.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:'IME-漢字😀'}));
+  });
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  await waitValue('IME-漢字😀');
+  await page.mouse.click(740,520);await assertNoEditor();
+  await page.mouse.click(450,106);await waitEditor();await waitValue('IME-漢字😀');
+  await untilPixels('factory-editor-composition-simulated',img=>changedPixels(fieldBefore,img,fieldPixels)>30);
+  // Menu keyboard input must not leak to the textarea that was just editing.
+  await page.keyboard.press('Home');
+  await page.keyboard.press('Shift+ArrowRight');
+  await page.keyboard.press('Shift+ArrowRight');
+  const selectionBeforeMenu=await editor.evaluate(element=>({
+    value:element.value,start:element.selectionStart,end:element.selectionEnd,
+  }));
+  const beforeEditorMenu=await screenshot('factory-editor-before-menu');
+  await page.mouse.click(95,14);await page.mouse.move(950,30);
+  await assertNoEditor();
+  const menuArea={x:65,y:34,width:170,height:40};
+  const editorMenu=await untilPixels('factory-editor-menu-open',img=>
+    changedPixels(beforeEditorMenu,img,menuArea)>100);
+  await page.keyboard.press('ArrowDown');
+  await assertNoEditor();
+  await untilPixels('factory-editor-menu-keyboard',img=>changedPixels(editorMenu,img,menuArea)>50);
+  assert.deepEqual(await editor.evaluate(element=>({
+    value:element.value,start:element.selectionStart,end:element.selectionEnd,
+  })),selectionBeforeMenu,'Menu ArrowDown must not edit text or move the editor selection');
+  await page.keyboard.press('Escape');
+  await assertNoEditor();
+  await untilPixels('factory-editor-menu-dismissed',img=>changedPixels(beforeEditorMenu,img,menuArea)===0);
+  assert.deepEqual(await editor.evaluate(element=>({
+    value:element.value,start:element.selectionStart,end:element.selectionEnd,
+  })),selectionBeforeMenu,'Menu dismissal must preserve the editor value and selection');
+  report.checks.push('focused textarea yields keyboard ownership to toolbar menu without text/selection mutation');
+
+
+  // A trusted CDP touch tap must transfer focus to the real editing element.
+  const editingTouch=await context.newCDPSession(page);
+  let editingContact=false;
+  try {
+    await editingTouch.send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
+    await page.mouse.click(740,520);await assertNoEditor();
+    await editingTouch.send('Input.dispatchTouchEvent',{type:'touchStart',
+      touchPoints:[{x:260,y:420,id:1,radiusX:3,radiusY:3,force:1}]});
+    editingContact=true;
+    await editingTouch.send('Input.dispatchTouchEvent',{type:'touchMove',
+      touchPoints:[{x:260,y:260,id:1,radiusX:3,radiusY:3,force:1}]});
+    await editingTouch.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});
+    editingContact=false;
+    await assertNoEditor();
+    await editingTouch.send('Input.dispatchTouchEvent',{type:'touchStart',
+      touchPoints:[{x:450,y:250,id:1,radiusX:3,radiusY:3,force:1}]});
+    editingContact=true;
+    await editingTouch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+    editingContact=false;
+    await waitEditor();
+    const multilineBefore=await screenshot('factory-multiline-before');
+    await page.keyboard.press('Control+A');await page.keyboard.type('line1');
+    await page.keyboard.press('Enter');await page.keyboard.type('line2');
+    await waitValue('line1\nline2');
+    await page.keyboard.press('Home');await page.keyboard.press('Shift+End');
+    assert.deepEqual(await editor.evaluate(element=>[element.selectionStart,element.selectionEnd]),[6,11]);
+    await page.keyboard.type('next');await waitValue('line1\nnext');
+    await untilPixels('factory-multiline-edited',img=>changedPixels(multilineBefore,img,viewPixels)>80);
+  } finally {
+    try {
+      if(editingContact)await editingTouch.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});
+    } finally {
+      try {await editingTouch.send('Emulation.setTouchEmulationEnabled',{enabled:false});}
+      finally {await editingTouch.detach();}
+    }
+  }
+  await page.mouse.click(740,520);await assertNoEditor();
+  await page.mouse.click(450,250);await waitEditor();await waitValue('line1\nnext');
+  // The caret-sized DOM proxy must not soft-wrap otherwise Home/End target
+  // one-character visual lines instead of the unwrapped native TextView line.
+  await page.keyboard.press('Control+A');await page.keyboard.type('abc def');
+  await page.keyboard.press('Home');await page.keyboard.type('H');
+  await page.keyboard.press('End');await page.keyboard.type('E');
+  await waitValue('Habc defE');
+  await page.mouse.click(740,520);await assertNoEditor();
+  await page.mouse.click(450,250);await waitEditor();await waitValue('Habc defE');
+  report.checks.push('trusted TextView Home/End follow native unwrapped line boundaries and persist to core');
+
+  await page.mouse.click(70,88);await assertNoEditor();
+  await page.mouse.move(500,180);await page.mouse.down();
+  await page.mouse.move(690,180,{steps:8});await page.mouse.up();
+  await assertNoEditor();
+  await page.mouse.click(95,14);await assertNoEditor();await page.keyboard.press('Escape');
+  await page.mouse.click(70,168);await page.mouse.move(260,420);
+  await page.mouse.wheel(0,250);await assertNoEditor();
+  report.checks.push('real textarea focus from mouse/touch, hardware text once, Unicode/selection/multiline core persistence, synthetic composition once (not real IME), non-editor controls preserve blur');
+
   assert.equal(await page.evaluate(async()=> (await import('./pkg/scarlet_ui_widget_factory.js')).runtime_error()),undefined);
   assert.equal(errors.length,0,errors.join('\n'));
   report.passed=true;

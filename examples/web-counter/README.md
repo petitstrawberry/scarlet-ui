@@ -66,7 +66,10 @@ These are checks to run, not claims of a successful GPU run:
 
 Keyboard navigation, basic Unicode character input and wheel scrolling are
 translated by the web platform in addition to pointer input.
-Limitations: single canvas/window; no IME/dead-key composition, clipboard bridge,
-accessibility tree, native popups, dialogs or multi-window support yet.
+Text editors use an invisible textarea bridge for browser editing, selection
+and composition while remaining SGFX-rendered. See Widget Factory’s browser
+input notes for real-device verification limits.
+Limitations: single canvas/window; no accessibility tree, native popups, dialogs
+or multi-window support yet.
 WebGPU device loss or allocation/render failures terminate the runner and are
 reported; automatic device recovery is not implemented.

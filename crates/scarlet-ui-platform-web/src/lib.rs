@@ -4,6 +4,8 @@
 mod damage;
 mod menu;
 mod paint;
+mod text_edit;
+mod text_input;
 mod touch;
 use scarlet_ui_core::{
     Application, ApplicationRunner, Buffer, Error, Result, View,
@@ -40,6 +42,7 @@ struct FrameLoop {
     frame: Option<gloo_render::AnimationFrame>,
     error: Option<String>,
     paused: bool,
+    text_input: std::rc::Weak<text_input::TextInput>,
 }
 
 /// Owns the application, GPU resources, event listeners and scheduled frame.
@@ -58,6 +61,12 @@ impl WebApp {
     /// The embedding page should blur/inert the canvas while it is paused;
     /// event listeners remain installed until this handle is dropped.
     pub fn pause(&self) {
+        // Commit/blur while the runner is still live; DOM focus callbacks may
+        // drain it synchronously, so do not hold the FrameLoop borrow here.
+        let editor = self.state.borrow().text_input.upgrade();
+        if let Some(editor) = editor {
+            editor.suspend();
+        }
         let mut state = self.state.borrow_mut();
         state.paused = true;
         state.frame.take();
@@ -72,6 +81,10 @@ impl WebApp {
             state.paused = false;
             restart
         };
+        let editor = self.state.borrow().text_input.upgrade();
+        if let Some(editor) = editor {
+            editor.resume();
+        }
         if restart {
             schedule_frame(&self.state);
         }
@@ -92,32 +105,40 @@ fn schedule_frame(state: &Rc<RefCell<FrameLoop>>) {
         let Some(state) = weak.upgrade() else {
             return;
         };
-        // Do not keep a RefCell borrow across application callbacks.
-        let Some(mut tick) = state.borrow_mut().tick.take() else {
-            return;
-        };
-        match tick() {
-            Ok(Some(_)) => {
-                state.borrow_mut().tick = Some(tick);
-                schedule_frame(&state);
-            }
-            Ok(None) => {
-                state.borrow_mut().frame.take();
-            }
-            Err(error) => {
-                web_sys::console::error_1(&JsValue::from_str(&error.to_string()));
-                let mut state = state.borrow_mut();
-                state.error = Some(error.to_string());
-                state.frame.take();
-            }
+        tick_now(&state);
+        if state.borrow().tick.is_some() {
+            schedule_frame(&state);
         }
     });
     state.borrow_mut().frame = Some(frame);
 }
 
+// Pointer and DOM editing callbacks also drain the runner synchronously. Taking
+// the callback out prevents reentrant focus/select events from borrowing it.
+fn tick_now(state: &Rc<RefCell<FrameLoop>>) {
+    if state.borrow().paused {
+        return;
+    }
+    let Some(mut tick) = state.borrow_mut().tick.take() else {
+        return;
+    };
+    match tick() {
+        Ok(Some(_)) => state.borrow_mut().tick = Some(tick),
+        Ok(None) => {
+            state.borrow_mut().frame.take();
+        }
+        Err(error) => {
+            web_sys::console::error_1(&JsValue::from_str(&error.to_string()));
+            let mut state = state.borrow_mut();
+            state.error = Some(error.to_string());
+            state.frame.take();
+        }
+    }
+}
+
 /// Initialize WebGPU asynchronously, then run one application cycle per animation frame.
 /// Supply an explicitly CSS-sized canvas and install an embedded font before calling.
-/// Additional native windows, popups, IME and file dialogs are not supported yet.
+/// Additional native windows, popups and file dialogs are not supported yet.
 pub async fn run<A: Application + View>(
     canvas: HtmlCanvasElement,
     app: A,
@@ -132,16 +153,26 @@ pub async fn run<A: Application + View>(
     menus.borrow_mut().resize(size);
     let paint = paint::WebPaint::new(gpu, canvas.width(), canvas.height(), menus.clone())
         .map_err(js_error)?;
-    let window = WebWindow::new_canvas(canvas, size, scale, Box::new(paint), menus)?;
-    let tick = ApplicationRunner::new(Box::new(WebBackend(Some(window))))
-        .into_tick(app)
-        .map_err(js_error)?;
     let state = Rc::new(RefCell::new(FrameLoop {
-        tick: Some(Box::new(tick)),
+        tick: None,
         frame: None,
         error: None,
         paused: false,
+        text_input: std::rc::Weak::new(),
     }));
+    let window = WebWindow::new_canvas(
+        canvas,
+        size,
+        scale,
+        Box::new(paint),
+        menus,
+        Rc::downgrade(&state),
+    )?;
+    state.borrow_mut().text_input = Rc::downgrade(&window.text_input);
+    let tick = ApplicationRunner::new(Box::new(WebBackend(Some(window))))
+        .into_tick(app)
+        .map_err(js_error)?;
+    state.borrow_mut().tick = Some(Box::new(tick));
     schedule_frame(&state);
     Ok(WebApp { state })
 }
@@ -202,6 +233,7 @@ struct WebWindow {
     menus: Rc<RefCell<menu::WebMenu>>,
     hover_handoff: menu::HoverHandoff,
     menu_touch: touch::MenuTouchRouting,
+    text_input: Rc<text_input::TextInput>,
 }
 impl WebWindow {
     fn new_canvas(
@@ -210,14 +242,19 @@ impl WebWindow {
         scale: u32,
         paint: Box<dyn PaintBackend>,
         menus: Rc<RefCell<menu::WebMenu>>,
+        runner: std::rc::Weak<RefCell<FrameLoop>>,
     ) -> std::result::Result<Self, JsValue> {
         let original_tab_index = canvas.get_attribute("tabindex");
         canvas.set_tab_index(0);
+        let events = Rc::default();
+        let text_input =
+            text_input::TextInput::new(canvas.clone(), Rc::clone(&events), runner.clone())?;
         let mut window = Self {
             canvas,
             size,
             scale,
-            events: Rc::default(),
+            events,
+            text_input,
             paint: Some(paint),
             listeners: Vec::new(),
             input_listeners: Vec::new(),
@@ -229,6 +266,7 @@ impl WebWindow {
         };
         let pressed = Rc::new(Cell::new(None));
         let touches = Rc::new(RefCell::new(touch::TouchContacts::default()));
+        let tap = Rc::new(Cell::new(None::<(i32, i32, i32)>));
         for kind in [
             "pointermove",
             "pointerdown",
@@ -241,6 +279,10 @@ impl WebWindow {
             let events = window.events.clone();
             let pressed = pressed.clone();
             let touches = touches.clone();
+            let runner = runner.clone();
+            let text_input = window.text_input.clone();
+            let tap = tap.clone();
+            let menus = window.menus.clone();
             let callback = Closure::wrap(Box::new(move |e: PointerEvent| {
                 if e.pointer_type() != "touch" && !e.is_primary() {
                     return;
@@ -252,9 +294,42 @@ impl WebWindow {
                 let y = ((e.client_y() as f64 - rect.top()) * canvas.client_height() as f64
                     / rect.height().max(1.0))
                 .floor() as i32;
+                if kind == "pointerdown" {
+                    e.prevent_default(); // DOM focus must follow resolved ScarletUI focus.
+                    // Finish pending DOM text before core can switch the focused field.
+                    text_input.commit_dom();
+                    if e.is_primary() && e.button() == 0 && menus.borrow().owns_pointer(y) {
+                        // Menu keyboard navigation belongs to the canvas, not
+                        // to the hidden editor. Internal blur retains selection.
+                        let _ = canvas.focus();
+                    }
+                    if e.is_primary() && e.button() == 0 && !menus.borrow().owns_pointer(y) {
+                        tap.set(Some((e.pointer_id(), x, y)));
+                    } else {
+                        tap.set(None);
+                    }
+                }
+                if let Some((id, start_x, start_y)) = tap.get() {
+                    if id != e.pointer_id()
+                        || text_edit::tap_moved(start_x, start_y, x, y)
+                        || matches!(kind, "pointercancel" | "lostpointercapture")
+                    {
+                        tap.set(None);
+                    }
+                }
+                let finish_tap = || {
+                    if kind == "pointerup" && tap.take().is_some() {
+                        if let Some(runner) = runner.upgrade() {
+                            tick_now(&runner);
+                        }
+                        text_input.focus_at(x, y);
+                    }
+                };
                 if e.pointer_type() == "touch" {
                     if kind == "pointerdown" {
-                        let _ = canvas.focus();
+                        if !text_input.focused() {
+                            let _ = canvas.focus();
+                        }
                         let _ = canvas.set_pointer_capture(e.pointer_id());
                     }
                     let frame =
@@ -267,6 +342,7 @@ impl WebWindow {
                     if matches!(kind, "pointerup" | "pointercancel") {
                         let _ = canvas.release_pointer_capture(e.pointer_id());
                     }
+                    finish_tap();
                     return;
                 }
                 let button = match e.button() {
@@ -276,7 +352,9 @@ impl WebWindow {
                 };
                 let event = match kind {
                     "pointerdown" => {
-                        let _ = canvas.focus();
+                        if !text_input.focused() {
+                            let _ = canvas.focus();
+                        }
                         pressed.set(Some(button));
                         let _ = canvas.set_pointer_capture(e.pointer_id());
                         MouseEvent::ButtonPressed {
@@ -306,6 +384,7 @@ impl WebWindow {
                     _ => MouseEvent::Moved { x, y },
                 };
                 events.borrow_mut().push_back(Event::Mouse(event));
+                finish_tap();
             }) as Box<dyn FnMut(PointerEvent)>);
             window
                 .canvas
@@ -314,7 +393,15 @@ impl WebWindow {
         }
         let events = window.events.clone();
         let blur_touches = touches.clone();
+        let editor = window.text_input.element.clone();
         window.listen("blur", move |event| {
+            if event
+                .dyn_ref::<web_sys::FocusEvent>()
+                .and_then(|e| e.related_target())
+                .is_some_and(|t| t == editor.clone().into())
+            {
+                return;
+            }
             if let Some(frame) = blur_touches.borrow_mut().cancel_all(event.time_stamp()) {
                 events.borrow_mut().push_back(Event::TouchFrame(frame));
             }
@@ -387,6 +474,8 @@ impl WebWindow {
         for kind in ["keydown", "keyup"] {
             let events = self.events.clone();
             let held_keys = held_keys.clone();
+            let text_input = self.text_input.clone();
+            let menus = self.menus.clone();
             self.listen(kind, move |event| {
                 let Some(key) = event.dyn_ref::<KeyboardEvent>() else {
                     return;
@@ -407,6 +496,7 @@ impl WebWindow {
                 let text_allowed =
                     alt_graph || (!modifiers.control && !modifiers.super_key && !modifiers.alt);
                 let down = kind == "keydown";
+                let menu_was_open = menus.borrow().is_open();
                 let mut events = events.borrow_mut();
                 let mut held = held_keys.borrow_mut();
                 if down {
@@ -458,12 +548,23 @@ impl WebWindow {
                 {
                     key.prevent_default();
                 }
+                drop(held);
+                drop(events);
+                if down && text_allowed {
+                    text_input.keyboard_focus(|| !menu_was_open && !menus.borrow().is_open());
+                }
             })?;
         }
         for kind in ["focus", "blur"] {
             let events = self.events.clone();
             let held_keys = held_keys.clone();
-            self.listen(kind, move |_| {
+            let editor = self.text_input.element.clone();
+            self.listen(kind, move |event| {
+                let internal = kind == "blur"
+                    && event
+                        .dyn_ref::<web_sys::FocusEvent>()
+                        .and_then(|e| e.related_target())
+                        .is_some_and(|t| t == editor.clone().into());
                 let mut events = events.borrow_mut();
                 if kind == "blur" {
                     for (_, keycode) in held_keys.borrow_mut().drain(..) {
@@ -472,6 +573,9 @@ impl WebWindow {
                             modifiers: KeyModifiers::empty(),
                         }));
                     }
+                }
+                if internal {
+                    return;
                 }
                 events.push_back(Event::Focus(if kind == "focus" {
                     FocusEvent::Gained
@@ -683,6 +787,9 @@ impl PlatformWindow for WebWindow {
             }
             return Some(event);
         }
+    }
+    fn sync_text_input(&mut self, state: Option<&scarlet_ui_core::element::TextInputElementState>) {
+        self.text_input.sync(state, self.menus.borrow().height());
     }
     fn wait_for_event(&mut self, _: std::time::Duration) {}
     fn output_scale_milli(&self) -> u32 {

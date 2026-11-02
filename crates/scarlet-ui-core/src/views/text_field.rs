@@ -463,6 +463,8 @@ impl TextFieldRenderObject {
             cursor_rect.origin.x += graphics::measure_text_sized(prefix, self.font_size).0 as f32;
         }
         TextInputElementState {
+            editor_id: None,
+            input_rect: crate::geometry::Rect::new(Point::ZERO, self.size),
             cursor_rect,
             surrounding_text: self.text_document.as_str().into_owned(),
             cursor_byte: self.selection.caret.byte as u32,
@@ -611,6 +613,25 @@ pub(crate) fn handle_text_field_text_input(
     }
 
     match event {
+        crate::event::Event::TextInputSelection {
+            cursor_byte,
+            anchor_byte,
+        } => {
+            let text = render_object.text_document.as_str();
+            let boundary = |byte: u32| {
+                let mut byte = (byte as usize).min(text.len());
+                while !text.is_char_boundary(byte) {
+                    byte -= 1;
+                }
+                byte
+            };
+            render_object.selection = TextSelection {
+                caret: TextPosition::new(boundary(*cursor_byte)),
+                anchor: TextPosition::new(boundary(*anchor_byte)),
+            };
+            drop(text);
+            true
+        }
         crate::event::Event::TextInputCommit { text, .. } => {
             render_object.clear_preedit();
             insert_text(field, render_object, &single_line_text(text));

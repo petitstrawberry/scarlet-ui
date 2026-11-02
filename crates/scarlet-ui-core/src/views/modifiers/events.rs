@@ -1810,6 +1810,11 @@ mod tests {
         let input = State::new(
             crate::state::generate_state_id(),
             Some(TextInputElementState {
+                editor_id: None,
+                input_rect: crate::geometry::Rect::new(
+                    crate::geometry::Point::ZERO,
+                    Size::new(100.0, 20.0),
+                ),
                 cursor_rect: crate::geometry::Rect::new(
                     crate::geometry::Point::ZERO,
                     Size::new(1.0, 20.0),

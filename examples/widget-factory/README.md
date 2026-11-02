@@ -53,9 +53,25 @@ not introduce a viewport-repositioning popup system.
   shortcuts remain browser-owned.
 - Existing SGFX Canvas renders the animated cube with depth testing; no canvas
   or widget is replaced by a browser DOM control.
-- IME composition, dead-key composition, clipboard integration, accessibility
-  tree, native dialogs/popups and multiple windows are not implemented. The
-  existing in-canvas Select widget is retained; native OS popup APIs are distinct.
+- Focused TextField/TextView use an invisible textarea as the browser editing
+  surface. Text, selection and composition are synchronized with the existing
+  ScarletUI editor; SGFX still paints the complete control. This also lets the
+  browser own ordinary editing and clipboard commands without a clipboard API
+  permission. Keyboard activation is requested from a completed editor tap,
+  not from a scroll gesture or arbitrary canvas click. The DOM proxy does not
+  wrap at its invisible width: Home/End and vertical navigation use logical
+  lines, matching the default unwrapped TextView. Explicitly soft-wrapped
+  custom editors do not yet mirror their visual line layout into the proxy.
+- The browser visual viewport can request focused-caret reveal through nested
+  ScarletUI ScrollViews. Temporary bottom/right keyboard allowance is restored
+  on blur or viewport expansion; active drags are not forcibly scrolled. This
+  does not introduce negative overscroll for top/left occlusion at the authored
+  content origin, or scroll a containing document on behalf of embedded apps.
+- Real iOS/Android keyboard activation, IME behavior and keyboard avoidance need
+  device verification; synthetic browser composition tests are not equivalent.
+  EditContext is not used in this implementation. Accessibility tree, native
+  dialogs/popups and multiple windows remain unsupported. The in-canvas Select
+  widget is retained; native OS popup APIs are distinct.
 - Hardware GPU/browser-engine coverage and device-loss recovery require separate
   validation. The native design is retained, but full native platform parity is
   not claimed.

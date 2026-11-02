@@ -606,6 +606,8 @@ pub struct ScrollViewRenderObject<V: View> {
     scrollbar_color: Option<Color>,
     viewport_size: Size,
     content_size: Size,
+    // Temporary platform occlusion; authored content/insets remain unchanged.
+    text_input_allowance: Size,
     offset_x: f32,
     offset_y: f32,
     scrollbar_active: bool,
@@ -644,6 +646,7 @@ impl<V: View> ScrollViewRenderObject<V> {
             scrollbar_color: None,
             viewport_size: Size::ZERO,
             content_size: Size::ZERO,
+            text_input_allowance: Size::ZERO,
             offset_x: 0.0,
             offset_y: 0.0,
             scrollbar_active: false,
@@ -718,11 +721,13 @@ impl<V: View> ScrollViewRenderObject<V> {
     }
 
     fn max_offset_x(&self) -> f32 {
-        (self.content_size.width - self.viewport_size.width).max(0.0)
+        (self.content_size.width + self.text_input_allowance.width - self.viewport_size.width)
+            .max(0.0)
     }
 
     fn max_offset_y(&self) -> f32 {
-        (self.content_size.height - self.viewport_size.height).max(0.0)
+        (self.content_size.height + self.text_input_allowance.height - self.viewport_size.height)
+            .max(0.0)
     }
 
     fn clamp_offsets(&mut self) {
@@ -954,7 +959,9 @@ impl<V: View> ScrollViewRenderObject<V> {
             return None;
         }
 
-        let thumb_w = (self.viewport_size.width / self.content_size.width * track_w)
+        let thumb_w = (self.viewport_size.width
+            / (self.content_size.width + self.text_input_allowance.width)
+            * track_w)
             .max(metrics.scrollbar_min_thumb_length.min(track_w))
             .min(track_w);
         let travel = (track_w - thumb_w).max(0.0);
@@ -994,7 +1001,9 @@ impl<V: View> ScrollViewRenderObject<V> {
             return None;
         }
 
-        let thumb_h = (self.viewport_size.height / self.content_size.height * track_h)
+        let thumb_h = (self.viewport_size.height
+            / (self.content_size.height + self.text_input_allowance.height)
+            * track_h)
             .max(metrics.scrollbar_min_thumb_length.min(track_h))
             .min(track_h);
         let travel = (track_h - thumb_h).max(0.0);
@@ -1186,6 +1195,37 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let (scaled_x, scaled_y) = self.normalized_wheel_event(event);
         (scaled_x.abs() > 0.01 && self.max_offset_x() > 0.0)
             || (scaled_y.abs() > 0.01 && self.max_offset_y() > 0.0)
+    }
+
+    fn reveal_text_input(&mut self, request: Option<(Rect, Rect)>) -> bool {
+        let old_allowance = self.text_input_allowance;
+        let (mut x, mut y) = self.offset();
+        self.text_input_allowance = Size::ZERO;
+        if let Some((caret, visible)) = request {
+            self.selection_scroll_pending = false;
+            // Additional travel is needed even when content fits the original
+            // viewport: its bottom may now be covered by a software keyboard.
+            if self.axes.allows_x() {
+                self.text_input_allowance.width = (self.viewport_size.width - visible.right())
+                    .clamp(0.0, self.viewport_size.width);
+                x += if caret.left() < visible.left() {
+                    caret.left() - visible.left()
+                } else {
+                    (caret.right() - visible.right()).max(0.0)
+                };
+            }
+            if self.axes.allows_y() {
+                self.text_input_allowance.height = (self.viewport_size.height - visible.bottom())
+                    .clamp(0.0, self.viewport_size.height);
+                y += if caret.top() < visible.top() {
+                    caret.top() - visible.top()
+                } else {
+                    (caret.bottom() - visible.bottom()).max(0.0)
+                };
+            }
+        }
+        let moved = self.set_offset(x, y);
+        moved || old_allowance != self.text_input_allowance
     }
 
     fn accepts_touch_scroll(&self) -> bool {
@@ -2123,5 +2163,35 @@ mod tests {
         ));
         let mut ended_ctx = PaintContext::new();
         assert!(!render_object.paint_overlay(&mut ended_ctx, Point::ZERO));
+    }
+    #[test]
+    fn text_input_reveal_preserves_authored_inset_and_leading_scroll_limit() {
+        let view = ScrollView::new(crate::views::Rectangle::new())
+            .vertical()
+            .content_size(100.0, 100.0)
+            .content_bottom_inset(20.0);
+        let mut object = ScrollViewRenderObject::from_view(&view);
+        object.layout(LayoutConstraints::tight(100.0, 100.0));
+        // No negative scrolling is introduced for leading-edge occlusion.
+        assert!(!object.reveal_text_input(Some((
+            Rect::from_xywh(2.0, 2.0, 1.0, 12.0),
+            Rect::from_xywh(20.0, 20.0, 80.0, 80.0),
+        ))));
+        assert_eq!(object.offset(), (0.0, 0.0));
+        assert!(object.reveal_text_input(Some((
+            Rect::from_xywh(2.0, 90.0, 1.0, 10.0),
+            Rect::from_xywh(0.0, 0.0, 100.0, 50.0),
+        ))));
+        assert_eq!(object.offset().1, 50.0);
+        assert_eq!(object.content_bottom_inset, 20.0);
+        assert_eq!(object.content_size.height, 120.0);
+        object.selection_scroll_pending = true;
+        assert!(object.reveal_text_input(None));
+        assert_eq!(object.offset().1, 20.0);
+        assert!(
+            object.selection_scroll_pending,
+            "restoration must not discard an authored pending target"
+        );
+        assert_eq!(object.text_input_allowance, Size::ZERO);
     }
 }
