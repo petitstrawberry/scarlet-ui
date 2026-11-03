@@ -12,6 +12,7 @@ export default defineConfig({
       description: 'Cross-platform, declarative UI for Rust.',
       social: [{ icon: 'github', label: 'Source on GitHub', href: 'https://github.com/petitstrawberry/scarlet-ui' }],
       customCss: ['./src/styles/brand.css'],
+      components: { Footer: './src/components/Footer.astro' },
       sidebar: [
         { label: 'Introduction', slug: '' },
         { label: 'Getting started', slug: 'getting-started' },
