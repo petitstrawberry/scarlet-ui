@@ -22,6 +22,23 @@ function meta(key, expected) {
   assert.equal(matches[0].content, expected, key);
 }
 
+test('homepage and documentation footers show the project copyright and retain navigation', () => {
+  const license = readFileSync(new URL('../../LICENSE', import.meta.url), 'utf8');
+  const [, year, owner] = license.match(/^Copyright \(c\) (\d{4}) (.+)$/m);
+  const copyright = `© ${year} ${owner}`;
+  for (const path of ['index.html', 'getting-started/index.html']) {
+    const source = readFileSync(new URL(path, dist), 'utf8');
+    const footers = [...source.matchAll(/<footer\b[^>]*>([\s\S]*?)<\/footer>/g)];
+    assert.equal(footers.length, 1, `${path}: one semantic footer`);
+    const footer = footers[0][1];
+    assert.equal(footer.split(copyright).length - 1, 1, `${path}: license attribution`);
+    if (path === 'getting-started/index.html') {
+      assert.match(footer, /rel="prev"/);
+      assert.match(footer, /rel="next"/);
+    }
+  }
+});
+
 test('homepage title overrides metadata only, with no duplicate social tags', () => {
   assert.deepEqual([...head.matchAll(/<title>(.*?)<\/title>/g)].map(match => match[1]), [title]);
   assert.match(html, /<h1\b[^>]*>ScarletUI<\/h1>/);
