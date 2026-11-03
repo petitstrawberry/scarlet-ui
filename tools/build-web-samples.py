@@ -92,6 +92,27 @@ def validate(directory: Path) -> None:
             raise ValueError(f'Missing site asset: {filename}')
 
 
+def stage_input_diagnostic(stage: Path, identity: dict) -> None:
+    """Opt-in top-level page; reuse Factory runtime without changing normal pages."""
+    destination = stage / 'diagnostics/input'
+    destination.mkdir(parents=True)
+    html = (ROOT / 'examples/widget-factory/index.html').read_text()
+    original = "'./pkg/scarlet_ui_widget_factory.js'"
+    if html.count(original) != 1:
+        raise ValueError('Factory module import changed; update diagnostic route explicitly')
+    for marker in ('<meta charset=', '<script type="module">'):
+        if html.count(marker) != 1:
+            raise ValueError(f'Factory HTML marker changed: {marker}')
+    html = html.replace(original, "'../../widget-factory/pkg/scarlet_ui_widget_factory.js'")
+    html = html.replace('<meta charset=', '<meta name="robots" content="noindex,nofollow">\n<meta charset=', 1)
+    metadata = json.dumps({'source': 'ScarletUI iOS focus diagnostic', **identity}).replace('<', '\\u003c')
+    trace = ('<script type="application/json" id="scarlet-diagnostic-build">' + metadata + '</script>'
+             '<script src="./focus-trace.js"></script>\n')
+    html = html.replace('<script type="module">', trace + '<script type="module">', 1)
+    (destination / 'index.html').write_text(html)
+    shutil.copy2(ROOT / 'samples/diagnostics/focus-trace.js', destination / 'focus-trace.js')
+
+
 def build(output: Path, profile: str) -> None:
     output = output.resolve()
     if output == ROOT or ROOT.is_relative_to(output):
@@ -129,6 +150,7 @@ def build(output: Path, profile: str) -> None:
             source = 'web-counter' if route == 'counter' else route
             shutil.copy2(ROOT / 'examples' / source / 'index.html', demo / 'index.html')
             subprocess.run(['wasm-bindgen', str(target / f'{module}.wasm'), '--target', 'web', '--no-typescript', '--out-dir', str(demo / 'pkg')], check=True, cwd=ROOT)
+        stage_input_diagnostic(stage, source_identity())
         subprocess.run(['python3', str(ROOT / 'site/scripts/social-metadata.py'), str(stage)], check=True, cwd=ROOT)
         subprocess.run(['node', '--test', str(ROOT / 'site/scripts/metadata-built.check.mjs')], check=True, cwd=ROOT,
                        env={**os.environ, 'SCARLET_SITE_DIR': str(stage)})

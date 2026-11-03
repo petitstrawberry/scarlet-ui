@@ -33,6 +33,24 @@ class PackageValidation(unittest.TestCase):
             (folder / 'pkg' / f'{module}.js').write_text(f"new URL('{module}_bg.wasm', import.meta.url)")
             (folder / 'pkg' / f'{module}_bg.wasm').write_bytes(b'\0asm\x01\0\0\0')
 
+    def test_diagnostic_is_opt_in_and_reuses_factory_runtime(self):
+        import json
+        before = {str(p.relative_to(self.root)): p.read_bytes()
+                  for p in self.root.rglob('*') if p.is_file()}
+        identity = {'source_commit': 'test-commit', 'source_dirty': False}
+        builder.stage_input_diagnostic(self.root, identity)
+        page = self.root / 'diagnostics/input/index.html'
+        html = page.read_text()
+        self.assertIn('name="robots" content="noindex,nofollow"', html)
+        self.assertIn('../../widget-factory/pkg/scarlet_ui_widget_factory.js', html)
+        self.assertIn('"source_commit": "test-commit"', html)
+        self.assertIn('<script src="./focus-trace.js"></script>', html)
+        self.assertFalse((page.parent / 'pkg').exists())
+        for name, data in before.items():
+            self.assertEqual((self.root / name).read_bytes(), data, name)
+        builder.validate(self.root)
+        self.assertTrue((page.parent / '../../widget-factory/pkg/scarlet_ui_widget_factory.js').resolve().is_file())
+
     def tearDown(self):
         self.temp.cleanup()
 

@@ -38,6 +38,7 @@ jobs:
           python3 tools/test_web_samples.py
           python3 tools/test_pages_destination.py
           node --test samples/capability.test.cjs
+          node --test samples/diagnostics/*.test.cjs
           node --test site/scripts/*.test.mjs
       - name: Build and validate the static samples
         run: python3 tools/build-web-samples.py
