@@ -391,6 +391,21 @@ impl WebWindow {
                 .add_event_listener_with_callback(kind, callback.as_ref().unchecked_ref())?;
             window.listeners.push((kind, callback));
         }
+        // WebKit can dispatch a compatibility mousedown after touch pointerup,
+        // even when pointerdown was cancelled. By then focus_at may have focused
+        // the editor; the canvas's native mousedown focus would immediately blur
+        // it and dismiss the keyboard. Keep Scarlet's resolved focus authoritative
+        // without stopping event propagation or browser-owned secondary actions.
+        let editor = window.text_input.clone();
+        window.listen("mousedown", move |event| {
+            if editor.focused()
+                && event
+                    .dyn_ref::<web_sys::MouseEvent>()
+                    .is_some_and(|mouse| mouse.button() == 0)
+            {
+                event.prevent_default();
+            }
+        })?;
         let events = window.events.clone();
         let blur_touches = touches.clone();
         let editor = window.text_input.clone();

@@ -749,8 +749,41 @@ try {
       finally {await editingTouch.detach();}
     }
   }
+  // Recreate WebKit's late compatibility mousedown as a separate trusted
+  // native mouse event, without letting its preceding pointerdown reach the
+  // app. This tests the browser's actual mousedown focus default, rather than
+  // assuming a synthetic dispatch can move focus. It is not real iOS QA.
+  await page.evaluate(() => {
+    const canvas=document.querySelector('canvas');
+    window.__scarletLateDown={};
+    window.addEventListener('pointerdown',event=>event.stopImmediatePropagation(),
+      {capture:true,once:true});
+    document.addEventListener('mousedown',event=>{
+      window.__scarletLateDown={trusted:event.isTrusted,prevented:event.defaultPrevented,
+        targetCanvas:event.target===canvas};
+    },{once:true});
+  });
+  await page.mouse.move(450,250);await page.mouse.down();
+  assert.deepEqual(await page.evaluate(()=>window.__scarletLateDown),
+    {trusted:true,prevented:true,targetCanvas:true},
+    'Late canvas mousedown must be cancelled without stopping propagation');
+  await waitEditor();
+  await page.mouse.up();
+  // Secondary button defaults remain browser-owned, and events outside the
+  // canvas are untouched even while the hidden editor is focused.
+  const mouseDefaults=await page.evaluate(()=>{
+    const canvas=document.querySelector('canvas');
+    const secondary=new MouseEvent('mousedown',{button:2,bubbles:true,cancelable:true});
+    canvas.dispatchEvent(secondary);
+    const outside=new MouseEvent('mousedown',{button:0,bubbles:true,cancelable:true});
+    document.body.dispatchEvent(outside);
+    return [secondary.defaultPrevented,outside.defaultPrevented];
+  });
+  assert.deepEqual(mouseDefaults,[false,false]);
+  await page.keyboard.type('!');await waitValue('line1\nnext!');
+  report.checks.push('late trusted canvas mousedown preserves editor focus; secondary and outside defaults remain untouched');
   await page.mouse.click(740,520);await assertNoEditor();
-  await page.mouse.click(450,250);await waitEditor();await waitValue('line1\nnext');
+  await page.mouse.click(450,250);await waitEditor();await waitValue('line1\nnext!');
   // The caret-sized DOM proxy must not soft-wrap otherwise Home/End target
   // one-character visual lines instead of the unwrapped native TextView line.
   await page.keyboard.press('Control+A');await page.keyboard.type('abc def');
