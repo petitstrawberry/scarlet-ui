@@ -5,6 +5,17 @@
 //! API and selects the requested backend at the target-specific composition
 //! root.
 //!
+//! # Documentation
+//!
+//! Start with the [Getting started guide](https://ui.scarlet-os.org/getting-started/)
+//! for application setup and the [guides](https://ui.scarlet-os.org/reference/project/)
+//! for usage and architecture. This reference describes the Rust API.
+//!
+//! The website's API reference is built with `std`, `platform-winit` and `preview`.
+//! Web and Scarlet backend items are target-specific and are not included in that
+//! native build. Platform features are mutually exclusive; do not use
+//! `--all-features` to build this crate's documentation.
+//!
 //! Dependency direction:
 //!
 //! ```text

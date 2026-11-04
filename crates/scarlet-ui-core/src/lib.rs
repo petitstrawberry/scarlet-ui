@@ -4,7 +4,7 @@
 //! `scarlet-ui` facade crate. It provides:
 //!
 //! - **Declarative Views**: Describe your UI with composable Views
-//! - **State Management**: Reactive State<T> with automatic updates
+//! - **State Management**: Reactive `State<T>` with automatic updates
 //! - **Element System**: Efficient runtime representation with reconciliation
 //! - **Layout Engine**: Constraint-based layout system
 //! - **Event Handling**: Pointer and keyboard event routing

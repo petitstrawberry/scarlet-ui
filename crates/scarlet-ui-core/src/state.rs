@@ -160,7 +160,7 @@ impl<T> StateInner<T> {
 
 /// Reactive state container with subscription notifications
 ///
-/// State<T> is a reference-counted container that can be cloned and shared.
+/// `State<T>` is a reference-counted container that can be cloned and shared.
 /// When the value is updated, all subscribers are notified.
 #[derive(Clone)]
 pub struct State<T> {

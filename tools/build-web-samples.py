@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the root-hosted Starlight site and browser samples. Requires Node 24+, Python 3.11+, Cargo, wasm-bindgen."""
+"""Build the root-hosted Starlight guides, rustdoc API reference and browser samples. Requires Node 24+, Python 3.11+, Cargo, wasm-bindgen."""
 from __future__ import annotations
 
 import argparse
@@ -7,6 +7,7 @@ import hashlib
 from html.parser import HTMLParser
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -20,7 +21,13 @@ DEMOS = (
     ('counter', 'scarlet-ui-web-counter', 'scarlet_ui_web_counter'),
 )
 MARKER = '.scarletui-samples'
-SITE_FILES = ('index.html', 'try/index.html', 'capability.js', 'assets/widget-factory.png', 'assets/counter-example.png')
+API_PACKAGES = (
+    'scarlet-ui', 'scarlet-ui-core', 'scarlet-ui-macros',
+    'scarlet-ui-icons-tabler', 'scarlet-scroll-motion',
+    'scarlet-ui-platform-winit', 'scarlet-ui-renderer-sgfx',
+)
+API_FEATURES = 'scarlet-ui/std,scarlet-ui/platform-winit,scarlet-ui/preview'
+SITE_FILES = ('docs/index.html', 'docs/scarlet_ui/index.html', 'docs/crates.js', 'index.html', 'try/index.html', 'capability.js', 'assets/widget-factory.png', 'assets/counter-example.png')
 
 
 def run(*args: str) -> str:
@@ -87,9 +94,96 @@ def validate(directory: Path) -> None:
             raise ValueError(f'Missing WASM reference: {glue}')
         if not wasm.is_file() or wasm.read_bytes()[:8] != b'\0asm\x01\0\0\0':
             raise ValueError(f'Invalid WASM artifact: {wasm}')
+    validate_api_docs(directory / 'docs')
     for filename in (*SITE_FILES, '.nojekyll', 'font-license.txt', 'tabler-license.txt'):
         if not (directory / filename).is_file():
             raise ValueError(f'Missing site asset: {filename}')
+
+
+def validate_api_docs(docs: Path) -> None:
+    """Check assets loaded by rustdoc JavaScript as well as ordinary HTML links."""
+    for package in API_PACKAGES:
+        if not (docs / package.replace('-', '_') / 'index.html').is_file():
+            raise ValueError(f'Missing API crate: {package}')
+    for pattern in ('static.files/*.css', 'static.files/*.js', 'src/**/*.html'):
+        if not any(docs.glob(pattern)):
+            raise ValueError(f'Missing rustdoc assets: {pattern}')
+    # Rustdoc has used both a flat search index and a sharded search.index tree.
+    if not (any(docs.glob('search-index*.js')) or any((docs / 'search.index').rglob('*.js'))):
+        raise ValueError('Missing rustdoc search index')
+
+
+def build_api_docs(target: Path) -> Path:
+    """Build the native public API without conflicting Scarlet/Web features.
+
+    An isolated target directory and a clean doc tree keep old packages/features
+    out of rustdoc's cumulative search index. Compiler intermediates stay cached.
+    Use Cargo native mode so proc-macro and library docs share one search index.
+    Cross-target API documentation is a separate build, not this native reference.
+    """
+    target = target / 'api-reference'
+    options = ['--target-dir', str(target)]
+    env = {key: value for key, value in os.environ.items() if key != 'CARGO_BUILD_TARGET'}
+    subprocess.run(['cargo', 'clean', '--doc', *options], cwd=ROOT, check=True, env=env)
+    command = ['cargo', 'doc', '--locked', '--lib', '--no-deps', '--no-default-features',
+               '--features', API_FEATURES, *options]
+    for package in API_PACKAGES:
+        command += ['-p', package]
+    # Fail publication on broken source links or malformed Rustdoc HTML while
+    # preserving caller-supplied flags (including encoded paths with spaces).
+    flags = env.get('CARGO_ENCODED_RUSTDOCFLAGS')
+    if flags is None:
+        flags = '\x1f'.join(env.get('RUSTDOCFLAGS', '').split())
+    env['CARGO_ENCODED_RUSTDOCFLAGS'] = '\x1f'.join(filter(None, (
+        flags, '--deny=rustdoc::broken_intra_doc_links', '--deny=rustdoc::invalid_html_tags')))
+    subprocess.run(command, cwd=ROOT, check=True, env=env)
+    docs = target / 'doc'
+    for package in API_PACKAGES:
+        if not (docs / package.replace('-', '_') / 'index.html').is_file():
+            raise ValueError(f'Missing native API reference: {package}. Build without a build.target Cargo configuration.')
+    return docs
+
+
+def stage_api_docs(stage: Path, docs: Path) -> None:
+    """Keep rustdoc's layout, search data, source pages and assets together."""
+    shutil.copytree(docs, stage / 'docs')
+    shutil.copy2(ROOT / 'site/rustdoc/index.html', stage / 'docs/index.html')
+    normalize_api_docs(stage / 'docs')
+
+
+def normalize_api_docs(docs: Path) -> None:
+    """Repair only known upstream rustdoc artifacts, before strict link checks.
+
+    tracing's blanket impl snippets retain module-relative Markdown links when
+    inlined into unrelated crates. Rustdoc also emits optional implementor script
+    references for these four traits even when no implementor data was generated.
+    Never skip validation of arbitrary missing API links or script assets.
+    """
+    lock = tomllib.loads((ROOT / 'Cargo.lock').read_text())
+    tracing = next(package['version'] for package in lock['package'] if package['name'] == 'tracing')
+    upstream = f'https://docs.rs/tracing/{tracing}/tracing'
+    empty_traits = {
+        'trait.impl/scarlet_ui_core/application/trait.Application.js',
+        'trait.impl/scarlet_ui_core/file_dialog/trait.FileDialogSession.js',
+        'trait.impl/scarlet_ui_core/preview/trait.PreviewSession.js',
+        'trait.impl/scarlet_ui_core/preview/trait.PreviewLibrary.js',
+    }
+    root = docs.resolve()
+    for file in docs.rglob('*.html'):
+        original = file.read_text()
+        html = original.replace('href="dispatcher#setting-the-default-subscriber"',
+                                f'href="{upstream}/dispatcher/index.html#setting-the-default-subscriber"')
+        html = html.replace('href="super::Subscriber"', f'href="{upstream}/trait.Subscriber.html"')
+
+        def optional_implementors(match: re.Match) -> str:
+            target = (file.parent / match.group(1)).resolve()
+            if target.is_relative_to(root) and target.relative_to(root).as_posix() in empty_traits and not target.exists():
+                return ''
+            return match.group(0)
+
+        html = re.sub(r'<script src="([^"<>]+)" async></script>', optional_implementors, html)
+        if html != original:
+            file.write_text(html)
 
 
 def stage_input_diagnostic(stage: Path, identity: dict) -> None:
@@ -134,6 +228,7 @@ def build(output: Path, profile: str) -> None:
                    env={**os.environ, 'ASTRO_TELEMETRY_DISABLED': '1'})
     # Cargo metadata honors CARGO_TARGET_DIR and workspace configuration.
     metadata = json.loads(run('cargo', 'metadata', '--locked', '--no-deps', '--format-version', '1'))
+    api_docs = build_api_docs(Path(metadata['target_directory']))
     target = Path(metadata['target_directory']) / 'wasm32-unknown-unknown' / ('release' if profile == 'release' else 'debug')
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.scarletui-samples-', dir=output.parent) as temporary:
@@ -154,11 +249,15 @@ def build(output: Path, profile: str) -> None:
         subprocess.run(['python3', str(ROOT / 'site/scripts/social-metadata.py'), str(stage)], check=True, cwd=ROOT)
         subprocess.run(['node', '--test', str(ROOT / 'site/scripts/metadata-built.check.mjs')], check=True, cwd=ROOT,
                        env={**os.environ, 'SCARLET_SITE_DIR': str(stage)})
+        # API reference keeps rustdoc HTML intact; do not create thousands of
+        # Starlight social cards for generated items, sources and redirect pages.
+        stage_api_docs(stage, api_docs)
         validate(stage)
         manifest = {
             'format': 1,
             'profile': profile,
             'wasm_bindgen': version,
+            'api_reference': {'packages': list(API_PACKAGES), 'features': API_FEATURES},
             **source_identity(),
             'files': {str(p.relative_to(stage)): {'bytes': p.stat().st_size, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
                       for p in sorted(stage.rglob('*')) if p.is_file()},

@@ -432,7 +432,7 @@ pub trait RenderObject: Any {
     /// [`ScrollOffsetUpdate::NeedsComposite`] when retained layers only need
     /// recomposition. The default implementation does nothing and returns
     /// [`ScrollOffsetUpdate::None`], leaving the layout/paint decision to
-    /// [`ElementRenderObject::update_needs_layout`].
+    /// [`crate::element::ElementRenderObject::update_needs_layout`].
     fn apply_scroll_offset(&mut self, _children: &mut [Box<dyn Element>]) -> ScrollOffsetUpdate {
         ScrollOffsetUpdate::None
     }

@@ -3,6 +3,8 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+import os
 from urllib.parse import urljoin, urlsplit
 
 spec = importlib.util.spec_from_file_location('build_web_samples', Path(__file__).with_name('build-web-samples.py'))
@@ -26,12 +28,125 @@ class PackageValidation(unittest.TestCase):
         (self.root / 'try').mkdir()
         (self.root / 'index.html').write_text('<a href="/try/">Try</a><a href="/guide/">Guide</a><link href="/_astro/theme.css"><img src="./assets/widget-factory.png">')
         (self.root / 'try/index.html').write_text('<a href="../">Home</a><a href="../counter/">Counter</a><a href="../widget-factory/">Factory</a><link href="/_astro/theme.css"><script src="../capability.js"></script>')
+        self.api = self.root / 'docs'
+        for package in builder.API_PACKAGES:
+            folder = self.api / package.replace('-', '_')
+            folder.mkdir(parents=True)
+            (folder / 'index.html').write_text('<a href="../scarlet_ui/index.html">API</a>')
+        (self.api / 'index.html').write_text('<a href="./scarlet_ui/index.html">API</a>')
+        (self.api / 'crates.js').write_text('window.ALL_CRATES = [];')
+        (self.api / 'static.files').mkdir()
+        (self.api / 'static.files/rustdoc.css').touch()
+        (self.api / 'static.files/search.js').touch()
+        (self.api / 'search.index').mkdir()
+        (self.api / 'search.index/root.js').touch()
+        (self.api / 'src/scarlet_ui').mkdir(parents=True)
+        (self.api / 'src/scarlet_ui/lib.rs.html').write_text('<a href="../../scarlet_ui/index.html">API</a>')
         for route, _, module in builder.DEMOS:
             folder = self.root / route
             (folder / 'pkg').mkdir(parents=True)
             (folder / 'index.html').write_text(f"<script>import('./pkg/{module}.js')</script>")
             (folder / 'pkg' / f'{module}.js').write_text(f"new URL('{module}_bg.wasm', import.meta.url)")
             (folder / 'pkg' / f'{module}_bg.wasm').write_bytes(b'\0asm\x01\0\0\0')
+
+    def test_api_reference_has_crates_sources_search_and_static_assets(self):
+        (self.api / 'scarlet_ui/index.html').write_text(
+            '<a href="../scarlet_ui_core/index.html">Core</a>'
+            '<a href="../src/scarlet_ui/lib.rs.html">Source</a>'
+            '<script src="../static.files/search.js"></script>'
+            '<link href="../static.files/rustdoc.css">')
+        builder.validate(self.root)
+
+    def test_missing_api_crate_is_rejected(self):
+        (self.api / 'scarlet_ui_macros/index.html').unlink()
+        with self.assertRaisesRegex(ValueError, 'Missing API crate'):
+            builder.validate(self.root)
+
+    def test_missing_rustdoc_search_index_is_rejected(self):
+        (self.api / 'search.index/root.js').unlink()
+        with self.assertRaisesRegex(ValueError, 'Missing rustdoc search index'):
+            builder.validate(self.root)
+
+    def test_older_rustdoc_search_index_is_supported(self):
+        (self.api / 'search.index/root.js').unlink()
+        (self.api / 'search-index.js').touch()
+        builder.validate(self.root)
+
+    def test_missing_rustdoc_source_is_rejected(self):
+        (self.api / 'src/scarlet_ui/lib.rs.html').unlink()
+        with self.assertRaisesRegex(ValueError, 'Missing rustdoc assets'):
+            builder.validate(self.root)
+
+    def test_api_staging_keeps_dynamic_assets_and_source_pages(self):
+        stage = self.root / 'staged'
+        stage.mkdir()
+        builder.stage_api_docs(stage, self.api)
+        for path in self.api.rglob('*'):
+            if path.is_file() and path.name != 'index.html':
+                self.assertEqual((stage / 'docs' / path.relative_to(self.api)).read_bytes(), path.read_bytes())
+        entry = (stage / 'docs/index.html').read_text()
+        self.assertIn('content="0; url=./scarlet_ui/index.html"', entry)
+        self.assertIn('href="./scarlet_ui/index.html"', entry)
+        builder.validate_api_docs(stage / 'docs')
+
+    def test_upstream_rustdoc_workarounds_are_narrow_and_idempotent(self):
+        page = self.api / 'scarlet_ui/index.html'
+        missing = '../trait.impl/scarlet_ui_core/application/trait.Application.js'
+        present = '../trait.impl/scarlet_ui_core/preview/trait.PreviewSession.js'
+        actual = (page.parent / present).resolve()
+        actual.parent.mkdir(parents=True)
+        actual.write_text('window.pending_implementors = {existing: true};')
+        page.write_text('<a href="dispatcher#setting-the-default-subscriber">Default</a>'
+                        '<a href="super::Subscriber">Subscriber</a>'
+                        f'<script src="{missing}" async></script>'
+                        f'<script src="{present}" async></script>')
+        builder.normalize_api_docs(self.api)
+        html = page.read_text()
+        self.assertIn('/tracing/dispatcher/index.html#setting-the-default-subscriber', html)
+        self.assertIn('/tracing/trait.Subscriber.html', html)
+        self.assertNotIn(missing, html)
+        self.assertIn(present, html)
+        self.assertEqual(actual.read_text(), 'window.pending_implementors = {existing: true};')
+        builder.normalize_api_docs(self.api)
+        self.assertEqual(page.read_text(), html)
+        builder.validate(self.root)
+
+    def test_unexpected_missing_implementation_script_still_fails(self):
+        page = self.api / 'scarlet_ui/index.html'
+        page.write_text('<script src="../trait.impl/scarlet_ui/trait.Unknown.js" async></script>')
+        builder.normalize_api_docs(self.api)
+        with self.assertRaisesRegex(ValueError, 'Missing local link'):
+            builder.validate(self.root)
+
+    def test_api_build_uses_isolated_native_docs_and_compatible_features(self):
+        target = self.root / 'custom-target'
+        docs = target / 'api-reference/doc'
+        for package in builder.API_PACKAGES:
+            folder = docs / package.replace('-', '_')
+            folder.mkdir(parents=True)
+            (folder / 'index.html').touch()
+        with patch.dict(os.environ, {'CARGO_BUILD_TARGET': 'wasm32-unknown-unknown'}):
+            with patch.object(builder.subprocess, 'run') as run:
+                self.assertEqual(builder.build_api_docs(target), docs)
+        clean, build = run.call_args_list
+        self.assertEqual(clean.args[0], ['cargo', 'clean', '--doc', '--target-dir', str(target / 'api-reference')])
+        command = build.args[0]
+        self.assertIn('--no-deps', command)
+        self.assertIn('--locked', command)
+        self.assertIn('--no-default-features', command)
+        self.assertIn('scarlet-ui/std,scarlet-ui/platform-winit,scarlet-ui/preview', command)
+        self.assertNotIn('--all-features', command)
+        self.assertNotIn('--target', command)
+        self.assertNotIn('CARGO_BUILD_TARGET', build.kwargs['env'])
+        self.assertIn('--deny=rustdoc::broken_intra_doc_links', build.kwargs['env']['CARGO_ENCODED_RUSTDOCFLAGS'])
+        self.assertIn('--deny=rustdoc::invalid_html_tags', build.kwargs['env']['CARGO_ENCODED_RUSTDOCFLAGS'])
+        for package in builder.API_PACKAGES:
+            self.assertIn(package, command)
+
+    def test_incomplete_or_cross_target_api_build_is_rejected(self):
+        with patch.object(builder.subprocess, 'run'):
+            with self.assertRaisesRegex(ValueError, 'build.target Cargo configuration'):
+                builder.build_api_docs(self.root / 'empty-target')
 
     def test_diagnostic_is_opt_in_and_reuses_factory_runtime(self):
         import json

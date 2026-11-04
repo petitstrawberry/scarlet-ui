@@ -22,6 +22,13 @@ function meta(key, expected) {
   assert.equal(matches[0].content, expected, key);
 }
 
+test('homepage and guide navigation distinguish API Reference from guides', () => {
+  for (const path of ['index.html', 'getting-started/index.html']) {
+    const source = readFileSync(new URL(path, dist), 'utf8');
+    assert.match(source, /href="\/docs\/"[^>]*>[\s\S]*?API Reference/);
+  }
+});
+
 test('homepage and documentation footers show the project copyright and retain navigation', () => {
   const license = readFileSync(new URL('../../LICENSE', import.meta.url), 'utf8');
   const [, year, owner] = license.match(/^Copyright \(c\) (\d{4}) (.+)$/m);
@@ -72,7 +79,8 @@ test('documentation titles do not inherit the homepage title or image', () => {
 
 test('each indexable generated page has its own unique social image and truthful title', async () => {
   const { readdirSync } = await import('node:fs');
-  const pages = readdirSync(dist, { recursive: true }).filter(path => path.endsWith('.html') && path !== '404.html');
+  // Rustdoc is packaged separately and retains its own generated metadata.
+  const pages = readdirSync(dist, { recursive: true }).filter(path => path.endsWith('.html') && path !== '404.html' && !path.startsWith('docs/'));
   const images = new Set();
   for (const path of pages) {
     const source = readFileSync(new URL(path, dist), 'utf8');
