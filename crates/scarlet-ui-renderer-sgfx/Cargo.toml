@@ -24,3 +24,8 @@ path = "src/lib.rs"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+sgfx-backend-wgpu = { git = "https://github.com/petitstrawberry/sgfx", rev = "22e3d283046543239d2f3606dea73d9fcac7abad" }
+wgpu = "24"
+pollster = "0.4"

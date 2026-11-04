@@ -14,6 +14,98 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
+// Real scene content behind the stock controls. Changing the save counter
+// changes this scene so stale/flattened backdrop caches are visible immediately.
+#[derive(Clone)]
+struct MaterialBackdrop {
+    phase: usize,
+}
+
+struct MaterialBackdropRender {
+    phase: usize,
+    size: Size,
+}
+
+impl View for MaterialBackdrop {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(scarlet_ui::RenderElement::new(
+            self.clone(),
+            MaterialBackdropRender {
+                phase: self.phase,
+                size: Size::ZERO,
+            },
+        ))
+    }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
+impl scarlet_ui::ElementRenderObject for MaterialBackdropRender {
+    fn layout(&mut self, constraints: scarlet_ui::LayoutConstraints) -> Size {
+        self.size = constraints.constrain(Size::new(760.0, 140.0));
+        self.size
+    }
+    fn size(&self) -> Size {
+        self.size
+    }
+    fn render(&mut self) {}
+    fn hit_test(&self, _: Point) -> bool {
+        false
+    }
+    fn paint_outsets(&self) -> scarlet_ui::EdgeInsets {
+        scarlet_ui::EdgeInsets::all(12.0)
+    }
+    fn paint(&self, ctx: &mut scarlet_ui::renderer::PaintContext<'_>, origin: Point) -> bool {
+        let panel = Rect::from_xywh(
+            origin.x - 12.0,
+            origin.y,
+            self.size.width + 24.0,
+            self.size.height,
+        );
+        ctx.push_rounded_clip(panel, 20.0);
+        ctx.fill_rect(panel, Color::rgb(218, 225, 237));
+        let colors = [
+            Color::rgb(168, 198, 207),
+            Color::rgb(213, 183, 181),
+            Color::rgb(186, 185, 214),
+        ];
+        let cell = panel.size.width / 3.0;
+        for index in 0..3 {
+            let x = panel.origin.x + cell * index as f32;
+            let rect = Rect::from_xywh(x, panel.origin.y, cell, panel.size.height);
+            ctx.fill_rect(rect, colors[(index + self.phase) % colors.len()]);
+            // Small actual scene detail makes the material's spatial blur
+            // distinguishable from an ordinary translucent colored rectangle.
+            for line in 0..7 {
+                let y = panel.origin.y + 14.0 + line as f32 * 19.0;
+                ctx.fill_rect(
+                    Rect::from_xywh(x + 10.0, y, cell - 20.0, 1.0),
+                    Color::WHITE.with_opacity(0.30),
+                );
+            }
+        }
+        ctx.pop_clip();
+        true
+    }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+    fn update(&mut self, view: &dyn View) -> scarlet_ui::element::UpdateResult {
+        let Some(view) = view.as_any().downcast_ref::<MaterialBackdrop>() else {
+            return scarlet_ui::element::UpdateResult::Replaced;
+        };
+        if self.phase == view.phase {
+            return scarlet_ui::element::UpdateResult::NoChange;
+        }
+        self.phase = view.phase;
+        scarlet_ui::element::UpdateResult::Updated
+    }
+}
+
 fn split_layout_for_selection(selection: usize) -> (SplitAxis, SplitAxisPolicy) {
     match selection {
         1 => (SplitAxis::Vertical, SplitAxisPolicy::Fixed),
@@ -496,7 +588,11 @@ pub(crate) struct WidgetFactory {
     viewport: State<Size>,
     slider_value: State<f32>,
     toggle_on: State<bool>,
+    toggle_off: State<bool>,
     text_value: State<String>,
+    study_count: State<u32>,
+    study_disabled_text: State<String>,
+    study_disabled_selected: State<usize>,
     selected: State<usize>,
     split_layout: State<usize>,
     tab_bar_placement: State<usize>,
@@ -516,8 +612,12 @@ impl WidgetFactory {
             viewport: State::new(StateId::new(29), Size::new(860.0, 560.0)),
             slider_value: State::new(StateId::new(20), 0.42),
             toggle_on: State::new(StateId::new(21), true),
+            toggle_off: State::new(StateId::new(33), false),
             text_value: State::new(StateId::new(22), String::from("Factory text field")),
             selected: State::new(StateId::new(23), 1usize),
+            study_count: State::new(StateId::new(30), 0),
+            study_disabled_text: State::new(StateId::new(31), String::from("Project name")),
+            study_disabled_selected: State::new(StateId::new(32), 0),
             split_layout: State::new(StateId::new(27), 0usize),
             tab_bar_placement: State::new(StateId::new(28), 0usize),
             text_document: State::new(
@@ -615,7 +715,7 @@ impl WidgetFactory {
     }
 
     fn row<V: View + Clone>(&self, name: &str, control: V) -> impl View + Clone + use<V> {
-        let label = Text::new(name.to_owned()).font_size(14.0);
+        let label = Text::new(name.to_owned()).text_style(TextStyle::Callout);
         if self.stacked_rows() {
             Either::A(
                 vstack![label, control]
@@ -634,7 +734,7 @@ impl WidgetFactory {
     }
 
     fn button(&self) -> impl View + Clone + use<> {
-        Button::new("Factory Button")
+        Button::new("Factory Button").material(GlassMaterial::regular())
     }
 
     fn text_field(&self) -> impl View + Clone + use<> {
@@ -651,7 +751,26 @@ impl WidgetFactory {
     }
 
     fn toggle(&self) -> impl View + Clone + use<> {
-        Toggle::new(self.toggle_on.clone())
+        hstack![
+            hstack![
+                Toggle::new(self.toggle_off.clone()),
+                Text::new(if self.toggle_off.get() { "On" } else { "Off" })
+                    .text_style(TextStyle::Callout)
+                    .tone(TextTone::Secondary),
+            ]
+            .spacing(8.0)
+            .alignment(Alignment::Center),
+            hstack![
+                Toggle::new(self.toggle_on.clone()),
+                Text::new(if self.toggle_on.get() { "On" } else { "Off" })
+                    .text_style(TextStyle::Callout)
+                    .tone(TextTone::Secondary),
+            ]
+            .spacing(8.0)
+            .alignment(Alignment::Center),
+        ]
+        .spacing(28.0)
+        .alignment(Alignment::Center)
     }
 
     fn progress(&self) -> impl View + Clone + use<> {
@@ -813,6 +932,7 @@ impl WidgetFactory {
                 .padding(12.0)
             }),
         ])
+        .material(GlassMaterial::regular())
         .tab_bar_placement(tab_bar_placement_for_selection(
             self.tab_bar_placement.get(),
         ))
@@ -831,12 +951,20 @@ impl WidgetFactory {
         .width(self.demo_width(220.0))
     }
 
-    fn configurable_layouts(&self) -> impl View + Clone + use<> {
+    fn configurable_layouts(&self, show_tab_backdrop: bool) -> impl View + Clone + use<> {
+        let tabs = if show_tab_backdrop {
+            Either::A(ZStack::new((
+                MaterialBackdrop { phase: 1 }.frame(self.demo_width(320.0), 150.0),
+                self.tab_view(),
+            )))
+        } else {
+            Either::B(self.tab_view())
+        };
         vstack! {
             self.row("Split layout", self.split_layout_select()),
             self.row("SplitView", self.split_view()),
             self.row("Tab bar", self.tab_bar_placement_select()),
-            self.row("TabView", self.tab_view()),
+            self.row("TabView", tabs),
         }
         .spacing(16.0)
         .alignment(Alignment::Leading)
@@ -844,13 +972,13 @@ impl WidgetFactory {
 
     fn overview_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
-            Text::new("Widget Factory").font_size(28.0),
-            Text::new("PaintCommand default rendering").font_size(15.0),
+            Text::new("Widget Factory").text_style(TextStyle::Title),
+            Text::new("PaintCommand default rendering").text_style(TextStyle::Callout).tone(TextTone::Secondary),
             self.row("ProgressView", self.progress()),
             self.row("Rectangle", self.rectangle()),
             self.row("Divider", self.divider()),
             self.row("ScrollView both", self.scroll_view()),
-            self.configurable_layouts(),
+            self.configurable_layouts(false),
         }
         .spacing(16.0)
         .alignment(Alignment::Leading)
@@ -860,8 +988,8 @@ impl WidgetFactory {
 
     fn sgfx_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
-            Text::new("SGFX").font_size(28.0),
-            Text::new("SGFX retained canvas").font_size(15.0),
+            Text::new("SGFX").text_style(TextStyle::Title),
+            Text::new("SGFX retained canvas").text_style(TextStyle::Callout).tone(TextTone::Secondary),
             self.sgfx_cube(),
         }
         .spacing(16.0)
@@ -870,9 +998,112 @@ impl WidgetFactory {
         self.scroll_page(content)
     }
 
+    // Trial surface: real stock controls, not a separate skin or HTML specimen.
+    fn control_study(&self) -> impl View + Clone + use<> {
+        let width = self.row_width().min(760.0);
+        let count = self.study_count.clone();
+        let button = vstack![
+            Text::new("Action").text_style(TextStyle::Callout),
+            Button::new("Save changes")
+                .material(GlassMaterial::regular())
+                .on_click(move || count.update(|value| *value += 1))
+                .frame_width(130.0),
+        ]
+        .spacing(8.0)
+        .alignment(Alignment::Leading);
+        let field = vstack![
+            Text::new("Project name").text_style(TextStyle::Callout),
+            TextField::new(self.text_value.clone())
+                .placeholder("Untitled project")
+                .frame_width(if width < 550.0 {
+                    width
+                } else {
+                    (width - 170.0) * 0.6
+                }),
+        ]
+        .spacing(8.0)
+        .alignment(Alignment::Leading);
+        let select = vstack![
+            Text::new("Density").text_style(TextStyle::Callout),
+            Select::new(
+                vec![
+                    String::from("Compact"),
+                    String::from("Regular"),
+                    String::from("Expanded")
+                ],
+                self.selected.clone()
+            )
+            .style(SelectStyle::Menu)
+            .width(if width < 550.0 {
+                width
+            } else {
+                (width - 170.0) * 0.4
+            }),
+        ]
+        .spacing(8.0)
+        .alignment(Alignment::Leading);
+        let controls = if width < 550.0 {
+            Either::A(
+                vstack![button, field, select]
+                    .spacing(20.0)
+                    .alignment(Alignment::Leading),
+            )
+        } else {
+            Either::B(
+                hstack![button.frame_width(130.0), field, select]
+                    .spacing(20.0)
+                    .alignment(Alignment::Top),
+            )
+        };
+        vstack![
+            Text::new("Control study").text_style(TextStyle::Title),
+            Text::new("Buttons, inputs and menus with a shared material.")
+                .text_style(TextStyle::Callout)
+                .tone(TextTone::Secondary),
+            ZStack::new((
+                MaterialBackdrop {
+                    phase: (self.study_count.get() % 3) as usize
+                }
+                .frame(width, if width < 550.0 { 300.0 } else { 140.0 }),
+                controls,
+            )),
+            Text::new(format!(
+                "Saved {} times. Save again to change the real backdrop behind the glass.",
+                self.study_count.get()
+            ))
+            .text_style(TextStyle::Callout)
+            .tone(TextTone::Secondary),
+            Divider::new().frame(width, 1.0),
+            self.row(
+                "Disabled",
+                vstack![
+                    Button::new("Save changes")
+                        .material(GlassMaterial::regular())
+                        .enabled(false),
+                    TextField::new(self.study_disabled_text.clone())
+                        .enabled(false)
+                        .frame_width(self.demo_width(280.0)),
+                    Select::new(
+                        vec![String::from("Unavailable")],
+                        self.study_disabled_selected.clone()
+                    )
+                    .enabled(false)
+                    .style(SelectStyle::Menu)
+                    .width(self.demo_width(280.0)),
+                ]
+                .spacing(12.0)
+                .alignment(Alignment::Leading)
+            ),
+        ]
+        .spacing(24.0)
+        .alignment(Alignment::Leading)
+    }
+
     fn controls_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
-            Text::new("Controls").font_size(24.0),
+            self.control_study(),
+            Divider::new().frame(self.row_width(), 1.0),
+            Text::new("Other controls").text_style(TextStyle::Headline),
             self.row("Button", self.button()),
             self.row("Toggle", self.toggle()),
             self.row("Slider", self.slider()),
@@ -886,7 +1117,7 @@ impl WidgetFactory {
 
     fn inputs_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
-            Text::new("Inputs").font_size(24.0),
+            Text::new("Inputs").text_style(TextStyle::Title),
             self.row("TextField", self.text_field()),
             self.row("Select", self.select()),
             self.row("Slider", self.slider()),
@@ -926,15 +1157,26 @@ impl WidgetFactory {
 
     fn display_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
-            Text::new("Display").font_size(24.0),
-            self.row("Text", Text::new("Factory text sample").font_size(16.0)),
+            Text::new("Display").text_style(TextStyle::Title),
+            self.row(
+                "Text",
+                vstack![
+                    Text::new("Text hierarchy").text_style(TextStyle::Headline),
+                    Text::new("Readable content, clear emphasis").text_style(TextStyle::Body),
+                    Text::new("Supporting detail shares the same type family.")
+                        .text_style(TextStyle::Callout)
+                        .tone(TextTone::Secondary),
+                ]
+                .spacing(8.0)
+                .alignment(Alignment::Leading),
+            ),
             self.row("Rectangle", self.rectangle()),
             self.row("Divider", self.divider()),
             self.row("Tabler Icons", self.icons()),
             self.row("ScrollView both", self.scroll_view()),
             self.row("ScrollView x", self.horizontal_scroll_view()),
             self.row("ScrollView y", self.vertical_scroll_view()),
-            self.configurable_layouts(),
+            self.configurable_layouts(true),
         }
         .spacing(16.0)
         .alignment(Alignment::Leading)
@@ -953,7 +1195,11 @@ impl View for WidgetFactory {
             &self.viewport,
             &self.slider_value,
             &self.toggle_on,
+            &self.toggle_off,
             &self.text_value,
+            &self.study_count,
+            &self.study_disabled_text,
+            &self.study_disabled_selected,
             &self.selected,
             &self.split_layout,
             &self.tab_bar_placement,
@@ -1003,6 +1249,7 @@ impl Application for WidgetFactory {
                         .icon(Icon::Package),
                 }
                 .presentation(NavigationPresentation::Automatic)
+                .sidebar_style(NavigationSidebarStyle::Floating)
                 .shows_icons(true)
                 .sidebar_width(Self::SIDEBAR_WIDTH)
                 .minimum_content_size(Size::new(Self::MIN_CONTENT_WIDTH, 0.0)),
@@ -1591,6 +1838,24 @@ mod tests {
         pipeline.layout_initial();
         pipeline.resize(Size::new(400.0, 300.0));
         pipeline.render_with_damage();
+        fn paper_origin(element: &dyn Element, parent: Point) -> Option<Point> {
+            let origin = Point::new(
+                parent.x + element.position().x,
+                parent.y + element.position().y,
+            );
+            if element
+                .render_object()
+                .is_some_and(|render| render.as_any().is::<scarlet_ui::SgfxCanvasRenderObject>())
+            {
+                return Some(origin);
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| paper_origin(child.as_ref(), origin))
+        }
+        let paper = paper_origin(pipeline.element_tree().root().unwrap(), Point::ZERO).unwrap();
+        let start = ((paper.x + 20.0) as i32, (paper.y + 20.0) as i32);
         let mut serial = 0;
         let mut send = |id, phase, x, y| {
             serial += 1;
@@ -1612,7 +1877,7 @@ mod tests {
             }));
             pipeline.render_with_damage();
         };
-        send(1, TouchPhase::Down, 32, 68);
+        send(1, TouchPhase::Down, start.0, start.1);
         assert_eq!(app.strokes.get().len(), 4);
         assert_eq!(
             app.strokes.get()[3].points[0],
@@ -1634,7 +1899,7 @@ mod tests {
         assert_eq!(app.strokes.get(), released);
 
         // A second finger outside the paper must cancel even a pending stroke.
-        send(2, TouchPhase::Down, 32, 68);
+        send(2, TouchPhase::Down, start.0, start.1);
         send(3, TouchPhase::Down, 20, 250);
         assert!(!app.active.get());
         let interrupted = app.strokes.get();
@@ -1872,6 +2137,107 @@ mod tests {
                 Phase::Target,
             ));
             assert!(render_object.first_extent() > initial_extent + 20.0);
+        }
+    }
+    #[test]
+    fn material_backdrop_padding_fits_narrow_pages() {
+        let app = WidgetFactory::new();
+        for width in [375.0, 590.0, 1180.0] {
+            app.viewport.set(Size::new(width, 600.0));
+            let backdrop = MaterialBackdropRender {
+                phase: 0,
+                size: Size::new(app.row_width(), 140.0),
+            };
+            assert!(backdrop.paint_outsets().left <= app.page_padding());
+            assert!(backdrop.paint_outsets().right <= app.page_padding());
+        }
+    }
+
+    /// Release-only observational benchmark of the real Controls scene. It
+    /// renders offscreen with the same CPU pipeline, not a native screenshot.
+    #[test]
+    #[ignore = "manual release CPU material performance measurement"]
+    fn measure_factory_glass_frame_budget() {
+        use scarlet_ui::event::{Event, MouseButton, MouseEvent};
+        use scarlet_ui::renderer::{PaintCommand, PaintContext};
+        use scarlet_ui::{ComponentElement, RenderingPipeline, SceneBuilder};
+        fn label_position(element: &dyn Element, parent: Point) -> Option<(i32, i32)> {
+            let origin = Point::new(
+                parent.x + element.position().x,
+                parent.y + element.position().y,
+            );
+            if element.type_name_debug().contains("NavigationSidebar") {
+                let mut ctx = PaintContext::new();
+                element.render_object().unwrap().paint(&mut ctx, origin);
+                return ctx.commands().iter().find_map(|command| match command {
+                    PaintCommand::DrawText { text, position, .. } if text == "Controls" => {
+                        Some((position.x as i32 + 4, position.y as i32 + 8))
+                    }
+                    _ => None,
+                });
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| label_position(child.as_ref(), origin))
+        }
+        for scale in [1000, 2000] {
+            let app = WidgetFactory::new();
+            let size = Size::new(1180.0, 812.0);
+            app.viewport.set(size);
+            let mut pipeline = RenderingPipeline::new();
+            pipeline.set_root(Box::new(ComponentElement::new_with_builder(
+                app.clone(),
+                |app| {
+                    let mut builder = SceneBuilder::new();
+                    app.scenes().build(&mut builder);
+                    builder.into_declarations().remove(0).view
+                },
+            )));
+            pipeline.set_scale_milli(scale);
+            pipeline.resize(size);
+            pipeline.layout_initial();
+            let (x, y) = label_position(pipeline.element_tree().root().unwrap(), Point::ZERO)
+                .expect("Controls navigation label");
+            pipeline.render_with_damage();
+            for event in [
+                MouseEvent::Moved { x, y },
+                MouseEvent::ButtonPressed {
+                    button: MouseButton::Left,
+                    x,
+                    y,
+                    click_count: 1,
+                },
+                MouseEvent::ButtonReleased {
+                    button: MouseButton::Left,
+                    x,
+                    y,
+                    click_count: 1,
+                },
+            ] {
+                pipeline.handle_event(&Event::Mouse(event));
+                pipeline.render_with_damage();
+            }
+            for index in 1..=3 {
+                app.study_count.set(index);
+                assert!(pipeline.render_with_damage().is_some());
+            }
+            let mut milliseconds = Vec::new();
+            for index in 100..120 {
+                app.study_count.set(index);
+                let start = std::time::Instant::now();
+                assert!(pipeline.render_with_damage().is_some());
+                milliseconds.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            milliseconds.sort_by(f64::total_cmp);
+            assert!(
+                pipeline.render_with_damage().is_none(),
+                "idle glass must not keep repainting"
+            );
+            println!(
+                "FACTORY_GLASS_CPU scale={} median_ms={:.3} p95_ms={:.3} logical=1180x812 samples=20",
+                scale, milliseconds[10], milliseconds[19]
+            );
         }
     }
 }

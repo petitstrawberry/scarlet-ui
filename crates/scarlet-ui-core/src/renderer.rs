@@ -73,7 +73,7 @@ pub fn path_rounded_rect(rect: Rect, corner_radius: f32) -> Path {
         (x1 - r, y0 + r, 3.0 * core::f32::consts::FRAC_PI_2),
     ];
     for (cx, cy, start_angle) in corners {
-        for i in 0..corner_segments {
+        for i in 0..=corner_segments {
             let t =
                 start_angle + core::f32::consts::FRAC_PI_2 * (i as f32) / (corner_segments as f32);
             pts.push(Point::new(cx + r * libm::cosf(t), cy + r * libm::sinf(t)));
@@ -138,6 +138,22 @@ pub enum PaintCommand {
         corner_radius: f32,
         top_color: Color,
         bottom_color: Color,
+    },
+    /// Blur pixels already painted behind this rounded rectangle, then apply a
+    /// uniform translucent tint. Later commands (including labels) stay sharp.
+    /// CPU blur uses three separable box passes in premultiplied color, with a
+    /// total physical support capped at 64 pixels. When the blur exceeds the
+    /// bounded ROI/frame budget, the tint's RGB becomes an opaque fallback to
+    /// retain readability. Explicit zero-radius tint-only painting preserves
+    /// its requested alpha. This is destination-dependent and must not be cached
+    /// as an isolated transparent picture. Within rounded clips it establishes
+    /// a compositing boundary: content before and after the material receives
+    /// clip coverage independently, rather than sharing one isolated group.
+    BackdropFilterRoundedRect {
+        rect: Rect,
+        corner_radius: f32,
+        blur_radius: f32,
+        tint: Color,
     },
     /// Draw a blurred rounded-rectangle shadow behind `rect`.
     DrawRoundedRectShadow {
@@ -423,6 +439,35 @@ impl<'a> PaintContext<'a> {
             });
     }
 
+    /// Blur the preceding scene and tint it, clipped to a rounded rectangle.
+    /// `blur_radius` is the kernel support radius in logical pixels
+    /// (the approximate Gaussian standard deviation is one third of it). Zero
+    /// disables the blur without disabling the tint. SetOpacity controls the
+    /// strength of the entire material, not just its tint. If a nonzero blur
+    /// exceeds CPU resource limits, the provided tint RGB is rendered opaque
+    /// (still respecting SetOpacity and clip coverage) for readable fallback.
+    /// This fallback is a renderer quality decision, not a different material.
+    ///
+    /// Custom `ElementRenderObject` implementations emitting this command must
+    /// return `true` from `reads_backdrop()` while the material is present,
+    /// including commands inside nested display lists or popups. This lets the
+    /// rendering pipeline bypass isolated picture caches and replay the scene
+    /// whenever its backdrop changes.
+    pub fn backdrop_filter_rounded_rect(
+        &mut self,
+        rect: Rect,
+        corner_radius: f32,
+        blur_radius: f32,
+        tint: Color,
+    ) {
+        self.commands.push(PaintCommand::BackdropFilterRoundedRect {
+            rect,
+            corner_radius,
+            blur_radius,
+            tint,
+        });
+    }
+
     /// Draw a soft rounded-rectangle drop shadow.
     pub fn draw_rounded_rect_shadow(
         &mut self,
@@ -701,6 +746,7 @@ impl<'a> PaintContext<'a> {
                 }
                 PaintCommand::FillRoundedRect { rect, .. }
                 | PaintCommand::FillVerticalGradientRoundedRect { rect, .. }
+                | PaintCommand::BackdropFilterRoundedRect { rect, .. }
                 | PaintCommand::StrokeRect { rect, .. }
                 | PaintCommand::StrokeRoundedRect { rect, .. }
                 | PaintCommand::DrawIcon { rect, .. } => include(*rect),
@@ -726,7 +772,22 @@ impl<'a> PaintContext<'a> {
                         ));
                     }
                 }
-                // CPU fallback intentionally ignores shadows and extensions.
+                PaintCommand::DrawRoundedRectShadow {
+                    rect,
+                    offset,
+                    blur_radius,
+                    spread_radius,
+                    ..
+                } => {
+                    let expansion = *spread_radius + blur_radius.max(0.0);
+                    include(Rect::from_xywh(
+                        rect.left() + offset.dx - expansion,
+                        rect.top() + offset.dy - expansion,
+                        rect.size.width + expansion * 2.0,
+                        rect.size.height + expansion * 2.0,
+                    ));
+                }
+                // Unrecognized extensions remain backend-specific.
                 _ => {}
             }
         }
@@ -762,6 +823,7 @@ impl<'a> PaintContext<'a> {
                 }
                 PaintCommand::FillRoundedRect { rect, .. }
                 | PaintCommand::FillVerticalGradientRoundedRect { rect, .. }
+                | PaintCommand::BackdropFilterRoundedRect { rect, .. }
                 | PaintCommand::DrawRoundedRectShadow { rect, .. }
                 | PaintCommand::StrokeRect { rect, .. }
                 | PaintCommand::StrokeRoundedRect { rect, .. }
@@ -1050,11 +1112,230 @@ pub struct CpuPaintRenderer {
     clip_stack: Vec<ClipRegion>,
     clip_entries: Vec<ClipEntry>,
     scratch: RasterScratch,
+    shadow_cache: Vec<CpuShadowRaster>,
+    backdrop: BackdropScratch,
 }
+
+// The CPU prototype bounds both memory and frame work independently of the
+// caller's geometry. Two retained premultiplied surfaces use at most 32 MiB.
+const MAX_BACKDROP_RADIUS: usize = 64;
+const MAX_BACKDROP_PIXELS: usize = 1_000_000;
+const MAX_BACKDROP_FRAME_PIXELS: usize = 8_000_000;
+
+#[derive(Default)]
+struct BackdropScratch {
+    pixels: Vec<[f32; 4]>,
+    work: Vec<[f32; 4]>,
+    frame_pixels: usize,
+    fallback_count: usize,
+}
+
+fn premultiply_pixel(pixel: u32) -> [f32; 4] {
+    let p = pixel.to_le_bytes();
+    let alpha = p[3] as f32 / 255.0;
+    [
+        p[0] as f32 * alpha,
+        p[1] as f32 * alpha,
+        p[2] as f32 * alpha,
+        p[3] as f32,
+    ]
+}
+
+fn unpremultiply_pixel(p: [f32; 4]) -> u32 {
+    if p[3] < 0.000_01 {
+        return 0;
+    }
+    let inv_alpha = 255.0 / p[3];
+    u32::from_le_bytes([
+        (p[0] * inv_alpha + 0.5).clamp(0.0, 255.0) as u8,
+        (p[1] * inv_alpha + 0.5).clamp(0.0, 255.0) as u8,
+        (p[2] * inv_alpha + 0.5).clamp(0.0, 255.0) as u8,
+        (p[3] + 0.5).clamp(0.0, 255.0) as u8,
+    ])
+}
+
+/// Sliding-window separable box pass: O(pixels), independent of radius after
+/// a bounded initial sum. Clamped sampling extends the actual window edge.
+fn backdrop_box_pass(
+    src: &[[f32; 4]],
+    dst: &mut [[f32; 4]],
+    width: usize,
+    height: usize,
+    radius: usize,
+    horizontal: bool,
+) {
+    let (lines, length, step) = if horizontal {
+        (height, width, 1)
+    } else {
+        (width, height, width)
+    };
+    let divisor = (radius * 2 + 1) as f32;
+    for line in 0..lines {
+        let base = if horizontal { line * width } else { line };
+        let mut sum = [0.0; 4];
+        for tap in -(radius as isize)..=radius as isize {
+            let position = tap.clamp(0, length as isize - 1) as usize;
+            for c in 0..4 {
+                sum[c] += src[base + position * step][c];
+            }
+        }
+        for position in 0..length {
+            for c in 0..4 {
+                dst[base + position * step][c] = sum[c] / divisor;
+            }
+            let remove = position.saturating_sub(radius);
+            let add = (position + radius + 1).min(length - 1);
+            for c in 0..4 {
+                sum[c] += src[base + add * step][c] - src[base + remove * step][c];
+            }
+        }
+    }
+}
+
+fn union_rect(previous: Option<Rect>, rect: Rect) -> Rect {
+    let Some(old) = previous else {
+        return rect;
+    };
+    let left = old.left().min(rect.left());
+    let top = old.top().min(rect.top());
+    Rect::from_xywh(
+        left,
+        top,
+        old.right().max(rect.right()) - left,
+        old.bottom().max(rect.bottom()) - top,
+    )
+}
+
+// Conservative logical bounds for pending clip layers. Only used on scenes
+// containing a backdrop, and avoids clearing/scanning a whole window for each
+// small control. Text uses the real cached glyph masks, including overhangs.
+fn command_paint_bounds(
+    command: &PaintCommand,
+    context: &PaintContext<'_>,
+    scale_milli: u32,
+) -> Option<Rect> {
+    let scale = scale_milli.max(1) as f32 / 1000.0;
+    let rect = match command {
+        PaintCommand::FillRoundedRect { rect, .. }
+        | PaintCommand::FillVerticalGradientRoundedRect { rect, .. }
+        | PaintCommand::StrokeRect { rect, .. }
+        | PaintCommand::StrokeRoundedRect { rect, .. } => *rect,
+        PaintCommand::DrawIcon {
+            rect, icon, style, ..
+        } => {
+            let size = libm::ceilf(
+                (rect.size.width * scale)
+                    .min(rect.size.height * scale)
+                    .max(1.0),
+            )
+            .min(u16::MAX as f32) as u16;
+            let raster = crate::icon::rasterize_icon(*icon, size, *style);
+            Rect::from_xywh(
+                (rect.left() * scale) as i32 as f32 / scale,
+                (rect.top() * scale) as i32 as f32 / scale,
+                raster.width as f32 / scale,
+                raster.height as f32 / scale,
+            )
+        }
+        PaintCommand::DrawBuffer { dst, buffer_idx } => {
+            // This legacy command does not scale to dst.size: it composites
+            // the source's physical pixels at the snapped destination origin.
+            let source = context.buffer(BufferHandle(*buffer_idx))?;
+            Rect::from_xywh(
+                (dst.left() * scale) as i32 as f32 / scale,
+                (dst.top() * scale) as i32 as f32 / scale,
+                source.width() as f32 / scale,
+                source.height() as f32 / scale,
+            )
+        }
+        PaintCommand::DrawBufferRect { dst, .. } => *dst,
+        PaintCommand::DrawRoundedRectShadow {
+            rect,
+            offset,
+            blur_radius,
+            spread_radius,
+            ..
+        } => {
+            let expansion = spread_radius + blur_radius.max(0.0);
+            Rect::from_xywh(
+                rect.left() + offset.dx - expansion,
+                rect.top() + offset.dy - expansion,
+                rect.size.width + expansion * 2.0,
+                rect.size.height + expansion * 2.0,
+            )
+        }
+        PaintCommand::FillPath { path, .. } | PaintCommand::StrokePath { path, .. } => {
+            let first = path.first()?;
+            let (mut left, mut top, mut right, mut bottom) = (first.x, first.y, first.x, first.y);
+            for p in path {
+                left = left.min(p.x);
+                top = top.min(p.y);
+                right = right.max(p.x);
+                bottom = bottom.max(p.y);
+            }
+            let pad = match command {
+                PaintCommand::StrokePath { stroke_width, .. } => stroke_width.max(1.0),
+                _ => 1.0 / scale,
+            };
+            Rect::from_xywh(
+                left - pad,
+                top - pad,
+                right - left + pad * 2.0,
+                bottom - top + pad * 2.0,
+            )
+        }
+        PaintCommand::DrawText {
+            position,
+            text,
+            font_size_px,
+            ..
+        } => {
+            let x = libm::floorf(position.x as i32 as f32 * scale);
+            let y = libm::floorf(position.y as i32 as f32 * scale);
+            let mut bounds = None;
+            for glyph in
+                crate::graphics::rasterize_text_cached(text, *font_size_px, scale_milli).iter()
+            {
+                bounds = Some(union_rect(
+                    bounds,
+                    Rect::from_xywh(
+                        (x + glyph.x as f32) / scale,
+                        (y + glyph.y as f32) / scale,
+                        glyph.width as f32 / scale,
+                        glyph.height as f32 / scale,
+                    ),
+                ));
+            }
+            bounds?
+        }
+        _ => return None,
+    };
+    if [rect.left(), rect.top(), rect.right(), rect.bottom()]
+        .iter()
+        .all(|v| v.is_finite())
+        && rect.size.width > 0.0
+        && rect.size.height > 0.0
+    {
+        Some(rect)
+    } else {
+        None
+    }
+}
+
+// Bounded, geometry/color-keyed shadow images. Position is excluded except for
+// subpixel phase, so repeated identical controls share one raster at each scale.
+struct CpuShadowRaster {
+    key: [u32; 8],
+    buffer: Buffer,
+}
+const MAX_SHADOW_CACHE_PIXELS: usize = 8_000_000;
+const MAX_SHADOW_CACHE_ENTRIES: usize = 16;
+const CPU_SHADOW_WEIGHTS: [f32; 8] = [0.02, 0.03, 0.05, 0.08, 0.12, 0.17, 0.23, 0.30];
 
 pub(crate) struct RasterScratch {
     scaled_points: Vec<Point>,
     crossings: Vec<f32>,
+    coverage: Vec<f32>,
     clip_rects: Vec<Rect>,
     path_points: Vec<Point>,
 }
@@ -1064,6 +1345,7 @@ impl RasterScratch {
         Self {
             scaled_points: Vec::new(),
             crossings: Vec::new(),
+            coverage: Vec::new(),
             clip_rects: Vec::new(),
             path_points: Vec::new(),
         }
@@ -1072,6 +1354,7 @@ impl RasterScratch {
     fn clear(&mut self) {
         self.scaled_points.clear();
         self.crossings.clear();
+        self.coverage.clear();
         self.clip_rects.clear();
         self.path_points.clear();
     }
@@ -1082,6 +1365,7 @@ impl RasterScratch {
 pub(crate) struct RasterScratchCapacity {
     pub(crate) scaled_points: usize,
     pub(crate) crossings: usize,
+    pub(crate) coverage: usize,
     pub(crate) clip_rects: usize,
     pub(crate) path_points: usize,
 }
@@ -1089,6 +1373,8 @@ pub(crate) struct RasterScratchCapacity {
 struct PaintLayer {
     buffer: Buffer,
     clip: ClipRegion,
+    // Logical bounds of pending pixels, used by backdrop compositing barriers.
+    pending_bounds: Option<Rect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1118,6 +1404,8 @@ impl CpuPaintRenderer {
             clip_stack: Vec::new(),
             clip_entries: Vec::new(),
             scratch: RasterScratch::new(),
+            shadow_cache: Vec::new(),
+            backdrop: BackdropScratch::default(),
         }
     }
 
@@ -1141,6 +1429,8 @@ impl CpuPaintRenderer {
             clip_stack: Vec::new(),
             clip_entries: Vec::new(),
             scratch: RasterScratch::new(),
+            shadow_cache: Vec::new(),
+            backdrop: BackdropScratch::default(),
         };
         renderer.execute_with_damage(ctx, damage_rects);
         *buffer = renderer.into_buffer();
@@ -1173,6 +1463,8 @@ impl CpuPaintRenderer {
         self.clip_stack.clear();
         self.clip_entries.clear();
         self.scratch.clear();
+        self.shadow_cache.clear();
+        self.backdrop = BackdropScratch::default();
         self.buffer = Buffer::from_logical_dimensions_with_scale(
             size.width as u32,
             size.height as u32,
@@ -1192,6 +1484,7 @@ impl CpuPaintRenderer {
         RasterScratchCapacity {
             scaled_points: self.scratch.scaled_points.capacity(),
             crossings: self.scratch.crossings.capacity(),
+            coverage: self.scratch.coverage.capacity(),
             clip_rects: self.scratch.clip_rects.capacity(),
             path_points: self.scratch.path_points.capacity(),
         }
@@ -1254,7 +1547,11 @@ impl CpuPaintRenderer {
 
     fn push_clip_layer(&mut self, clip: ClipRegion) {
         let buffer = self.acquire_layer_buffer();
-        let layer = PaintLayer { buffer, clip };
+        let layer = PaintLayer {
+            buffer,
+            clip,
+            pending_bounds: None,
+        };
         self.layer_stack.push(layer);
     }
 
@@ -1262,6 +1559,9 @@ impl CpuPaintRenderer {
         let Some(layer) = self.layer_stack.pop() else {
             return;
         };
+        if let (Some(parent), Some(bounds)) = (self.layer_stack.last_mut(), layer.pending_bounds) {
+            parent.pending_bounds = Some(union_rect(parent.pending_bounds, bounds));
+        }
         let clip = self.scale_clip_region(layer.clip);
         let effective_clips = self.rebuild_effective_clip_rects(damage_rects);
 
@@ -1364,35 +1664,476 @@ impl CpuPaintRenderer {
         );
     }
 
-    fn rebuild_scaled_rounded_rect(&mut self, rect: Rect, corner_radius: f32) {
-        let radius = corner_radius
-            .min(rect.size.width / 2.0)
-            .min(rect.size.height / 2.0);
-        let corner_segments = (libm::ceilf(radius * 0.75) as usize).clamp(8, 32);
-        let x0 = rect.origin.x;
-        let y0 = rect.origin.y;
-        let x1 = rect.origin.x + rect.size.width;
-        let y1 = rect.origin.y + rect.size.height;
-        let corners = [
-            (x1 - radius, y1 - radius, 0.0),
-            (x0 + radius, y1 - radius, core::f32::consts::FRAC_PI_2),
-            (x0 + radius, y0 + radius, core::f32::consts::PI),
-            (x1 - radius, y0 + radius, 3.0 * core::f32::consts::FRAC_PI_2),
-        ];
-        let scale = self.scale_milli as f32 / 1000.0;
-        self.scratch.scaled_points.clear();
-        self.scratch
-            .scaled_points
-            .reserve(corner_segments.saturating_mul(4));
-        for (center_x, center_y, start_angle) in corners {
-            for index in 0..corner_segments {
-                let angle = start_angle
-                    + core::f32::consts::FRAC_PI_2 * index as f32 / corner_segments as f32;
-                self.scratch.scaled_points.push(Point::new(
-                    (center_x + radius * libm::cosf(angle)) * scale,
-                    (center_y + radius * libm::sinf(angle)) * scale,
-                ));
+    fn paint_rounded_rect(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        stroke_width: Option<f32>,
+        color: Color,
+        clip: Option<ClipRegion>,
+    ) {
+        self.paint_gradient_rect(rect, radius, stroke_width, color, None, clip);
+    }
+
+    fn paint_gradient_rect(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        stroke_width: Option<f32>,
+        color: Color,
+        bottom_color: Option<Color>,
+        clip: Option<ClipRegion>,
+    ) {
+        let scratch = &mut self.scratch;
+        let buffer = if let Some(layer) = self.layer_stack.last_mut() {
+            &mut layer.buffer
+        } else {
+            &mut self.buffer
+        };
+        raster_rounded_rect(
+            buffer,
+            rect,
+            radius,
+            stroke_width,
+            color,
+            bottom_color,
+            clip,
+            &mut scratch.coverage,
+        );
+    }
+
+    /// A backdrop establishes a compositing barrier: resolve preceding layers
+    /// before sampling, without copying a resolved backdrop into a transparent
+    /// layer (which would apply its alpha twice when popped). Subsequent paints
+    /// continue in the still-active, now empty layers above the material.
+    fn flush_backdrop_layers(&mut self) {
+        for index in (0..self.layer_stack.len()).rev() {
+            let (parents, children) = self.layer_stack.split_at_mut(index);
+            let layer = &mut children[0];
+            let Some(bounds) = layer.pending_bounds.take() else {
+                continue;
+            };
+            let scale = self.scale_milli as f32 / 1000.0;
+            let scaled = |rect: Rect| {
+                Rect::from_xywh(
+                    rect.left() * scale,
+                    rect.top() * scale,
+                    rect.size.width * scale,
+                    rect.size.height * scale,
+                )
+            };
+            let clip = ClipRegion {
+                rect: scaled(layer.clip.rect),
+                corner_radius: layer.clip.corner_radius * scale,
+            };
+            let target = if let Some(parent) = parents.last_mut() {
+                parent.pending_bounds = Some(union_rect(parent.pending_bounds, bounds));
+                &mut parent.buffer
+            } else {
+                &mut self.buffer
+            };
+            composite_layer_clipped(target, &layer.buffer, clip, Some(scaled(bounds)));
+            let (left, top, right, bottom) = raster_bounds(&layer.buffer, scaled(bounds), None);
+            if right > left && bottom > top {
+                layer.buffer.clear_rect(
+                    left as u32,
+                    top as u32,
+                    (right - left) as u32,
+                    (bottom - top) as u32,
+                    Color::TRANSPARENT,
+                );
             }
+        }
+    }
+
+    fn paint_backdrop(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        blur_radius: f32,
+        tint: Color,
+        opacity: f32,
+    ) {
+        if ![
+            rect.left(),
+            rect.top(),
+            rect.right(),
+            rect.bottom(),
+            radius,
+            blur_radius,
+            tint.r,
+            tint.g,
+            tint.b,
+            tint.a,
+            opacity,
+        ]
+        .iter()
+        .all(|v| v.is_finite())
+            || rect.size.width <= 0.0
+            || rect.size.height <= 0.0
+            || opacity <= 0.0
+        {
+            return;
+        }
+        let rect = self.scale_rect(rect);
+        let radius = self
+            .scale_f32(radius)
+            .max(0.0)
+            .min(rect.size.width * 0.5)
+            .min(rect.size.height * 0.5);
+        if ![rect.left(), rect.top(), rect.right(), rect.bottom(), radius]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return;
+        }
+        let active = self.active_clip_rect();
+        if !self.clip_stack.is_empty() && active.is_none() {
+            return;
+        }
+        let active = active.map(|r| self.scale_rect(r));
+        let (left, top, right, bottom) = raster_bounds(&self.buffer, rect, active);
+        if right <= left || bottom <= top {
+            return;
+        }
+        let support = libm::ceilf(
+            self.scale_f32(blur_radius.max(0.0))
+                .min(MAX_BACKDROP_RADIUS as f32),
+        ) as usize;
+        let tint_pixel = tint.to_bgra();
+        if support == 0 && tint_pixel >> 24 == 0 {
+            return;
+        }
+        self.flush_backdrop_layers();
+
+        let sample_left = (left - support as i32).max(0);
+        let sample_top = (top - support as i32).max(0);
+        let sample_right = (right + support as i32).min(self.buffer.width() as i32);
+        let sample_bottom = (bottom + support as i32).min(self.buffer.height() as i32);
+        let width = (sample_right - sample_left) as usize;
+        let height = (sample_bottom - sample_top) as usize;
+        let area = width.checked_mul(height).unwrap_or(usize::MAX);
+        let needs_blur = support > 0 && tint_pixel >> 24 < 255;
+        let blur = needs_blur
+            && area <= MAX_BACKDROP_PIXELS
+            && area <= MAX_BACKDROP_FRAME_PIXELS.saturating_sub(self.backdrop.frame_pixels);
+        // Quality fallback keeps the material's semantic RGB, but removes
+        // busy sharp background detail when there is no budget to soften it.
+        // An explicit radius of zero is still an ordinary translucent tint.
+        let tint_pixel = if needs_blur && !blur {
+            self.backdrop.fallback_count += 1;
+            tint_pixel | 0xff00_0000
+        } else {
+            tint_pixel
+        };
+        let stride = self.buffer.width() as usize;
+        if blur {
+            self.backdrop.frame_pixels += area;
+            // reserve_exact prevents geometric Vec growth exceeding the cap.
+            if self.backdrop.pixels.capacity() < area {
+                self.backdrop
+                    .pixels
+                    .reserve_exact(area - self.backdrop.pixels.len());
+            }
+            if self.backdrop.work.capacity() < area {
+                self.backdrop
+                    .work
+                    .reserve_exact(area - self.backdrop.work.len());
+            }
+            self.backdrop.pixels.resize(area, [0.0; 4]);
+            self.backdrop.work.resize(area, [0.0; 4]);
+            for y in 0..height {
+                let start = (sample_top as usize + y) * stride + sample_left as usize;
+                for x in 0..width {
+                    self.backdrop.pixels[y * width + x] =
+                        premultiply_pixel(self.buffer.as_slice()[start + x]);
+                }
+            }
+            // Three box kernels approximate a Gaussian, with exact total
+            // support equal to the capped physical blur_radius.
+            for pass in 0..3 {
+                let r = (support + pass) / 3;
+                if r == 0 {
+                    continue;
+                }
+                backdrop_box_pass(
+                    &self.backdrop.pixels,
+                    &mut self.backdrop.work,
+                    width,
+                    height,
+                    r,
+                    true,
+                );
+                backdrop_box_pass(
+                    &self.backdrop.work,
+                    &mut self.backdrop.pixels,
+                    width,
+                    height,
+                    r,
+                    false,
+                );
+            }
+        }
+        let tint = premultiply_pixel(tint_pixel);
+        let tint_alpha = tint[3] / 255.0;
+        self.scratch
+            .coverage
+            .resize((right - left) as usize + 1, 0.0);
+        let scale = self.scale_milli as f32 / 1000.0;
+        for y in top..bottom {
+            self.scratch.coverage.fill(0.0);
+            for sample in 0..COVERAGE_SAMPLES {
+                let yc = y as f32 + (sample as f32 + 0.5) * COVERAGE_WEIGHT;
+                let Some((mut a, mut b)) = rounded_span(rect, radius, yc) else {
+                    continue;
+                };
+                // Intersect spans before coverage integration, rather than
+                // multiplying AA masks and darkening coincident edges.
+                for clip in &self.clip_stack {
+                    let scaled = ClipRegion {
+                        rect: Rect::from_xywh(
+                            clip.rect.left() * scale,
+                            clip.rect.top() * scale,
+                            clip.rect.size.width * scale,
+                            clip.rect.size.height * scale,
+                        ),
+                        corner_radius: clip.corner_radius * scale,
+                    };
+                    if let Some((c, d)) = clip_span_at(scaled, yc) {
+                        a = a.max(c);
+                        b = b.min(d);
+                    } else {
+                        b = a;
+                        break;
+                    }
+                }
+                add_coverage_span(&mut self.scratch.coverage, left, a, b);
+            }
+            let mut coverage = 0.0;
+            let pixels = self.buffer.as_mut_slice();
+            for x in left..right {
+                coverage += self.scratch.coverage[(x - left) as usize];
+                let amount = coverage.clamp(0.0, 1.0) * opacity;
+                if amount <= 0.000_01 {
+                    continue;
+                }
+                let index = y as usize * stride + x as usize;
+                let old = premultiply_pixel(pixels[index]);
+                let filtered = if blur {
+                    self.backdrop.pixels
+                        [(y - sample_top) as usize * width + (x - sample_left) as usize]
+                } else {
+                    old
+                };
+                let mut output = [0.0; 4];
+                for c in 0..4 {
+                    let material = tint[c] + filtered[c] * (1.0 - tint_alpha);
+                    output[c] = old[c] + (material - old[c]) * amount;
+                }
+                pixels[index] = unpremultiply_pixel(output);
+            }
+        }
+    }
+
+    fn paint_soft_shadow(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        blur: f32,
+        spread: f32,
+        color: Color,
+        damage_rects: Option<&[Rect]>,
+    ) {
+        if color.a <= 0.0 || rect.size.width <= 0.0 || rect.size.height <= 0.0 {
+            return;
+        }
+        let expansion = spread + blur;
+        let bounds = [
+            rect.left() - expansion,
+            rect.top() - expansion,
+            rect.right() + expansion,
+            rect.bottom() + expansion,
+        ];
+        if ![rect.size.width, rect.size.height, radius, blur, spread]
+            .iter()
+            .chain(bounds.iter())
+            .all(|v| v.is_finite())
+            || bounds[2] <= 0.0
+            || bounds[3] <= 0.0
+            || bounds[0] >= self.buffer.width() as f32
+            || bounds[1] >= self.buffer.height() as f32
+        {
+            return;
+        }
+        let x = libm::floorf(rect.left() - expansion) as i32;
+        let y = libm::floorf(rect.top() - expansion) as i32;
+        let width = (libm::ceilf(rect.right() + expansion) - x as f32).max(0.0) as u32;
+        let height = (libm::ceilf(rect.bottom() + expansion) - y as f32).max(0.0) as u32;
+        if width == 0 || height == 0 {
+            return;
+        }
+        let pixels = u64::from(width) * u64::from(height);
+        // Geometric partition clips are half-open at pixel centers, so adjacent
+        // retained shadow strips never blend the same pixel twice. Damage alone
+        // still rounds outward to match clearing; rounded masks apply later.
+        let scale = self.scale_milli as f32 / 1000.0;
+        let mut real_scissor = (i32::MIN, i32::MIN, i32::MAX, i32::MAX);
+        for clip in self
+            .clip_stack
+            .iter()
+            .filter(|clip| clip.corner_radius <= 0.0)
+        {
+            real_scissor.0 = real_scissor
+                .0
+                .max(libm::ceilf(clip.rect.left() * scale - 0.5) as i32);
+            real_scissor.1 = real_scissor
+                .1
+                .max(libm::ceilf(clip.rect.top() * scale - 0.5) as i32);
+            real_scissor.2 = real_scissor
+                .2
+                .min(libm::ceilf(clip.rect.right() * scale - 0.5) as i32);
+            real_scissor.3 = real_scissor
+                .3
+                .min(libm::ceilf(clip.rect.bottom() * scale - 0.5) as i32);
+        }
+        let clips = self.rebuild_effective_clip_rects(damage_rects);
+        if matches!(clips, EffectiveClipRects::Empty) {
+            return;
+        }
+        if pixels > MAX_SHADOW_CACHE_PIXELS as u64 {
+            // Keep pathological huge shadows bounded in memory; ordinary UI
+            // shadows use the cached path below.
+            for (index, weight) in CPU_SHADOW_WEIGHTS.iter().enumerate() {
+                let expansion = spread + blur * (7 - index) as f32 / 7.0;
+                let shape = Rect::from_xywh(
+                    rect.left() - expansion,
+                    rect.top() - expansion,
+                    rect.size.width + 2.0 * expansion,
+                    rect.size.height + 2.0 * expansion,
+                );
+                let tint = color.with_opacity(color.a * *weight);
+                match clips {
+                    EffectiveClipRects::Unclipped => self.paint_rounded_rect(
+                        shape,
+                        (radius + expansion).max(0.0),
+                        None,
+                        tint,
+                        None,
+                    ),
+                    EffectiveClipRects::Rects => {
+                        for i in 0..self.scratch.clip_rects.len() {
+                            let bounds = self.scale_rect(self.scratch.clip_rects[i]);
+                            let left = (libm::floorf(bounds.left()) as i32).max(real_scissor.0);
+                            let top = (libm::floorf(bounds.top()) as i32).max(real_scissor.1);
+                            let right = (libm::ceilf(bounds.right()) as i32).min(real_scissor.2);
+                            let bottom = (libm::ceilf(bounds.bottom()) as i32).min(real_scissor.3);
+                            let clip = ClipRegion {
+                                rect: Rect::from_xywh(
+                                    left as f32,
+                                    top as f32,
+                                    (right - left).max(0) as f32,
+                                    (bottom - top).max(0) as f32,
+                                ),
+                                corner_radius: 0.0,
+                            };
+                            self.paint_rounded_rect(
+                                shape,
+                                (radius + expansion).max(0.0),
+                                None,
+                                tint,
+                                Some(clip),
+                            );
+                        }
+                    }
+                    EffectiveClipRects::Empty => {}
+                }
+            }
+            return;
+        }
+        let pixels = pixels as usize;
+        let local = Rect::from_xywh(
+            rect.left() - x as f32,
+            rect.top() - y as f32,
+            rect.size.width,
+            rect.size.height,
+        );
+        let key = [
+            local.left().to_bits(),
+            local.top().to_bits(),
+            local.size.width.to_bits(),
+            local.size.height.to_bits(),
+            radius.to_bits(),
+            blur.to_bits(),
+            spread.to_bits(),
+            color.to_bgra(),
+        ];
+        let index = if let Some(index) = self.shadow_cache.iter().position(|entry| entry.key == key)
+        {
+            index
+        } else {
+            while !self.shadow_cache.is_empty()
+                && (self.shadow_cache.len() >= MAX_SHADOW_CACHE_ENTRIES
+                    || self
+                        .shadow_cache
+                        .iter()
+                        .map(|entry| entry.buffer.as_slice().len())
+                        .sum::<usize>()
+                        + pixels
+                        > MAX_SHADOW_CACHE_PIXELS)
+            {
+                self.shadow_cache.remove(0);
+            }
+            let mut buffer = Buffer::from_dimensions(width, height);
+            for (index, weight) in CPU_SHADOW_WEIGHTS.iter().enumerate() {
+                let expansion = spread + blur * (7 - index) as f32 / 7.0;
+                let shape = Rect::from_xywh(
+                    local.left() - expansion,
+                    local.top() - expansion,
+                    local.size.width + 2.0 * expansion,
+                    local.size.height + 2.0 * expansion,
+                );
+                raster_rounded_rect(
+                    &mut buffer,
+                    shape,
+                    (radius + expansion).max(0.0),
+                    None,
+                    color.with_opacity(color.a * *weight),
+                    None,
+                    None,
+                    &mut self.scratch.coverage,
+                );
+            }
+            self.shadow_cache.push(CpuShadowRaster { key, buffer });
+            self.shadow_cache.len() - 1
+        };
+        let source = &self.shadow_cache[index].buffer;
+        let target = if let Some(layer) = self.layer_stack.last_mut() {
+            &mut layer.buffer
+        } else {
+            &mut self.buffer
+        };
+        match clips {
+            EffectiveClipRects::Unclipped => target.composite(source, x, y, 1.0),
+            EffectiveClipRects::Rects => {
+                let scale = self.scale_milli as f32 / 1000.0;
+                for clip in &self.scratch.clip_rects {
+                    let left = (libm::floorf(clip.left() * scale) as i32).max(real_scissor.0);
+                    let top = (libm::floorf(clip.top() * scale) as i32).max(real_scissor.1);
+                    let right = (libm::ceilf(clip.right() * scale) as i32).min(real_scissor.2);
+                    let bottom = (libm::ceilf(clip.bottom() * scale) as i32).min(real_scissor.3);
+                    target.composite_clipped(
+                        source,
+                        x,
+                        y,
+                        1.0,
+                        left,
+                        top,
+                        right - left,
+                        bottom - top,
+                    );
+                }
+            }
+            EffectiveClipRects::Empty => {}
         }
     }
 
@@ -1401,9 +2142,23 @@ impl CpuPaintRenderer {
         let path = &scratch.scaled_points;
         let crossings = &mut scratch.crossings;
         if let Some(layer) = self.layer_stack.last_mut() {
-            fill_polygon(&mut layer.buffer, path, color, clip, crossings);
+            fill_polygon(
+                &mut layer.buffer,
+                path,
+                color,
+                clip,
+                crossings,
+                &mut scratch.coverage,
+            );
         } else {
-            fill_polygon(&mut self.buffer, path, color, clip, crossings);
+            fill_polygon(
+                &mut self.buffer,
+                path,
+                color,
+                clip,
+                crossings,
+                &mut scratch.coverage,
+            );
         }
     }
 
@@ -1440,6 +2195,7 @@ impl CpuPaintRenderer {
                 clip,
                 &mut scratch.path_points,
                 &mut scratch.crossings,
+                &mut scratch.coverage,
             );
         } else {
             draw_thick_line_clipped(
@@ -1451,6 +2207,7 @@ impl CpuPaintRenderer {
                 clip,
                 &mut scratch.path_points,
                 &mut scratch.crossings,
+                &mut scratch.coverage,
             );
         }
     }
@@ -1480,6 +2237,40 @@ impl CpuPaintRenderer {
         {
             return self.execute_with_damage(&ctx.flattened(), damage_rects);
         }
+        self.backdrop.fallback_count = 0;
+        let uses_backdrop = ctx
+            .commands()
+            .iter()
+            .any(|command| matches!(command, PaintCommand::BackdropFilterRoundedRect { .. }));
+        if uses_backdrop {
+            if let Some(rects) = damage_rects {
+                if rects.is_empty() {
+                    return;
+                }
+                // Pixels outside damage contain last frame's foreground and
+                // cannot be a blur source. Reconstruct a clean scene, then copy
+                // only requested damage. The scene pipeline expands dependent
+                // damage to the full frame; this also makes direct callers safe.
+                let clean = self.acquire_layer_buffer();
+                let mut previous = core::mem::replace(&mut self.buffer, clean);
+                self.execute_with_damage(ctx, None);
+                let width = previous.width() as usize;
+                for rect in rects {
+                    let (x, y, w, h) = self.rect_to_u32(*rect);
+                    if w == 0 || h == 0 {
+                        continue;
+                    }
+                    for row in y..y + h {
+                        let start = row as usize * width + x as usize;
+                        previous.as_mut_slice()[start..start + w as usize]
+                            .copy_from_slice(&self.buffer.as_slice()[start..start + w as usize]);
+                    }
+                }
+                let clean = core::mem::replace(&mut self.buffer, previous);
+                self.layer_pool.push(clean);
+                return;
+            }
+        }
         match damage_rects {
             Some(rects) => {
                 for rect in rects {
@@ -1492,11 +2283,23 @@ impl CpuPaintRenderer {
         }
         self.recycle_active_layers();
 
+        self.backdrop.frame_pixels = 0;
+
         // Opacity is part of the backend-neutral paint stream. Keeping it as
         // state here makes translucent focus/selection layers match SGFX.
         let mut opacity = 1.0f32;
 
         for cmd in ctx.commands() {
+            if uses_backdrop && !self.layer_stack.is_empty() {
+                if let Some(bounds) = command_paint_bounds(cmd, ctx, self.scale_milli) {
+                    let bounds = self
+                        .active_clip_rect()
+                        .and_then(|clip| intersect_rect(bounds, clip));
+                    if let (Some(layer), Some(bounds)) = (self.layer_stack.last_mut(), bounds) {
+                        layer.pending_bounds = Some(union_rect(layer.pending_bounds, bounds));
+                    }
+                }
+            }
             match cmd {
                 PaintCommand::DrawDisplayList { .. } => unreachable!("recordings expanded above"),
                 PaintCommand::FillPath { path, color } => {
@@ -1525,20 +2328,21 @@ impl CpuPaintRenderer {
                     color,
                 } => {
                     let color = color.with_opacity(color.a * opacity);
-                    self.rebuild_scaled_rounded_rect(*rect, *corner_radius);
+                    let rect = self.scale_rect(*rect);
+                    let radius = self.scale_f32(*corner_radius);
                     match self.rebuild_effective_clip_rects(damage_rects) {
                         EffectiveClipRects::Unclipped => {
-                            self.fill_scaled_path(color, None);
+                            self.paint_rounded_rect(rect, radius, None, color, None);
                         }
                         EffectiveClipRects::Empty => {}
                         EffectiveClipRects::Rects => {
                             for index in 0..self.scratch.clip_rects.len() {
-                                let rect = self.scratch.clip_rects[index];
+                                let clip_rect = self.scratch.clip_rects[index];
                                 let clip = ClipRegion {
-                                    rect: self.scale_rect(rect),
+                                    rect: self.scale_rect(clip_rect),
                                     corner_radius: 0.0,
                                 };
-                                self.fill_scaled_path(color, Some(clip));
+                                self.paint_rounded_rect(rect, radius, None, color, Some(clip));
                             }
                         }
                     }
@@ -1549,50 +2353,14 @@ impl CpuPaintRenderer {
                     top_color,
                     bottom_color,
                 } => {
-                    // The CPU renderer intentionally uses a flat midpoint
-                    // color. Geometry and contrast remain equivalent while
-                    // the GPU path provides the high-fidelity gradient.
-                    let color = interpolate_color(*top_color, *bottom_color, 0.5);
-                    let color = color.with_opacity(color.a * opacity);
-                    self.rebuild_scaled_rounded_rect(*rect, *corner_radius);
+                    let color = top_color.with_opacity(top_color.a * opacity);
+                    let bottom = bottom_color.with_opacity(bottom_color.a * opacity);
+                    let rect = self.scale_rect(*rect);
+                    let radius = self.scale_f32(*corner_radius);
                     match self.rebuild_effective_clip_rects(damage_rects) {
                         EffectiveClipRects::Unclipped => {
-                            self.fill_scaled_path(color, None);
+                            self.paint_gradient_rect(rect, radius, None, color, Some(bottom), None);
                         }
-                        EffectiveClipRects::Empty => {}
-                        EffectiveClipRects::Rects => {
-                            for index in 0..self.scratch.clip_rects.len() {
-                                let rect = self.scratch.clip_rects[index];
-                                let clip = ClipRegion {
-                                    rect: self.scale_rect(rect),
-                                    corner_radius: 0.0,
-                                };
-                                self.fill_scaled_path(color, Some(clip));
-                            }
-                        }
-                    }
-                }
-                PaintCommand::DrawRoundedRectShadow { .. } => {
-                    // Shadows are a GPU enhancement. The CPU fallback keeps
-                    // the same surface geometry without spending time on blur.
-                }
-                PaintCommand::StrokeRect {
-                    rect,
-                    stroke_width,
-                    color,
-                } => {
-                    let color = color.with_opacity(color.a * opacity);
-                    let rect = self.scale_rect(*rect);
-                    let stroke_width = self.scale_f32(stroke_width.max(1.0));
-                    match self.rebuild_effective_clip_rects(damage_rects) {
-                        EffectiveClipRects::Unclipped => stroke_rounded_rect(
-                            self.current_buffer_mut(),
-                            rect,
-                            0.0,
-                            stroke_width,
-                            color,
-                            None,
-                        ),
                         EffectiveClipRects::Empty => {}
                         EffectiveClipRects::Rects => {
                             for index in 0..self.scratch.clip_rects.len() {
@@ -1601,11 +2369,89 @@ impl CpuPaintRenderer {
                                     rect: self.scale_rect(clip_rect),
                                     corner_radius: 0.0,
                                 };
-                                stroke_rounded_rect(
-                                    self.current_buffer_mut(),
+                                self.paint_gradient_rect(
+                                    rect,
+                                    radius,
+                                    None,
+                                    color,
+                                    Some(bottom),
+                                    Some(clip),
+                                );
+                            }
+                        }
+                    }
+                }
+                PaintCommand::BackdropFilterRoundedRect {
+                    rect,
+                    corner_radius,
+                    blur_radius,
+                    tint,
+                } => {
+                    self.paint_backdrop(*rect, *corner_radius, *blur_radius, *tint, opacity);
+                }
+                PaintCommand::DrawRoundedRectShadow {
+                    rect,
+                    corner_radius,
+                    offset,
+                    blur_radius,
+                    spread_radius,
+                    color,
+                } => {
+                    if ![
+                        rect.origin.x,
+                        rect.origin.y,
+                        rect.size.width,
+                        rect.size.height,
+                        *corner_radius,
+                        offset.dx,
+                        offset.dy,
+                        *blur_radius,
+                        *spread_radius,
+                    ]
+                    .iter()
+                    .all(|v| v.is_finite())
+                    {
+                        continue;
+                    }
+                    let physical = self.scale_rect(Rect::from_xywh(
+                        rect.left() + offset.dx,
+                        rect.top() + offset.dy,
+                        rect.size.width,
+                        rect.size.height,
+                    ));
+                    self.paint_soft_shadow(
+                        physical,
+                        self.scale_f32(*corner_radius),
+                        self.scale_f32(blur_radius.max(0.0)),
+                        self.scale_f32(*spread_radius),
+                        color.with_opacity(color.a * opacity),
+                        damage_rects,
+                    );
+                }
+                PaintCommand::StrokeRect {
+                    rect,
+                    stroke_width,
+                    color,
+                } => {
+                    let color = color.with_opacity(color.a * opacity);
+                    let rect = self.scale_rect(*rect);
+                    let stroke_width = self.scale_f32(stroke_width.max(0.0));
+                    match self.rebuild_effective_clip_rects(damage_rects) {
+                        EffectiveClipRects::Unclipped => {
+                            self.paint_rounded_rect(rect, 0.0, Some(stroke_width), color, None)
+                        }
+                        EffectiveClipRects::Empty => {}
+                        EffectiveClipRects::Rects => {
+                            for index in 0..self.scratch.clip_rects.len() {
+                                let clip_rect = self.scratch.clip_rects[index];
+                                let clip = ClipRegion {
+                                    rect: self.scale_rect(clip_rect),
+                                    corner_radius: 0.0,
+                                };
+                                self.paint_rounded_rect(
                                     rect,
                                     0.0,
-                                    stroke_width,
+                                    Some(stroke_width),
                                     color,
                                     Some(clip),
                                 );
@@ -1622,16 +2468,11 @@ impl CpuPaintRenderer {
                     let color = color.with_opacity(color.a * opacity);
                     let rect = self.scale_rect(*rect);
                     let radius = self.scale_f32(*corner_radius);
-                    let stroke_width = self.scale_f32(stroke_width.max(1.0));
+                    let stroke_width = self.scale_f32(stroke_width.max(0.0));
                     match self.rebuild_effective_clip_rects(damage_rects) {
-                        EffectiveClipRects::Unclipped => stroke_rounded_rect(
-                            self.current_buffer_mut(),
-                            rect,
-                            radius,
-                            stroke_width,
-                            color,
-                            None,
-                        ),
+                        EffectiveClipRects::Unclipped => {
+                            self.paint_rounded_rect(rect, radius, Some(stroke_width), color, None)
+                        }
                         EffectiveClipRects::Empty => {}
                         EffectiveClipRects::Rects => {
                             for index in 0..self.scratch.clip_rects.len() {
@@ -1640,11 +2481,10 @@ impl CpuPaintRenderer {
                                     rect: self.scale_rect(clip_rect),
                                     corner_radius: 0.0,
                                 };
-                                stroke_rounded_rect(
-                                    self.current_buffer_mut(),
+                                self.paint_rounded_rect(
                                     rect,
                                     radius,
-                                    stroke_width,
+                                    Some(stroke_width),
                                     color,
                                     Some(clip),
                                 );
@@ -1658,7 +2498,7 @@ impl CpuPaintRenderer {
                     color,
                 } => {
                     let color = color.with_opacity(color.a * opacity);
-                    let scaled_width = self.scale_f32(stroke_width.max(1.0));
+                    let scaled_width = self.scale_f32(stroke_width.max(0.0));
                     self.rebuild_scaled_points(path);
                     match self.rebuild_effective_clip_rects(damage_rects) {
                         EffectiveClipRects::Unclipped => {
@@ -1871,6 +2711,14 @@ impl CpuPaintRenderer {
         (x0 as u32, y0 as u32, w as u32, h as u32)
     }
 
+    /// Number of backdrop commands replaced with opaque semantic tint because
+    /// of the CPU ROI/frame budget during the most recent replay. Explicit
+    /// zero-radius tints and already-opaque materials are not fallbacks. An
+    /// empty-damage execution resets this diagnostic to zero.
+    pub fn backdrop_fallback_count(&self) -> usize {
+        self.backdrop.fallback_count
+    }
+
     pub fn buffer(&self) -> &Buffer {
         &self.buffer
     }
@@ -1884,100 +2732,227 @@ impl CpuPaintRenderer {
     }
 }
 
-// Phase 2 keeps `fill_polygon` as a free function and threads caller-owned
-// crossings scratch through it because both fill paths and thick-line strokes
-// need the same scanline rasterizer without allocating per scanline.
+// Integrate horizontal coverage exactly and use eight subpixel scanlines in Y.
+// Accumulate a difference row so opaque interiors still cost one write per pixel,
+// not eight. Scratch is retained across commands/frames; there are no row allocations.
+const COVERAGE_SAMPLES: usize = 8;
+const COVERAGE_WEIGHT: f32 = 1.0 / COVERAGE_SAMPLES as f32;
+
+fn add_coverage_span(row: &mut [f32], origin: i32, left: f32, right: f32) {
+    let width = row.len() - 1;
+    let left = (left - origin as f32).clamp(0.0, width as f32);
+    let right = (right - origin as f32).clamp(0.0, width as f32);
+    if right <= left {
+        return;
+    }
+    let first = libm::floorf(left) as usize;
+    let last = libm::floorf(right) as usize;
+    if first == last {
+        let amount = (right - left) * COVERAGE_WEIGHT;
+        row[first] += amount;
+        row[first + 1] -= amount;
+    } else {
+        let left_fraction = left - first as f32;
+        let right_fraction = right - last as f32;
+        row[first] += (1.0 - left_fraction) * COVERAGE_WEIGHT;
+        row[first + 1] += left_fraction * COVERAGE_WEIGHT;
+        row[last] -= (1.0 - right_fraction) * COVERAGE_WEIGHT;
+        if last < width {
+            row[last + 1] -= right_fraction * COVERAGE_WEIGHT;
+        }
+    }
+}
+
+fn blend_coverage_row(buffer: &mut Buffer, y: i32, left: i32, row: &[f32], color: Color) {
+    let pixel = color.to_bgra();
+    let opaque = color.a >= 1.0;
+    let start = y as usize * buffer.width() as usize + left as usize;
+    let data = &mut buffer.as_mut_slice()[start..start + row.len() - 1];
+    let mut coverage = 0.0f32;
+    for (dst, delta) in data.iter_mut().zip(row.iter()) {
+        coverage += delta;
+        // Ignore roundoff outside the shape, and retain exact opaque interiors.
+        if coverage >= 0.999_99 {
+            *dst = if opaque {
+                pixel
+            } else {
+                Buffer::blend_pixels(*dst, pixel, 1.0)
+            };
+        } else if coverage > 0.000_01 {
+            *dst = Buffer::blend_pixels(*dst, pixel, coverage.clamp(0.0, 1.0));
+        }
+    }
+}
+
+fn rounded_span(rect: Rect, radius: f32, y: f32) -> Option<(f32, f32)> {
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || y < rect.top() || y >= rect.bottom() {
+        return None;
+    }
+    let radius = radius
+        .max(0.0)
+        .min(rect.size.width * 0.5)
+        .min(rect.size.height * 0.5);
+    let dy = (rect.top() + radius - y)
+        .max(y - (rect.bottom() - radius))
+        .max(0.0);
+    let inset = if dy > 0.0 {
+        if radius > 1.0e10 {
+            let r = radius as f64;
+            let d = dy as f64;
+            (r - libm::sqrt((r * r - d * d).max(0.0))) as f32
+        } else {
+            radius - libm::sqrtf((radius * radius - dy * dy).max(0.0))
+        }
+    } else {
+        0.0
+    };
+    Some((rect.left() + inset, rect.right() - inset))
+}
+
+// Rectangular clip/damage bounds remain a hard pixel scissor, matching the
+// existing clear and retained-repaint contract. Rounded clips get their mask
+// once at layer composition, not also at the layer's rectangular bounds.
+fn clip_span_at(clip: ClipRegion, y: f32) -> Option<(f32, f32)> {
+    if clip.corner_radius > 0.0 {
+        return rounded_span(clip.rect, clip.corner_radius, y);
+    }
+    if y < libm::floorf(clip.rect.top()) || y >= libm::ceilf(clip.rect.bottom()) {
+        return None;
+    }
+    Some((
+        libm::floorf(clip.rect.left()),
+        libm::ceilf(clip.rect.right()),
+    ))
+}
+
+fn add_clipped_span(row: &mut [f32], left: i32, span: (f32, f32), clip: Option<(f32, f32)>) {
+    let (mut a, mut b) = span;
+    if let Some((c, d)) = clip {
+        a = a.max(c);
+        b = b.min(d);
+    }
+    add_coverage_span(row, left, a, b);
+}
+
 fn fill_polygon(
     buffer: &mut Buffer,
     path: &[Point],
     color: Color,
     clip: Option<ClipRegion>,
     crossings: &mut Vec<f32>,
+    coverage: &mut Vec<f32>,
 ) {
-    if path.len() < 3 || color.a <= 0.0 {
+    if path.len() < 3 || color.a <= 0.0 || path.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
+    {
         return;
     }
+    let mut min_x = f32::MAX;
     let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
     let mut max_y = f32::MIN;
     for p in path {
+        min_x = min_x.min(p.x);
         min_y = min_y.min(p.y);
+        max_x = max_x.max(p.x);
         max_y = max_y.max(p.y);
     }
-    if let Some(clip) = clip {
-        min_y = min_y.max(clip.rect.origin.y);
-        max_y = max_y.min(clip.rect.origin.y + clip.rect.size.height);
+    let bounds = Rect::from_xywh(min_x, min_y, max_x - min_x, max_y - min_y);
+    let (left, top, right, bottom) = raster_bounds(buffer, bounds, clip.map(|c| c.rect));
+    if right <= left || bottom <= top {
+        return;
     }
-    let min_y = libm::floorf(min_y) as i32;
-    let max_y = libm::ceilf(max_y) as i32;
-    let bw = buffer.width() as i32;
-    let bh = buffer.height() as i32;
-    let bgra = color.to_bgra();
-    let is_opaque = color.a >= 1.0;
-    let data = buffer.as_mut_slice();
-    let n = path.len();
-
-    // The bottom of a damage/clip rectangle is exclusive, like its right
-    // edge. Drawing one extra row can clear retained content outside damage.
-    for y in min_y..max_y {
-        if y < 0 || y >= bh {
-            continue;
-        }
-        let yc = y as f32 + 0.5;
-        crossings.clear();
-        for i in 0..n {
-            let p0 = path[i];
-            let p1 = path[(i + 1) % n];
-            let cond0 = p0.y <= yc;
-            let cond1 = p1.y <= yc;
-            if cond0 != cond1 {
-                let dy = p1.y - p0.y;
-                if dy.abs() > 0.001 {
-                    let t = (yc - p0.y) / dy;
-                    let x = p0.x + t * (p1.x - p0.x);
-                    crossings.push(x);
-                }
-            }
-        }
-        crossings.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
-        let mut chunks = crossings.chunks_exact(2);
-        for pair in chunks.by_ref() {
-            let mut x_start = (libm::ceilf(pair[0] - 0.5) as i32).max(0);
-            let mut x_end = (libm::ceilf(pair[1] - 0.5) as i32).min(bw);
-            if let Some(clip) = clip {
-                x_start = x_start.max(libm::floorf(clip.rect.origin.x) as i32);
-                x_end = x_end.min(libm::ceilf(clip.rect.origin.x + clip.rect.size.width) as i32);
-            }
-            if x_start >= x_end || x_start >= bw {
-                continue;
-            }
-            let start = (y as usize * bw as usize) + x_start as usize;
-            let count = (x_end - x_start) as usize;
-            let row = &mut data[start..start + count];
-            if let Some(clip) = clip.filter(|clip| clip.corner_radius > 0.0) {
-                for (offset, dst) in row.iter_mut().enumerate() {
-                    let x = x_start + offset as i32;
-                    if !contains_rounded_rect(
-                        clip.rect,
-                        clip.corner_radius,
-                        x as f32 + 0.5,
-                        y as f32 + 0.5,
-                    ) {
-                        continue;
-                    }
-                    if is_opaque {
-                        *dst = bgra;
-                    } else {
-                        *dst = Buffer::blend_pixels(*dst, bgra, 1.0);
-                    }
-                }
-            } else if is_opaque {
-                row.fill(bgra);
+    coverage.resize((right - left) as usize + 1, 0.0);
+    for y in top..bottom {
+        coverage.fill(0.0);
+        for sample in 0..COVERAGE_SAMPLES {
+            let yc = y as f32 + (sample as f32 + 0.5) * COVERAGE_WEIGHT;
+            let clip_span = if let Some(c) = clip {
+                let Some(span) = clip_span_at(c, yc) else {
+                    continue;
+                };
+                Some(span)
             } else {
-                for dst in row {
-                    *dst = Buffer::blend_pixels(*dst, bgra, 1.0);
+                None
+            };
+            crossings.clear();
+            for i in 0..path.len() {
+                let p0 = path[i];
+                let p1 = path[(i + 1) % path.len()];
+                if (p0.y <= yc) != (p1.y <= yc) {
+                    let t = (yc - p0.y) / (p1.y - p0.y);
+                    crossings.push(p0.x + t * (p1.x - p0.x));
                 }
             }
+            crossings.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+            for pair in crossings.chunks_exact(2) {
+                add_clipped_span(coverage, left, (pair[0], pair[1]), clip_span);
+            }
         }
+        blend_coverage_row(buffer, y, left, coverage, color);
+    }
+}
+
+fn raster_rounded_rect(
+    buffer: &mut Buffer,
+    rect: Rect,
+    radius: f32,
+    stroke_width: Option<f32>,
+    color: Color,
+    bottom_color: Option<Color>,
+    clip: Option<ClipRegion>,
+    coverage: &mut Vec<f32>,
+) {
+    if [rect.left(), rect.top(), rect.size.width, rect.size.height]
+        .iter()
+        .any(|v| !v.is_finite())
+        || (color.a <= 0.0 && bottom_color.is_none_or(|bottom| bottom.a <= 0.0))
+        || !radius.is_finite()
+        || stroke_width.is_some_and(|w| !w.is_finite() || w <= 0.0)
+    {
+        return;
+    }
+    let (left, top, right, bottom) = raster_bounds(buffer, rect, clip.map(|c| c.rect));
+    if right <= left || bottom <= top {
+        return;
+    }
+    let radius = radius
+        .max(0.0)
+        .min(rect.size.width * 0.5)
+        .min(rect.size.height * 0.5);
+    let inner = stroke_width.map(|width| (inset_rect(rect, width), (radius - width).max(0.0)));
+    coverage.resize((right - left) as usize + 1, 0.0);
+    for y in top..bottom {
+        coverage.fill(0.0);
+        for sample in 0..COVERAGE_SAMPLES {
+            let yc = y as f32 + (sample as f32 + 0.5) * COVERAGE_WEIGHT;
+            let Some(outer) = rounded_span(rect, radius, yc) else {
+                continue;
+            };
+            let clip_span = if let Some(c) = clip {
+                let Some(span) = clip_span_at(c, yc) else {
+                    continue;
+                };
+                Some(span)
+            } else {
+                None
+            };
+            if let Some((inner_rect, inner_radius)) = inner {
+                if let Some(hole) = rounded_span(inner_rect, inner_radius, yc) {
+                    add_clipped_span(coverage, left, (outer.0, hole.0), clip_span);
+                    add_clipped_span(coverage, left, (hole.1, outer.1), clip_span);
+                    continue;
+                }
+            }
+            add_clipped_span(coverage, left, outer, clip_span);
+        }
+        let row_color = bottom_color.map_or(color, |bottom| {
+            interpolate_color(
+                color,
+                bottom,
+                ((y as f32 + 0.5 - rect.top()) / rect.size.height).clamp(0.0, 1.0),
+            )
+        });
+        blend_coverage_row(buffer, y, left, coverage, row_color);
     }
 }
 
@@ -1991,20 +2966,6 @@ fn composite_layer_clipped(
     else {
         return;
     };
-
-    if clip.corner_radius <= 0.0 {
-        dst.composite_clipped(
-            src,
-            0,
-            0,
-            1.0,
-            rect.origin.x as i32,
-            rect.origin.y as i32,
-            rect.size.width as i32,
-            rect.size.height as i32,
-        );
-        return;
-    }
 
     let left = libm::floorf(rect.origin.x).max(0.0) as i32;
     let top = libm::floorf(rect.origin.y).max(0.0) as i32;
@@ -2024,67 +2985,22 @@ fn composite_layer_clipped(
     let dst_data = dst.as_mut_slice();
 
     for y in top..bottom {
-        let py = y as f32 + 0.5;
         let src_row = y as usize * src_width;
         let dst_row = y as usize * dst_width;
         for x in left..right {
-            let px = x as f32 + 0.5;
-            if !contains_rounded_rect(clip.rect, clip.corner_radius, px, py) {
+            let coverage = rounded_pixel_coverage(clip.rect, clip.corner_radius, x, y);
+            if coverage <= 0.0 {
                 continue;
             }
             let src_pixel = src_data[src_row + x as usize];
             let dst_idx = dst_row + x as usize;
-            dst_data[dst_idx] = Buffer::blend_pixels(dst_data[dst_idx], src_pixel, 1.0);
+            dst_data[dst_idx] = Buffer::blend_pixels(dst_data[dst_idx], src_pixel, coverage);
         }
     }
 }
 
-fn draw_line_clipped(
-    buffer: &mut Buffer,
-    from: Point,
-    to: Point,
-    color: Color,
-    clip: Option<Rect>,
-) {
-    if color.a <= 0.0 {
-        return;
-    }
-
-    let mut x0 = from.x as i32;
-    let mut y0 = from.y as i32;
-    let x1 = to.x as i32;
-    let y1 = to.y as i32;
-    let dx = (x1 - x0).abs();
-    let sx = if x0 < x1 { 1 } else { -1 };
-    let dy = -(y1 - y0).abs();
-    let sy = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx + dy;
-
-    loop {
-        if clip.is_none_or(|rect| rect_contains_pixel(rect, x0, y0)) {
-            blend_pixel(buffer, x0, y0, color);
-        }
-        if x0 == x1 && y0 == y1 {
-            break;
-        }
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x0 += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y0 += sy;
-        }
-    }
-}
-
-/// Draws a line segment with a physical-pixel `width`.
-///
-/// `width <= 1.0` falls back to the crisp single-pixel [`draw_line_clipped`].
-/// Thicker strokes rasterize an oriented quad with square caps via
-/// [`fill_polygon`]; the quad is extended by `half_w` along the segment
-/// direction so neighbouring segments in a path overlap and leave no gaps.
+/// Rasterize all stroke widths as covered quads, including subpixel hairlines.
+/// Square caps match the existing path convention.
 fn draw_thick_line_clipped(
     buffer: &mut Buffer,
     from: Point,
@@ -2094,12 +3010,9 @@ fn draw_thick_line_clipped(
     clip: Option<Rect>,
     path_points: &mut Vec<Point>,
     crossings: &mut Vec<f32>,
+    coverage: &mut Vec<f32>,
 ) {
     if color.a <= 0.0 || width <= 0.0 {
-        return;
-    }
-    if width <= 1.0 {
-        draw_line_clipped(buffer, from, to, color, clip);
         return;
     }
 
@@ -2119,7 +3032,7 @@ fn draw_thick_line_clipped(
         path_points.push(Point::new(from.x + half_w, from.y - half_w));
         path_points.push(Point::new(from.x + half_w, from.y + half_w));
         path_points.push(Point::new(from.x - half_w, from.y + half_w));
-        fill_polygon(buffer, path_points, color, clip_region, crossings);
+        fill_polygon(buffer, path_points, color, clip_region, crossings, coverage);
         return;
     }
 
@@ -2139,31 +3052,7 @@ fn draw_thick_line_clipped(
     path_points.push(Point::new(end_x + nx * half_w, end_y + ny * half_w));
     path_points.push(Point::new(end_x - nx * half_w, end_y - ny * half_w));
     path_points.push(Point::new(start_x - nx * half_w, start_y - ny * half_w));
-    fill_polygon(buffer, path_points, color, clip_region, crossings);
-}
-
-fn blend_pixel(buffer: &mut Buffer, x: i32, y: i32, color: Color) {
-    if x < 0 || y < 0 || x >= buffer.width() as i32 || y >= buffer.height() as i32 {
-        return;
-    }
-    let pixel = color.to_bgra();
-    let width = buffer.width() as usize;
-    let idx = y as usize * width + x as usize;
-    let data = buffer.as_mut_slice();
-    if color.a >= 1.0 {
-        data[idx] = pixel;
-    } else {
-        data[idx] = Buffer::blend_pixels(data[idx], pixel, 1.0);
-    }
-}
-
-fn rect_contains_pixel(rect: Rect, x: i32, y: i32) -> bool {
-    let px = x as f32 + 0.5;
-    let py = y as f32 + 0.5;
-    px >= rect.origin.x
-        && py >= rect.origin.y
-        && px < rect.origin.x + rect.size.width
-        && py < rect.origin.y + rect.size.height
+    fill_polygon(buffer, path_points, color, clip_region, crossings, coverage);
 }
 
 fn intersect_rect(a: Rect, b: Rect) -> Option<Rect> {
@@ -2176,52 +3065,31 @@ fn intersect_rect(a: Rect, b: Rect) -> Option<Rect> {
     }
     Some(Rect::from_xywh(left, top, right - left, bottom - top))
 }
-
-fn stroke_rounded_rect(
-    buffer: &mut Buffer,
-    rect: Rect,
-    corner_radius: f32,
-    stroke_width: f32,
-    color: Color,
-    clip: Option<ClipRegion>,
-) {
-    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || stroke_width <= 0.0 || color.a <= 0.0 {
-        return;
+fn rounded_pixel_coverage(rect: Rect, radius: f32, x: i32, y: i32) -> f32 {
+    let radius = radius
+        .max(0.0)
+        .min(rect.size.width * 0.5)
+        .min(rect.size.height * 0.5);
+    let x0 = x as f32;
+    let y0 = y as f32;
+    if x0 >= rect.left()
+        && x0 + 1.0 <= rect.right()
+        && y0 >= rect.top()
+        && y0 + 1.0 <= rect.bottom()
+        && ((x0 >= rect.left() + radius && x0 + 1.0 <= rect.right() - radius)
+            || (y0 >= rect.top() + radius && y0 + 1.0 <= rect.bottom() - radius))
+    {
+        return 1.0;
     }
-
-    let inner = inset_rect(rect, stroke_width);
-    let inner_radius = (corner_radius - stroke_width).max(0.0);
-    let (left, top, right, bottom) = raster_bounds(buffer, rect, clip.map(|c| c.rect));
-    if right <= left || bottom <= top {
-        return;
-    }
-
-    let pixel = color.to_bgra();
-    let is_opaque = color.a >= 1.0;
-    let width = buffer.width() as usize;
-    let data = buffer.as_mut_slice();
-
-    for y in top..bottom {
-        let py = y as f32 + 0.5;
-        for x in left..right {
-            let px = x as f32 + 0.5;
-            if let Some(clip) = clip {
-                if !contains_rounded_rect(clip.rect, clip.corner_radius, px, py) {
-                    continue;
-                }
-            }
-            if contains_rounded_rect(rect, corner_radius, px, py)
-                && !contains_rounded_rect(inner, inner_radius, px, py)
-            {
-                let idx = y as usize * width + x as usize;
-                if is_opaque {
-                    data[idx] = pixel;
-                } else {
-                    data[idx] = Buffer::blend_pixels(data[idx], pixel, 1.0);
-                }
-            }
+    let mut coverage = 0.0;
+    for sample in 0..COVERAGE_SAMPLES {
+        let yc = y as f32 + (sample as f32 + 0.5) * COVERAGE_WEIGHT;
+        if let Some((left, right)) = rounded_span(rect, radius, yc) {
+            coverage +=
+                (right.min(x as f32 + 1.0) - left.max(x as f32)).clamp(0.0, 1.0) * COVERAGE_WEIGHT;
         }
     }
+    coverage
 }
 
 fn composite_scaled_buffer(
@@ -2316,30 +3184,6 @@ fn raster_bounds(buffer: &Buffer, rect: Rect, clip: Option<Rect>) -> (i32, i32, 
     )
 }
 
-fn contains_rounded_rect(rect: Rect, corner_radius: f32, px: f32, py: f32) -> bool {
-    let left = rect.origin.x;
-    let top = rect.origin.y;
-    let right = rect.origin.x + rect.size.width;
-    let bottom = rect.origin.y + rect.size.height;
-    if px < left || px >= right || py < top || py >= bottom {
-        return false;
-    }
-
-    let radius = corner_radius
-        .max(0.0)
-        .min(rect.size.width * 0.5)
-        .min(rect.size.height * 0.5);
-    if radius <= 0.0 {
-        return true;
-    }
-
-    let cx = px.clamp(left + radius, right - radius);
-    let cy = py.clamp(top + radius, bottom - radius);
-    let dx = px - cx;
-    let dy = py - cy;
-    dx * dx + dy * dy <= radius * radius
-}
-
 fn inset_rect(rect: Rect, inset: f32) -> Rect {
     Rect::new(
         Point::new(rect.origin.x + inset, rect.origin.y + inset),
@@ -2354,6 +3198,810 @@ fn inset_rect(rect: Rect, inset: f32) -> Rect {
 mod tests {
     use super::*;
     use crate::testing::alloc_counter::measure_allocations;
+
+    fn aa_pixels(ctx: &PaintContext<'_>, scale: u32, background: Color) -> Buffer {
+        let mut renderer = CpuPaintRenderer::new(Size::new(40.0, 40.0), scale, background);
+        renderer.execute(ctx);
+        renderer.into_buffer()
+    }
+
+    #[test]
+    fn cpu_backdrop_command_bounds_translation_and_recording() {
+        let mut local = PaintContext::new();
+        local.backdrop_filter_rounded_rect(
+            Rect::from_xywh(2.0, 3.0, 20.0, 12.0),
+            4.0,
+            9.0,
+            Color::WHITE,
+        );
+        let mut ctx = PaintContext::new();
+        ctx.draw_display_list(Point::new(5.0, 7.0), local.into_display_list());
+        let flat = ctx.flattened();
+        assert!(
+            matches!(flat.commands()[0], PaintCommand::BackdropFilterRoundedRect { rect, corner_radius: 4.0, blur_radius: 9.0, .. }
+            if rect == Rect::from_xywh(7.0, 10.0, 20.0, 12.0))
+        );
+        assert_eq!(
+            ctx.raster_bounds(Size::new(100.0, 100.0), 2000),
+            Rect::from_xywh(7.0, 10.0, 20.0, 12.0)
+        );
+    }
+
+    #[test]
+    fn cpu_backdrop_samples_halo_and_changes_with_background_at_both_scales() {
+        for scale in [1000, 2000] {
+            let scene = |color, filter| {
+                let mut ctx = PaintContext::new();
+                ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 12.0, 40.0), color);
+                if filter {
+                    ctx.backdrop_filter_rounded_rect(
+                        Rect::from_xywh(12.0, 8.0, 20.0, 24.0),
+                        6.0,
+                        9.0,
+                        Color::TRANSPARENT,
+                    );
+                }
+                aa_pixels(&ctx, scale, Color::BLACK)
+            };
+            let plain = scene(Color::rgb(255, 0, 0), false);
+            let red = scene(Color::rgb(255, 0, 0), true);
+            let blue = scene(Color::rgb(0, 0, 255), true);
+            let s = scale as usize / 1000;
+            let sample = 20 * s * red.width() as usize + 13 * s;
+            assert!(
+                red.as_slice()[sample].to_le_bytes()[2] > 0,
+                "sample outside the shape must affect its inside"
+            );
+            assert_ne!(red.as_slice()[sample], blue.as_slice()[sample]);
+            for y in 0..red.height() as i32 {
+                for x in 0..red.width() as i32 {
+                    if rounded_pixel_coverage(
+                        Rect::from_xywh(
+                            12.0 * s as f32,
+                            8.0 * s as f32,
+                            20.0 * s as f32,
+                            24.0 * s as f32,
+                        ),
+                        6.0 * s as f32,
+                        x,
+                        y,
+                    ) == 0.0
+                    {
+                        let i = y as usize * red.width() as usize + x as usize;
+                        assert_eq!(
+                            red.as_slice()[i],
+                            plain.as_slice()[i],
+                            "outside shape at {x},{y}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cpu_backdrop_uses_immutable_snapshot_and_leaves_later_foreground_sharp() {
+        for scale in [1000, 2000] {
+            let mut ctx = PaintContext::new();
+            ctx.fill_rect(Rect::from_xywh(19.0, 0.0, 2.0, 40.0), Color::WHITE);
+            ctx.backdrop_filter_rounded_rect(
+                Rect::from_xywh(0.0, 0.0, 40.0, 40.0),
+                0.0,
+                12.0,
+                Color::TRANSPARENT,
+            );
+            let soft = aa_pixels(&ctx, scale, Color::BLACK);
+            let s = scale as usize / 1000;
+            let width = soft.width() as usize;
+            for x in 0..width {
+                assert_eq!(
+                    soft.as_slice()[20 * s * width + x],
+                    soft.as_slice()[20 * s * width + width - 1 - x]
+                );
+            }
+            ctx.fill_rect(Rect::from_xywh(19.0, 0.0, 2.0, 40.0), Color::rgb(255, 0, 0));
+            let sharp = aa_pixels(&ctx, scale, Color::BLACK);
+            for x in 0..width {
+                let i = 20 * s * width + x;
+                if (19 * s..21 * s).contains(&x) {
+                    assert_eq!(sharp.as_slice()[i], Color::rgb(255, 0, 0).to_bgra());
+                } else {
+                    assert_eq!(sharp.as_slice()[i], soft.as_slice()[i]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cpu_backdrop_blurs_premultiplied_alpha_and_replaces_not_source_over() {
+        let mut source = Buffer::from_logical_dimensions_with_scale(40, 40, 1000);
+        for y in 0..40 {
+            for x in 0..40 {
+                source.as_mut_slice()[y * 40 + x] = if x < 20 {
+                    Color::rgba(255, 0, 0, 128).to_bgra()
+                } else {
+                    0x0000_00ff
+                };
+            }
+        }
+        let mut ctx = PaintContext::new();
+        ctx.draw_buffer_ref(Rect::from_xywh(0.0, 0.0, 40.0, 40.0), &source);
+        ctx.backdrop_filter_rounded_rect(
+            Rect::from_xywh(0.0, 0.0, 40.0, 40.0),
+            0.0,
+            9.0,
+            Color::TRANSPARENT,
+        );
+        let result = aa_pixels(&ctx, 1000, Color::TRANSPARENT);
+        let middle = result.as_slice()[20 * 40 + 19].to_le_bytes();
+        assert_eq!(
+            middle[0], 0,
+            "hidden blue in zero-alpha taps must not bleed"
+        );
+        assert_eq!(middle[2], 255);
+        assert!(
+            middle[3] > 0 && middle[3] < 128,
+            "replacement must be allowed to reduce alpha"
+        );
+        assert_eq!(
+            result.as_slice()[20 * 40 + 5],
+            Color::rgba(255, 0, 0, 128).to_bgra()
+        );
+    }
+
+    #[test]
+    fn cpu_backdrop_nested_clips_resolve_transparent_layers_once() {
+        for scale in [1000, 2000] {
+            let outer = Rect::from_xywh(3.0, 3.0, 34.0, 34.0);
+            let inner = Rect::from_xywh(7.0, 7.0, 26.0, 26.0);
+            let prefix = |ctx: &mut PaintContext<'_>| {
+                ctx.fill_rect(
+                    Rect::from_xywh(0.0, 0.0, 20.0, 40.0),
+                    Color::rgba(255, 0, 0, 100),
+                );
+                ctx.push_rounded_clip(outer, 8.0);
+                ctx.fill_rect(
+                    Rect::from_xywh(2.0, 2.0, 36.0, 36.0),
+                    Color::rgba(0, 0, 255, 110),
+                );
+                ctx.push_clip(Rect::from_xywh(5.0, 5.0, 30.0, 27.0));
+                ctx.push_rounded_clip(inner, 6.0);
+                ctx.fill_rect(
+                    Rect::from_xywh(20.0, 0.0, 20.0, 40.0),
+                    Color::rgba(0, 255, 0, 90),
+                );
+            };
+            let material_and_foreground = |ctx: &mut PaintContext<'_>| {
+                ctx.set_opacity(0.6);
+                ctx.backdrop_filter_rounded_rect(
+                    Rect::from_xywh(4.0, 4.0, 32.0, 32.0),
+                    7.0,
+                    6.0,
+                    Color::rgba(255, 255, 255, 70),
+                );
+                ctx.fill_rect(Rect::from_xywh(6.0, 6.0, 15.0, 6.0), Color::BLACK);
+                ctx.pop_clip();
+                ctx.pop_clip();
+                ctx.pop_clip();
+            };
+            let mut pending = PaintContext::new();
+            prefix(&mut pending);
+            material_and_foreground(&mut pending);
+            let actual = aa_pixels(&pending, scale, Color::TRANSPARENT);
+            let mut resolved = PaintContext::new();
+            prefix(&mut resolved);
+            resolved.pop_clip();
+            resolved.pop_clip();
+            resolved.pop_clip();
+            resolved.push_rounded_clip(outer, 8.0);
+            resolved.push_clip(Rect::from_xywh(5.0, 5.0, 30.0, 27.0));
+            resolved.push_rounded_clip(inner, 6.0);
+            material_and_foreground(&mut resolved);
+            let expected = aa_pixels(&resolved, scale, Color::TRANSPARENT);
+            assert_eq!(actual.as_slice(), expected.as_slice(), "scale {scale}");
+        }
+    }
+
+    #[test]
+    fn cpu_backdrop_flushes_actual_legacy_buffer_extent_not_destination_size() {
+        for scale in [1000, 2000] {
+            let mut source = Buffer::from_logical_dimensions_with_scale(20, 20, scale);
+            source.clear(Color::rgba(220, 40, 80, 190));
+            let render = |resolve_first| {
+                let mut ctx = PaintContext::new();
+                let clip = Rect::from_xywh(2.0, 2.0, 36.0, 36.0);
+                ctx.push_rounded_clip(clip, 6.0);
+                ctx.draw_buffer_ref(Rect::from_xywh(6.25, 6.75, 1.0, 1.0), &source);
+                if resolve_first {
+                    ctx.pop_clip();
+                    ctx.push_rounded_clip(clip, 6.0);
+                }
+                ctx.backdrop_filter_rounded_rect(
+                    Rect::from_xywh(4.0, 4.0, 32.0, 32.0),
+                    4.0,
+                    9.0,
+                    Color::rgba(255, 255, 255, 60),
+                );
+                ctx.pop_clip();
+                aa_pixels(&ctx, scale, Color::TRANSPARENT)
+            };
+            assert_eq!(render(false).as_slice(), render(true).as_slice());
+        }
+    }
+
+    #[test]
+    fn cpu_backdrop_partial_damage_reconstructs_clean_prefix_without_feedback() {
+        for scale in [1000, 2000] {
+            let scene = |color| {
+                let mut ctx = PaintContext::new();
+                ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 20.0, 40.0), color);
+                ctx.push_rounded_clip(Rect::from_xywh(2.0, 2.0, 36.0, 36.0), 7.0);
+                ctx.backdrop_filter_rounded_rect(
+                    Rect::from_xywh(5.0, 5.0, 30.0, 30.0),
+                    5.0,
+                    12.0,
+                    Color::rgba(255, 255, 255, 60),
+                );
+                ctx.fill_rect(Rect::from_xywh(19.0, 5.0, 2.0, 30.0), Color::BLACK);
+                ctx.pop_clip();
+                ctx
+            };
+            let old = scene(Color::rgb(255, 0, 0));
+            let changed = scene(Color::rgb(0, 0, 255));
+            let expected = aa_pixels(&changed, scale, Color::WHITE);
+            let mut renderer = CpuPaintRenderer::new(Size::new(40.0, 40.0), scale, Color::WHITE);
+            renderer.execute(&old);
+            let before = renderer.buffer().as_slice().to_vec();
+            let damage = Rect::from_xywh(14.25, 4.25, 12.0, 30.0);
+            for _ in 0..6 {
+                renderer.execute_with_damage(&changed, Some(&[damage, damage]));
+            }
+            let (x, y, w, h) = renderer.rect_to_u32(damage);
+            for py in 0..expected.height() {
+                for px in 0..expected.width() {
+                    let index = py as usize * expected.width() as usize + px as usize;
+                    let value = if (x..x + w).contains(&px) && (y..y + h).contains(&py) {
+                        expected.as_slice()[index]
+                    } else {
+                        before[index]
+                    };
+                    assert_eq!(
+                        renderer.buffer().as_slice()[index],
+                        value,
+                        "scale {scale}, pixel {px},{py}"
+                    );
+                }
+            }
+            let saved = renderer.buffer().as_slice().to_vec();
+            renderer.execute_with_damage(&changed, Some(&[]));
+            assert_eq!(saved, renderer.buffer().as_slice());
+        }
+    }
+
+    #[test]
+    fn cpu_backdrop_overlapping_materials_sample_prior_material() {
+        let mut first = PaintContext::new();
+        first.fill_rect(Rect::from_xywh(0.0, 0.0, 20.0, 40.0), Color::rgb(255, 0, 0));
+        first.backdrop_filter_rounded_rect(
+            Rect::from_xywh(2.0, 2.0, 25.0, 30.0),
+            5.0,
+            6.0,
+            Color::rgba(255, 255, 255, 80),
+        );
+        let prefix = aa_pixels(&first, 1000, Color::BLACK);
+        first.backdrop_filter_rounded_rect(
+            Rect::from_xywh(12.0, 10.0, 26.0, 28.0),
+            5.0,
+            9.0,
+            Color::rgba(0, 0, 255, 50),
+        );
+        let actual = aa_pixels(&first, 1000, Color::BLACK);
+        let mut replay = PaintContext::new();
+        replay.draw_buffer_ref(Rect::from_xywh(0.0, 0.0, 40.0, 40.0), &prefix);
+        replay.backdrop_filter_rounded_rect(
+            Rect::from_xywh(12.0, 10.0, 26.0, 28.0),
+            5.0,
+            9.0,
+            Color::rgba(0, 0, 255, 50),
+        );
+        assert_eq!(
+            actual.as_slice(),
+            aa_pixels(&replay, 1000, Color::BLACK).as_slice()
+        );
+    }
+
+    #[test]
+    fn cpu_backdrop_reuses_scratch_and_bounds_work() {
+        let mut renderer = CpuPaintRenderer::new(Size::new(40.0, 40.0), 2000, Color::WHITE);
+        let mut ctx = PaintContext::new();
+        ctx.push_rounded_clip(Rect::from_xywh(0.0, 0.0, 40.0, 40.0), 8.0);
+        ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 20.0, 40.0), Color::BLACK);
+        ctx.backdrop_filter_rounded_rect(
+            Rect::from_xywh(4.0, 4.0, 32.0, 32.0),
+            6.0,
+            f32::MAX,
+            Color::rgba(255, 255, 255, 30),
+        );
+        ctx.pop_clip();
+        renderer.execute(&ctx);
+        assert_eq!(
+            measure_allocations(|| renderer.execute(&ctx)).allocations,
+            0
+        );
+        assert!(renderer.backdrop.pixels.capacity() <= MAX_BACKDROP_PIXELS);
+        renderer.buffer.clear(Color::BLACK);
+        renderer.backdrop.frame_pixels = MAX_BACKDROP_FRAME_PIXELS;
+        renderer.paint_backdrop(
+            Rect::from_xywh(0.0, 0.0, 40.0, 40.0),
+            0.0,
+            12.0,
+            Color::rgba(255, 255, 255, 128),
+            1.0,
+        );
+        assert_eq!(renderer.backdrop.frame_pixels, MAX_BACKDROP_FRAME_PIXELS);
+        assert_eq!(renderer.backdrop_fallback_count(), 1);
+        assert!(
+            renderer
+                .buffer()
+                .as_slice()
+                .iter()
+                .all(|p| *p == Color::WHITE.to_bgra())
+        );
+        renderer.resize(Size::new(40.0, 40.0), 1000);
+        assert_eq!(renderer.backdrop.pixels.capacity(), 0);
+        assert_eq!(renderer.backdrop_fallback_count(), 0);
+    }
+
+    #[test]
+    fn cpu_backdrop_large_roi_uses_opaque_semantic_tint_fallback() {
+        let mut renderer = CpuPaintRenderer::new(Size::new(1001.0, 1000.0), 1000, Color::BLACK);
+        let mut ctx = PaintContext::new();
+        ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 500.0, 1000.0), Color::WHITE);
+        ctx.backdrop_filter_rounded_rect(
+            Rect::from_xywh(0.0, 0.0, 1001.0, 1000.0),
+            0.0,
+            12.0,
+            Color::rgba(255, 0, 0, 128),
+        );
+        renderer.execute(&ctx);
+        assert_eq!(renderer.backdrop.pixels.len(), 0);
+        assert_eq!(renderer.backdrop.frame_pixels, 0);
+        assert_eq!(renderer.backdrop_fallback_count(), 1);
+        assert_eq!(
+            renderer.buffer().as_slice()[500 * 1001 + 500],
+            Color::rgb(255, 0, 0).to_bgra()
+        );
+        assert_eq!(
+            renderer.buffer().as_slice()[500 * 1001 + 499],
+            Color::rgb(255, 0, 0).to_bgra()
+        );
+        renderer.execute_with_damage(&ctx, Some(&[]));
+        assert_eq!(renderer.backdrop_fallback_count(), 0);
+        renderer.execute(&ctx);
+        assert_eq!(
+            renderer.backdrop_fallback_count(),
+            1,
+            "counter is per replay, not cumulative"
+        );
+        renderer.execute(&PaintContext::new());
+        assert_eq!(renderer.backdrop_fallback_count(), 0);
+    }
+
+    #[test]
+    fn cpu_backdrop_budget_fallback_preserves_explicit_tint_and_opacity_contracts() {
+        let mut renderer = CpuPaintRenderer::new(Size::new(40.0, 40.0), 1000, Color::BLACK);
+        let rect = Rect::from_xywh(4.0, 4.0, 32.0, 32.0);
+        let center = 20 * 40 + 20;
+        for radius in [0.0, -4.0] {
+            renderer.buffer.clear(Color::BLACK);
+            renderer.backdrop.frame_pixels = MAX_BACKDROP_FRAME_PIXELS;
+            renderer.paint_backdrop(rect, 6.0, radius, Color::rgba(255, 255, 255, 128), 1.0);
+            assert_eq!(
+                renderer.buffer().as_slice()[center],
+                Color::rgb(128, 128, 128).to_bgra()
+            );
+            assert_eq!(renderer.backdrop_fallback_count(), 0);
+        }
+        renderer.buffer.clear(Color::BLACK);
+        renderer.paint_backdrop(rect, 6.0, 12.0, Color::rgb(220, 40, 80), 1.0);
+        assert_eq!(
+            renderer.buffer().as_slice()[center],
+            Color::rgb(220, 40, 80).to_bgra()
+        );
+        assert_eq!(
+            renderer.backdrop_fallback_count(),
+            0,
+            "opaque materials need no blur"
+        );
+        renderer.buffer.clear(Color::BLACK);
+        renderer.paint_backdrop(rect, 6.0, 12.0, Color::rgba(220, 40, 80, 60), 0.5);
+        assert_eq!(
+            renderer.buffer().as_slice()[center],
+            Color::rgb(110, 20, 40).to_bgra()
+        );
+        assert_eq!(
+            renderer.buffer().as_slice()[4 * 40 + 4],
+            Color::BLACK.to_bgra(),
+            "fallback still respects rounded coverage"
+        );
+        assert_eq!(renderer.backdrop_fallback_count(), 1);
+    }
+
+    #[test]
+    fn cpu_backdrop_invalid_inputs_are_noops_and_huge_bounds_are_clipped() {
+        let mut renderer = CpuPaintRenderer::new(Size::new(40.0, 40.0), 1000, Color::BLACK);
+        let mut ctx = PaintContext::new();
+        for v in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            ctx.backdrop_filter_rounded_rect(
+                Rect::from_xywh(v, 0.0, 40.0, 40.0),
+                4.0,
+                9.0,
+                Color::WHITE,
+            );
+            ctx.backdrop_filter_rounded_rect(
+                Rect::from_xywh(0.0, 0.0, 40.0, 40.0),
+                v,
+                9.0,
+                Color::WHITE,
+            );
+            ctx.backdrop_filter_rounded_rect(
+                Rect::from_xywh(0.0, 0.0, 40.0, 40.0),
+                4.0,
+                v,
+                Color::WHITE,
+            );
+            ctx.backdrop_filter_rounded_rect(
+                Rect::from_xywh(0.0, 0.0, 40.0, 40.0),
+                4.0,
+                9.0,
+                Color {
+                    r: v,
+                    ..Color::WHITE
+                },
+            );
+        }
+        renderer.execute(&ctx);
+        assert!(
+            renderer
+                .buffer()
+                .as_slice()
+                .iter()
+                .all(|p| *p == Color::BLACK.to_bgra())
+        );
+        assert_eq!(renderer.backdrop.pixels.len(), 0);
+        let mut huge = PaintContext::new();
+        huge.backdrop_filter_rounded_rect(
+            Rect::from_xywh(-1.0, -1.0, 1.0e20, 1.0e20),
+            0.0,
+            f32::MAX,
+            Color::rgba(255, 255, 255, 128),
+        );
+        renderer.execute(&huge);
+        assert_eq!(renderer.backdrop.pixels.len(), 1600);
+        assert!(
+            renderer
+                .buffer()
+                .as_slice()
+                .iter()
+                .all(|p| *p == Color::rgb(128, 128, 128).to_bgra())
+        );
+    }
+
+    #[test]
+    fn cpu_backdrop_opacity_modulates_the_whole_material() {
+        let scene = |opacity| {
+            let mut ctx = PaintContext::new();
+            ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 20.0, 40.0), Color::WHITE);
+            ctx.set_opacity(opacity);
+            ctx.backdrop_filter_rounded_rect(
+                Rect::from_xywh(0.0, 0.0, 40.0, 40.0),
+                0.0,
+                9.0,
+                Color::TRANSPARENT,
+            );
+            aa_pixels(&ctx, 1000, Color::BLACK)
+        };
+        let zero = scene(0.0);
+        let half = scene(0.5);
+        let full = scene(1.0);
+        for i in 0..1600 {
+            let a = zero.as_slice()[i].to_le_bytes()[0] as i32;
+            let b = full.as_slice()[i].to_le_bytes()[0] as i32;
+            let c = half.as_slice()[i].to_le_bytes()[0] as i32;
+            assert!((c * 2 - a - b).abs() <= 1);
+        }
+    }
+
+    #[test]
+    fn cpu_huge_shadow_fallback_keeps_partition_clips_disjoint() {
+        let shadow = |ctx: &mut PaintContext<'_>| {
+            ctx.draw_rounded_rect_shadow(
+                Rect::from_xywh(4.0, 4.0, 300_000.0, 30.0),
+                5.0,
+                Offset::new(0.0, 2.0),
+                4.0,
+                0.0,
+                Color::rgba(0, 0, 0, 100),
+            )
+        };
+        let mut whole = PaintContext::new();
+        shadow(&mut whole);
+        let expected = aa_pixels(&whole, 1000, Color::WHITE);
+        let mut split = PaintContext::new();
+        for rect in [
+            Rect::from_xywh(0.0, 0.0, 10.25, 40.0),
+            Rect::from_xywh(10.25, 0.0, 29.75, 40.0),
+        ] {
+            split.push_clip(rect);
+            shadow(&mut split);
+            split.pop_clip();
+        }
+        let actual = aa_pixels(&split, 1000, Color::WHITE);
+        assert_eq!(expected.as_slice(), actual.as_slice());
+    }
+
+    #[test]
+    fn cpu_shadow_cache_shares_positions_is_bounded_and_resets_at_resize() {
+        let mut renderer = CpuPaintRenderer::new(Size::new(120.0, 80.0), 1000, Color::WHITE);
+        let shadow = |x: f32, width: f32| {
+            let mut ctx = PaintContext::new();
+            ctx.draw_rounded_rect_shadow(
+                Rect::from_xywh(x, 10.0, width, 20.0),
+                5.0,
+                Offset::new(0.0, 2.0),
+                4.0,
+                0.0,
+                Color::rgba(0, 0, 0, 80),
+            );
+            ctx
+        };
+        renderer.execute(&shadow(10.0, 20.0));
+        renderer.execute(&shadow(50.0, 20.0));
+        assert_eq!(renderer.shadow_cache.len(), 1);
+        renderer.execute(&shadow(50.5, 20.0));
+        assert_eq!(renderer.shadow_cache.len(), 2);
+        for width in 21..45 {
+            renderer.execute(&shadow(10.0, width as f32));
+        }
+        assert_eq!(renderer.shadow_cache.len(), MAX_SHADOW_CACHE_ENTRIES);
+        assert!(
+            renderer
+                .shadow_cache
+                .iter()
+                .map(|entry| entry.buffer.as_slice().len())
+                .sum::<usize>()
+                <= MAX_SHADOW_CACHE_PIXELS
+        );
+        renderer.resize(Size::new(120.0, 80.0), 2000);
+        assert!(renderer.shadow_cache.is_empty());
+    }
+
+    #[test]
+    fn cpu_gradient_and_shadow_repaint_preserve_damage_and_scratch() {
+        for scale in [1000, 2000] {
+            let mut ctx = PaintContext::new();
+            ctx.draw_rounded_rect_shadow(
+                Rect::from_xywh(8.0, 8.0, 20.0, 20.0),
+                6.0,
+                Offset::new(0.0, 2.0),
+                5.0,
+                0.0,
+                Color::rgba(0, 0, 0, 70),
+            );
+            ctx.fill_vertical_gradient_rounded_rect(
+                Rect::from_xywh(8.0, 8.0, 20.0, 20.0),
+                6.0,
+                Color::rgba(255, 255, 255, 220),
+                Color::rgba(210, 215, 225, 150),
+            );
+            let mut renderer = CpuPaintRenderer::new(Size::new(40.0, 40.0), scale, Color::WHITE);
+            renderer.execute(&ctx);
+            let before = renderer.buffer().as_slice().to_vec();
+            renderer.execute_with_damage(&ctx, Some(&[Rect::from_xywh(10.25, 5.25, 16.0, 29.0)]));
+            assert_eq!(before, renderer.buffer().as_slice());
+            let allocations = measure_allocations(|| renderer.execute(&ctx));
+            assert_eq!(allocations.allocations, 0);
+        }
+    }
+
+    #[test]
+    fn cpu_shadow_bounds_include_offset_spread_and_blur() {
+        let mut ctx = PaintContext::new();
+        ctx.draw_rounded_rect_shadow(
+            Rect::from_xywh(20.0, 20.0, 30.0, 20.0),
+            6.0,
+            Offset::new(2.0, 3.0),
+            5.0,
+            1.0,
+            Color::BLACK,
+        );
+        assert_eq!(
+            ctx.raster_bounds(Size::new(100.0, 100.0), 1000),
+            Rect::from_xywh(16.0, 17.0, 42.0, 32.0)
+        );
+    }
+
+    #[test]
+    fn aa_blending_keeps_straight_alpha_in_transparent_layers() {
+        let white = Buffer::blend_pixels(0, Color::WHITE.to_bgra(), 0.5).to_le_bytes();
+        assert_eq!(white, [255, 255, 255, 127]);
+        let red = Color::rgba(255, 0, 0, 128).to_bgra();
+        let blue = Color::rgba(0, 0, 255, 128).to_bgra();
+        let blend = Buffer::blend_pixels(blue, red, 1.0).to_le_bytes();
+        assert!((blend[0] as i32 - 84).abs() <= 1);
+        assert_eq!(blend[1], 0);
+        assert!((blend[2] as i32 - 170).abs() <= 1);
+        assert!((blend[3] as i32 - 191).abs() <= 1);
+    }
+
+    #[test]
+    fn aa_rounded_circle_polygon_and_diagonal_have_partial_edge_coverage() {
+        for scale in [1000, 2000] {
+            for shape in 0..4 {
+                let mut ctx = PaintContext::new();
+                match shape {
+                    0 => ctx.fill_rounded_rect(
+                        Rect::from_xywh(4.0, 4.0, 30.0, 24.0),
+                        7.0,
+                        Color::WHITE,
+                    ),
+                    1 => ctx.fill_circle(Point::new(20.0, 20.0), 12.0, Color::WHITE),
+                    2 => ctx.fill_triangle(
+                        Point::new(4.0, 4.0),
+                        Point::new(31.0, 11.0),
+                        Point::new(13.0, 32.0),
+                        Color::WHITE,
+                    ),
+                    _ => ctx.draw_line(
+                        Point::new(4.0, 7.0),
+                        Point::new(30.0, 22.0),
+                        1.0,
+                        Color::WHITE,
+                    ),
+                }
+                let buffer = aa_pixels(&ctx, scale, Color::BLACK);
+                assert!(
+                    buffer.as_slice().iter().any(|p| {
+                        let v = p & 255;
+                        v > 0 && v < 255
+                    }),
+                    "shape {shape} at {scale}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aa_integer_rectangles_stay_crisp_and_fractional_rectangles_keep_area() {
+        let mut ctx = PaintContext::new();
+        ctx.fill_rect(Rect::from_xywh(4.0, 4.0, 10.0, 10.0), Color::WHITE);
+        let b = aa_pixels(&ctx, 1000, Color::BLACK);
+        assert!(
+            b.as_slice()
+                .iter()
+                .all(|p| *p == Color::BLACK.to_bgra() || *p == Color::WHITE.to_bgra())
+        );
+        let mut ctx = PaintContext::new();
+        ctx.fill_rect(Rect::from_xywh(4.25, 4.5, 10.0, 10.0), Color::WHITE);
+        let b = aa_pixels(&ctx, 1000, Color::BLACK);
+        assert_eq!(b.get_pixel(4, 6).unwrap() & 255, 191);
+        assert_eq!(b.get_pixel(6, 4).unwrap() & 255, 127);
+        assert_eq!(b.get_pixel(14, 6).unwrap() & 255, 63);
+    }
+
+    #[test]
+    fn aa_fractional_borders_keep_width_and_empty_center() {
+        for (width, expected) in [(0.0, 0), (0.5, 127), (0.75, 191), (1.0, 255)] {
+            let mut ctx = PaintContext::new();
+            ctx.stroke_rounded_rect(
+                Rect::from_xywh(4.0, 4.0, 24.0, 24.0),
+                6.0,
+                width,
+                Color::WHITE,
+            );
+            let b = aa_pixels(&ctx, 1000, Color::BLACK);
+            assert_eq!(b.get_pixel(4, 16).unwrap() & 255, expected);
+            assert_eq!(b.get_pixel(16, 16).unwrap(), Color::BLACK.to_bgra());
+            assert_eq!(b.get_pixel(3, 16).unwrap(), Color::BLACK.to_bgra());
+        }
+    }
+
+    #[test]
+    fn aa_rounded_fill_and_clip_are_symmetric() {
+        for scale in [1000, 2000] {
+            for clip in [false, true] {
+                let mut ctx = PaintContext::new();
+                let rect = Rect::from_xywh(4.0, 4.0, 24.0, 24.0);
+                if clip {
+                    ctx.push_rounded_clip(rect, 8.0);
+                    ctx.fill_rect(rect, Color::WHITE);
+                    ctx.pop_clip();
+                } else {
+                    ctx.fill_rounded_rect(rect, 8.0, Color::WHITE);
+                }
+                let b = aa_pixels(&ctx, scale, Color::BLACK);
+                let k = scale / 1000;
+                for y in 4 * k..28 * k {
+                    for x in 4 * k..28 * k {
+                        let a = (b.get_pixel(x, y).unwrap() & 255) as i32;
+                        let h = (b.get_pixel(32 * k - 1 - x, y).unwrap() & 255) as i32;
+                        let v = (b.get_pixel(x, 32 * k - 1 - y).unwrap() & 255) as i32;
+                        assert!(
+                            (a - h).abs() <= 1 && (a - v).abs() <= 1,
+                            "{x},{y}: {a},{h},{v}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aa_rounded_layer_does_not_dark_fringe_white_shape() {
+        for scale in [1000, 2000] {
+            let mut plain = PaintContext::new();
+            plain.fill_circle(Point::new(20.0, 20.0), 8.0, Color::WHITE);
+            let expected = aa_pixels(&plain, scale, Color::BLACK);
+            let mut clipped = PaintContext::new();
+            clipped.push_rounded_clip(Rect::from_xywh(0.0, 0.0, 40.0, 40.0), 3.0);
+            clipped.fill_circle(Point::new(20.0, 20.0), 8.0, Color::WHITE);
+            clipped.pop_clip();
+            let actual = aa_pixels(&clipped, scale, Color::BLACK);
+            for (index, (a, b)) in expected
+                .as_slice()
+                .iter()
+                .zip(actual.as_slice())
+                .enumerate()
+            {
+                assert_eq!(a, b, "pixel {index} at {scale}");
+            }
+        }
+    }
+
+    #[test]
+    fn aa_fractional_rounded_clip_applies_edge_mask_once() {
+        let mut ctx = PaintContext::new();
+        ctx.push_rounded_clip(Rect::from_xywh(4.25, 4.0, 24.0, 24.0), 4.0);
+        ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 40.0, 40.0), Color::WHITE);
+        ctx.pop_clip();
+        let b = aa_pixels(&ctx, 1000, Color::BLACK);
+        assert_eq!(b.get_pixel(4, 16).unwrap() & 255, 191);
+    }
+
+    #[test]
+    fn aa_fractional_damage_repaint_matches_full_frame() {
+        for scale in [1000, 1250, 2000] {
+            let mut ctx = PaintContext::new();
+            ctx.fill_rounded_rect(
+                Rect::from_xywh(2.25, 2.5, 32.0, 30.0),
+                8.0,
+                Color::rgba(230, 90, 50, 180),
+            );
+            let mut renderer = CpuPaintRenderer::new(Size::new(40.0, 40.0), scale, Color::BLACK);
+            renderer.execute(&ctx);
+            let before = renderer.buffer().as_slice().to_vec();
+            renderer.execute_with_damage(&ctx, Some(&[Rect::from_xywh(8.25, 3.25, 13.0, 22.5)]));
+            assert_eq!(before, renderer.buffer().as_slice());
+        }
+    }
+
+    #[test]
+    fn aa_rounded_contours_reuse_coverage_scratch_without_allocating() {
+        let mut ctx = PaintContext::new();
+        ctx.fill_rounded_rect(Rect::from_xywh(4.25, 4.5, 28.0, 24.0), 8.0, Color::WHITE);
+        ctx.stroke_rounded_rect(
+            Rect::from_xywh(4.25, 4.5, 28.0, 24.0),
+            8.0,
+            0.75,
+            Color::BLACK,
+        );
+        let mut renderer = CpuPaintRenderer::new(Size::new(40.0, 40.0), 2000, Color::BLACK);
+        renderer.execute(&ctx);
+        let capacity = renderer.scratch_capacity_for_test();
+        let snapshot = measure_allocations(|| renderer.execute(&ctx));
+        assert_eq!(snapshot.allocations, 0);
+        assert_eq!(capacity, renderer.scratch_capacity_for_test());
+    }
 
     #[test]
     fn append_at_translates_nested_geometry_text_and_remaps_buffers() {
@@ -2411,7 +4059,7 @@ mod tests {
         assert_eq!(t.len(), 3);
 
         let rr = path_rounded_rect(Rect::new(Point::new(0.0, 0.0), Size::new(40.0, 40.0)), 8.0);
-        assert_eq!(rr.len(), 32);
+        assert_eq!(rr.len(), 36);
     }
 
     #[test]
@@ -2546,7 +4194,7 @@ mod tests {
     }
 
     #[test]
-    fn cpu_gradient_fallback_uses_midpoint_color() {
+    fn cpu_gradient_interpolates_native_rows() {
         let mut ctx = PaintContext::new();
         ctx.fill_vertical_gradient_rounded_rect(
             Rect::from_xywh(2.0, 2.0, 20.0, 20.0),
@@ -2558,13 +4206,16 @@ mod tests {
         renderer.execute(&ctx);
 
         let pixel = Color::from_bgra(renderer.buffer().get_pixel(12, 12).unwrap());
-        assert!((pixel.r - 0.5).abs() < 0.01);
-        assert!((pixel.g - 0.5).abs() < 0.01);
-        assert!((pixel.b - 0.5).abs() < 0.01);
+        assert!((pixel.r - 0.475).abs() < 0.01);
+        assert!((pixel.g - 0.475).abs() < 0.01);
+        assert!((pixel.b - 0.475).abs() < 0.01);
+        let top = Color::from_bgra(renderer.buffer().get_pixel(12, 2).unwrap());
+        let bottom = Color::from_bgra(renderer.buffer().get_pixel(12, 21).unwrap());
+        assert!(top.r > 0.95 && bottom.r < 0.05);
     }
 
     #[test]
-    fn cpu_shadow_fallback_does_not_paint() {
+    fn cpu_shadow_has_offset_and_soft_falloff() {
         let background = Color::rgb(24, 32, 40);
         let mut ctx = PaintContext::new();
         ctx.draw_rounded_rect_shadow(
@@ -2578,8 +4229,11 @@ mod tests {
         let mut renderer = CpuPaintRenderer::new(Size::new(40.0, 40.0), 1000, background);
         renderer.execute(&ctx);
 
+        let near = renderer.buffer().get_pixel(20, 32).unwrap() & 255;
+        let far = renderer.buffer().get_pixel(20, 37).unwrap() & 255;
+        assert!(near < far && far < (background.to_bgra() & 255));
         assert_eq!(
-            renderer.buffer().get_pixel(20, 32).unwrap(),
+            renderer.buffer().get_pixel(39, 39).unwrap(),
             background.to_bgra()
         );
     }
@@ -2603,9 +4257,8 @@ mod tests {
     #[test]
     fn cpu_paint_renderer_reuses_scanline_crossings_scratch() {
         let mut ctx = PaintContext::new();
-        ctx.fill_rounded_rect(
-            Rect::new(Point::new(10.0, 10.0), Size::new(80.0, 80.0)),
-            10.0,
+        ctx.fill_path(
+            path_rounded_rect(Rect::from_xywh(10.0, 10.0, 80.0, 80.0), 10.0),
             Color::rgb(255, 255, 0),
         );
         let mut renderer =
@@ -2621,6 +4274,7 @@ mod tests {
         let second = renderer.scratch_capacity_for_test();
 
         assert_eq!(first.crossings, second.crossings);
+        assert_eq!(first.coverage, second.coverage);
         assert_eq!(snapshot.allocations, 0);
     }
 

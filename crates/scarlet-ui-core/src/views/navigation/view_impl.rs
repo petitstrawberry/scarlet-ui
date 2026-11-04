@@ -105,6 +105,7 @@ where
         content.nav.get_icon_color(),
         content.nav.get_presentation(),
     )
+    .sidebar_style(content.nav.get_sidebar_style())
 }
 
 fn navigation_child_views<T>(content: &NavigationContent<T>) -> Vec<Box<dyn View>>

@@ -58,35 +58,14 @@ impl Compositor {
     }
 
     fn element_paint_bounds(&self, element: &dyn Element, absolute_origin: Point) -> Rect {
-        let bounds = element.bounds();
-        let mut width = bounds.size.width;
-        let mut height = bounds.size.height;
-        if let Some(buffer) = element.get_buffer() {
-            width = width.max(buffer.logical_width() as f32);
-            height = height.max(buffer.logical_height() as f32);
-        }
-        let bounds = Rect::from_xywh(absolute_origin.x, absolute_origin.y, width, height);
-        let Some(render_object) = element.render_object() else {
-            return bounds;
-        };
-        let outsets = render_object.paint_outsets();
-        let finite_positive = |value: f32| {
-            if value.is_finite() {
-                value.max(0.0)
-            } else {
-                0.0
-            }
-        };
-        let left = finite_positive(outsets.left);
-        let top = finite_positive(outsets.top);
-        let right = finite_positive(outsets.right);
-        let bottom = finite_positive(outsets.bottom);
-        Rect::from_xywh(
-            bounds.origin.x - left,
-            bounds.origin.y - top,
-            bounds.size.width + left + right,
-            bounds.size.height + top + bottom,
-        )
+        crate::pipeline::RenderingPipeline::element_paint_bounds(element, absolute_origin)
+    }
+
+    fn element_buffer_origin(element: &dyn Element, absolute_origin: Point) -> Point {
+        let offset = element
+            .render_object()
+            .map_or(Point::ZERO, |ro| ro.buffer_origin());
+        Point::new(absolute_origin.x + offset.x, absolute_origin.y + offset.y)
     }
 
     fn is_expanded_select(&self, element: &dyn Element) -> bool {
@@ -257,6 +236,9 @@ impl Compositor {
         // Composite this node's buffer if it has one
         if let Some(render_object) = render_object {
             if let Some(buffer) = render_object.get_buffer() {
+                let offset = render_object.buffer_origin();
+                let buffer_origin =
+                    Point::new(absolute_origin.x + offset.x, absolute_origin.y + offset.y);
                 let opacity = 1.0;
                 if crate::debug::is_enabled() {
                     crate::logln!(
@@ -270,8 +252,8 @@ impl Compositor {
 
                 self.window_buffer.composite(
                     buffer,
-                    self.scale_pos(absolute_origin.x),
-                    self.scale_pos(absolute_origin.y),
+                    self.scale_pos(buffer_origin.x),
+                    self.scale_pos(buffer_origin.y),
                     opacity,
                 );
             }
@@ -314,14 +296,17 @@ impl Compositor {
             return;
         };
 
-        if let Some(buffer) = element.get_buffer() {
+        if !self.is_expanded_select(element)
+            && let Some(buffer) = element.get_buffer()
+        {
+            let buffer_origin = Self::element_buffer_origin(element, absolute_origin);
             let opacity = 1.0;
             if let Some(active_clip) = next_clip {
                 let (x, y, w, h) = self.rect_to_i32(active_clip.rect);
                 self.window_buffer.composite_clipped_rounded(
                     buffer,
-                    self.scale_pos(absolute_origin.x),
-                    self.scale_pos(absolute_origin.y),
+                    self.scale_pos(buffer_origin.x),
+                    self.scale_pos(buffer_origin.y),
                     opacity,
                     x,
                     y,
@@ -332,8 +317,8 @@ impl Compositor {
             } else {
                 self.window_buffer.composite(
                     buffer,
-                    self.scale_pos(absolute_origin.x),
-                    self.scale_pos(absolute_origin.y),
+                    self.scale_pos(buffer_origin.x),
+                    self.scale_pos(buffer_origin.y),
                     opacity,
                 );
             }
@@ -367,7 +352,10 @@ impl Compositor {
             return;
         };
 
-        if let Some(buffer) = element.get_buffer() {
+        if !self.is_expanded_select(element)
+            && let Some(buffer) = element.get_buffer()
+        {
+            let buffer_origin = Self::element_buffer_origin(element, absolute_origin);
             let opacity = 1.0;
             for rect in dirty_rects.iter() {
                 if !paint_bounds.overlaps(rect) {
@@ -387,8 +375,8 @@ impl Compositor {
                 if clip_radius > 0.0 {
                     self.window_buffer.composite_clipped_rounded(
                         buffer,
-                        self.scale_pos(absolute_origin.x),
-                        self.scale_pos(absolute_origin.y),
+                        self.scale_pos(buffer_origin.x),
+                        self.scale_pos(buffer_origin.y),
                         opacity,
                         x,
                         y,
@@ -399,8 +387,8 @@ impl Compositor {
                 } else {
                     self.window_buffer.composite_clipped(
                         buffer,
-                        self.scale_pos(absolute_origin.x),
-                        self.scale_pos(absolute_origin.y),
+                        self.scale_pos(buffer_origin.x),
+                        self.scale_pos(buffer_origin.y),
                         opacity,
                         x,
                         y,
@@ -425,50 +413,26 @@ impl Compositor {
         &mut self,
         element: &dyn Element,
         origin: Point,
-        clip: Option<ClipRegion>,
+        _clip: Option<ClipRegion>,
     ) {
-        let position = element.position();
-        let absolute_origin = Point {
-            x: origin.x + position.x,
-            y: origin.y + position.y,
-        };
-
-        let Some(next_clip) = self.next_clip_for_element(element, absolute_origin, clip) else {
-            return;
-        };
-
+        let absolute_origin = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
         for child in element.children() {
-            self.composite_select_overlays(child.as_ref(), absolute_origin, next_clip);
+            self.composite_select_overlays(child.as_ref(), absolute_origin, None);
         }
-
-        if self.is_expanded_select(element) {
-            if let Some(buffer) = element.get_buffer() {
-                let opacity = 1.0;
-                if let Some(active_clip) = next_clip {
-                    let paint_bounds = self.element_paint_bounds(element, absolute_origin);
-                    if let Some(clip_rect) = self.intersect_rect(paint_bounds, active_clip.rect) {
-                        let (x, y, w, h) = self.rect_to_i32(clip_rect);
-                        self.window_buffer.composite_clipped_rounded(
-                            buffer,
-                            self.scale_pos(absolute_origin.x),
-                            self.scale_pos(absolute_origin.y),
-                            opacity,
-                            x,
-                            y,
-                            w,
-                            h,
-                            self.scale_len(active_clip.radius) as f32,
-                        );
-                    }
-                } else {
-                    self.window_buffer.composite(
-                        buffer,
-                        self.scale_pos(absolute_origin.x),
-                        self.scale_pos(absolute_origin.y),
-                        opacity,
-                    );
-                }
-            }
+        // Selects are window overlays, independent from ancestor scroll clips.
+        if self.is_expanded_select(element)
+            && let Some(buffer) = element.get_buffer()
+        {
+            let origin = Self::element_buffer_origin(element, absolute_origin);
+            self.window_buffer.composite(
+                buffer,
+                self.scale_pos(origin.x),
+                self.scale_pos(origin.y),
+                1.0,
+            );
         }
     }
 
@@ -477,77 +441,37 @@ impl Compositor {
         element: &dyn Element,
         origin: Point,
         dirty_rects: &[Rect],
-        clip: Option<ClipRegion>,
+        _clip: Option<ClipRegion>,
     ) {
-        let position = element.position();
-        let absolute_origin = Point {
-            x: origin.x + position.x,
-            y: origin.y + position.y,
-        };
-
-        let Some(next_clip) = self.next_clip_for_element(element, absolute_origin, clip) else {
-            return;
-        };
-
+        let absolute_origin = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
         for child in element.children() {
             self.composite_select_overlays_clipped(
                 child.as_ref(),
                 absolute_origin,
                 dirty_rects,
-                next_clip,
+                None,
             );
         }
-
-        if self.is_expanded_select(element) {
-            let paint_bounds = self.element_paint_bounds(element, absolute_origin);
-            if !self.overlaps_any(paint_bounds, dirty_rects) {
-                return;
-            }
-
-            if let Some(buffer) = element.get_buffer() {
-                let opacity = 1.0;
-                for rect in dirty_rects.iter() {
-                    if !paint_bounds.overlaps(rect) {
-                        continue;
-                    }
-
-                    let mut clip_rect = *rect;
-                    let mut clip_radius = 0.0;
-                    if let Some(active_clip) = next_clip {
-                        if let Some(intersection) = self.intersect_rect(clip_rect, active_clip.rect)
-                        {
-                            clip_rect = intersection;
-                            clip_radius = active_clip.radius;
-                        } else {
-                            continue;
-                        }
-                    }
-                    let (x, y, w, h) = self.rect_to_i32(clip_rect);
-                    if clip_radius > 0.0 {
-                        self.window_buffer.composite_clipped_rounded(
-                            buffer,
-                            self.scale_pos(absolute_origin.x),
-                            self.scale_pos(absolute_origin.y),
-                            opacity,
-                            x,
-                            y,
-                            w,
-                            h,
-                            self.scale_len(clip_radius) as f32,
-                        );
-                    } else {
-                        self.window_buffer.composite_clipped(
-                            buffer,
-                            self.scale_pos(absolute_origin.x),
-                            self.scale_pos(absolute_origin.y),
-                            opacity,
-                            x,
-                            y,
-                            w,
-                            h,
-                        );
-                    }
-                }
+        if self.is_expanded_select(element)
+            && let Some(buffer) = element.get_buffer()
+        {
+            let bounds = self.element_paint_bounds(element, absolute_origin);
+            let origin = Self::element_buffer_origin(element, absolute_origin);
+            for rect in dirty_rects.iter().filter(|rect| bounds.overlaps(rect)) {
+                let (x, y, w, h) = self.rect_to_i32(*rect);
+                self.window_buffer.composite_clipped(
+                    buffer,
+                    self.scale_pos(origin.x),
+                    self.scale_pos(origin.y),
+                    1.0,
+                    x,
+                    y,
+                    w,
+                    h,
+                );
             }
         }
     }
@@ -561,26 +485,26 @@ impl Compositor {
 
         let render_object = node.render_object();
         if let Some(render_object) = render_object {
-            let size = render_object.size();
-            let bounds = Rect::from_xywh(
-                absolute_origin.x,
-                absolute_origin.y,
-                size.width,
-                size.height,
+            let bounds = crate::pipeline::RenderingPipeline::render_object_paint_bounds(
+                render_object,
+                absolute_origin,
             );
             if !self.overlaps_any(bounds, dirty_rects) {
                 return;
             }
 
             if let Some(buffer) = render_object.get_buffer() {
+                let offset = render_object.buffer_origin();
+                let buffer_origin =
+                    Point::new(absolute_origin.x + offset.x, absolute_origin.y + offset.y);
                 let opacity = 1.0;
                 for rect in dirty_rects.iter() {
                     if bounds.overlaps(rect) {
                         let (x, y, w, h) = self.rect_to_i32(*rect);
                         self.window_buffer.composite_clipped(
                             buffer,
-                            self.scale_pos(absolute_origin.x),
-                            self.scale_pos(absolute_origin.y),
+                            self.scale_pos(buffer_origin.x),
+                            self.scale_pos(buffer_origin.y),
                             opacity,
                             x,
                             y,
@@ -687,13 +611,12 @@ impl Compositor {
         if dirty_ids.contains(&node.id()) {
             if let Some(render_object) = node.render_object() {
                 if render_object.get_buffer().is_some() {
-                    let size = render_object.size();
-                    rects.push(Rect::from_xywh(
-                        absolute_origin.x,
-                        absolute_origin.y,
-                        size.width,
-                        size.height,
-                    ));
+                    rects.push(
+                        crate::pipeline::RenderingPipeline::render_object_paint_bounds(
+                            render_object,
+                            absolute_origin,
+                        ),
+                    );
                 } else {
                     *fallback_full = true;
                     return;

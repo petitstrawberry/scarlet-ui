@@ -15,7 +15,6 @@ use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
 use crate::geometry::{EdgeInsets, Point, Rect, Size};
-use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::view::View;
@@ -38,6 +37,23 @@ fn select_expanded_state(selected_index: &State<usize>) -> State<bool> {
 /// Select change callback type.
 pub type SelectChangeCallback = Box<dyn Fn(usize) + 'static>;
 
+/// Visual presentation of a single-choice picker.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SelectStyle {
+    /// A full-width form field. This is the default.
+    #[default]
+    Form,
+    /// A right-aligned value and compact circular chevron button.
+    ///
+    /// The overlay menu has 24-pixel rows, independent of the trigger height.
+    Menu,
+}
+
+const MENU_ROW_HEIGHT: f32 = 24.0;
+const POPUP_GAP: f32 = 6.0;
+const POPUP_PADDING: f32 = 4.0;
+const POPUP_RADIUS: f32 = 12.0;
+
 /// Select View - displays a selected option and expands on click.
 #[derive(Clone)]
 pub struct Select {
@@ -49,6 +65,8 @@ pub struct Select {
     row_height: f32,
     placeholder: String,
     max_visible_rows: usize,
+    select_style: SelectStyle,
+    enabled: bool,
 }
 
 impl Select {
@@ -70,10 +88,28 @@ impl Select {
             expanded,
             on_change: None,
             width: 260.0,
-            row_height: 32.0,
+            row_height: style::CONTROL_HEIGHT,
             placeholder: String::from("Select…"),
             max_visible_rows: 8,
+            select_style: SelectStyle::Form,
+            enabled: true,
         }
+    }
+
+    /// Choose a full form field or a compact, right-aligned menu picker.
+    pub fn style(mut self, select_style: SelectStyle) -> Self {
+        self.select_style = select_style;
+        self
+    }
+
+    /// Enable selection, or display a non-interactive disabled control.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Set the change callback.
@@ -161,6 +197,9 @@ impl Select {
     ///
     /// * `index` - Newly selected option index.
     pub fn invoke_on_change(&self, index: usize) {
+        if !self.enabled {
+            return;
+        }
         if let Some(callback) = self.on_change.as_ref() {
             callback(index);
         }
@@ -179,7 +218,9 @@ impl View for Select {
                 self.row_height,
                 self.placeholder.clone(),
                 self.max_visible_rows,
-            ),
+            )
+            .with_enabled(self.enabled)
+            .with_style(self.select_style),
         ))
     }
 
@@ -201,8 +242,15 @@ pub struct SelectRenderObject {
     row_height: f32,
     placeholder: String,
     max_visible_rows: usize,
+    select_style: SelectStyle,
     scroll_offset: usize,
+    popup_viewport: Option<Rect>,
+    buffer_origin: Point,
     hovered_index: Option<usize>,
+    enabled: bool,
+    focused: bool,
+    hovered: bool,
+    pressed: bool,
     size: Size,
     buffer: Option<Buffer>,
 }
@@ -238,13 +286,54 @@ impl SelectRenderObject {
             row_height,
             placeholder,
             max_visible_rows,
+            select_style: SelectStyle::Form,
             scroll_offset: 0,
+            popup_viewport: None,
+            buffer_origin: Point::ZERO,
             hovered_index: None,
+            enabled: true,
+            focused: false,
+            hovered: false,
+            pressed: false,
             size: Size::ZERO,
             buffer: None,
         };
         render_object.selected_index = render_object.clamped_selected_index();
         render_object
+    }
+
+    fn with_style(mut self, select_style: SelectStyle) -> Self {
+        self.select_style = select_style;
+        self.reset_scroll_on_open();
+        self
+    }
+
+    fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        if !enabled {
+            self.expanded = false;
+        }
+        self
+    }
+
+    pub(crate) fn is_focused(&self) -> bool {
+        self.focused && self.enabled
+    }
+    pub(crate) fn set_focused(&mut self, focused: bool) {
+        self.focused = focused && self.enabled;
+        if !self.focused {
+            self.pressed = false;
+            self.expanded = false;
+        }
+    }
+    pub(crate) fn set_hovered(&mut self, hovered: bool) {
+        self.hovered = hovered && self.enabled;
+    }
+    pub(crate) fn set_pressed(&mut self, pressed: bool) {
+        self.pressed = pressed && self.enabled;
+    }
+    pub(crate) fn is_pressed(&self) -> bool {
+        self.pressed
     }
 
     /// Set whether the list is expanded.
@@ -253,7 +342,35 @@ impl SelectRenderObject {
     ///
     /// * `expanded` - Whether the option list should be shown.
     pub fn set_expanded(&mut self, expanded: bool) {
-        self.expanded = expanded;
+        let opening = expanded && self.enabled && !self.expanded;
+        self.expanded = expanded && self.enabled;
+        if opening {
+            self.reset_scroll_on_open();
+        }
+    }
+
+    /// Window viewport translated into this control's local coordinates.
+    /// It is supplied by the pipeline, independently of ancestor scroll clips.
+    pub(crate) fn set_popup_viewport(&mut self, viewport: Rect) -> bool {
+        if self.popup_viewport == Some(viewport) {
+            return false;
+        }
+        self.popup_viewport = Some(viewport);
+        if self.expanded {
+            self.reset_scroll_on_open();
+            self.adjust_scroll();
+        }
+        self.expanded
+    }
+
+    fn reset_scroll_on_open(&mut self) {
+        self.scroll_offset = if self.select_style == SelectStyle::Menu {
+            self.menu_placement().0
+        } else {
+            self.selected_index
+                .saturating_sub(self.max_visible_rows / 2)
+                .min(self.options.len().saturating_sub(self.max_visible_rows))
+        };
     }
 
     /// Return whether the list is expanded.
@@ -274,17 +391,31 @@ impl SelectRenderObject {
     }
 
     pub fn adjust_scroll(&mut self) {
-        if self.options.is_empty() {
-            return;
-        }
-        let visible = self.options.len().min(self.max_visible_rows);
+        let visible = self.visible_row_count();
         if visible == 0 {
             return;
         }
         let target = self.hovered_index.unwrap_or(self.selected_index);
-        let ideal_start = target.saturating_sub(visible / 2);
-        let max_start = self.options.len().saturating_sub(visible);
-        self.scroll_offset = ideal_start.min(max_start);
+        if target < self.scroll_offset {
+            self.scroll_offset = target;
+        } else if target >= self.scroll_offset + visible {
+            self.scroll_offset = target + 1 - visible;
+        }
+        self.scroll_offset = self
+            .scroll_offset
+            .min(self.options.len().saturating_sub(visible));
+    }
+
+    /// Scroll an open popup by option rows without changing its selected value.
+    pub(crate) fn scroll_rows(&mut self, delta: i32) {
+        let max = self.options.len().saturating_sub(self.visible_row_count());
+        self.scroll_offset = if delta > 0 {
+            self.scroll_offset.saturating_add(delta as usize).min(max)
+        } else {
+            self.scroll_offset
+                .saturating_sub(delta.unsigned_abs() as usize)
+        };
+        self.hovered_index = None;
     }
 
     pub fn typeahead(&mut self, c: char) -> bool {
@@ -318,7 +449,7 @@ impl SelectRenderObject {
     ///
     /// * `index` - Hovered option index, or `None` when no option is hovered.
     pub fn set_hovered_index(&mut self, index: Option<usize>) {
-        self.hovered_index = index;
+        self.hovered_index = index.filter(|index| *index < self.options.len());
     }
 
     /// Find an option index for a local Y coordinate in the expanded list.
@@ -331,16 +462,24 @@ impl SelectRenderObject {
     ///
     /// Option index under the coordinate, or `None` outside option rows.
     pub fn option_index_at_y(&self, y: f32) -> Option<usize> {
-        let row_height = self.effective_row_height();
-        if !self.expanded || y < row_height || y >= self.popup_height() {
+        let rows_top = self.popup_rect().origin.y + POPUP_PADDING;
+        let row_height = self.option_row_height();
+        let visible = self.visible_row_count();
+        if !self.expanded || y < rows_top || y >= rows_top + visible as f32 * row_height {
             return None;
         }
-        let index = ((y - row_height) / row_height) as usize + self.scroll_offset;
-        if index < self.options.len() {
-            Some(index)
-        } else {
-            None
+        Some(((y - rows_top) / row_height) as usize + self.scroll_start())
+    }
+
+    /// Hit-test an option using both coordinates, including the compact menu width.
+    pub fn option_index_at_point(&self, point: Point) -> Option<usize> {
+        let popup = self.popup_rect();
+        if point.x < popup.origin.x + POPUP_PADDING
+            || point.x >= popup.origin.x + popup.size.width - POPUP_PADDING
+        {
+            return None;
         }
+        self.option_index_at_y(point.y)
     }
 
     fn clamped_selected_index(&self) -> usize {
@@ -351,130 +490,174 @@ impl SelectRenderObject {
         }
     }
 
-    fn popup_row_count(&self) -> usize {
-        if self.expanded {
-            self.options.len().min(self.max_visible_rows) + 1
-        } else {
-            1
+    fn scroll_start(&self) -> usize {
+        self.scroll_offset
+            .min(self.options.len().saturating_sub(self.visible_row_count()))
+    }
+
+    fn option_row_height(&self) -> f32 {
+        match self.select_style {
+            SelectStyle::Form => self.effective_row_height(),
+            SelectStyle::Menu => MENU_ROW_HEIGHT,
         }
     }
 
+    fn visible_row_count(&self) -> usize {
+        match self.select_style {
+            SelectStyle::Form => self.options.len().min(self.max_visible_rows),
+            SelectStyle::Menu => self.menu_placement().1,
+        }
+    }
+
+    // (opening scroll start, visible rows, popup top). The selected row is the
+    // anchor, so edge constraints reduce the surrounding rows instead of moving
+    // the selected value away from its trigger. Later keyboard/wheel scrolling
+    // changes content, not the panel's position.
+    fn menu_placement(&self) -> (usize, usize, f32) {
+        let count = self.options.len();
+        let wanted = count.min(self.max_visible_rows).max(1);
+        let selected = self.clamped_selected_index();
+        let center = self.effective_row_height() * 0.5;
+        let (above_capacity, below_capacity) = if let Some(viewport) = self.popup_viewport {
+            (
+                libm::floorf(
+                    ((center - viewport.top() - POPUP_PADDING - MENU_ROW_HEIGHT * 0.5)
+                        / MENU_ROW_HEIGHT)
+                        .max(0.0),
+                ) as usize,
+                libm::floorf(
+                    ((viewport.bottom() - center - POPUP_PADDING - MENU_ROW_HEIGHT * 0.5)
+                        / MENU_ROW_HEIGHT)
+                        .max(0.0),
+                ) as usize,
+            )
+        } else {
+            (wanted, wanted)
+        };
+        let mut above = selected.min(wanted / 2).min(above_capacity);
+        let below = count
+            .saturating_sub(selected + 1)
+            .min(wanted - 1 - above)
+            .min(below_capacity);
+        above = selected.min(wanted - 1 - below).min(above_capacity);
+        let visible = (above + 1 + below).min(count);
+        let mut top = center - POPUP_PADDING - (above as f32 + 0.5) * MENU_ROW_HEIGHT;
+        // For a trigger partly outside a tiny viewport, visibility takes priority
+        // over impossible alignment. Normal in-window triggers remain exact.
+        if let Some(viewport) = self.popup_viewport {
+            let height = visible as f32 * MENU_ROW_HEIGHT + POPUP_PADDING * 2.0;
+            top = top
+                .max(viewport.top())
+                .min((viewport.bottom() - height).max(viewport.top()));
+        }
+        (selected.saturating_sub(above), visible, top)
+    }
+
+    fn popup_rect(&self) -> Rect {
+        let width = match self.select_style {
+            SelectStyle::Form => self.size.width,
+            SelectStyle::Menu => {
+                let widest_label = self.options.iter().fold(0.0_f32, |width, label| {
+                    width.max(
+                        crate::graphics::measure_text_sized(label, style::CONTROL_FONT_SIZE).0
+                            as f32,
+                    )
+                });
+                let preferred = (widest_label + 40.0).max(144.0);
+                self.popup_viewport.map_or(preferred, |viewport| {
+                    preferred.min(viewport.size.width.max(0.0))
+                })
+            }
+        };
+        let top = match self.select_style {
+            SelectStyle::Form => self.effective_row_height() + POPUP_GAP,
+            SelectStyle::Menu => self.menu_placement().2,
+        };
+        let left = match self.select_style {
+            SelectStyle::Form => 0.0,
+            SelectStyle::Menu => {
+                let label = self
+                    .options
+                    .get(self.clamped_selected_index())
+                    .map_or(self.placeholder.as_str(), String::as_str);
+                let label_width =
+                    crate::graphics::measure_text_sized(label, style::CONTROL_FONT_SIZE).0 as f32;
+                let trigger_text_x = (self.size.width - 30.0 - label_width).max(4.0);
+                let desired = trigger_text_x - 24.0;
+                self.popup_viewport.map_or(desired, |viewport| {
+                    desired
+                        .max(viewport.left())
+                        .min((viewport.right() - width).max(viewport.left()))
+                })
+            }
+        };
+        Rect::from_xywh(
+            left,
+            top,
+            width,
+            self.visible_row_count() as f32 * self.option_row_height() + POPUP_PADDING * 2.0,
+        )
+    }
+
     fn popup_height(&self) -> f32 {
-        self.effective_row_height() * self.popup_row_count() as f32
+        if self.expanded {
+            self.popup_rect().bottom().max(self.effective_row_height())
+        } else {
+            self.effective_row_height()
+        }
+    }
+
+    fn buffer_bounds(&self) -> Rect {
+        let outsets = self.paint_outsets();
+        let left = libm::floorf(-outsets.left);
+        let top = libm::floorf(-outsets.top);
+        let right = libm::ceilf(self.size.width + outsets.right);
+        let bottom = libm::ceilf(self.size.height + outsets.bottom);
+        Rect::from_xywh(left, top, right - left, bottom - top)
     }
 
     fn effective_row_height(&self) -> f32 {
         self.row_height.max(style::metrics().minimum_control_height)
     }
 
-    fn draw_label(
-        canvas: &mut graphics::Canvas<'_>,
-        label: &str,
-        y: i32,
-        width: u32,
-        row_height: u32,
-        color: Color,
-    ) {
-        if width <= 44 {
-            return;
-        }
-        let text_y = y + ((row_height as i32 - 15) / 2).max(0);
-        let max_chars = ((width.saturating_sub(44) / 8) as usize).max(1);
-        if label.chars().count() > max_chars {
-            let clipped: String = label.chars().take(max_chars).collect();
-            canvas.draw_text_sized(12, text_y, &clipped, color, 13.0);
-        } else {
-            canvas.draw_text_sized(12, text_y, label, color, 13.0);
-        }
-    }
-
-    fn draw_chevron(canvas: &mut graphics::Canvas<'_>, x: i32, y: i32, color: Color) {
-        canvas.draw_line(x, y, x + 5, y + 5, color);
-        canvas.draw_line(x + 5, y + 5, x + 10, y, color);
-    }
-
-    fn draw_checkmark(canvas: &mut graphics::Canvas<'_>, w: u32, y: i32, row_h: u32, color: Color) {
-        let cx = w.saturating_sub(22) as i32;
-        let cy = y + ((row_h as i32 - 8) / 2).max(0) + 2;
-        canvas.draw_line(cx, cy, cx + 3, cy + 3, color);
-        canvas.draw_line(cx + 3, cy + 3, cx + 8, cy - 3, color);
-    }
-
     fn draw_select(&mut self) {
         if self.size.width <= 0.0 {
             return;
         }
-        let w = libm::ceilf(self.size.width) as u32;
-        let h = libm::ceilf(self.popup_height()) as u32;
-        let row_h = libm::ceilf(self.effective_row_height()) as u32;
-        let selected_index = self.clamped_selected_index();
-        let selected_label = self.options.get(selected_index).cloned();
-        let options = self.options.clone();
-        let hovered_index = self.hovered_index;
-        let opt_count = options.len();
-        let visible = opt_count.min(self.max_visible_rows);
-        let scroll_start = self.scroll_offset.min(opt_count.saturating_sub(visible));
-        let scroll_end = (scroll_start + visible).min(opt_count);
-
-        let needs_resize = self
+        let bounds = self.buffer_bounds();
+        self.buffer_origin = bounds.origin;
+        let w = bounds.size.width as u32;
+        let h = bounds.size.height as u32;
+        if self
             .buffer
             .as_ref()
-            .map_or(true, |b| b.logical_width() != w || b.logical_height() != h);
-        if needs_resize {
-            self.buffer = Some(Buffer::from_logical_dimensions(w, h));
+            .is_none_or(|buffer| buffer.logical_width() != w || buffer.logical_height() != h)
+        {
+            let scale = self
+                .buffer
+                .as_ref()
+                .map_or(crate::graphics::current_scale_milli(), Buffer::scale_milli);
+            self.buffer = Some(Buffer::from_logical_dimensions_with_scale(w, h, scale));
         }
-
-        let Some(ref mut buffer) = self.buffer else {
+        // One command list is authoritative for both retained and legacy CPU paths.
+        let Some(mut buffer) = self.buffer.take() else {
             return;
         };
-
-        let mut canvas = graphics::Canvas::for_buffer(buffer);
-        let palette = ColorPalette::default();
-        let background = palette.button_background();
-        let popup_background = style::surface_color(&palette, style::SurfaceRole::Floating);
-        let border = palette.border();
-        let text = palette.text_primary();
-        let subtle = palette.text_secondary();
-        canvas.fill_rect(0, 0, w, h, Color::rgba(0.0, 0.0, 0.0, 0.0));
-        canvas.fill_rect(0, 0, w, row_h, background);
-        canvas.draw_rect(0, 0, w, row_h, border);
-
-        if let Some(label) = selected_label {
-            Self::draw_label(&mut canvas, &label, 0, w, row_h, text);
-        } else {
-            Self::draw_label(&mut canvas, &self.placeholder, 0, w, row_h, subtle);
-        }
-        if w >= 24 {
-            Self::draw_chevron(
-                &mut canvas,
-                w.saturating_sub(24) as i32,
-                ((row_h as i32 - 6) / 2).max(0),
-                subtle,
+        {
+            let mut ctx = PaintContext::new();
+            self.paint(
+                &mut ctx,
+                Point::new(-self.buffer_origin.x, -self.buffer_origin.y),
+            );
+            #[allow(deprecated)]
+            crate::renderer::CpuPaintRenderer::execute_into_buffer(
+                &mut buffer,
+                Color::CLEAR,
+                &ctx,
+                None,
             );
         }
-
-        if self.expanded {
-            let active = hovered_index.or(Some(selected_index));
-            let active_background =
-                style::selected_item_surface(palette.primary(), popup_background);
-            let mut y = row_h as i32;
-            for index in scroll_start..scroll_end {
-                let label = &options[index];
-                let row_background = if active == Some(index) {
-                    active_background
-                } else {
-                    popup_background
-                };
-                canvas.fill_rect(0, y, w, row_h, row_background);
-                canvas.draw_line(0, y, w as i32, y, border.with_opacity(0.55));
-                Self::draw_label(&mut canvas, label, y, w, row_h, text);
-                if index == selected_index && w >= 24 {
-                    Self::draw_checkmark(&mut canvas, w, y, row_h, subtle);
-                }
-                y += row_h as i32;
-            }
-            canvas.draw_rect(0, 0, w, h, border);
-        }
+        self.buffer = Some(buffer);
     }
 }
 
@@ -487,13 +670,15 @@ impl ElementRenderObject for SelectRenderObject {
         let height = self.effective_row_height();
         self.size = Size { width, height };
 
-        let w = libm::ceilf(width) as u32;
-        let h = libm::ceilf(self.popup_height()) as u32;
-        let needs_resize = self
+        let bounds = self.buffer_bounds();
+        self.buffer_origin = bounds.origin;
+        let w = bounds.size.width as u32;
+        let h = bounds.size.height as u32;
+        if self
             .buffer
             .as_ref()
-            .map_or(true, |b| b.logical_width() != w || b.logical_height() != h);
-        if needs_resize {
+            .is_none_or(|buffer| buffer.logical_width() != w || buffer.logical_height() != h)
+        {
             self.buffer = Some(Buffer::from_logical_dimensions(w, h));
         }
 
@@ -505,11 +690,26 @@ impl ElementRenderObject for SelectRenderObject {
     }
 
     fn paint_outsets(&self) -> EdgeInsets {
-        if self.expanded {
-            style::elevation_outsets(style::ElevationRole::Floating)
-        } else {
-            EdgeInsets::ZERO
+        if !self.expanded {
+            return EdgeInsets::ZERO;
         }
+        let shadow = style::elevation_outsets(style::ElevationRole::Floating);
+        let popup = self.popup_rect();
+        EdgeInsets::new(
+            (shadow.left - popup.left()).max(0.0),
+            (shadow.top - popup.top()).max(0.0),
+            (popup.right() + shadow.right - self.size.width).max(0.0),
+            (popup.bottom() + shadow.bottom - self.size.height).max(0.0),
+        )
+    }
+
+    fn buffer_origin(&self) -> Point {
+        self.buffer_origin
+    }
+
+    fn captures_wheel_event(&self, event: &crate::event::MouseEvent) -> bool {
+        matches!(event, crate::event::MouseEvent::Wheel { x, y, .. }
+            if self.expanded && self.popup_rect().contains(Point::new(*x as f32, *y as f32)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -521,14 +721,13 @@ impl ElementRenderObject for SelectRenderObject {
     }
 
     fn hit_test(&self, point: crate::geometry::Point) -> bool {
-        let bounds = crate::geometry::Rect {
-            origin: crate::geometry::Point::ZERO,
-            size: Size {
-                width: self.size.width,
-                height: self.popup_height(),
-            },
-        };
-        self.size.width > 0.0 && bounds.contains(point)
+        self.size.width > 0.0
+            && if self.expanded && self.select_style == SelectStyle::Menu {
+                self.popup_rect().contains(point)
+            } else {
+                Rect::new(Point::ZERO, self.size).contains(point)
+                    || (self.expanded && self.popup_rect().contains(point))
+            }
     }
 
     fn render(&mut self) {
@@ -543,137 +742,223 @@ impl ElementRenderObject for SelectRenderObject {
         self.buffer = None;
     }
 
+    fn reads_backdrop(&self) -> bool {
+        true
+    }
+
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let w = self.size.width;
         if w <= 0.0 {
             return true;
         }
-        let row_h = self.effective_row_height();
-        let h = self.popup_height();
+        let trigger_h = self.effective_row_height();
         let selected_index = self.clamped_selected_index();
         let selected_label = self.options.get(selected_index);
-        let visible = self.options.len().min(self.max_visible_rows);
-        let scroll_start = self
-            .scroll_offset
-            .min(self.options.len().saturating_sub(visible));
-        let scroll_end = (scroll_start + visible).min(self.options.len());
         let palette = ColorPalette::default();
-        let background = palette.button_background();
-        let popup_background = style::surface_color(&palette, style::SurfaceRole::Floating);
-        let border = palette.border();
-        let text = palette.text_primary();
-        let subtle = palette.text_secondary();
-        let metrics = style::metrics();
-
-        let outer_rect = Rect::new(origin, Size::new(w, h));
-        let row_rect = Rect::from_xywh(origin.x, origin.y, w, row_h);
-        ctx.fill_rect(outer_rect, Color::TRANSPARENT);
-        if self.expanded {
-            style::floating_shadow(ctx, outer_rect, metrics.control_radius, palette.shadow());
-            ctx.push_rounded_clip(outer_rect, metrics.control_radius);
-            ctx.fill_rect(outer_rect, popup_background);
-            style::fill_raised_surface(ctx, row_rect, 0.0, background, false);
+        let text = if self.enabled {
+            palette.text_primary()
         } else {
-            style::raised_control_surface(ctx, row_rect, background, border, false);
-        }
-
+            palette.text_tertiary()
+        };
+        let subtle = if self.enabled {
+            palette.text_secondary()
+        } else {
+            palette.text_tertiary()
+        };
         let label = selected_label.map_or(self.placeholder.as_str(), String::as_str);
         let label_color = if selected_label.is_some() {
             text
         } else {
             subtle
         };
-        let max_chars = (((w as u32).saturating_sub(44) / 8) as usize).max(1);
-        let display_label = if label.chars().count() > max_chars {
-            label.chars().take(max_chars).collect::<String>()
-        } else {
-            String::from(label)
-        };
-        let text_y = origin.y + ((row_h - 15.0) / 2.0).max(0.0);
-        // A character-count estimate is not a pixel bound (wide Unicode and
-        // proportional glyphs vary). Clip labels independently of indicators.
-        if w > 44.0 {
-            ctx.push_clip(Rect::from_xywh(origin.x + 12.0, origin.y, w - 44.0, row_h));
-            ctx.draw_text(
-                Point::new(origin.x + 12.0, text_y),
-                display_label,
-                label_color,
-                13.0,
-            );
+        let trigger = Rect::from_xywh(origin.x, origin.y, w, trigger_h);
+        let text_y = origin.y + style::control_text_y(trigger_h, style::CONTROL_FONT_SIZE);
 
-            ctx.pop_clip();
-        }
-        // Suppress the indicator when its inset and geometry cannot fit.
-        if w >= 24.0 {
-            let chevron_x = origin.x + (w - 24.0).max(1.0);
-            let chevron_y = origin.y + ((row_h - 6.0) / 2.0).max(0.0);
-            ctx.draw_line(
-                Point::new(chevron_x, chevron_y),
-                Point::new(chevron_x + 5.0, chevron_y + 5.0),
-                1.0,
-                subtle,
-            );
-            ctx.draw_line(
-                Point::new(chevron_x + 5.0, chevron_y + 5.0),
-                Point::new(chevron_x + 10.0, chevron_y),
-                1.0,
-                subtle,
-            );
-        }
-
-        if self.expanded {
-            let active = self.hovered_index.or(Some(selected_index));
-            let active_background =
-                style::selected_item_surface(palette.primary(), popup_background);
-            let mut y = origin.y + row_h;
-            for index in scroll_start..scroll_end {
-                let row_background = if active == Some(index) {
-                    active_background
-                } else {
-                    popup_background
-                };
-                ctx.fill_rect(Rect::from_xywh(origin.x, y, w, row_h), row_background);
-                ctx.draw_line(
-                    Point::new(origin.x, y),
-                    Point::new(origin.x + w, y),
-                    1.0,
-                    border.with_opacity(0.55),
+        match self.select_style {
+            SelectStyle::Form => {
+                let mut material = style::GlassMaterial::editing();
+                if !self.enabled {
+                    material.tint = palette.background_secondary().with_opacity(0.72);
+                } else if self.pressed {
+                    material.tint = material.tint.darken(0.035);
+                } else if self.hovered {
+                    material.tint = material.tint.darken(0.012);
+                }
+                if self.is_focused() && !self.expanded {
+                    material = style::focused_editing_material(material);
+                }
+                style::paint_glass_material(
+                    ctx,
+                    trigger,
+                    style::metrics().control_radius,
+                    material,
                 );
                 if w > 44.0 {
-                    ctx.push_clip(Rect::from_xywh(origin.x + 12.0, y, w - 44.0, row_h));
+                    ctx.push_clip(Rect::from_xywh(
+                        origin.x + 12.0,
+                        origin.y,
+                        w - 44.0,
+                        trigger_h,
+                    ));
                     ctx.draw_text(
-                        Point::new(origin.x + 12.0, y + ((row_h - 15.0) / 2.0).max(0.0)),
-                        self.options[index].clone(),
-                        text,
-                        13.0,
+                        Point::new(origin.x + 12.0, text_y),
+                        String::from(label),
+                        label_color,
+                        style::CONTROL_FONT_SIZE,
                     );
                     ctx.pop_clip();
                 }
-                if index == selected_index && w >= 24.0 {
-                    let cx = origin.x + (w - 22.0).max(0.0);
-                    let cy = y + ((row_h - 8.0) / 2.0).max(0.0) + 2.0;
+                if w >= 24.0 {
+                    let x = origin.x + w - 24.0;
+                    let y = origin.y + (trigger_h - 6.0) * 0.5;
+                    ctx.draw_line(Point::new(x, y), Point::new(x + 5.0, y + 5.0), 1.5, subtle);
+                    ctx.draw_line(
+                        Point::new(x + 5.0, y + 5.0),
+                        Point::new(x + 10.0, y),
+                        1.5,
+                        subtle,
+                    );
+                }
+            }
+            SelectStyle::Menu if !self.expanded => {
+                // Only the small chevron segment has a material surface. The
+                // value stays on its parent's surface, with a real pixel clip.
+                if w >= 24.0 {
+                    let button = Rect::from_xywh(
+                        origin.x + w - 22.0,
+                        origin.y + (trigger_h - 20.0) * 0.5,
+                        20.0,
+                        20.0,
+                    );
+                    let fill = if self.enabled {
+                        palette.text_secondary().with_opacity(if self.pressed {
+                            0.18
+                        } else if self.hovered {
+                            0.12
+                        } else {
+                            0.08
+                        })
+                    } else {
+                        palette.text_tertiary().with_opacity(0.06)
+                    };
+                    let mut material = style::GlassMaterial::thumb();
+                    material.tint = fill.blend_over(material.tint);
+                    if self.is_focused() {
+                        material = style::focused_editing_material(material);
+                    }
+                    style::paint_glass_material(ctx, button, 10.0, material);
+                    let cx = button.origin.x + 10.0;
+                    let cy = button.origin.y + 10.0;
+                    for (dy, direction) in [(-2.0, -1.0), (2.0, 1.0)] {
+                        ctx.draw_line(
+                            Point::new(cx - 2.5, cy + dy),
+                            Point::new(cx, cy + dy + direction * 2.5),
+                            1.25,
+                            subtle,
+                        );
+                        ctx.draw_line(
+                            Point::new(cx, cy + dy + direction * 2.5),
+                            Point::new(cx + 2.5, cy + dy),
+                            1.25,
+                            subtle,
+                        );
+                    }
+                }
+                if w > 44.0 {
+                    let right = origin.x + w - 30.0;
+                    let label_width =
+                        crate::graphics::measure_text_sized(label, style::CONTROL_FONT_SIZE).0
+                            as f32;
+                    let label_x = (right - label_width).max(origin.x + 4.0);
+                    ctx.push_clip(Rect::from_xywh(
+                        origin.x + 4.0,
+                        origin.y,
+                        w - 34.0,
+                        trigger_h,
+                    ));
+                    ctx.draw_text(
+                        Point::new(label_x, text_y),
+                        String::from(label),
+                        label_color,
+                        style::CONTROL_FONT_SIZE,
+                    );
+                    ctx.pop_clip();
+                }
+            }
+            SelectStyle::Menu => {}
+        }
+
+        if self.expanded {
+            let local_popup = self.popup_rect();
+            let popup = Rect::new(
+                Point::new(
+                    origin.x + local_popup.origin.x,
+                    origin.y + local_popup.origin.y,
+                ),
+                local_popup.size,
+            );
+            style::floating_shadow(ctx, popup, POPUP_RADIUS, palette.shadow());
+            // Keep trigger geometry and popup interaction unchanged. Only the
+            // shared material reads the actual in-app scene behind the popup.
+            style::paint_glass_material(ctx, popup, POPUP_RADIUS, style::GlassMaterial::floating());
+            ctx.push_rounded_clip(popup, POPUP_RADIUS);
+            // Opening moves keyboard focus feedback to the active row. Keep
+            // the menu material neutral, without a tinted header or full wash.
+            let row_h = self.option_row_height();
+            let scroll_start = self.scroll_start();
+            let scroll_end = (scroll_start + self.visible_row_count()).min(self.options.len());
+            for index in scroll_start..scroll_end {
+                let y = popup.origin.y + POPUP_PADDING + (index - scroll_start) as f32 * row_h;
+                let active = self.hovered_index == Some(index);
+                let row_text = if active { Color::WHITE } else { text };
+                if active {
+                    ctx.fill_rounded_rect(
+                        Rect::from_xywh(
+                            popup.origin.x + POPUP_PADDING,
+                            y,
+                            (popup.size.width - POPUP_PADDING * 2.0).max(0.0),
+                            row_h,
+                        ),
+                        7.0,
+                        palette.primary(),
+                    );
+                }
+                if popup.size.width > 44.0 {
+                    ctx.push_clip(Rect::from_xywh(
+                        popup.origin.x + 24.0,
+                        y,
+                        popup.size.width - 36.0,
+                        row_h,
+                    ));
+                    ctx.draw_text(
+                        Point::new(
+                            popup.origin.x + 24.0,
+                            y + style::control_text_y(row_h, style::CONTROL_FONT_SIZE),
+                        ),
+                        self.options[index].clone(),
+                        row_text,
+                        style::CONTROL_FONT_SIZE,
+                    );
+                    ctx.pop_clip();
+                }
+                if index == selected_index && popup.size.width >= 24.0 {
+                    let cx = popup.origin.x + 9.0;
+                    let cy = y + row_h * 0.5;
                     ctx.draw_line(
                         Point::new(cx, cy),
                         Point::new(cx + 3.0, cy + 3.0),
-                        1.0,
-                        subtle,
+                        1.5,
+                        row_text,
                     );
                     ctx.draw_line(
                         Point::new(cx + 3.0, cy + 3.0),
                         Point::new(cx + 8.0, cy - 3.0),
-                        1.0,
-                        subtle,
+                        1.5,
+                        row_text,
                     );
                 }
-                y += row_h;
             }
             ctx.pop_clip();
-            ctx.stroke_rounded_rect(
-                outer_rect,
-                metrics.control_radius,
-                metrics.border_width,
-                border,
-            );
         }
         true
     }
@@ -695,19 +980,30 @@ impl ElementRenderObject for SelectRenderObject {
                 || (self.row_height - new_row_height).abs() > 0.001
                 || self.placeholder != new_placeholder
                 || self.max_visible_rows != new_max_visible_rows
+                || self.select_style != select.select_style
+                || self.enabled != select.enabled
             {
                 let just_expanded = !self.expanded && new_expanded;
                 self.options = new_options;
                 self.selected_index = new_selected_index;
-                self.expanded = new_expanded;
+                self.expanded = new_expanded && select.enabled;
+                self.enabled = select.enabled;
+                if !self.enabled {
+                    self.focused = false;
+                    self.hovered = false;
+                    self.pressed = false;
+                    self.hovered_index = None;
+                    select.expanded.set(false);
+                }
+                self.select_style = select.select_style;
                 self.width = new_width;
                 self.row_height = new_row_height;
                 self.placeholder = new_placeholder;
                 self.max_visible_rows = new_max_visible_rows;
                 self.selected_index = self.clamped_selected_index();
                 if just_expanded {
-                    self.hovered_index = Some(self.selected_index);
-                    self.scroll_offset = 0;
+                    self.hovered_index = None;
+                    self.reset_scroll_on_open();
                     self.adjust_scroll();
                 }
                 crate::element::UpdateResult::Updated
@@ -795,8 +1091,11 @@ mod tests {
                     }
                     PaintCommand::DrawText { .. } => {
                         let clip = clips.last().expect("every label is clipped");
-                        assert_eq!(clip.origin.x, origin.x + 12.0);
-                        assert_eq!(clip.size.width, 112.0);
+                        assert_eq!(
+                            clip.origin.x,
+                            origin.x + if labels == 0 { 12.0 } else { 24.0 }
+                        );
+                        assert_eq!(clip.size.width, if labels == 0 { 112.0 } else { 120.0 });
                         assert_eq!(clip.size.height, select.effective_row_height());
                         labels += 1;
                     }
@@ -849,7 +1148,7 @@ mod tests {
             .commands()
             .iter()
             .find_map(|command| match command {
-                PaintCommand::FillVerticalGradientRoundedRect { corner_radius, .. } => {
+                PaintCommand::BackdropFilterRoundedRect { corner_radius, .. } => {
                     Some(*corner_radius)
                 }
                 _ => None,
@@ -862,11 +1161,319 @@ mod tests {
             .commands()
             .iter()
             .find_map(|command| match command {
-                PaintCommand::PushClip { corner_radius, .. } => Some(*corner_radius),
+                PaintCommand::PushClip { corner_radius, .. } if *corner_radius > 0.0 => {
+                    Some(*corner_radius)
+                }
                 _ => None,
             });
 
         assert_eq!(collapsed_radius, Some(style::metrics().control_radius));
         assert_eq!(expanded_radius, collapsed_radius);
+    }
+    fn menu_select(expanded: bool) -> SelectRenderObject {
+        let mut select = SelectRenderObject::new(
+            alloc::vec![
+                String::from("Compact"),
+                String::from("Regular"),
+                String::from("Comfortable")
+            ],
+            1,
+            expanded,
+            260.0,
+            36.0,
+            String::new(),
+            8,
+        )
+        .with_style(SelectStyle::Menu);
+        select.layout(LayoutConstraints::loose(260.0, 100.0));
+        select
+    }
+
+    #[test]
+    fn menu_select_overlaps_trigger_with_exact_value_position_and_negative_hits() {
+        let mut select = menu_select(false);
+        let label_position = |ctx: &PaintContext<'_>| {
+            ctx.commands()
+                .iter()
+                .find_map(|command| match command {
+                    PaintCommand::DrawText { position, text, .. } if text == "Regular" => {
+                        Some(*position)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let closed_position = {
+            let mut closed = PaintContext::new();
+            select.paint(&mut closed, Point::ZERO);
+            label_position(&closed)
+        };
+        select.set_expanded(true);
+        let mut open = PaintContext::new();
+        select.paint(&mut open, Point::ZERO);
+        assert_eq!(label_position(&open), closed_position);
+        let popup = select.popup_rect();
+        assert_eq!(popup.origin.y, -22.0);
+        assert_eq!(popup.size.height, 3.0 * 24.0 + 8.0);
+        assert!(select.hit_test(Point::new(popup.origin.x + 10.0, -6.0)));
+        assert_eq!(
+            select.option_index_at_point(Point::new(popup.origin.x + 10.0, -6.0)),
+            Some(0)
+        );
+        assert_eq!(
+            select.option_index_at_point(Point::new(popup.origin.x + 10.0, 18.0)),
+            Some(1)
+        );
+        assert_eq!(
+            select.option_index_at_point(Point::new(popup.origin.x + 10.0, 42.0)),
+            Some(2)
+        );
+        for point in [
+            Point::new(popup.left() - 1.0, 18.0),
+            Point::new(popup.right() + 1.0, 18.0),
+            Point::new(popup.left() + 10.0, popup.top()),
+            Point::new(popup.left() + 10.0, popup.bottom()),
+        ] {
+            assert_eq!(select.option_index_at_point(point), None);
+        }
+        assert!(
+            popup.right() > select.size.width,
+            "content may extend past the old trigger"
+        );
+    }
+
+    #[test]
+    fn menu_select_edge_placement_keeps_selection_visible_and_scroll_panel_stable() {
+        let mut select = SelectRenderObject::new(
+            (0..100).map(|i| alloc::format!("Option {i}")).collect(),
+            50,
+            false,
+            260.0,
+            36.0,
+            String::new(),
+            8,
+        )
+        .with_style(SelectStyle::Menu);
+        select.layout(LayoutConstraints::loose(260.0, 100.0));
+        for viewport in [
+            Rect::from_xywh(-50.0, 0.0, 400.0, 200.0),
+            Rect::from_xywh(-50.0, -164.0, 400.0, 200.0),
+        ] {
+            select.set_expanded(false);
+            select.set_popup_viewport(viewport);
+            select.set_expanded(true);
+            let popup = select.popup_rect();
+            assert!(popup.top() >= viewport.top() && popup.bottom() <= viewport.bottom());
+            assert_eq!(
+                select.option_index_at_point(Point::new(popup.left() + 10.0, 18.0)),
+                Some(50)
+            );
+            let original = popup;
+            select.scroll_rows(2);
+            assert_eq!(
+                select.popup_rect(),
+                original,
+                "scrolling must not move the panel"
+            );
+            assert_eq!(select.selected_index, 50);
+        }
+        select.set_popup_viewport(Rect::from_xywh(0.0, -100.0, 260.0, 300.0));
+        let popup = select.popup_rect();
+        assert_eq!(
+            popup.right(),
+            260.0,
+            "right window edge clamps otherwise overflowing menu"
+        );
+    }
+
+    #[test]
+    fn menu_select_legacy_buffer_preserves_negative_paint_and_shadow_at_both_scales() {
+        for scale in [1000, 2000] {
+            let mut select = menu_select(true);
+            select.buffer = Some(Buffer::from_logical_dimensions_with_scale(260, 36, scale));
+            select.draw_select();
+            let offset = select.buffer_origin();
+            assert!(offset.y < 0.0);
+            let mut ctx = PaintContext::new();
+            select.paint(&mut ctx, Point::new(40.0, 80.0));
+            let mut direct = crate::renderer::CpuPaintRenderer::new(
+                Size::new(400.0, 240.0),
+                scale,
+                Color::CLEAR,
+            );
+            direct.execute(&ctx);
+            let mut composited = Buffer::from_logical_dimensions_with_scale(400, 240, scale);
+            composited.composite(
+                select.get_buffer().unwrap(),
+                ((40.0 + offset.x) * scale as f32 / 1000.0) as i32,
+                ((80.0 + offset.y) * scale as f32 / 1000.0) as i32,
+                1.0,
+            );
+            assert_eq!(select.get_buffer().unwrap().scale_milli(), scale);
+            let mismatch = composited
+                .as_slice()
+                .iter()
+                .zip(direct.buffer().as_slice())
+                .enumerate()
+                .find(|(_, (actual, expected))| {
+                    // The isolated legacy buffer has a finite transparent
+                    // sampling edge, unlike the full-scene backdrop. One alpha
+                    // quantization step can differ after premultiplied blur.
+                    // Preserve geometry and fully opaque foreground parity.
+                    (**actual >> 24).abs_diff(**expected >> 24) > 1
+                        || (**expected >> 24 == 255 && actual != expected)
+                });
+            assert!(
+                mismatch.is_none(),
+                "legacy negative-origin coverage/opaque pixels differ at scale {scale}: {mismatch:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn menu_select_focus_tints_only_the_chevron_segment() {
+        for expanded in [false, true] {
+            let mut select = menu_select(expanded);
+            select.set_focused(true);
+            let mut ctx = PaintContext::new();
+            select.paint(&mut ctx, Point::ZERO);
+            let focus: Vec<_> = ctx
+                .commands()
+                .iter()
+                .filter_map(|command| match command {
+                    PaintCommand::BackdropFilterRoundedRect { rect, .. }
+                        if rect.size.height == 20.0 =>
+                    {
+                        Some(*rect)
+                    }
+                    _ => None,
+                })
+                .collect();
+            if expanded {
+                assert!(focus.is_empty());
+            } else {
+                assert_eq!(focus, alloc::vec![Rect::from_xywh(238.0, 8.0, 20.0, 20.0)]);
+            }
+            assert!(!ctx.commands().iter().any(|command| matches!(command,
+                PaintCommand::StrokeRoundedRect { color, .. } if *color == ColorPalette::default().primary()
+            )));
+        }
+    }
+
+    #[test]
+    fn form_select_open_focus_keeps_menu_neutral_without_a_header_island() {
+        let mut select = sample_select(true);
+        select.layout(LayoutConstraints::loose(260.0, 100.0));
+        select.set_focused(true);
+        let mut ctx = PaintContext::new();
+        select.paint(&mut ctx, Point::ZERO);
+        let focus: Vec<_> = ctx
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::BackdropFilterRoundedRect { rect, tint, .. }
+                    if rect.size.height == select.effective_row_height()
+                        && *tint != style::GlassMaterial::editing().tint =>
+                {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            focus.is_empty(),
+            "open form focus belongs to its active row"
+        );
+    }
+
+    #[test]
+    fn both_select_styles_use_real_material_without_old_gradient_or_border() {
+        for mut select in [
+            sample_select(false),
+            menu_select(false),
+            sample_select(true),
+            menu_select(true),
+        ] {
+            select.layout(LayoutConstraints::loose(260.0, 100.0));
+            assert!(select.reads_backdrop());
+            let mut ctx = PaintContext::new();
+            select.paint(&mut ctx, Point::ZERO);
+            assert!(
+                ctx.commands().iter().any(|command| matches!(
+                    command,
+                    PaintCommand::BackdropFilterRoundedRect { .. }
+                ))
+            );
+            assert!(!ctx.commands().iter().any(|command| matches!(
+                command,
+                PaintCommand::FillVerticalGradientRoundedRect { .. }
+                    | PaintCommand::StrokeRoundedRect { .. }
+            )));
+        }
+    }
+
+    #[test]
+    fn menu_select_hover_can_clear_without_losing_selected_check() {
+        let mut select = menu_select(true);
+        let accent = ColorPalette::default().primary();
+        for hovered in [Some(0), None] {
+            select.set_hovered_index(hovered);
+            let mut ctx = PaintContext::new();
+            select.paint(&mut ctx, Point::ZERO);
+            let highlights: Vec<_> = ctx
+                .commands()
+                .iter()
+                .filter_map(|command| match command {
+                    PaintCommand::FillRoundedRect { rect, color, .. } if *color == accent => {
+                        Some(*rect)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(highlights.len(), usize::from(hovered.is_some()));
+            assert_eq!(select.selected_index, 1);
+            // Only the selected check remains; the popup replaces the trigger.
+            assert_eq!(
+                ctx.commands()
+                    .iter()
+                    .filter(|command| matches!(command, PaintCommand::StrokePath { .. }))
+                    .count(),
+                2
+            );
+            for command in ctx.commands() {
+                if let PaintCommand::DrawText { text, color, .. } = command {
+                    if text == "Compact" {
+                        assert_eq!(
+                            *color,
+                            if hovered.is_some() {
+                                Color::WHITE
+                            } else {
+                                ColorPalette::default().text_primary()
+                            }
+                        );
+                    }
+                    if text == "Regular" {
+                        assert_eq!(*color, ColorPalette::default().text_primary());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn menu_select_keeps_untruncated_unicode_in_a_pixel_clip() {
+        let mut select = sample_select(true).with_style(SelectStyle::Menu);
+        select.layout(LayoutConstraints::loose(156.0, 100.0));
+        let mut ctx = PaintContext::new();
+        select.paint(&mut ctx, Point::ZERO);
+        let labels: Vec<_> = ctx
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::DrawText { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, alloc::vec!["Wide WWWWW label 日本語"]);
     }
 }

@@ -2069,9 +2069,12 @@ name = "scarlet-ui-renderer-sgfx"
 version = "1.0.0"
 dependencies = [
  "libm",
+ "pollster",
  "scarlet-ui-core",
+ "sgfx-backend-wgpu 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=22e3d283046543239d2f3606dea73d9fcac7abad)",
  "sgfx-core",
  "web-time",
+ "wgpu",
 ]
 
 [[package]]

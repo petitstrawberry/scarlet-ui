@@ -9,12 +9,6 @@ use crate::geometry::{EdgeInsets, Offset, Rect};
 use crate::input_environment::{InteractionMode, current_input_environment};
 use crate::renderer::PaintContext;
 
-const RAISED_TOP_LIGHTEN: f32 = 0.018;
-const RAISED_BOTTOM_DARKEN: f32 = 0.010;
-const PRESSED_TOP_DARKEN: f32 = 0.010;
-const PRESSED_BOTTOM_LIGHTEN: f32 = 0.004;
-const CHROME_TOP_LIGHTEN: f32 = 0.012;
-const CHROME_BOTTOM_DARKEN: f32 = 0.008;
 const TEXT_SELECTION_MIX: f32 = 0.24;
 const TEXT_SELECTION_TINT_LIFT: f32 = 0.12;
 const SELECTED_ITEM_MIX: f32 = 0.14;
@@ -82,16 +76,16 @@ pub(crate) struct VisualMetrics {
 
 const DESKTOP_VISUAL_METRICS: VisualMetrics = VisualMetrics {
     window_radius: 10.0,
-    control_radius: 6.0,
+    control_radius: 12.0,
     item_radius: 4.0,
     popover_radius: 8.0,
     border_width: 1.0,
-    focus_stroke_width: 1.5,
+    focus_stroke_width: 2.0,
     minimum_control_height: 24.0,
     navigation_indicator_width: 3.0,
     navigation_item_height: 40.0,
-    tab_indicator_height: 2.0,
-    tab_bar_height: 30.0,
+    tab_indicator_height: 0.0,
+    tab_bar_height: 36.0,
     scrollbar_thickness: 6.0,
     scrollbar_inset: 3.0,
     scrollbar_min_thumb_length: 24.0,
@@ -147,6 +141,107 @@ pub enum ElevationRole {
     Overlay,
 }
 
+/// A frosted in-app backdrop material shared by controls and surfaces.
+///
+/// The renderer samples content already painted behind the shape, blurs it,
+/// and applies a uniform tint. Foreground content remains sharp. This does
+/// not sample the operating-system desktop or simulate optical refraction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlassMaterial {
+    /// Logical blur kernel support radius, not Gaussian sigma.
+    pub blur_radius: f32,
+    /// Uniform translucent color applied after the backdrop is filtered.
+    pub tint: Color,
+}
+
+impl GlassMaterial {
+    /// A readable light/dark semantic material for buttons and menus.
+    pub fn regular() -> Self {
+        Self {
+            blur_radius: 18.0,
+            tint: ColorPalette::default().surface().with_opacity(0.64),
+        }
+    }
+
+    /// Denser, softly toned editing surface. The neutral tint keeps its bounds
+    /// legible even over a plain white canvas without adding an outline.
+    pub fn editing() -> Self {
+        Self {
+            tint: ColorPalette::default()
+                .button_background()
+                .with_opacity(0.78),
+            ..Self::regular()
+        }
+    }
+
+    /// Small interactive face; a shorter kernel keeps thumb work bounded.
+    pub fn thumb() -> Self {
+        Self {
+            blur_radius: 6.0,
+            tint: ColorPalette::default().surface().with_opacity(0.72),
+        }
+    }
+
+    /// Floating menu or popover surface, slightly denser than a button.
+    pub fn floating() -> Self {
+        Self {
+            tint: ColorPalette::default().surface().with_opacity(0.70),
+            ..Self::regular()
+        }
+    }
+
+    /// Neutral editing focus: deeper frosting and contrast without accent wash.
+    /// The contrast direction follows the material so custom dark faces remain legible.
+    pub fn focused_editor(mut self) -> Self {
+        let luminance = self.tint.r * 0.2126 + self.tint.g * 0.7152 + self.tint.b * 0.0722;
+        let neutral = if luminance < 0.5 {
+            ColorPalette::dark()
+        } else {
+            ColorPalette::light()
+        }
+        .text_primary();
+        let opacity = (self.tint.a + 0.12).min(1.0);
+        self.tint = neutral
+            .with_opacity(0.035)
+            .blend_over(self.tint)
+            .with_opacity(opacity);
+        self.blur_radius += 4.0;
+        self
+    }
+
+    /// Construct an explicitly configured material.
+    pub const fn new(blur_radius: f32, tint: Color) -> Self {
+        Self { blur_radius, tint }
+    }
+}
+
+impl Default for GlassMaterial {
+    fn default() -> Self {
+        Self::regular()
+    }
+}
+
+/// Editing focus changes neutral depth rather than washing the face in accent.
+/// A small contrast shift remains visible on a uniform backdrop; foreground
+/// caret/selection paint stays independent and sharp. Bounds never change.
+pub(crate) fn focused_editing_material(material: GlassMaterial) -> GlassMaterial {
+    material.focused_editor()
+}
+
+pub(crate) fn paint_glass_material(
+    ctx: &mut PaintContext<'_>,
+    rect: Rect,
+    radius: f32,
+    material: GlassMaterial,
+) {
+    ctx.backdrop_filter_rounded_rect(
+        rect,
+        radius_for(rect, radius),
+        material.blur_radius,
+        material.tint,
+    );
+}
+
 impl ElevationRole {
     /// Return the paint space required outside an elevated surface's layout
     /// bounds.
@@ -193,8 +288,65 @@ pub(crate) fn surface_radius(role: SurfaceRole) -> f32 {
     }
 }
 
+/// Shared control typography and spacing. Keep chrome density independent.
+pub(crate) const CONTROL_FONT_SIZE: f32 = 14.0;
+pub(crate) const CONTROL_HEIGHT: f32 = 36.0;
+pub(crate) const CONTROL_PADDING: f32 = 10.0;
+pub(crate) const CONTROL_GAP: f32 = 8.0;
+
+pub(crate) fn control_text_y(height: f32, font_size: f32) -> f32 {
+    ((height - crate::graphics::line_height_sized(font_size) as f32) * 0.5).max(0.0)
+}
+
+pub(crate) fn control_fill(palette: &ColorPalette, hovered: bool, pressed: bool) -> Color {
+    let fill = palette.button_background();
+    if pressed {
+        fill.darken(0.08)
+    } else if hovered {
+        fill.darken(0.035)
+    } else {
+        fill
+    }
+}
+
+pub(crate) fn control_focus(ctx: &mut PaintContext<'_>, rect: Rect, palette: &ColorPalette) {
+    focus_indicator(ctx, rect, focus_highlight(palette));
+}
+
+/// Focus changes the material across its face, without a perimeter or underline.
+/// Paint before foreground content so text, icons and carets keep full contrast.
+pub(crate) fn focus_indicator(ctx: &mut PaintContext<'_>, rect: Rect, tint: Color) {
+    let radius = radius_for(rect, metrics().control_radius);
+    ctx.fill_rounded_rect(rect, radius, tint.with_opacity(0.12));
+}
+
+/// Explicit-color compatibility surface. It is a uniform fill, not simulated glass.
+/// Built-in default materials use `paint_glass_material` instead.
+pub(crate) fn glass_control_surface(
+    ctx: &mut PaintContext<'_>,
+    rect: Rect,
+    fill: Color,
+    border: Color,
+    pressed: bool,
+) {
+    let radius = radius_for(rect, metrics().control_radius);
+    ctx.fill_rounded_rect(
+        rect,
+        radius,
+        if pressed { fill.darken(0.035) } else { fill },
+    );
+    if border.a > 0.0 {
+        ctx.stroke_rounded_rect(
+            rect,
+            radius,
+            metrics().border_width,
+            border.with_opacity(border.a * 0.7),
+        );
+    }
+}
+
 pub(crate) fn focus_highlight(palette: &ColorPalette) -> Color {
-    palette.primary_light().lighten(0.4)
+    palette.primary()
 }
 
 pub(crate) fn radius_for(rect: Rect, radius: f32) -> f32 {
@@ -224,11 +376,7 @@ pub(crate) fn raised_control_surface(
     border: Color,
     pressed: bool,
 ) {
-    let radius = radius_for(rect, metrics().control_radius);
-    fill_raised_surface(ctx, rect, radius, fill, pressed);
-    if border.a > 0.0 {
-        ctx.stroke_rounded_rect(rect, radius, metrics().border_width, border);
-    }
+    glass_control_surface(ctx, rect, fill, border, pressed);
 }
 
 pub(crate) fn fill_raised_surface(
@@ -238,27 +386,15 @@ pub(crate) fn fill_raised_surface(
     fill: Color,
     pressed: bool,
 ) {
-    let (top, bottom) = if pressed {
-        (
-            fill.darken(PRESSED_TOP_DARKEN),
-            fill.lighten(PRESSED_BOTTOM_LIGHTEN),
-        )
-    } else {
-        (
-            fill.lighten(RAISED_TOP_LIGHTEN),
-            fill.darken(RAISED_BOTTOM_DARKEN),
-        )
-    };
-    ctx.fill_vertical_gradient_rounded_rect(rect, radius_for(rect, radius), top, bottom);
+    ctx.fill_rounded_rect(
+        rect,
+        radius_for(rect, radius),
+        if pressed { fill.darken(0.035) } else { fill },
+    );
 }
 
 pub(crate) fn chrome_surface(ctx: &mut PaintContext<'_>, rect: Rect, fill: Color) {
-    ctx.fill_vertical_gradient_rounded_rect(
-        rect,
-        0.0,
-        fill.lighten(CHROME_TOP_LIGHTEN),
-        fill.darken(CHROME_BOTTOM_DARKEN),
-    );
+    ctx.fill_rect(rect, fill);
 }
 
 pub(crate) fn text_selection_highlight(accent: Color, surface: Color) -> Color {
@@ -483,25 +619,36 @@ mod tests {
     }
 
     #[test]
-    fn raised_surface_uses_subtle_gradient_without_a_shadow() {
-        let rect = Rect::from_xywh(0.0, 0.0, 100.0, 32.0);
+    fn standard_control_uses_a_single_surface_edge_without_drawn_highlights() {
+        let rect = Rect::from_xywh(0.0, 0.0, 100.0, 36.0);
         let fill = Color::gray(0.9);
         let mut ctx = PaintContext::new();
         raised_control_surface(&mut ctx, rect, fill, Color::BLACK, false);
+        assert!(matches!(
+            ctx.commands()[0],
+            PaintCommand::FillRoundedRect { .. }
+        ));
+        assert_eq!(ctx.commands().len(), 2);
+        assert!(
+            matches!(ctx.commands()[1], PaintCommand::StrokeRoundedRect { color, .. } if color.r == 0.0)
+        );
+    }
 
+    #[test]
+    fn focus_changes_the_material_without_an_underline_or_perimeter() {
+        let rect = Rect::from_xywh(0.0, 0.0, 120.0, 36.0);
+        let mut ctx = PaintContext::new();
+        control_focus(&mut ctx, rect, &ColorPalette::light());
         let [
-            PaintCommand::FillVerticalGradientRoundedRect {
-                top_color,
-                bottom_color,
-                ..
+            PaintCommand::FillRoundedRect {
+                rect: face, color, ..
             },
-            PaintCommand::StrokeRoundedRect { .. },
         ] = ctx.commands()
         else {
-            panic!("expected gradient and hairline for raised control");
+            panic!("focus must be a single material light, not an outline or underline");
         };
-        assert!(top_color.r > fill.r);
-        assert!(bottom_color.r < fill.r);
+        assert_eq!(*face, rect);
+        assert_eq!(color.a, 0.12);
     }
 
     #[test]
@@ -621,7 +768,7 @@ mod tests {
         let palette = ColorPalette::default();
         let highlight = focus_highlight(&palette);
 
-        assert_eq!(highlight, palette.primary_light().lighten(0.4));
+        assert_eq!(highlight, palette.primary());
         assert_eq!(highlight.a, 1.0);
         assert!(highlight.r > highlight.g);
     }

@@ -62,10 +62,12 @@ impl SgfxPaintEncoder {
     ) -> core::result::Result<LoweredFrame<'a>, FrameError<E::Error>> {
         // Global state changes may intentionally span recording boundaries.
         // Preserve their original sequence with one flat lowering pass.
-        if paint.commands().iter().any(|command| {
-            matches!(command,
+        if backdrop::contains_backdrop(paint)
+            || paint.commands().iter().any(|command| {
+                matches!(command,
             PaintCommand::DrawDisplayList { list, .. } if !list.is_self_contained())
-        }) {
+            })
+        {
             let flat = paint.flattened();
             return self
                 .lower(&flat, scale, area)
@@ -230,6 +232,9 @@ impl SgfxPaintEncoder {
                                             ]
                                         }
                                         DrawSource::Solid => offsets.shapes,
+                                        DrawSource::Backdrop(_) => {
+                                            unreachable!("backdrops bypass mesh reuse")
+                                        }
                                     };
                                     frame.draws.push(draw);
                                 }

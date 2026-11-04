@@ -52,19 +52,21 @@ pub use keyed::Keyed;
 pub use lazy_vstack::LazyVStack;
 pub use list::ListView;
 pub use menu::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};
-pub use navigation::{NavigationLink, NavigationPresentation, NavigationView};
+pub use navigation::{
+    NavigationLink, NavigationPresentation, NavigationSidebarStyle, NavigationView,
+};
 pub use progress::{ProgressView, ProgressViewRenderObject};
 pub use rectangle::{Rectangle, RectangleRenderObject};
 pub use scroll::{
     ScrollAxis, ScrollView, ScrollViewRenderObject, ScrollWheelDirection, ScrollbarVisibility,
 };
-pub use select::{Select, SelectChangeCallback, SelectRenderObject};
+pub use select::{Select, SelectChangeCallback, SelectRenderObject, SelectStyle};
 pub use slider::{Slider, SliderRenderObject};
 pub use spacer::{Spacer, SpacerRenderObject};
 pub use split::{SplitAxis, SplitAxisPolicy, SplitView, SplitViewRenderObject};
-pub use surface::{ElevationRole, Surface, SurfaceRole};
+pub use surface::{ElevationRole, GlassMaterial, Surface, SurfaceRole};
 pub use tab::{TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, TabViewRenderObject};
-pub use text::{Text, TextRenderObject};
+pub use text::{Text, TextRenderObject, TextStyle, TextTone};
 pub use text_field::{TextField, TextFieldRenderObject};
 pub use text_grid::{
     TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, TextGridRenderObject,

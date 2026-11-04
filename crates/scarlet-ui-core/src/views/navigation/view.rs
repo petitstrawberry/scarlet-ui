@@ -33,6 +33,17 @@ fn navigation_selected_state(key: usize) -> State<usize> {
 const DEFAULT_MINIMUM_CONTENT_WIDTH: f32 = 320.0;
 const DEFAULT_MINIMUM_CONTENT_HEIGHT: f32 = 240.0;
 
+/// Visual treatment of sidebar navigation. Bottom-bar navigation is unaffected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NavigationSidebarStyle {
+    /// The original edge-to-edge rail and narrow selection indicator.
+    #[default]
+    Simple,
+    /// An inset rounded panel with softly tinted, rounded destination rows.
+    /// Uses the shared in-app backdrop material and a uniform selected tint.
+    Floating,
+}
+
 /// Policy controlling how a navigation view presents its destinations.
 ///
 /// Automatic presentation responds to the logical bounds of each window.
@@ -174,6 +185,7 @@ where
     selected_index: State<usize>,
     /// Width reserved when using sidebar presentation.
     sidebar_width: f32,
+    sidebar_style: NavigationSidebarStyle,
     /// Requested adaptive presentation policy.
     presentation: NavigationPresentation,
     /// Smallest useful selected-content area for automatic presentation.
@@ -217,6 +229,7 @@ where
             links,
             selected_index: State::new(state_id, 0),
             sidebar_width: 200.0,
+            sidebar_style: NavigationSidebarStyle::Simple,
             presentation: NavigationPresentation::Automatic,
             minimum_content_size: Size::new(
                 DEFAULT_MINIMUM_CONTENT_WIDTH,
@@ -249,6 +262,7 @@ where
             links,
             selected_index: navigation_selected_state(state_key),
             sidebar_width: 200.0,
+            sidebar_style: NavigationSidebarStyle::Simple,
             presentation: NavigationPresentation::Automatic,
             minimum_content_size: Size::new(
                 DEFAULT_MINIMUM_CONTENT_WIDTH,
@@ -270,6 +284,17 @@ where
     pub fn sidebar_width(mut self, width: f32) -> Self {
         self.sidebar_width = width;
         self
+    }
+
+    /// Opt into a sidebar treatment without changing adaptive presentation.
+    pub fn sidebar_style(mut self, style: NavigationSidebarStyle) -> Self {
+        self.sidebar_style = style;
+        self
+    }
+
+    /// Return the configured sidebar treatment (simple by default).
+    pub fn get_sidebar_style(&self) -> NavigationSidebarStyle {
+        self.sidebar_style
     }
 
     /// Set the navigation presentation policy.
@@ -539,6 +564,7 @@ where
             links: self.links.clone(),
             selected_index: self.selected_index.clone(),
             sidebar_width: self.sidebar_width,
+            sidebar_style: self.sidebar_style,
             presentation: self.presentation,
             minimum_content_size: self.minimum_content_size,
             shows_icons: self.shows_icons,
@@ -554,7 +580,27 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{NavigationPresentation, NavigationView};
+    use super::{NavigationPresentation, NavigationSidebarStyle, NavigationView};
+
+    #[test]
+    fn floating_sidebar_is_opt_in_and_survives_clone() {
+        let view = NavigationView::new((NavigationLink::new("Home", || Text::new("Home")),));
+        assert_eq!(view.get_sidebar_style(), NavigationSidebarStyle::Simple);
+        let floating = view.sidebar_style(NavigationSidebarStyle::Floating);
+        assert_eq!(
+            floating.clone().get_sidebar_style(),
+            NavigationSidebarStyle::Floating
+        );
+        assert_eq!(
+            floating.get_presentation(),
+            NavigationPresentation::Automatic
+        );
+        let keyed = NavigationView::new_with_state_key(
+            (NavigationLink::new("Home", || Text::new("Home")),),
+            999999,
+        );
+        assert_eq!(keyed.get_sidebar_style(), NavigationSidebarStyle::Simple);
+    }
     use crate::views::{NavigationLink, Text};
     use crate::{Icon, InteractionMode, Size};
 

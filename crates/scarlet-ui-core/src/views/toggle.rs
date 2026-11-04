@@ -5,8 +5,7 @@
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::{Point, Rect, Size};
-use crate::graphics;
+use crate::geometry::{EdgeInsets, Offset, Point, Rect, Size};
 use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::view::View;
@@ -62,11 +61,14 @@ pub struct ToggleRenderObject {
 }
 
 impl ToggleRenderObject {
-    fn colors(&self, palette: &ColorPalette) -> (Color, Color, Color, Color) {
+    fn colors(&self, palette: &ColorPalette) -> (Color, Color) {
         let base_track = if self.is_on {
             palette.primary()
         } else {
-            style::surface_color(palette, SurfaceRole::Section)
+            palette
+                .text_primary()
+                .with_opacity(0.10)
+                .blend_over(style::surface_color(palette, SurfaceRole::Section))
         };
         let track = if self.pressed.is_pressed() {
             base_track.darken(0.035)
@@ -75,141 +77,12 @@ impl ToggleRenderObject {
         } else {
             base_track
         };
-        let track_border = if self.is_on {
-            palette.primary().darken(0.06)
+        let thumb = if self.pressed.is_pressed() {
+            style::GlassMaterial::thumb().tint.darken(0.035)
         } else {
-            palette.divider()
+            style::GlassMaterial::thumb().tint
         };
-        let thumb = style::surface_color(palette, SurfaceRole::Floating);
-        let thumb_border = palette.divider();
-        (track, track_border, thumb, thumb_border)
-    }
-
-    fn fill_rounded_rect(
-        canvas: &mut graphics::Canvas<'_>,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
-        radius: u32,
-        color: Color,
-    ) {
-        let r = radius as i32;
-        if r <= 0 {
-            canvas.fill_rect(x, y, width, height, color);
-            return;
-        }
-
-        let w = width as i32;
-        let h = height as i32;
-        let r_max = (width.min(height) / 2) as i32;
-        let r = r.min(r_max);
-        let r_sq = (r - 1).max(0);
-        let r_sq = r_sq * r_sq;
-
-        for py in 0..h {
-            for px in 0..w {
-                let mut inside = true;
-
-                if px < r && py < r {
-                    let dx = px - (r - 1);
-                    let dy = py - (r - 1);
-                    inside = dx * dx + dy * dy <= r_sq;
-                } else if px >= w - r && py < r {
-                    let dx = px - (w - r);
-                    let dy = py - (r - 1);
-                    inside = dx * dx + dy * dy <= r_sq;
-                } else if px < r && py >= h - r {
-                    let dx = px - (r - 1);
-                    let dy = py - (h - r);
-                    inside = dx * dx + dy * dy <= r_sq;
-                } else if px >= w - r && py >= h - r {
-                    let dx = px - (w - r);
-                    let dy = py - (h - r);
-                    inside = dx * dx + dy * dy <= r_sq;
-                }
-
-                if inside {
-                    canvas.put_pixel(x + px, y + py, color);
-                }
-            }
-        }
-    }
-
-    fn fill_circle(
-        canvas: &mut graphics::Canvas<'_>,
-        center_x: i32,
-        center_y: i32,
-        radius: i32,
-        color: Color,
-    ) {
-        if radius <= 0 {
-            return;
-        }
-        let r_sq = radius * radius;
-        for dy in -radius..=radius {
-            for dx in -radius..=radius {
-                if dx * dx + dy * dy <= r_sq {
-                    canvas.put_pixel(center_x + dx, center_y + dy, color);
-                }
-            }
-        }
-    }
-
-    fn downsample_2x(
-        src: &[u8],
-        src_width: u32,
-        src_height: u32,
-        dst: &mut [u8],
-        dst_width: u32,
-        dst_height: u32,
-    ) {
-        if src_width != dst_width * 2 || src_height != dst_height * 2 {
-            return;
-        }
-
-        for y in 0..dst_height {
-            for x in 0..dst_width {
-                let sx = x * 2;
-                let sy = y * 2;
-                let mut sum = [0u32; 4];
-
-                for oy in 0..2 {
-                    for ox in 0..2 {
-                        let idx = ((sy + oy) * src_width + (sx + ox)) as usize * 4;
-                        sum[0] += src[idx] as u32;
-                        sum[1] += src[idx + 1] as u32;
-                        sum[2] += src[idx + 2] as u32;
-                        sum[3] += src[idx + 3] as u32;
-                    }
-                }
-
-                let dst_idx = (y * dst_width + x) as usize * 4;
-                dst[dst_idx] = (sum[0] / 4) as u8;
-                dst[dst_idx + 1] = (sum[1] / 4) as u8;
-                dst[dst_idx + 2] = (sum[2] / 4) as u8;
-                dst[dst_idx + 3] = (sum[3] / 4) as u8;
-            }
-        }
-    }
-
-    fn blend_bgra_over(dst: &mut [u8], src: &[u8], width: u32, height: u32) {
-        for y in 0..height {
-            for x in 0..width {
-                let idx = ((y * width + x) * 4) as usize;
-                let bgra = u32::from_le_bytes([src[idx], src[idx + 1], src[idx + 2], src[idx + 3]]);
-                let color = Color::from_bgra(bgra);
-                if color.a <= 0.0 {
-                    continue;
-                }
-                let dst_bgra =
-                    u32::from_le_bytes([dst[idx], dst[idx + 1], dst[idx + 2], dst[idx + 3]]);
-                let dst_color = Color::from_bgra(dst_bgra);
-                let out = color.blend_over(dst_color);
-                let out_bytes = out.to_bgra().to_le_bytes();
-                dst[idx..idx + 4].copy_from_slice(&out_bytes);
-            }
-        }
+        (track, thumb)
     }
 
     /// Create a new ToggleRenderObject
@@ -247,89 +120,29 @@ impl ToggleRenderObject {
         self.pressed.set_touch(id, pressed);
     }
 
-    /// Draw toggle using Canvas API.
+    /// Replay the retained drawing for identical geometry and edges at every scale.
     fn draw_toggle(&mut self) {
-        let width = libm::ceilf(self.size.width) as usize;
-        let height = libm::ceilf(self.size.height) as usize;
-        let w = width as u32;
-        let h = height as u32;
-
-        // Create or resize buffer
-        let needs_resize = self
-            .buffer
-            .as_ref()
-            .map_or(true, |b| b.logical_width() != w || b.logical_height() != h);
-        if needs_resize {
-            self.buffer = Some(Buffer::from_logical_dimensions(w, h));
-        }
-
-        let palette = ColorPalette::default();
-        let (bg_color, border_color, thumb_color, thumb_border) = self.colors(&palette);
-        if let Some(ref mut buffer) = self.buffer {
-            let physical_w = buffer.width();
-            let physical_h = buffer.height();
-            let ui_scale = (buffer.scale_milli() as f32) / 1000.0;
-            let metrics = style::metrics();
-
-            let data = buffer.data_mut();
-            data.fill(0);
-
-            let aa_scale = 2u32;
-            let w_hi = physical_w * aa_scale;
-            let h_hi = physical_h * aa_scale;
-            let mut track_hi = alloc::vec![0u8; (w_hi * h_hi * 4) as usize];
-            let mut canvas_hi = graphics::Canvas::new(&mut track_hi, w_hi, h_hi);
-            let radius_hi = (h_hi / 2).max(1);
-            Self::fill_rounded_rect(&mut canvas_hi, 0, 0, w_hi, h_hi, radius_hi, border_color);
-
-            let inset = aa_scale;
-            let inner_w = w_hi.saturating_sub(inset * 2);
-            let inner_h = h_hi.saturating_sub(inset * 2);
-            if inner_w > 0 && inner_h > 0 {
-                let radius_inner = radius_hi.saturating_sub(inset);
-                Self::fill_rounded_rect(
-                    &mut canvas_hi,
-                    inset as i32,
-                    inset as i32,
-                    inner_w,
-                    inner_h,
-                    radius_inner,
-                    bg_color,
-                );
-            }
-
-            let mut track = alloc::vec![0u8; (physical_w * physical_h * 4) as usize];
-            Self::downsample_2x(&track_hi, w_hi, h_hi, &mut track, physical_w, physical_h);
-            data.copy_from_slice(&track);
-
-            // Thumb position: on = right side, off = left side
-            let thumb_diameter = metrics.toggle_thumb_diameter;
-            let thumb_x = if self.is_on {
-                self.size.width - metrics.toggle_thumb_inset - thumb_diameter
-            } else {
-                metrics.toggle_thumb_inset
-            };
-            let thumb_x = (thumb_x * ui_scale * aa_scale as f32) as i32;
-            let thumb_y = (metrics.toggle_thumb_inset * ui_scale * aa_scale as f32) as i32;
-            let thumb_size = libm::ceilf(thumb_diameter * ui_scale * aa_scale as f32) as i32;
-            let radius = (thumb_size / 2).max(1);
-            let center_x = thumb_x + radius;
-            let center_y = thumb_y + radius;
-            let mut thumb_hi = alloc::vec![0u8; (w_hi * h_hi * 4) as usize];
-            let mut thumb_canvas = graphics::Canvas::new(&mut thumb_hi, w_hi, h_hi);
-            Self::fill_circle(&mut thumb_canvas, center_x, center_y, radius, thumb_border);
-            Self::fill_circle(
-                &mut thumb_canvas,
-                center_x,
-                center_y,
-                (radius - aa_scale as i32).max(0),
-                thumb_color,
-            );
-
-            let mut thumb = alloc::vec![0u8; (physical_w * physical_h * 4) as usize];
-            Self::downsample_2x(&thumb_hi, w_hi, h_hi, &mut thumb, physical_w, physical_h);
-            Self::blend_bgra_over(data, &thumb, physical_w, physical_h);
-        }
+        let outsets = self.paint_outsets();
+        let w = libm::ceilf(self.size.width + outsets.left + outsets.right) as u32;
+        let h = libm::ceilf(self.size.height + outsets.top + outsets.bottom) as u32;
+        let old_buffer = self.buffer.take();
+        let scale = old_buffer.as_ref().map(|buffer| buffer.scale_milli());
+        let mut buffer = old_buffer
+            .filter(|buffer| buffer.logical_width() == w && buffer.logical_height() == h)
+            .unwrap_or_else(|| match scale {
+                Some(scale) => Buffer::from_logical_dimensions_with_scale(w, h, scale),
+                None => Buffer::from_logical_dimensions(w, h),
+            });
+        let mut ctx = PaintContext::new();
+        self.paint(&mut ctx, Point::new(outsets.left, outsets.top));
+        #[allow(deprecated)]
+        crate::renderer::CpuPaintRenderer::execute_into_buffer(
+            &mut buffer,
+            Color::CLEAR,
+            &ctx,
+            None,
+        );
+        self.buffer = Some(buffer);
     }
 }
 
@@ -354,6 +167,21 @@ impl ElementRenderObject for ToggleRenderObject {
         }
 
         self.size
+    }
+
+    fn reads_backdrop(&self) -> bool {
+        true
+    }
+
+    fn paint_outsets(&self) -> EdgeInsets {
+        // Reserve the maximum held-state extent even after release, so partial
+        // repainting clears the old capsule without changing layout or hit testing.
+        EdgeInsets::all(10.0)
+    }
+
+    fn buffer_origin(&self) -> Point {
+        let outsets = self.paint_outsets();
+        Point::new(-outsets.left, -outsets.top)
     }
 
     fn size(&self) -> Size {
@@ -382,39 +210,65 @@ impl ElementRenderObject for ToggleRenderObject {
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let palette = ColorPalette::default();
-        let (bg_color, border_color, thumb_color, thumb_border) = self.colors(&palette);
-        let metrics = style::metrics();
-        let rect = Rect::new(origin, self.size);
-        let border_width = metrics.border_width;
-        style::track(ctx, rect, border_color);
-        style::track(
-            ctx,
-            Rect::from_xywh(
-                origin.x + border_width,
-                origin.y + border_width,
-                (self.size.width - border_width * 2.0).max(0.0),
-                (self.size.height - border_width * 2.0).max(0.0),
-            ),
-            bg_color,
-        );
+        let (bg_color, thumb_color) = self.colors(&palette);
+        // Keep the existing hit target; the visible reference switch is a slim capsule.
+        let track_height = 16.0;
+        let track_y = origin.y + (self.size.height - track_height) / 2.0;
+        let rect = Rect::from_xywh(origin.x, track_y, self.size.width, track_height);
+        ctx.fill_rounded_rect(rect, track_height / 2.0, bg_color);
 
-        let thumb_diameter = metrics.toggle_thumb_diameter;
-        let thumb_x = if self.is_on {
-            self.size.width - metrics.toggle_thumb_inset - thumb_diameter
+        let thumb_width = 21.0;
+        let thumb_height = 14.0;
+        let inset = 1.0;
+        let x = if self.is_on {
+            self.size.width - inset - thumb_width
         } else {
-            metrics.toggle_thumb_inset
+            inset
         };
-        let thumb_radius = thumb_diameter / 2.0;
-        style::control_thumb(
-            ctx,
-            Point::new(
-                origin.x + thumb_x + thumb_radius,
-                origin.y + metrics.toggle_thumb_inset + thumb_radius,
-            ),
-            thumb_radius,
-            thumb_color,
-            thumb_border,
-        );
+        let thumb_rect = Rect::from_xywh(origin.x + x, track_y + inset, thumb_width, thumb_height);
+        if self.pressed.is_pressed() {
+            let held_rect = Rect::from_xywh(
+                thumb_rect.origin.x - 5.0,
+                origin.y + self.size.height / 2.0 - 11.0,
+                31.0,
+                22.0,
+            );
+            ctx.draw_rounded_rect_shadow(
+                held_rect,
+                11.0,
+                Offset::new(0.0, 1.0),
+                2.0,
+                0.0,
+                Color::BLACK.with_opacity(0.10),
+            );
+            style::paint_glass_material(
+                ctx,
+                held_rect,
+                11.0,
+                style::GlassMaterial {
+                    tint: thumb_color,
+                    ..style::GlassMaterial::thumb()
+                },
+            );
+        } else {
+            ctx.draw_rounded_rect_shadow(
+                thumb_rect,
+                8.0,
+                Offset::new(0.0, 1.0),
+                2.0,
+                0.0,
+                Color::BLACK.with_opacity(0.10),
+            );
+            style::paint_glass_material(
+                ctx,
+                thumb_rect,
+                thumb_height / 2.0,
+                style::GlassMaterial {
+                    tint: thumb_color,
+                    ..style::GlassMaterial::thumb()
+                },
+            );
+        }
         true
     }
 
@@ -439,6 +293,61 @@ mod tests {
     use crate::renderer::PaintCommand;
 
     #[test]
+    fn thumb_material_is_uniform_backdrop_only_and_preserves_center() {
+        for on in [false, true] {
+            let mut control = ToggleRenderObject::new(on);
+            let mut idle_center = None;
+            for held in [false, true] {
+                control.set_pressed(held);
+                assert!(control.reads_backdrop());
+                let mut ctx = PaintContext::new();
+                control.paint(&mut ctx, Point::new(7.0, 13.0));
+                let materials: alloc::vec::Vec<_> = ctx
+                    .commands()
+                    .iter()
+                    .filter_map(|cmd| match cmd {
+                        PaintCommand::BackdropFilterRoundedRect {
+                            rect,
+                            corner_radius,
+                            blur_radius,
+                            tint,
+                        } => Some((*rect, *corner_radius, *blur_radius, *tint)),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(materials.len(), 1, "only the thumb reads backdrop");
+                let (rect, radius, blur, tint) = materials[0];
+                assert_eq!(
+                    rect.size,
+                    Size::new(
+                        if held { 31.0 } else { 21.0 },
+                        if held { 22.0 } else { 14.0 }
+                    )
+                );
+                assert_eq!(radius, rect.size.height / 2.0);
+                assert_eq!(blur, style::GlassMaterial::thumb().blur_radius);
+                assert_eq!(tint.a, style::GlassMaterial::thumb().tint.a);
+                let center = Point::new(
+                    rect.origin.x + rect.size.width / 2.0,
+                    rect.origin.y + rect.size.height / 2.0,
+                );
+                if held {
+                    assert_eq!(Some(center), idle_center);
+                } else {
+                    idle_center = Some(center);
+                }
+                assert!(!ctx.commands().iter().any(|cmd| matches!(
+                    cmd,
+                    PaintCommand::FillVerticalGradientRoundedRect { .. }
+                        | PaintCommand::StrokeRoundedRect { .. }
+                        | PaintCommand::StrokeRect { .. }
+                        | PaintCommand::StrokePath { .. }
+                )));
+            }
+        }
+    }
+
+    #[test]
     fn toggle_uses_compact_desktop_metrics() {
         let toggle = ToggleRenderObject::new(false);
         let metrics = style::metrics();
@@ -456,23 +365,27 @@ mod tests {
         let mut ctx = PaintContext::new();
         toggle.paint(&mut ctx, Point::ZERO);
 
-        let PaintCommand::FillRoundedRect { color, .. } = &ctx.commands()[1] else {
-            panic!("expected inner toggle track");
+        let PaintCommand::FillRoundedRect { color, .. } = &ctx.commands()[0] else {
+            panic!("expected solid toggle track");
         };
         assert_eq!(*color, ColorPalette::default().primary());
     }
 
     #[test]
-    fn inactive_toggle_uses_the_section_surface_role() {
+    fn inactive_toggle_uses_a_visible_palette_derived_neutral_track() {
         let toggle = ToggleRenderObject::new(false);
         let mut ctx = PaintContext::new();
         toggle.paint(&mut ctx, Point::ZERO);
 
-        let PaintCommand::FillRoundedRect { color, .. } = &ctx.commands()[1] else {
-            panic!("expected inner toggle track");
+        let PaintCommand::FillRoundedRect { color, .. } = &ctx.commands()[0] else {
+            panic!("expected solid toggle track");
         };
         let palette = ColorPalette::default();
-        assert_eq!(*color, style::surface_color(&palette, SurfaceRole::Section));
+        let fill = palette
+            .text_primary()
+            .with_opacity(0.10)
+            .blend_over(style::surface_color(&palette, SurfaceRole::Section));
+        assert_eq!(*color, fill);
     }
 
     #[test]
@@ -488,11 +401,113 @@ mod tests {
     }
 
     #[test]
-    fn toggle_hairlines_are_opaque() {
-        let toggle = ToggleRenderObject::new(false);
-        let (_, track_border, _, thumb_border) = toggle.colors(&ColorPalette::default());
+    fn entire_toggle_has_no_outline_in_any_state() {
+        for on in [false, true] {
+            for held in [false, true] {
+                let mut toggle = ToggleRenderObject::new(on);
+                toggle.set_pressed(held);
+                let mut ctx = PaintContext::new();
+                toggle.paint(&mut ctx, Point::ZERO);
+                assert!(!ctx.commands().iter().any(|cmd| matches!(
+                    cmd,
+                    PaintCommand::StrokeRoundedRect { .. }
+                        | PaintCommand::StrokeRect { .. }
+                        | PaintCommand::StrokePath { .. }
+                )));
+            }
+        }
+    }
+    #[test]
+    fn glass_thumb_keeps_an_inside_gap_without_highlights() {
+        for on in [false, true] {
+            let toggle = ToggleRenderObject::new(on);
+            let mut ctx = PaintContext::new();
+            toggle.paint(&mut ctx, Point::new(10.0, 20.0));
+            let lenses: alloc::vec::Vec<_> = ctx
+                .commands()
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    PaintCommand::FillRoundedRect { rect, .. }
+                    | PaintCommand::BackdropFilterRoundedRect { rect, .. } => Some(*rect),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(lenses.len(), 2);
+            assert!(!ctx.commands().iter().any(|cmd| matches!(
+                cmd,
+                PaintCommand::FillVerticalGradientRoundedRect { .. }
+                    | PaintCommand::PushClip { .. }
+            )));
 
-        assert_eq!(track_border.a, 1.0);
-        assert_eq!(thumb_border.a, 1.0);
+            assert_eq!(lenses[1].size, Size::new(21.0, 14.0));
+            assert_eq!(lenses[1].origin.y, 23.0);
+            assert_eq!(lenses[1].origin.x, if on { 24.0 } else { 11.0 });
+        }
+    }
+
+    #[test]
+    fn legacy_buffer_matches_retained_material_at_1x_and_2x() {
+        for scale in [1000, 2000] {
+            for held in [false, true] {
+                let mut control = ToggleRenderObject::new(true);
+                control.set_pressed(held);
+                control.buffer = Some(Buffer::from_logical_dimensions_with_scale(
+                    control.size.width as u32,
+                    control.size.height as u32,
+                    scale,
+                ));
+                control.draw_toggle();
+                let mut ctx = PaintContext::new();
+                let outsets = control.paint_outsets();
+                control.paint(&mut ctx, Point::new(outsets.left, outsets.top));
+                let buffer_size = Size::new(
+                    control.size.width + outsets.left + outsets.right,
+                    control.size.height + outsets.top + outsets.bottom,
+                );
+                let mut renderer =
+                    crate::renderer::CpuPaintRenderer::new(buffer_size, scale, Color::CLEAR);
+                renderer.execute(&ctx);
+                let buffer = control.get_buffer().unwrap();
+                assert_eq!(buffer.scale_milli(), scale);
+                assert_eq!(buffer.data(), renderer.buffer().data());
+                assert!(buffer.data().iter().any(|&byte| byte != 0));
+            }
+        }
+    }
+    fn held_capsule(control: &ToggleRenderObject) -> Option<(Rect, Color)> {
+        let mut ctx = PaintContext::new();
+        control.paint(&mut ctx, Point::ZERO);
+        ctx.commands().iter().find_map(|cmd| match cmd {
+            PaintCommand::BackdropFilterRoundedRect { rect, tint, .. }
+                if rect.size.height == 22.0 =>
+            {
+                Some((*rect, *tint))
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn held_capsule_expands_transparently_and_release_restores_idle_glass() {
+        let mut control = ToggleRenderObject::new(true);
+        let size = control.size();
+        let outsets = control.paint_outsets();
+        assert!(held_capsule(&control).is_none());
+        control.set_pressed(true);
+        let (rect, tint) = held_capsule(&control).unwrap();
+        assert_eq!(rect.size, Size::new(31.0, 22.0));
+        assert!(tint.a > 0.0 && tint.a < 1.0);
+        assert!(rect.origin.x >= -outsets.left);
+        assert!(rect.origin.y >= -outsets.top);
+        assert!(rect.origin.x + rect.size.width <= size.width + outsets.right);
+        assert!(rect.origin.y + rect.size.height <= size.height + outsets.bottom);
+        assert_eq!(control.size(), size);
+        control.set_pressed(false);
+        assert!(held_capsule(&control).is_none());
+        assert_eq!(control.paint_outsets(), outsets);
+        control.set_touch_pressed(7, true);
+        assert!(held_capsule(&control).is_some());
+        control.set_touch_pressed(7, false);
+        assert!(held_capsule(&control).is_none());
     }
 }

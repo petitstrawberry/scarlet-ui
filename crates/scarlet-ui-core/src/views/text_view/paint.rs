@@ -4,7 +4,7 @@ use alloc::string::ToString;
 
 use super::layout::{TextViewLayout, VisualLine};
 use super::{BORDER_WIDTH, TextDocument, TextPosition, TextSelection};
-use crate::color::Color;
+use crate::color::{Color, ColorPalette};
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 use crate::renderer::PaintContext;
@@ -65,9 +65,73 @@ pub fn paint_text_view(
     highlight_current_line: bool,
 ) {
     let bounds = Rect::new(origin, size);
-    let metrics = style::metrics();
+    // Explicit color overrides are a uniform face, never a simulated glass bevel.
     style::fill_control(ctx, bounds, background_color);
+    if border_color.a > 0.0 {
+        style::stroke_control(ctx, bounds, style::metrics().border_width, border_color);
+    }
+    if focused {
+        style::fill_control(
+            ctx,
+            bounds,
+            ColorPalette::default()
+                .text_primary()
+                .with_opacity(background_color.a * 0.035),
+        );
+    }
 
+    paint_text_view_content(
+        ctx,
+        origin,
+        size,
+        layout,
+        document,
+        selection,
+        focused,
+        font_size,
+        padding,
+        background_color,
+        text_color,
+        placeholder_color,
+        selection_color,
+        current_line_color,
+        border_color,
+        focused_border_color,
+        placeholder,
+        preedit,
+        preedit_cursor_byte,
+        preedit_spans,
+        show_line_numbers,
+        highlight_current_line,
+    );
+}
+
+/// Paint editable text, selection, and IME content without surface chrome.
+pub(crate) fn paint_text_view_content(
+    ctx: &mut PaintContext,
+    origin: Point,
+    size: Size,
+    layout: &TextViewLayout,
+    document: &TextDocument,
+    selection: TextSelection,
+    focused: bool,
+    font_size: f32,
+    padding: f32,
+    background_color: Color,
+    text_color: Color,
+    placeholder_color: Color,
+    selection_color: Color,
+    current_line_color: Color,
+    _border_color: Color,
+    focused_border_color: Color,
+    placeholder: &str,
+    preedit: &str,
+    preedit_cursor_byte: u32,
+    preedit_spans: &[u8],
+    show_line_numbers: bool,
+    highlight_current_line: bool,
+) {
+    let metrics = style::metrics();
     let clip_rect = Rect::from_xywh(
         origin.x + BORDER_WIDTH,
         origin.y + BORDER_WIDTH,
@@ -146,21 +210,6 @@ pub fn paint_text_view(
 
     ctx.pop_clip();
     ctx.pop_clip();
-    let border = if focused {
-        focused_border_color
-    } else {
-        border_color
-    };
-    style::stroke_control(
-        ctx,
-        bounds,
-        if focused {
-            metrics.focus_stroke_width
-        } else {
-            BORDER_WIDTH
-        },
-        border,
-    );
 }
 
 fn paint_current_line(
