@@ -45,6 +45,14 @@ see the [project reference](../reference/project/).
 The reference pages are imported from the repository during the site build, so
 the original documentation remains the source of truth.
 
+## Look up the API
+
+The [API Reference](/docs/) is generated from the Rust source with rustdoc.
+Use it to look up types, traits, methods and their signatures; these guides
+explain how to build an application. The current reference includes the shared
+API, native winit backend and optional preview APIs (`std,platform-winit,preview`).
+Web- and Scarlet-specific backend APIs require separate target builds.
+
 ## Try the browser examples
 
 The browser version runs the existing widgets through WebGPU. It requires an

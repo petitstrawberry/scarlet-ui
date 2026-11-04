@@ -31,6 +31,10 @@ jobs:
         run: npm ci --ignore-scripts --prefix site
       - name: Install Rust and WebAssembly target
         run: rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+      - name: Install native API documentation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libfontconfig-dev pkg-config
       - name: Install matching JavaScript binding generator
         run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
       - name: Test package validation and capability states
@@ -40,7 +44,7 @@ jobs:
           node --test samples/capability.test.cjs
           node --test samples/diagnostics/*.test.cjs
           node --test site/scripts/*.test.mjs
-      - name: Build and validate the static samples
+      - name: Build and validate guides, API reference and samples
         run: python3 tools/build-web-samples.py
       - name: Save reviewable static output
         uses: actions/upload-artifact@v4

@@ -18,7 +18,8 @@ navigation are not captured by the embedded specimen.
 ## Build and preview
 
 Use Node 24, Python 3.11+, Rust supporting edition 2024, and the matching
-wasm-bindgen CLI. From the repository root:
+wasm-bindgen CLI. Native API documentation also needs `libfontconfig-dev` and
+`pkg-config` on Linux. From the repository root:
 
 ```sh
 npm ci --prefix site --ignore-scripts
@@ -31,19 +32,21 @@ python3 -m http.server 8765 --bind 127.0.0.1 --directory target/web-samples
 
 Open `http://localhost:8765/`. The build compiles both examples with
 `--release --locked`, imports the existing reference documentation, builds
-Starlight, generates matching JavaScript/Wasm bindings, validates local links,
+Starlight, generates the native rustdoc API reference and matching JavaScript/Wasm
+bindings, validates local links,
 and records file hashes in `build-manifest.json`. Generated files remain under
 ignored directories. `CARGO_TARGET_DIR` is honored; `--profile dev` selects a
 debug Wasm build. Existing output is replaced only when it carries this tool's
 generated marker. Source archives record unknown Git identity as null.
 
-This combined Starlight artifact is configured for a **site root**, not an
+This combined guides/API/samples artifact is configured for a **site root**, not an
 arbitrary project prefix. Generated theme assets use root-relative URLs.
 The standalone example modules still use relative JS/Wasm paths. Serve Wasm
 as `application/wasm` and JavaScript with its JavaScript MIME type. No CDN,
 credentials, backend service or browser security flags are required.
 
-Routes: `/` introduction, `/getting-started/`, `/reference/` pages, `/try/`
+Routes: `/` introduction, `/getting-started/`, `/reference/` guides, `/docs/`
+rustdoc API reference, `/try/`
 browser selection, `/counter/`, and `/widget-factory/`. The two full-window
 sample URLs are unchanged. `site/README.md` describes the theme and document
 import/update path; original `docs/` files remain authoritative.

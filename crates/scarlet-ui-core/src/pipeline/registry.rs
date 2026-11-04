@@ -50,7 +50,7 @@ impl StateRegistry {
 
     /// Get a cloned State by ID
     ///
-    /// Returns a cloned State<T> if it exists in the registry.
+    /// Returns a cloned `State<T>` if it exists in the registry.
     /// The cloned State points to the same underlying data via Arc.
     ///
     /// # Returns

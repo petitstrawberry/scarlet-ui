@@ -17,12 +17,13 @@ export default defineConfig({
         { label: 'Introduction', slug: '' },
         { label: 'Getting started', slug: 'getting-started' },
         { label: 'Try in your browser', slug: 'try' },
-        { label: 'Reference', items: [
+        { label: 'Guides', items: [
           { label: 'Project guide', slug: 'reference/project' },
           { label: 'Architecture', slug: 'reference/architecture' },
           { label: 'Application contract', slug: 'reference/application-contract' },
           { label: 'Browser guide', slug: 'reference/browser-samples' },
         ] },
+        { label: 'API Reference', link: '/docs/' },
       ],
     }),
   ],
