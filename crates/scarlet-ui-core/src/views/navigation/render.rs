@@ -5,13 +5,13 @@ use crate::color::{Color, ColorPalette};
 use crate::element::{
     Element, ElementRenderObject, LayoutConstraints, RenderElement, UpdateResult,
 };
-use crate::geometry::{Point, Rect, Size};
+use crate::geometry::{EdgeInsets, Point, Rect, Size};
 use crate::graphics;
 use crate::icon::{Icon, IconStyle};
 use crate::renderer::PaintContext;
 use crate::state::State;
 use crate::view::View;
-use crate::views::navigation::view::NavigationPresentation;
+use crate::views::navigation::view::{NavigationPresentation, NavigationSidebarStyle};
 use crate::views::style;
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
@@ -23,7 +23,7 @@ use core::cell::Cell;
 
 /// Layout render object for the complete navigation view.
 ///
-/// Sidebar painting and pointer interaction belong to the first child render
+/// Sidebar painting and pointer interaction belong to the last child render
 /// object. Keeping that region as a real element lets the event dispatcher's
 /// hover-path diff generate `Entered` and `Exited` at the sidebar boundary.
 pub struct NavigationViewRenderObject {
@@ -38,6 +38,9 @@ const BOTTOM_BAR_EXTRA_HEIGHT: f32 = 12.0;
 const BOTTOM_BAR_ICON_TOP_INSET: f32 = 8.0;
 const BOTTOM_BAR_TEXT_BOTTOM_INSET: f32 = 5.0;
 const TEXT_LINE_HEIGHT_FACTOR: f32 = 1.2;
+const FLOATING_BAR_MARGIN_X: f32 = 12.0;
+const FLOATING_BAR_MARGIN_Y: f32 = 8.0;
+const FLOATING_BAR_RADIUS: f32 = 28.0;
 
 fn bottom_bar_height(navigation_item_height: f32) -> f32 {
     navigation_item_height.max(0.0) + BOTTOM_BAR_EXTRA_HEIGHT
@@ -126,6 +129,42 @@ fn navigation_geometry(
             }
         }
     }
+}
+
+// Apply only to outermost vertical scrollports, including those behind wrappers.
+// Geometry is measured first so short or side-by-side scrollports get their
+// own overlap. Clear the inset when switching back to a sidebar.
+fn inset_overlay_scroll(
+    element: &mut dyn Element,
+    parent: Point,
+    cover: Option<Rect>,
+) -> (bool, bool) {
+    let origin = Point::new(
+        parent.x + element.position().x,
+        parent.y + element.position().y,
+    );
+    let bounds = Rect::new(origin, element.bounds().size);
+    let inset = cover.map_or(0.0, |cover| {
+        if bounds.right() > cover.left() && bounds.left() < cover.right() {
+            (bounds.bottom().min(cover.bottom()) - cover.top().max(bounds.top())).max(0.0)
+        } else {
+            0.0
+        }
+    });
+    if let Some(changed) = element
+        .render_object_mut()
+        .and_then(|render| render.set_bottom_overlay_inset(inset))
+    {
+        return (true, changed);
+    }
+    let mut accepted = false;
+    let mut changed = false;
+    for child in element.children_mut() {
+        let result = inset_overlay_scroll(child.as_mut(), origin, cover);
+        accepted |= result.0;
+        changed |= result.1;
+    }
+    (accepted, changed)
 }
 
 impl NavigationViewRenderObject {
@@ -233,11 +272,12 @@ impl ElementRenderObject for NavigationViewRenderObject {
         children: &mut [Box<dyn Element>],
     ) -> Size {
         let has_header = self.header_height > 0.0;
-        let content_index = if has_header { 2 } else { 1 };
-        if children.len() != content_index + 1 {
+        let content_index = 0;
+        let navigation_index = if has_header { 2 } else { 1 };
+        if children.len() != navigation_index + 1 {
             crate::logln!(
                 "[NavigationViewRenderObject::layout] WARNING: expected {} children, got {}",
-                content_index + 1,
+                navigation_index + 1,
                 children.len()
             );
         }
@@ -246,21 +286,41 @@ impl ElementRenderObject for NavigationViewRenderObject {
             constraints.max_width.max(0.0),
             constraints.max_height.max(0.0),
         );
-        let resolved_bottom_bar_height = bottom_bar_height(style::metrics().navigation_item_height);
+        let resolved_bottom_bar_height = children
+            .last()
+            .and_then(|child| child.render_object())
+            .and_then(|render| {
+                render
+                    .as_any()
+                    .downcast_ref::<NavigationSidebarRenderObject>()
+            })
+            .map_or_else(
+                || bottom_bar_height(style::metrics().navigation_item_height),
+                NavigationSidebarRenderObject::preferred_bottom_bar_height,
+            );
         let presentation = self.presentation.resolve_for_size(
             size,
             self.sidebar_width,
             self.minimum_content_size,
             resolved_bottom_bar_height,
         );
-        let geometry = navigation_geometry(
+        let floating = children
+            .last()
+            .and_then(|c| c.render_object())
+            .and_then(|r| r.as_any().downcast_ref::<NavigationSidebarRenderObject>())
+            .is_some_and(|r| r.sidebar_style == NavigationSidebarStyle::Floating);
+        let overlay = floating && presentation == NavigationPresentation::BottomBar;
+        let mut geometry = navigation_geometry(
             size,
             presentation,
             self.sidebar_width,
             self.header_height,
             resolved_bottom_bar_height,
         );
-        if let Some(navigation) = children.get_mut(0) {
+        if overlay {
+            geometry.content.size.height += geometry.navigation.size.height;
+        }
+        if let Some(navigation) = children.get_mut(navigation_index) {
             if let Some(render_object) = navigation.render_object_mut()
                 && let Some(navigation_render_object) = render_object
                     .as_any_mut()
@@ -295,6 +355,29 @@ impl ElementRenderObject for NavigationViewRenderObject {
                 geometry.content.size.height,
             ));
             content.set_position(geometry.content.origin);
+            let cover = if overlay {
+                Some(geometry.navigation)
+            } else {
+                None
+            };
+            let (accepts, changed) = inset_overlay_scroll(content.as_mut(), Point::ZERO, cover);
+            if changed {
+                content.layout(LayoutConstraints::new(
+                    geometry.content.size.width,
+                    geometry.content.size.width,
+                    0.0,
+                    geometry.content.size.height,
+                ));
+            }
+            if overlay && !accepts {
+                // Static pages still fit above chrome; scrollports extend behind it.
+                content.layout(LayoutConstraints::new(
+                    geometry.content.size.width,
+                    geometry.content.size.width,
+                    0.0,
+                    geometry.content.size.height - geometry.navigation.size.height,
+                ));
+            }
         }
 
         self.size = size;
@@ -327,6 +410,7 @@ pub(crate) struct NavigationSidebar {
     icon_style: IconStyle,
     icon_color: Option<Color>,
     presentation: NavigationPresentation,
+    sidebar_style: NavigationSidebarStyle,
 }
 
 impl NavigationSidebar {
@@ -349,7 +433,15 @@ impl NavigationSidebar {
             icon_style,
             icon_color,
             presentation,
+            sidebar_style: NavigationSidebarStyle::Simple,
         }
+    }
+}
+
+impl NavigationSidebar {
+    pub(crate) fn sidebar_style(mut self, style: NavigationSidebarStyle) -> Self {
+        self.sidebar_style = style;
+        self
     }
 }
 
@@ -384,6 +476,7 @@ pub(crate) struct NavigationSidebarRenderObject {
     icon_size: u32,
     item_padding: f32,
     presentation: NavigationPresentation,
+    sidebar_style: NavigationSidebarStyle,
 }
 
 impl NavigationSidebarRenderObject {
@@ -405,6 +498,7 @@ impl NavigationSidebarRenderObject {
             icon_size: 16,
             item_padding: 8.0,
             presentation: view.presentation,
+            sidebar_style: view.sidebar_style,
         }
     }
 
@@ -426,6 +520,42 @@ impl NavigationSidebarRenderObject {
         }
         if y >= self.size.height {
             return None;
+        }
+        if self.is_glass_bottom_bar() {
+            let panel = self.glass_bottom_panel(Point::ZERO);
+            let radius = style::radius_for(panel, FLOATING_BAR_RADIUS);
+            let dx = (x - x.clamp(
+                panel.origin.x + radius,
+                panel.origin.x + panel.size.width - radius,
+            ))
+            .abs();
+            let dy = (y - y.clamp(
+                panel.origin.y + radius,
+                panel.origin.y + panel.size.height - radius,
+            ))
+            .abs();
+            if x < panel.origin.x
+                || x >= panel.origin.x + panel.size.width
+                || y < panel.origin.y
+                || y >= panel.origin.y + panel.size.height
+                || dx * dx + dy * dy > radius * radius
+            {
+                return None;
+            }
+            return (0..self.labels.len()).find(|&index| {
+                let item = self.glass_bottom_item(Point::ZERO, index);
+                x >= item.origin.x && x < item.origin.x + item.size.width
+            });
+        }
+        if self.is_floating() {
+            if x < 16.0 || x >= self.size.width - 16.0 || y < 16.0 {
+                return None;
+            }
+            let index = ((y - 16.0) / 40.0) as usize;
+            return (index < self.labels.len()
+                && y < 16.0 + index as f32 * 40.0 + 36.0
+                && y < self.size.height - 16.0)
+                .then_some(index);
         }
         let index = match self.presentation {
             NavigationPresentation::BottomBar => {
@@ -450,7 +580,225 @@ impl NavigationSidebarRenderObject {
         self.selection_callbacks.get(index).cloned().flatten()
     }
 
+    fn is_floating(&self) -> bool {
+        self.sidebar_style == NavigationSidebarStyle::Floating
+            && self.presentation != NavigationPresentation::BottomBar
+    }
+
+    fn is_glass_bottom_bar(&self) -> bool {
+        self.sidebar_style == NavigationSidebarStyle::Floating
+            && self.presentation == NavigationPresentation::BottomBar
+    }
+
+    fn preferred_bottom_bar_height(&self) -> f32 {
+        if self.sidebar_style != NavigationSidebarStyle::Floating {
+            return bottom_bar_height(self.item_height);
+        }
+        let content_height = self.font_size * TEXT_LINE_HEIGHT_FACTOR
+            + if self.shows_icons {
+                self.icon_size as f32 + 4.0
+            } else {
+                0.0
+            };
+        // Keep 8px inside the glass above/below the icon-label group, plus
+        // independent outer margins. Large labels can grow the allocation.
+        (content_height + 16.0).max(56.0) + FLOATING_BAR_MARGIN_Y * 2.0
+    }
+
+    fn glass_bottom_panel(&self, origin: Point) -> Rect {
+        // Leave air around the whole bar, including its bottom edge. Clamp
+        // insets for transient zero/small allocations during window resizing.
+        let inset_x = FLOATING_BAR_MARGIN_X.min(self.size.width.max(0.0) * 0.5);
+        let inset_y = FLOATING_BAR_MARGIN_Y.min(self.size.height.max(0.0) * 0.5);
+        Rect::from_xywh(
+            origin.x + inset_x,
+            origin.y + inset_y,
+            (self.size.width - 2.0 * inset_x).max(0.0),
+            (self.size.height - 2.0 * inset_y).max(0.0),
+        )
+    }
+
+    fn glass_bottom_item(&self, origin: Point, index: usize) -> Rect {
+        let panel = self.glass_bottom_panel(origin);
+        let inset = 4.0_f32.min(panel.size.width * 0.5);
+        let width = (panel.size.width - inset * 2.0) / self.labels.len().max(1) as f32;
+        Rect::from_xywh(
+            panel.origin.x + inset + index as f32 * width,
+            panel.origin.y,
+            width,
+            panel.size.height,
+        )
+    }
+
+    fn paint_glass_bottom_bar(&self, ctx: &mut PaintContext<'_>, origin: Point) {
+        let palette = ColorPalette::default();
+        let panel = self.glass_bottom_panel(origin);
+        if panel.size.width <= 0.0 || panel.size.height <= 0.0 {
+            return;
+        }
+        let radius = style::radius_for(panel, FLOATING_BAR_RADIUS);
+        let mut material = style::GlassMaterial::regular();
+        material.tint = palette.text().with_opacity(0.045).blend_over(material.tint);
+        style::elevation_shadow(
+            ctx,
+            panel,
+            radius,
+            palette.shadow(),
+            style::ElevationRole::Raised,
+        );
+        ctx.push_rounded_clip(panel, radius);
+        style::paint_glass_material(ctx, panel, radius, material);
+        for (index, label) in self.labels.iter().enumerate() {
+            let item = self.glass_bottom_item(origin, index);
+            let inset_x = 2.0_f32.min(item.size.width * 0.5);
+            let inset_y = 4.0_f32.min(item.size.height * 0.5);
+            let face = Rect::from_xywh(
+                item.origin.x + inset_x,
+                item.origin.y + inset_y,
+                (item.size.width - inset_x * 2.0).max(0.0),
+                (item.size.height - inset_y * 2.0).max(0.0),
+            );
+            let selected = self.selected_index.get() == index;
+            let hovered = self.hovered_index == Some(index);
+            ctx.push_clip(item);
+            // One backdrop sample for the group; selection is a thin overlay
+            // within that material, never a second glass slab or an edge rule.
+            if selected {
+                ctx.fill_rounded_rect(
+                    face,
+                    style::radius_for(face, FLOATING_BAR_RADIUS - 4.0),
+                    palette
+                        .primary()
+                        .with_opacity(if hovered { 0.14 } else { 0.10 }),
+                );
+            } else if hovered {
+                ctx.fill_rounded_rect(
+                    face,
+                    style::radius_for(face, FLOATING_BAR_RADIUS - 4.0),
+                    palette.text().with_opacity(0.04),
+                );
+            }
+            let color = if selected {
+                palette.primary()
+            } else {
+                palette.text()
+            };
+            let (text_width, _) = graphics::measure_text_sized(label, self.font_size);
+            let icon = self
+                .icons
+                .get(index)
+                .copied()
+                .flatten()
+                .filter(|_| self.shows_icons);
+            let text_height = self.font_size * TEXT_LINE_HEIGHT_FACTOR;
+            let icon_size = self.icon_size as f32;
+            let content_height = text_height + if icon.is_some() { icon_size + 4.0 } else { 0.0 };
+            let top = item.origin.y + (item.size.height - content_height) * 0.5;
+            if let Some(icon) = icon {
+                crate::views::icon::paint_icon(
+                    ctx,
+                    Point::new(item.origin.x + (item.size.width - icon_size) * 0.5, top),
+                    icon_size,
+                    icon,
+                    self.icon_style,
+                    self.icon_color.unwrap_or(color),
+                );
+            }
+            ctx.draw_text(
+                Point::new(
+                    item.origin.x + (item.size.width - text_width as f32) * 0.5,
+                    top + if icon.is_some() { icon_size + 4.0 } else { 0.0 },
+                ),
+                label.clone(),
+                color,
+                self.font_size,
+            );
+            ctx.pop_clip();
+        }
+        ctx.pop_clip();
+    }
+
+    fn floating_row(&self, origin: Point, index: usize) -> Rect {
+        Rect::from_xywh(
+            origin.x + 16.0,
+            origin.y + 16.0 + index as f32 * 40.0,
+            (self.size.width - 32.0).max(0.0),
+            36.0,
+        )
+    }
+
+    fn paint_floating(&self, ctx: &mut PaintContext<'_>, origin: Point) {
+        let palette = ColorPalette::default();
+        let panel = Rect::from_xywh(
+            origin.x + 8.0,
+            origin.y + 8.0,
+            (self.size.width - 16.0).max(0.0),
+            (self.size.height - 16.0).max(0.0),
+        );
+        // Do not cover the backdrop with an opaque rail before sampling it.
+        // Floating navigation uses the same real material as controls/surfaces.
+        let mut material = style::GlassMaterial::regular();
+        // A neutral structural tint remains visible over a plain white canvas,
+        // while retaining real backdrop response and the existing geometry.
+        material.tint = palette.text().with_opacity(0.045).blend_over(material.tint);
+        style::paint_glass_material(ctx, panel, 16.0, material);
+        // Clip destinations to the inset panel on short windows.
+        let content = Rect::from_xywh(
+            origin.x + 16.0,
+            origin.y + 16.0,
+            (self.size.width - 32.0).max(0.0),
+            (self.size.height - 32.0).max(0.0),
+        );
+        ctx.push_clip(content);
+        for index in 0..self.labels.len() {
+            let row = self.floating_row(origin, index);
+            let selected = self.selected_index.get() == index;
+            if selected {
+                ctx.fill_rounded_rect(row, 12.0, palette.primary().with_opacity(0.10));
+            } else if self.hovered_index == Some(index) {
+                ctx.fill_rounded_rect(row, 12.0, palette.menu_hover());
+            }
+            let color = if selected {
+                palette.primary()
+            } else {
+                palette.text()
+            };
+            let mut text_x = row.origin.x + 12.0;
+            if self.shows_icons {
+                if let Some(icon) = self.icons.get(index).copied().flatten() {
+                    crate::views::icon::paint_icon(
+                        ctx,
+                        Point::new(text_x, row.origin.y + 10.0),
+                        16.0,
+                        icon,
+                        self.icon_style,
+                        self.icon_color.unwrap_or(color),
+                    );
+                }
+                // Reserve the same column even for destinations without an icon.
+                text_x += 26.0;
+            }
+            let (_, text_height) =
+                graphics::measure_text_sized(&self.labels[index], self.font_size);
+            ctx.draw_text(
+                Point::new(text_x, row.origin.y + (36.0 - text_height as f32) * 0.5),
+                self.labels[index].to_owned(),
+                color,
+                self.font_size,
+            );
+        }
+        ctx.pop_clip();
+    }
+
     fn paint_commands(&self, ctx: &mut PaintContext<'_>, origin: Point) {
+        if self.is_glass_bottom_bar() {
+            self.paint_glass_bottom_bar(ctx, origin);
+            return;
+        }
+        if self.is_floating() {
+            self.paint_floating(ctx, origin);
+            return;
+        }
         let palette = ColorPalette::default();
         let metrics = style::metrics();
         let width = self.size.width.max(0.0);
@@ -593,6 +941,18 @@ impl NavigationSidebarRenderObject {
 }
 
 impl ElementRenderObject for NavigationSidebarRenderObject {
+    fn reads_backdrop(&self) -> bool {
+        self.is_floating() || self.is_glass_bottom_bar()
+    }
+
+    fn paint_outsets(&self) -> EdgeInsets {
+        if self.is_glass_bottom_bar() {
+            style::elevation_outsets(style::ElevationRole::Raised)
+        } else {
+            EdgeInsets::ZERO
+        }
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         self.size = Size::new(constraints.max_width, constraints.max_height);
         let width = libm::ceilf(self.size.width.max(0.0)) as u32;
@@ -606,11 +966,24 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
         self.size
     }
 
+    fn hit_test(&self, point: Point) -> bool {
+        if self.presentation == NavigationPresentation::BottomBar
+            && self.sidebar_style == NavigationSidebarStyle::Floating
+        {
+            self.index_at_point(point.x, point.y).is_some()
+        } else {
+            Rect::new(Point::ZERO, self.size).contains(point)
+        }
+    }
+
     fn size(&self) -> Size {
         self.size
     }
 
     fn self_paint_bounds(&self, origin: Point) -> Option<Rect> {
+        if self.reads_backdrop() {
+            return None;
+        }
         let previous = self.last_painted_hovered_index.get();
         let current = self.hovered_index;
         let (first, last) = match (previous, current) {
@@ -648,6 +1021,7 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
         self.icon_style = view.icon_style;
         self.icon_color = view.icon_color;
         self.presentation = view.presentation;
+        self.sidebar_style = view.sidebar_style;
         self.item_height = style::metrics().navigation_item_height;
         self.hovered_index = self
             .hovered_index
@@ -656,6 +1030,22 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
     }
 
     fn render(&mut self) {
+        if self.reads_backdrop() {
+            if let Some(mut buffer) = self.buffer.take() {
+                let mut ctx = PaintContext::new();
+                self.paint_commands(&mut ctx, Point::ZERO);
+                #[allow(deprecated)]
+                crate::renderer::CpuPaintRenderer::execute_into_buffer(
+                    &mut buffer,
+                    Color::CLEAR,
+                    &ctx,
+                    None,
+                );
+                self.buffer = Some(buffer);
+            }
+            self.last_painted_hovered_index.set(self.hovered_index);
+            return;
+        }
         if let Some(buffer) = self.buffer.as_mut() {
             let palette = ColorPalette::default();
             let metrics = style::metrics();
@@ -853,8 +1243,10 @@ mod tests {
     };
     use crate::color::Color;
     use crate::element::{ElementRenderObject, LayoutConstraints};
-    use crate::geometry::{Rect, Size};
+    use crate::geometry::Point;
+    use crate::geometry::{EdgeInsets, Rect, Size};
     use crate::icon::{Icon, IconStyle};
+    use crate::renderer::PaintContext;
     use crate::state::State;
     use alloc::string::String;
     use alloc::vec;
@@ -998,6 +1390,285 @@ mod tests {
                 .expect("legacy buffer with icon")
                 .data()
         );
+    }
+
+    fn floating_sidebar() -> NavigationSidebar {
+        NavigationSidebar::new(
+            vec![String::from("One"), String::from("Two")],
+            vec![Some(Icon::Home), None],
+            vec![None, None],
+            State::new(crate::state::generate_state_id(), 0),
+            true,
+            IconStyle::default(),
+            None,
+            NavigationPresentation::Sidebar,
+        )
+        .sidebar_style(super::NavigationSidebarStyle::Floating)
+    }
+
+    #[test]
+    fn floating_navigation_overlays_scroll_content_and_clears_inset_on_resize() {
+        use crate::element::Element;
+        use crate::view::View;
+        use crate::views::scroll::ScrollViewRenderObject;
+        use crate::views::{ScrollView, Text};
+        let scroll = ScrollView::new(Text::new("last row"))
+            .vertical()
+            .content_size(400.0, 1200.0)
+            .content_bottom_inset(10.0)
+            .scroll_to_index(Some(59), 20.0);
+        let mut children = vec![scroll.create_element(), floating_sidebar().create_element()];
+        let mut render = super::NavigationViewRenderObject::new_with_presentation(
+            200.0,
+            0.0,
+            NavigationPresentation::BottomBar,
+        );
+        render.layout_with_children(LayoutConstraints::tight(400.0, 600.0), &mut children);
+        let scroll_render = |e: &dyn Element| {
+            e.render_object()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<ScrollViewRenderObject<Text>>()
+                .map(|r| (r.viewport_size(), r.content_size(), r.offset()))
+        };
+        let (viewport, content, offset) = scroll_render(children[0].as_ref()).unwrap();
+        assert_eq!(
+            viewport.height, 600.0,
+            "content paints all the way behind chrome"
+        );
+        assert_eq!(content.height, 1282.0);
+        assert_eq!(
+            offset.1, 682.0,
+            "last row clears the floating bar and authored inset"
+        );
+        assert_eq!(children[1].position().y, 528.0);
+        let nav = children[1].render_object().unwrap();
+        assert!(
+            !nav.hit_test(Point::new(1.0, 1.0)),
+            "outer margin passes through"
+        );
+        assert!(nav.hit_test(Point::new(100.0, 36.0)));
+        render.update_configuration(
+            200.0,
+            0.0,
+            NavigationPresentation::Sidebar,
+            Size::new(320.0, 240.0),
+        );
+        render.layout_with_children(LayoutConstraints::tight(900.0, 600.0), &mut children);
+        let (viewport, content, offset) = scroll_render(children[0].as_ref()).unwrap();
+        assert_eq!(viewport, Size::new(700.0, 600.0));
+        assert_eq!(content.height, 1210.0);
+        assert_eq!(offset.1, 610.0);
+    }
+
+    #[test]
+    fn floating_sidebar_uses_real_backdrop_before_crisp_selection_and_labels() {
+        let mut render = NavigationSidebarRenderObject::from_view(&floating_sidebar());
+        render.layout(LayoutConstraints::tight(200.0, 200.0));
+        assert!(render.reads_backdrop());
+        let mut ctx = PaintContext::new();
+        render.paint(&mut ctx, Point::ZERO);
+        assert!(
+            matches!(ctx.commands().first(), Some(crate::renderer::PaintCommand::BackdropFilterRoundedRect {
+            rect, corner_radius, blur_radius, ..
+        }) if *rect == Rect::from_xywh(8.0, 8.0, 184.0, 184.0)
+            && *corner_radius == 16.0 && *blur_radius > 0.0 && *blur_radius < 18.0)
+        );
+        assert!(
+            !ctx.commands().iter().any(|command| matches!(
+                command,
+                crate::renderer::PaintCommand::FillPath { .. }
+                    | crate::renderer::PaintCommand::StrokePath { .. }
+                    | crate::renderer::PaintCommand::StrokeRoundedRect { .. }
+                    | crate::renderer::PaintCommand::FillVerticalGradientRoundedRect { .. }
+            )),
+            "no opaque underlay, bevel or fixed decorative border"
+        );
+        render.set_presentation(NavigationPresentation::BottomBar);
+        assert!(
+            render.reads_backdrop(),
+            "floating navigation keeps its glass material in portrait"
+        );
+        render.set_presentation(NavigationPresentation::Sidebar);
+        let plain = floating_sidebar().sidebar_style(super::NavigationSidebarStyle::Simple);
+        render.update(&plain);
+        assert!(!render.reads_backdrop(), "Simple sidebar remains unchanged");
+    }
+
+    #[test]
+    fn floating_sidebar_keeps_a_structural_surface_on_white() {
+        let mut render = NavigationSidebarRenderObject::from_view(&floating_sidebar());
+        render.layout(LayoutConstraints::tight(200.0, 200.0));
+        let mut ctx = PaintContext::new();
+        render.paint(&mut ctx, Point::ZERO);
+        let mut renderer =
+            crate::renderer::CpuPaintRenderer::new(Size::new(200.0, 200.0), 1000, Color::WHITE);
+        renderer.execute(&ctx);
+        let outside = renderer.buffer().get_pixel(0, 160).unwrap();
+        let inside = renderer.buffer().get_pixel(100, 160).unwrap();
+        assert_ne!(inside, outside, "panel must not disappear on a white page");
+        let red = (inside >> 16) & 255;
+        assert!(
+            (238..=249).contains(&red),
+            "structural tone remains restrained"
+        );
+    }
+
+    #[test]
+    fn floating_sidebar_samples_changes_underneath_the_panel() {
+        let mut render = NavigationSidebarRenderObject::from_view(&floating_sidebar());
+        render.layout(LayoutConstraints::tight(200.0, 200.0));
+        let sample = |color| {
+            let mut ctx = PaintContext::new();
+            ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 200.0, 200.0), color);
+            render.paint(&mut ctx, Point::ZERO);
+            let mut renderer =
+                crate::renderer::CpuPaintRenderer::new(Size::new(200.0, 200.0), 1000, Color::WHITE);
+            renderer.execute(&ctx);
+            renderer.buffer().get_pixel(100, 160).unwrap()
+        };
+        assert_ne!(
+            sample(Color::rgb(80, 130, 180)),
+            sample(Color::rgb(180, 100, 80)),
+            "floating material must show the current backdrop, not an opaque cached rail"
+        );
+    }
+
+    #[test]
+    fn floating_bottom_bar_uses_one_inset_material_without_an_indicator() {
+        use crate::renderer::PaintCommand;
+        let mut render = NavigationSidebarRenderObject::from_view(&floating_sidebar());
+        render.set_presentation(NavigationPresentation::BottomBar);
+        assert_eq!(render.preferred_bottom_bar_height(), 72.0);
+        render.layout(LayoutConstraints::tight(
+            390.0,
+            render.preferred_bottom_bar_height(),
+        ));
+        assert!(render.reads_backdrop());
+        assert_eq!(render.index_at_point(1.0, 1.0), None);
+        assert_eq!(render.index_at_point(389.0, 71.0), None);
+        assert_eq!(
+            render.index_at_point(13.0, 9.0),
+            None,
+            "rounded corner is empty"
+        );
+        assert_eq!(render.index_at_point(100.0, 36.0), Some(0));
+        assert_eq!(render.index_at_point(300.0, 36.0), Some(1));
+        let mut ctx = PaintContext::new();
+        render.paint(&mut ctx, Point::ZERO);
+        let glass: Vec<_> = ctx
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::BackdropFilterRoundedRect {
+                    rect,
+                    corner_radius,
+                    blur_radius,
+                    tint,
+                    ..
+                } => Some((*rect, *corner_radius, *blur_radius, *tint)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(glass.len(), 1, "selection must not re-filter the glass");
+        assert_eq!(glass[0].0, Rect::from_xywh(12.0, 8.0, 366.0, 56.0));
+        assert_eq!(glass[0].1, 28.0);
+        assert!(
+            !ctx.commands()
+                .iter()
+                .any(|command| matches!(command, PaintCommand::FillPath { .. })),
+            "floating navigation has no edge indicator"
+        );
+        assert!(
+            glass
+                .iter()
+                .all(|entry| entry.2 > 0.0 && entry.2 < 18.0 && entry.3.a < 1.0)
+        );
+        assert!(matches!(
+            ctx.commands().first(),
+            Some(PaintCommand::DrawRoundedRectShadow { .. })
+        ));
+        assert_ne!(render.paint_outsets(), EdgeInsets::ZERO);
+        assert!(!ctx.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillVerticalGradientRoundedRect { .. }
+                | PaintCommand::StrokeRoundedRect { .. }
+        )));
+        let sample = |background| {
+            let mut ctx = PaintContext::new();
+            ctx.fill_rect(Rect::from_xywh(0.0, 0.0, 390.0, 72.0), background);
+            render.paint(&mut ctx, Point::ZERO);
+            let mut cpu =
+                crate::renderer::CpuPaintRenderer::new(Size::new(390.0, 72.0), 1000, Color::WHITE);
+            cpu.execute(&ctx);
+            cpu.buffer().get_pixel(300, 42).unwrap()
+        };
+        assert_ne!(
+            sample(Color::rgb(80, 130, 180)),
+            sample(Color::rgb(180, 100, 80))
+        );
+        let simple = floating_sidebar().sidebar_style(super::NavigationSidebarStyle::Simple);
+        render.update(&simple);
+        render.set_presentation(NavigationPresentation::BottomBar);
+        assert!(
+            !render.reads_backdrop(),
+            "Simple navigation remains unchanged"
+        );
+    }
+
+    #[test]
+    fn floating_sidebar_hit_regions_match_inset_rows_and_exclude_gaps() {
+        let mut render = NavigationSidebarRenderObject::from_view(&floating_sidebar());
+        render.layout(LayoutConstraints::tight(200.0, 500.0));
+        assert_eq!(render.index_at_point(28.0, 20.0), Some(0));
+        assert_eq!(render.index_at_point(28.0, 56.0), Some(1));
+        assert_eq!(render.index_at_point(8.0, 20.0), None);
+        assert_eq!(render.index_at_point(28.0, 8.0), None);
+        assert_eq!(render.index_at_point(28.0, 52.0), None);
+        assert_eq!(render.index_at_point(185.0, 20.0), None);
+        render.set_presentation(NavigationPresentation::BottomBar);
+        render.layout(LayoutConstraints::tight(200.0, 52.0));
+        assert!(!render.is_floating());
+        assert_eq!(render.index_at_point(8.0, 8.0), None);
+        assert_eq!(render.index_at_point(50.0, 26.0), Some(0));
+        assert_eq!(render.index_at_point(150.0, 26.0), Some(1));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn floating_sidebar_buffer_matches_retained_paint_and_accepts_style_updates() {
+        let view = floating_sidebar();
+        let mut render = NavigationSidebarRenderObject::from_view(&view);
+        render.layout(LayoutConstraints::tight(200.0, 200.0));
+        // Other tests change the process-wide UI scale. Fix both targets to
+        // the same explicit scale instead of sampling that global twice.
+        render.buffer = Some(crate::buffer::Buffer::from_logical_dimensions_with_scale(
+            200, 200, 1000,
+        ));
+        render.render();
+        let mut expected =
+            crate::buffer::Buffer::from_logical_dimensions_with_scale(200, 200, 1000);
+        let mut ctx = crate::renderer::PaintContext::new();
+        render.paint(&mut ctx, crate::geometry::Point::ZERO);
+        crate::renderer::CpuPaintRenderer::execute_into_buffer(
+            &mut expected,
+            Color::CLEAR,
+            &ctx,
+            None,
+        );
+        let actual = render.get_buffer().unwrap();
+        assert_eq!(
+            (actual.width(), actual.height()),
+            (expected.width(), expected.height())
+        );
+        assert!(
+            actual.data() == expected.data(),
+            "floating sidebar CPU and retained pixels differ"
+        );
+        let plain = view.sidebar_style(super::NavigationSidebarStyle::Simple);
+        render.update(&plain);
+        assert!(!render.is_floating());
+        assert_eq!(render.index_at_point(1.0, 1.0), Some(0));
     }
 
     #[test]

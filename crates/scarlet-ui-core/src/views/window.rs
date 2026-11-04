@@ -1834,33 +1834,54 @@ impl WindowBackdrop {
     }
 
     pub(crate) fn shadow_visible_regions(self) -> [Rect; 8] {
-        let body = self.window_geometry_rect(Point::ZERO);
-        let radius = self.effective_corner_radius(body);
+        let outer_body = self.window_geometry_rect(Point::ZERO);
+        // The body's AA edge is not fully opaque. Keep a conservative logical
+        // pixel of shadow underneath it, including at fractional window origins.
+        let inset = 1.0f32
+            .min(outer_body.size.width * 0.5)
+            .min(outer_body.size.height * 0.5);
+        let body = Rect::from_xywh(
+            outer_body.left() + inset,
+            outer_body.top() + inset,
+            (outer_body.size.width - 2.0 * inset).max(0.0),
+            (outer_body.size.height - 2.0 * inset).max(0.0),
+        );
+        let radius = (self.effective_corner_radius(outer_body) - inset).max(0.0);
         let corner = radius
             .min(body.size.width * 0.5)
             .min(body.size.height * 0.5);
         let right = body.right();
         let bottom = body.bottom();
+        let outsets = style::elevation_outsets(self.shadow_elevation);
+        let outer_left = (outer_body.left() - outsets.left).min(0.0);
+        let outer_top = (outer_body.top() - outsets.top).min(0.0);
+        let outer_right = (outer_body.right() + outsets.right).max(self.size.width);
+        let outer_bottom = (outer_body.bottom() + outsets.bottom).max(self.size.height);
+        let outer_width = outer_right - outer_left;
         [
-            Rect::from_xywh(0.0, 0.0, self.size.width, body.top().max(0.0)),
+            Rect::from_xywh(outer_left, outer_top, outer_width, body.top() - outer_top),
+            Rect::from_xywh(outer_left, bottom, outer_width, outer_bottom - bottom),
             Rect::from_xywh(
-                0.0,
-                bottom,
-                self.size.width,
-                (self.size.height - bottom).max(0.0),
-            ),
-            Rect::from_xywh(0.0, body.top(), body.left().max(0.0), body.size.height),
-            Rect::from_xywh(
-                right,
+                outer_left,
                 body.top(),
-                (self.size.width - right).max(0.0),
+                body.left() - outer_left,
                 body.size.height,
             ),
+            Rect::from_xywh(right, body.top(), outer_right - right, body.size.height),
             Rect::from_xywh(body.left(), body.top(), corner, corner),
             Rect::from_xywh(right - corner, body.top(), corner, corner),
             Rect::from_xywh(body.left(), bottom - corner, corner, corner),
             Rect::from_xywh(right - corner, bottom - corner, corner, corner),
         ]
+    }
+
+    pub(crate) fn shadow_fits_cache_bounds(self) -> bool {
+        self.shadow_visible_regions().iter().all(|rect| {
+            rect.left() >= 0.0
+                && rect.top() >= 0.0
+                && rect.right() <= self.size.width
+                && rect.bottom() <= self.size.height
+        })
     }
 
     fn effective_corner_radius(self, rect: Rect) -> f32 {

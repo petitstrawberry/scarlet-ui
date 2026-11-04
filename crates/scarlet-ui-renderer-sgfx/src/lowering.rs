@@ -1,6 +1,8 @@
 //! Paint-command to persistent SGFX IR lowering.
+mod backdrop;
 mod retained;
 mod shadow_cache;
+mod tiles;
 
 use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
@@ -61,13 +63,16 @@ const SHADOW_LAYER_WEIGHTS: [f32; SHADOW_LAYER_COUNT] =
 
 const CANVAS_TARGET_TEX_COORDS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq)]
 enum DrawSource {
     Solid,
     Texture(TextureId),
     PixelTexture(TextureId),
+    PremultipliedTexture(TextureId),
     Glyph(TextureId),
     IconGlyph(TextureId),
+    // An ordered pass barrier, never batchable or retained as an isolated mesh.
+    Backdrop(backdrop::Backdrop),
 }
 
 #[derive(Clone, Copy)]
@@ -431,6 +436,7 @@ pub struct SgfxPaintEncoder {
     vertex_buffer: BufferId,
     solid_pipeline: RenderPipelineId,
     texture_pipeline: RenderPipelineId,
+    premultiplied_pipeline: RenderPipelineId,
     glyph_pipeline: RenderPipelineId,
     sampler: SamplerId,
     pixel_sampler: SamplerId,
@@ -453,6 +459,14 @@ pub struct SgfxPaintEncoder {
     retained_meshes: Vec<retained::RetainedMesh>,
     recording_mesh: bool,
     shadow_cache: Option<shadow_cache::ShadowCache>,
+    shape_cache: crate::geometry::ShapeCache,
+    backdrop: Option<backdrop::Resources>,
+    backdrop_pixels: u64,
+    backdrop_filters: u32,
+    backdrop_fallbacks: u32,
+    analytic_glass: bool,
+    raster_tiles: Vec<tiles::Tile>,
+    tile_backdrop: Option<backdrop::Resources>,
 }
 
 impl SgfxPaintEncoder {
@@ -544,6 +558,7 @@ impl SgfxPaintEncoder {
             FragmentProgram::TextureVertexColor(TextureSampleMode::AlphaMask),
         )?
         .id();
+        let premultiplied_pipeline = tiles::pipeline(&table)?;
         let sampler = table
             .define_sampler(SamplerDesc::new(
                 // Keep text, icons, and retained surfaces smooth when a
@@ -590,13 +605,22 @@ impl SgfxPaintEncoder {
 
         Ok(Self {
             retained_meshes: Vec::new(),
+            analytic_glass: false,
+            raster_tiles: Vec::new(),
+            tile_backdrop: None,
             shadow_cache: None,
+            shape_cache: crate::geometry::ShapeCache::default(),
+            backdrop: None,
+            backdrop_pixels: 0,
+            backdrop_filters: 0,
+            backdrop_fallbacks: 0,
             recording_mesh: false,
             table,
             targets,
             vertex_buffer,
             solid_pipeline,
             texture_pipeline,
+            premultiplied_pipeline,
             glyph_pipeline,
             sampler,
             pixel_sampler,
@@ -781,6 +805,9 @@ impl SgfxPaintEncoder {
     /// texture uploads remain valid and are not needlessly uploaded again. The
     /// next presentation target must also be fully repainted by the platform.
     pub fn discard_frame(&mut self) {
+        for tile in &mut self.raster_tiles {
+            tile.invalidate();
+        }
         if let Some(cache) = self.shadow_cache.as_mut() {
             cache.list_id = 0;
         }
@@ -857,6 +884,21 @@ impl SgfxPaintEncoder {
         #[cfg(feature = "std")]
         let started = scarlet_ui_core::debug::frame_log_enabled().then(Instant::now);
         let render_areas = self.validate_render_areas(render_areas)?;
+        // A filter reads earlier painting beyond its output damage rectangle.
+        // Full replay prevents stale/previously filtered pixels in its halo.
+        let render_areas = if backdrop::contains_backdrop(paint) {
+            alloc::vec![PixelBounds {
+                x: 0,
+                y: 0,
+                width: self.width,
+                height: self.height,
+            }]
+        } else {
+            render_areas
+        };
+        self.backdrop_pixels = 0;
+        self.backdrop_filters = 0;
+        self.backdrop_fallbacks = 0;
         let target = *self.targets.get(slot).ok_or(Error::InvalidFrame)?;
         if let Some(source_slot) = copy_from {
             self.copy_target(executor, source_slot, slot)?;
@@ -981,6 +1023,11 @@ impl SgfxPaintEncoder {
             .map_err(|_| Error::FrameTooComplex)?;
         buffer_textures_before.extend(self.buffer_textures.iter().cloned());
         self.glyph_atlas_rebuild_required = false;
+        let backdrop_budget_before = (
+            self.backdrop_pixels,
+            self.backdrop_filters,
+            self.backdrop_fallbacks,
+        );
         match self.lower_once(paint, scale_milli, render_area) {
             Err(Error::FrameTooComplex) if self.glyph_atlas_rebuild_required => {
                 // Cached atlas pages may contain glyphs from many older frames. Rebuild
@@ -1006,6 +1053,11 @@ impl SgfxPaintEncoder {
                     texture.used_frame = 0;
                 }
                 self.glyph_atlas_rebuild_required = false;
+                (
+                    self.backdrop_pixels,
+                    self.backdrop_filters,
+                    self.backdrop_fallbacks,
+                ) = backdrop_budget_before;
                 self.lower_once(paint, scale_milli, render_area)
             }
             result => result,
@@ -1026,6 +1078,7 @@ impl SgfxPaintEncoder {
         );
         let mut tessellator =
             Tessellator::new(scale_milli, self.width, self.height, render_bounds)?;
+        tessellator.shape_cache = core::mem::take(&mut self.shape_cache);
         let mut draws = Vec::new();
         let mut uploads = Vec::new();
         let mut buffer_mappings: Vec<(u64, TextureId)> = Vec::new();
@@ -1060,6 +1113,25 @@ impl SgfxPaintEncoder {
                             DrawSource::Solid,
                         )?;
                     }
+                }
+                PaintCommand::BackdropFilterRoundedRect {
+                    rect,
+                    corner_radius,
+                    blur_radius,
+                    tint,
+                    refraction,
+                } => {
+                    self.lower_backdrop(
+                        &mut tessellator,
+                        &mut draws,
+                        *rect,
+                        *corner_radius,
+                        *blur_radius,
+                        *tint,
+                        *refraction,
+                        opacity,
+                        scale,
+                    )?;
                 }
                 PaintCommand::FillVerticalGradientRoundedRect {
                     rect,
@@ -1531,6 +1603,7 @@ impl SgfxPaintEncoder {
             DrawSource::Solid,
         )?;
         let vertex_bytes = encode_paint_vertices(tessellator.vertices())?;
+        self.shape_cache = core::mem::take(&mut tessellator.shape_cache);
         Ok(LoweredFrame {
             vertex_bytes,
             draws,
@@ -2564,6 +2637,9 @@ impl SgfxPaintEncoder {
         let texture_pipeline = table
             .render_pipeline_ref(self.texture_pipeline)
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+        let premultiplied_pipeline = table
+            .render_pipeline_ref(self.premultiplied_pipeline)
+            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
         let glyph_pipeline = table
             .render_pipeline_ref(self.glyph_pipeline)
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -2571,6 +2647,15 @@ impl SgfxPaintEncoder {
         let transform = pixel_transform(self.width, self.height)?;
         let white = ir_color([1.0, 1.0, 1.0, 1.0])?;
 
+        // Upload data must outlive the batched command stream.
+        let backdrop_bytes: Vec<Option<Vec<u8>>> = frame
+            .draws
+            .iter()
+            .map(|draw| match draw.source {
+                DrawSource::Backdrop(filter) => self.backdrop_work_bytes(filter).map(Some),
+                _ => Ok(None),
+            })
+            .collect::<Result<_>>()?;
         let mut encoder = CommandEncoder::new(&table);
         let mut stream_commands = 0usize;
         let mut vertices_written = false;
@@ -2585,6 +2670,37 @@ impl SgfxPaintEncoder {
             let mut draw_index = 0usize;
             let mut first_pass = true;
             while draw_index < frame.draws.len() {
+                if let DrawSource::Backdrop(filter) = frame.draws[draw_index].source {
+                    if stream_commands.saturating_add(64) > MAX_COMMANDS {
+                        let commands = encoder
+                            .finish()
+                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                        executor.execute(&commands).map_err(FrameError::Execution)?;
+                        encoder = CommandEncoder::new(&table);
+                        stream_commands = 0;
+                    }
+                    if !vertices_written && !frame.vertex_bytes.is_empty() {
+                        encoder
+                            .write_buffer(vertex_buffer, 0, &frame.vertex_bytes)
+                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                        vertices_written = true;
+                        stream_commands += 1;
+                    }
+                    self.encode_backdrop(
+                        &mut encoder,
+                        &table,
+                        backdrop_bytes[draw_index]
+                            .as_deref()
+                            .ok_or(Error::InvalidFrame)?,
+                        target_id,
+                        frame.draws[draw_index],
+                        filter,
+                    )?;
+                    stream_commands += 63; // Conservative IR bound, including reserved pass endings.
+                    draw_index += 1;
+                    first_pass = false;
+                    continue;
+                }
                 // Batch independent damage passes into one stream. Preserve
                 // their original areas and clears; split only at IR capacity.
                 if stream_commands.saturating_add(PASS_COMMANDS + MAX_PAINT_DRAW_COMMANDS)
@@ -2619,6 +2735,9 @@ impl SgfxPaintEncoder {
 
                 while draw_index < frame.draws.len() {
                     let draw = frame.draws[draw_index];
+                    if matches!(draw.source, DrawSource::Backdrop(_)) {
+                        break;
+                    }
                     let Some(scissor) = intersect_bounds(draw.geometry.scissor, *render_area)
                     else {
                         draw_index += 1;
@@ -2629,8 +2748,12 @@ impl SgfxPaintEncoder {
                     }
                     let (pipeline, texture) = match draw.source {
                         DrawSource::Solid => (solid_pipeline, None),
+                        DrawSource::Backdrop(_) => unreachable!("backdrop is a pass barrier"),
                         DrawSource::Texture(texture) | DrawSource::PixelTexture(texture) => {
                             (texture_pipeline, Some(texture))
+                        }
+                        DrawSource::PremultipliedTexture(texture) => {
+                            (premultiplied_pipeline, Some(texture))
                         }
                         DrawSource::Glyph(texture) | DrawSource::IconGlyph(texture) => {
                             (glyph_pipeline, Some(texture))
@@ -2775,20 +2898,40 @@ impl SgfxPaintEncoder {
 
 fn extension_context(paint: &PaintContext<'_>) -> PaintContext<'static> {
     let mut extensions = PaintContext::new();
-    paint.visit_commands(&mut |command, origin| {
-        if let PaintCommand::Extension { rect, payload } = command {
-            extensions.draw_extension(
-                scarlet_ui_core::geometry::Rect::new(
-                    scarlet_ui_core::geometry::Point::new(
-                        rect.origin.x + origin.x,
-                        rect.origin.y + origin.y,
+    fn visit(
+        paint: &PaintContext<'_>,
+        origin: scarlet_ui_core::geometry::Point,
+        out: &mut PaintContext<'static>,
+    ) {
+        use scarlet_ui_core::geometry::{Point, Rect};
+        for command in paint.commands() {
+            match command {
+                PaintCommand::Extension { rect, payload } => out.draw_extension(
+                    Rect::new(
+                        Point::new(rect.origin.x + origin.x, rect.origin.y + origin.y),
+                        rect.size,
                     ),
-                    rect.size,
+                    Arc::clone(payload),
                 ),
-                Arc::clone(payload),
-            );
+                PaintCommand::DrawDisplayList {
+                    origin: local,
+                    list,
+                } if list.has_extensions() => {
+                    visit(
+                        list.context(),
+                        Point::new(origin.x + local.x, origin.y + local.y),
+                        out,
+                    );
+                }
+                _ => {}
+            }
         }
-    });
+    }
+    visit(
+        paint,
+        scarlet_ui_core::geometry::Point::ZERO,
+        &mut extensions,
+    );
     extensions
 }
 
@@ -3001,7 +3144,8 @@ fn push_draw_phase(
             .geometry
             .first_vertex
             .checked_add(previous.geometry.vertex_count);
-        if previous.source == source
+        if !matches!(source, DrawSource::Backdrop(_))
+            && previous.source == source
             && previous.snap_phase == snap_phase
             && previous.geometry.scissor == geometry.scissor
             && previous_end == Some(geometry.first_vertex)
@@ -3271,13 +3415,13 @@ mod tests {
     use sgfx::ir::{Command, CommandBuffer};
 
     #[derive(Default)]
-    struct RecordingExecutor {
-        command_kinds: Vec<Vec<&'static str>>,
+    pub(super) struct RecordingExecutor {
+        pub(super) command_kinds: Vec<Vec<&'static str>>,
         draw_vertices: Vec<u32>,
         buffer_write_sizes: Vec<usize>,
         viewports: Vec<[f32; 6]>,
         scissors: Vec<Option<PixelRect>>,
-        render_areas: Vec<PixelRect>,
+        pub(super) render_areas: Vec<PixelRect>,
     }
 
     impl CommandExecutor for RecordingExecutor {

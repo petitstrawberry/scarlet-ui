@@ -58,7 +58,9 @@ pub mod error;
 pub mod event;
 pub mod file_dialog;
 pub mod geometry;
+pub mod glass;
 pub mod graphics;
+pub use glass::{GlassQuality, glass_quality, set_glass_quality};
 pub mod icon;
 mod id;
 pub mod input_environment;
@@ -159,20 +161,20 @@ pub use views::modifiers::{
 pub use views::{
     BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, HorizontalSizeClass,
     IconView, Image, ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView,
-    ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabBarPlacement, TabBarPosition,
-    TabItem, TabStyle, TabView, Toggle, VectorImageData, VectorTriangle, VerticalSizeClass,
-    WindowSizeClass,
+    ScrollWheelDirection, ScrollbarVisibility, Select, SelectStyle, Slider, TabBarPlacement,
+    TabBarPosition, TabItem, TabStyle, TabView, Toggle, VectorImageData, VectorTriangle,
+    VerticalSizeClass, WindowSizeClass,
 };
 pub use views::{
-    Button, ElevationRole, HStack, LazyVStack, Rectangle, Spacer, SplitAxis, SplitAxisPolicy,
-    SplitView, Surface, SurfaceRole, Text, TextField, VStack, Window, WindowContentLayout,
-    WindowShadow, ZStack,
+    Button, ElevationRole, GlassMaterial, HStack, LazyVStack, Rectangle, Spacer, SplitAxis,
+    SplitAxisPolicy, SplitView, Surface, SurfaceRole, Text, TextField, TextStyle, TextTone, VStack,
+    Window, WindowContentLayout, WindowShadow, ZStack,
 };
 pub use views::{
     EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView, TextViewRenderObject,
     TextViewScroll, WrapMode,
 };
-pub use views::{NavigationLink, NavigationPresentation, NavigationView};
+pub use views::{NavigationLink, NavigationPresentation, NavigationSidebarStyle, NavigationView};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
 
 pub use scarlet_ui_macros::preview;
@@ -194,6 +196,7 @@ pub mod prelude {
         MouseEvent, ScrollSource, WheelPhase,
     };
     pub use crate::geometry::*;
+    pub use crate::glass::{GlassQuality, glass_quality, set_glass_quality};
     pub use crate::graphics::{
         FontStack, GlyphRasterKey, RasterizedGlyph, add_default_font_fallback,
         clear_default_font_fallbacks, default_font_stack, measure_text_sized_with_font_stack,
@@ -220,14 +223,15 @@ pub mod prelude {
     pub use crate::views::{
         BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar,
         HorizontalSizeClass, IconView, Image, ImageFit, ImageSource, ListView, ProgressView,
-        ScrollAxis, ScrollView, ScrollWheelDirection, ScrollbarVisibility, Select, Slider,
-        TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, Toggle, VectorImageData,
-        VectorTriangle, VerticalSizeClass, WindowSizeClass,
+        ScrollAxis, ScrollView, ScrollWheelDirection, ScrollbarVisibility, Select, SelectStyle,
+        Slider, TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, Toggle,
+        VectorImageData, VectorTriangle, VerticalSizeClass, WindowSizeClass,
     };
     pub use crate::views::{
-        Button, Either, Either3, Either4, Either5, Either6, ElevationRole, HStack, LazyVStack,
-        NavigationPresentation, Rectangle, Spacer, SplitAxis, SplitAxisPolicy, SplitView, Surface,
-        SurfaceRole, Text, TextField, VStack, Window, WindowContentLayout, WindowShadow, ZStack,
+        Button, Either, Either3, Either4, Either5, Either6, ElevationRole, GlassMaterial, HStack,
+        LazyVStack, NavigationPresentation, NavigationSidebarStyle, Rectangle, Spacer, SplitAxis,
+        SplitAxisPolicy, SplitView, Surface, SurfaceRole, Text, TextField, TextStyle, TextTone,
+        VStack, Window, WindowContentLayout, WindowShadow, ZStack,
     };
     pub use crate::views::{
         EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView,

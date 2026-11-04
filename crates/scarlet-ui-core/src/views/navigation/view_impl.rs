@@ -105,6 +105,7 @@ where
         content.nav.get_icon_color(),
         content.nav.get_presentation(),
     )
+    .sidebar_style(content.nav.get_sidebar_style())
 }
 
 fn navigation_child_views<T>(content: &NavigationContent<T>) -> Vec<Box<dyn View>>
@@ -113,11 +114,12 @@ where
 {
     let selected = content.nav.selected_index_state().get();
     let mut children: Vec<Box<dyn View>> = Vec::new();
-    children.push(Box::new(navigation_sidebar(content)));
+    children.push(content.nav.links().build_content(selected));
     if let Some(header_builder) = content.nav.header_builder() {
         children.push(header_builder());
     }
-    children.push(content.nav.links().build_content(selected));
+    // Chrome paints after the content it samples, and receives hits first.
+    children.push(Box::new(navigation_sidebar(content)));
     children
 }
 

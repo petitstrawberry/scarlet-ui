@@ -39,12 +39,14 @@ pub struct TextField {
     blur_on_empty: bool,
     autofocus: bool,
     background_color: Color,
+    material: Option<style::GlassMaterial>,
     border_color: Color,
     focused_border_color: Color,
     text_color: Color,
     placeholder_color: Color,
     font_size: f32,
     padding: f32,
+    enabled: bool,
 }
 
 impl TextField {
@@ -61,13 +63,31 @@ impl TextField {
             blur_on_empty: false,
             autofocus: false,
             background_color: style::surface_color(&palette, style::SurfaceRole::Canvas),
-            border_color: palette.divider(),
+            material: Some(style::GlassMaterial::editing()),
+            border_color: palette.border(),
             focused_border_color: style::focus_highlight(&palette),
             text_color: palette.text(),
             placeholder_color: palette.text_secondary(),
-            font_size: 14.0,
-            padding: 8.0,
+            font_size: style::CONTROL_FONT_SIZE,
+            padding: style::CONTROL_PADDING,
+            enabled: true,
         }
+    }
+
+    /// Override the default editing backdrop material without changing input or layout.
+    pub fn material(mut self, material: style::GlassMaterial) -> Self {
+        self.material = Some(material);
+        self
+    }
+
+    /// Enable editing, or display a non-interactive disabled field.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Set placeholder text shown while the value is empty.
@@ -141,7 +161,7 @@ impl TextField {
         self
     }
 
-    /// Set the text field background color.
+    /// Set the text field background color, opting out of default glass.
     ///
     /// # Arguments
     ///
@@ -152,10 +172,11 @@ impl TextField {
     /// The updated text field.
     pub fn background_color(mut self, color: Color) -> Self {
         self.background_color = color;
+        self.material = None;
         self
     }
 
-    /// Set the unfocused border color.
+    /// Set the unfocused border color, opting out of default glass.
     ///
     /// # Arguments
     ///
@@ -166,10 +187,11 @@ impl TextField {
     /// The updated text field.
     pub fn border_color(mut self, color: Color) -> Self {
         self.border_color = color;
+        self.material = None;
         self
     }
 
-    /// Set the focused border color.
+    /// Set the focused border color, opting out of default glass.
     ///
     /// # Arguments
     ///
@@ -180,6 +202,7 @@ impl TextField {
     /// The updated text field.
     pub fn focused_border_color(mut self, color: Color) -> Self {
         self.focused_border_color = color;
+        self.material = None;
         self
     }
 
@@ -255,12 +278,15 @@ pub struct TextFieldRenderObject {
     dragging: bool,
     placeholder: String,
     background_color: Color,
+    material: Option<style::GlassMaterial>,
     border_color: Color,
     focused_border_color: Color,
     text_color: Color,
     placeholder_color: Color,
     font_size: f32,
     padding: f32,
+    enabled: bool,
+    hovered: bool,
     size: Size,
 }
 
@@ -278,17 +304,20 @@ impl TextFieldRenderObject {
             preedit_cursor_byte: 0,
             preedit_anchor_byte: 0,
             preedit_spans: alloc::vec::Vec::new(),
-            focused: view.autofocus,
+            focused: view.autofocus && view.enabled,
             autofocus: view.autofocus,
             dragging: false,
             placeholder: view.placeholder.clone(),
             background_color: view.background_color,
+            material: view.material,
             border_color: view.border_color,
             focused_border_color: view.focused_border_color,
             text_color: view.text_color,
             placeholder_color: view.placeholder_color,
             font_size: view.font_size,
             padding: view.padding,
+            enabled: view.enabled,
+            hovered: false,
             size: Size::ZERO,
         }
     }
@@ -316,7 +345,7 @@ impl ElementRenderObject for TextFieldRenderObject {
         let line_height = graphics::line_height_sized(self.font_size).max(1) as f32;
         let intrinsic = Size::new(
             measured_width as f32 + preedit_width + self.padding * 2.0,
-            (line_height + self.padding * 2.0).max(style::metrics().minimum_control_height),
+            (line_height + self.padding * 2.0).max(style::CONTROL_HEIGHT),
         );
         self.size = constraints.constrain(intrinsic);
         self.compute_layout();
@@ -377,11 +406,15 @@ impl ElementRenderObject for TextFieldRenderObject {
                 caret: TextPosition::new(selection.caret.byte.min(len)),
             }
         };
-        self.focused = focused;
-        self.preedit = preedit;
+        self.focused = focused && view.enabled;
+        self.preedit = if view.enabled { preedit } else { String::new() };
         self.preedit_cursor_byte = preedit_cursor_byte;
         self.preedit_anchor_byte = preedit_anchor_byte;
-        self.preedit_spans = preedit_spans;
+        self.preedit_spans = if view.enabled {
+            preedit_spans
+        } else {
+            alloc::vec::Vec::new()
+        };
         self.size = size;
         self.compute_layout();
         crate::element::UpdateResult::Updated
@@ -391,8 +424,55 @@ impl ElementRenderObject for TextFieldRenderObject {
         true
     }
 
+    fn reads_backdrop(&self) -> bool {
+        self.material.is_some()
+    }
+
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
-        paint::paint_text_view(
+        let palette = ColorPalette::default();
+        let background = if self.enabled {
+            self.background_color
+        } else {
+            palette.background_secondary()
+        };
+        let text = if self.enabled {
+            self.text_color
+        } else {
+            palette.text_tertiary()
+        };
+        let border = if !self.enabled {
+            palette.divider()
+        } else if self.hovered {
+            self.border_color.darken(0.04)
+        } else {
+            self.border_color
+        };
+        let paint_content = if let Some(mut material) = self.material {
+            if !self.enabled {
+                material.tint = palette.background_secondary().with_opacity(0.86);
+            } else if self.hovered {
+                material.tint = material
+                    .tint
+                    .with_opacity((material.tint.a + 0.06).min(1.0));
+            }
+            style::paint_glass_material(
+                ctx,
+                crate::geometry::Rect::new(origin, self.size),
+                style::metrics().control_radius,
+                material,
+            );
+            if self.focused && self.enabled {
+                style::glass_control_focus(
+                    ctx,
+                    crate::geometry::Rect::new(origin, self.size),
+                    material,
+                );
+            }
+            paint::paint_text_view_content
+        } else {
+            paint::paint_text_view
+        };
+        paint_content(
             ctx,
             origin,
             self.size,
@@ -402,12 +482,16 @@ impl ElementRenderObject for TextFieldRenderObject {
             self.focused,
             self.font_size,
             self.padding,
-            self.background_color,
-            self.text_color,
-            self.placeholder_color,
+            background,
+            text,
+            if self.enabled {
+                self.placeholder_color
+            } else {
+                text
+            },
             self.selection_color(),
             Color::TRANSPARENT,
-            self.border_color,
+            border,
             self.focused_border_color,
             &self.placeholder,
             &self.preedit,
@@ -421,6 +505,10 @@ impl ElementRenderObject for TextFieldRenderObject {
 }
 
 impl TextFieldRenderObject {
+    pub(crate) fn set_hovered(&mut self, hovered: bool) {
+        self.hovered = hovered && self.enabled;
+    }
+
     pub(crate) fn is_focused(&self) -> bool {
         self.focused
     }
@@ -1030,6 +1118,155 @@ mod tests {
     use crate::renderer::PaintCommand;
     use crate::state::StateId;
 
+    fn glass_tint(render_object: &TextFieldRenderObject) -> Color {
+        let mut context = PaintContext::new();
+        render_object.paint(&mut context, Point::ZERO);
+        assert!(!context.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillVerticalGradientRoundedRect { .. }
+        )));
+        assert!(
+            context
+                .commands()
+                .iter()
+                .skip(1)
+                .any(|command| matches!(command, PaintCommand::DrawText { .. }))
+        );
+        match context.commands().first().expect("field surface") {
+            PaintCommand::BackdropFilterRoundedRect { tint, .. } => *tint,
+            _ => panic!("filter backdrop before crisp editable content"),
+        }
+    }
+
+    #[test]
+    fn default_field_uses_editing_material_and_uniform_state_faces() {
+        let text = State::new(crate::state::generate_state_id(), String::from("Name"));
+        let mut field = TextFieldRenderObject::from_view(&TextField::new(text.clone()));
+        field.layout(LayoutConstraints::tight(160.0, 36.0));
+        assert!(field.reads_backdrop());
+        let rest = glass_tint(&field);
+        assert_eq!(rest, style::GlassMaterial::editing().tint);
+        field.set_hovered(true);
+        assert_ne!(rest, glass_tint(&field));
+        let hovered = glass_tint(&field);
+        field.set_focused(true);
+        assert_eq!(hovered, glass_tint(&field));
+        field.set_hovered(false);
+        assert_eq!(rest, glass_tint(&field));
+        field.update(&TextField::new(text).enabled(false));
+        assert!(!field.is_focused());
+        assert!(field.reads_backdrop());
+        assert_ne!(rest, glass_tint(&field));
+        assert_eq!(field.size(), Size::new(160.0, 36.0));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn focus_ring_is_visible_without_darkening_light_or_dark_glass() {
+        for palette in [ColorPalette::light(), ColorPalette::dark()] {
+            let material =
+                style::GlassMaterial::new(18.0, palette.button_background().with_opacity(0.78));
+            let view = TextField::new(State::new(crate::state::generate_state_id(), String::new()))
+                .material(material);
+            let mut object = TextFieldRenderObject::from_view(&view);
+            object.layout(LayoutConstraints::tight(160.0, 36.0));
+            let mut face_samples = [0u32; 2];
+            let mut ring_samples = [0u32; 2];
+            for (index, focused) in [false, true].into_iter().enumerate() {
+                object.set_focused(focused);
+                let mut context = PaintContext::new();
+                object.paint(&mut context, Point::ZERO);
+                let mut buffer =
+                    crate::buffer::Buffer::from_logical_dimensions_with_scale(160, 36, 1000);
+                crate::renderer::CpuPaintRenderer::execute_into_buffer(
+                    &mut buffer,
+                    palette.background(),
+                    &context,
+                    None,
+                );
+                face_samples[index] = buffer.as_slice()[18 * 160 + 80];
+                ring_samples[index] = buffer.as_slice()[160 + 80];
+                assert!(
+                    matches!(context.commands()[0], PaintCommand::BackdropFilterRoundedRect { tint, .. } if tint == material.tint)
+                );
+                assert_eq!(
+                    context
+                        .commands()
+                        .iter()
+                        .filter(|command| matches!(command, PaintCommand::StrokeRoundedRect { .. }))
+                        .count(),
+                    usize::from(focused)
+                );
+            }
+            assert_eq!(
+                face_samples[0], face_samples[1],
+                "focus must not recolor the face"
+            );
+            let luminance = |pixel: u32| {
+                let channels = [16, 8, 0].map(|shift| ((pixel >> shift) & 255) as f32 / 255.0);
+                let linear = channels.map(|v| {
+                    if v <= 0.04045 {
+                        v / 12.92
+                    } else {
+                        ((v + 0.055) / 1.055).powf(2.4)
+                    }
+                });
+                linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722
+            };
+            let rest = luminance(ring_samples[0]);
+            let focus = luminance(ring_samples[1]);
+            let contrast = (rest.max(focus) + 0.05) / (rest.min(focus) + 0.05);
+            assert!(
+                contrast >= 1.2,
+                "focus ring contrast on {:?}: {contrast}",
+                palette.scheme()
+            );
+            object.set_focused(false);
+            assert_eq!(glass_tint(&object), material.tint);
+            assert_eq!(object.size(), Size::new(160.0, 36.0));
+        }
+    }
+
+    #[test]
+    fn custom_field_face_is_uniform_and_preserves_requested_color() {
+        let color = Color::rgb(30u8, 50u8, 70u8);
+        let field = TextField::new(State::new(crate::state::generate_state_id(), String::new()))
+            .background_color(color)
+            .border_color(Color::CLEAR);
+        let mut object = TextFieldRenderObject::from_view(&field);
+        object.layout(LayoutConstraints::tight(160.0, 36.0));
+        assert!(!object.reads_backdrop());
+        let mut context = PaintContext::new();
+        object.paint(&mut context, Point::ZERO);
+        assert!(matches!(context.commands().first(), Some(
+            PaintCommand::FillRoundedRect { color: face, .. }
+        ) if *face == color));
+        object.set_focused(true);
+        object.set_hovered(true);
+        let mut focused = PaintContext::new();
+        object.paint(&mut focused, Point::ZERO);
+        assert!(matches!(focused.commands().first(), Some(
+            PaintCommand::FillRoundedRect { color: face, .. }
+        ) if *face == color));
+        assert!(matches!(focused.commands().get(1), Some(
+            PaintCommand::StrokeRoundedRect { color, .. }
+        ) if *color == ColorPalette::default().primary().with_opacity(0.40)));
+        assert!(!focused.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillVerticalGradientRoundedRect { .. }
+        )));
+    }
+
+    #[test]
+    fn explicit_field_chrome_preserves_custom_colors_and_readback_updates() {
+        let text = State::new(crate::state::generate_state_id(), String::new());
+        let view = TextField::new(text).background_color(Color::CLEAR);
+        let mut field = TextFieldRenderObject::from_view(&view);
+        assert!(!field.reads_backdrop());
+        field.update(&view.material(style::GlassMaterial::editing()));
+        assert!(field.reads_backdrop());
+    }
+
     #[test]
     fn physical_space_and_text_insert_one_space() {
         let text = State::new(crate::state::generate_state_id(), String::from("ab"));
@@ -1230,18 +1467,18 @@ mod tests {
         assert!(
             ctx.commands()
                 .iter()
-                .any(|command| matches!(command, PaintCommand::FillRoundedRect { .. }))
+                .any(|command| matches!(command, PaintCommand::BackdropFilterRoundedRect { .. }))
         );
         assert!(
             ctx.commands()
                 .iter()
-                .any(|command| matches!(command, PaintCommand::FillPath { .. }))
+                .any(|command| matches!(command,
+                    PaintCommand::FillPath { color, .. } if *color == Color::rgb(150u8, 158u8, 170u8)))
         );
-        assert!(
-            ctx.commands()
-                .iter()
-                .any(|command| matches!(command, PaintCommand::StrokeRoundedRect { .. }))
-        );
+        assert!(!ctx.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillVerticalGradientRoundedRect { .. }
+        )));
     }
 
     #[test]

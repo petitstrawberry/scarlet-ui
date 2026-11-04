@@ -13,4 +13,4 @@ mod view_impl;
 pub use link::NavigationLink;
 pub(crate) use render::NavigationSidebarRenderObject;
 pub use render::NavigationViewRenderObject;
-pub use view::{NavigationPresentation, NavigationView};
+pub use view::{NavigationPresentation, NavigationSidebarStyle, NavigationView};

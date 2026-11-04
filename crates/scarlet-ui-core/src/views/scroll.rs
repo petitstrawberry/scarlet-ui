@@ -595,6 +595,7 @@ pub struct ScrollViewRenderObject<V: View> {
     axes: ScrollAxis,
     configured_content_size: Option<Size>,
     content_bottom_inset: f32,
+    overlay_bottom_inset: f32,
     wheel_scale: f32,
     horizontal_wheel_direction: ScrollWheelDirection,
     vertical_wheel_direction: ScrollWheelDirection,
@@ -635,6 +636,7 @@ impl<V: View> ScrollViewRenderObject<V> {
             axes,
             configured_content_size: content_size,
             content_bottom_inset: 0.0,
+            overlay_bottom_inset: 0.0,
             wheel_scale,
             horizontal_wheel_direction: ScrollWheelDirection::Normal,
             vertical_wheel_direction: ScrollWheelDirection::Normal,
@@ -761,7 +763,8 @@ impl<V: View> ScrollViewRenderObject<V> {
         let viewport_extent = if horizontal {
             self.viewport_size.width
         } else {
-            (self.viewport_size.height - self.content_bottom_inset).max(1.0)
+            (self.viewport_size.height - self.content_bottom_inset - self.overlay_bottom_inset)
+                .max(1.0)
         };
         let viewport_bottom = viewport_top + viewport_extent;
         let next_offset = if item_top < viewport_top {
@@ -995,8 +998,11 @@ impl<V: View> ScrollViewRenderObject<V> {
             - metrics.scrollbar_inset
             - metrics.scrollbar_thickness;
         let track_y = origin.y + metrics.scrollbar_inset;
-        let track_h =
-            (self.viewport_size.height - metrics.scrollbar_inset * 2.0 - reserved).max(0.0);
+        let track_h = (self.viewport_size.height
+            - self.overlay_bottom_inset
+            - metrics.scrollbar_inset * 2.0
+            - reserved)
+            .max(0.0);
         if track_h <= 0.0 || track_x < origin.x {
             return None;
         }
@@ -1027,7 +1033,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let height = finite_viewport_axis(constraints.min_height, constraints.max_height);
         self.viewport_size = Size::new(width, height);
         self.content_size = self.configured_content_size.unwrap_or(self.viewport_size);
-        self.content_size.height += self.content_bottom_inset;
+        self.content_size.height += self.content_bottom_inset + self.overlay_bottom_inset;
         self.clamp_offsets();
         self.viewport_size
     }
@@ -1059,7 +1065,8 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
                 self.configured_content_size
                     .map(|size| size.height)
                     .unwrap_or(0.0),
-            ) + self.content_bottom_inset;
+            ) + self.content_bottom_inset
+                + self.overlay_bottom_inset;
             if !self.selection_scroll_pending {
                 if let Some(anchor) = &self.anchor {
                     if let Some(position) = child.resolve_scroll_anchor(&anchor.key) {
@@ -1201,7 +1208,10 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let old_allowance = self.text_input_allowance;
         let (mut x, mut y) = self.offset();
         self.text_input_allowance = Size::ZERO;
-        if let Some((caret, visible)) = request {
+        if let Some((caret, mut visible)) = request {
+            visible.size.height = visible.size.height.min(
+                (self.viewport_size.height - self.overlay_bottom_inset - visible.top()).max(0.0),
+            );
             self.selection_scroll_pending = false;
             // Additional travel is needed even when content fits the original
             // viewport: its bottom may now be covered by a software keyboard.
@@ -1403,6 +1413,19 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
             return ScrollOffsetUpdate::None;
         }
         self.apply_scroll_offset(children)
+    }
+
+    fn set_bottom_overlay_inset(&mut self, inset: f32) -> Option<bool> {
+        if !self.axes.allows_y() {
+            return None;
+        }
+        let inset = sanitize_non_negative(inset, 0.0);
+        let changed = self.overlay_bottom_inset != inset;
+        self.overlay_bottom_inset = inset;
+        if changed && self.selection_target.is_some() {
+            self.selection_scroll_pending = true;
+        }
+        Some(changed)
     }
 
     fn owns_child_viewport(&self) -> bool {
@@ -1855,6 +1878,27 @@ mod tests {
             Phase::Target,
         ));
         assert_eq!(render_object.offset(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn container_overlay_inset_preserves_authored_padding_and_reveals_last_item() {
+        let view = ScrollView::new(Text::new("content"))
+            .vertical()
+            .content_size(100.0, 2000.0)
+            .content_bottom_inset(10.0)
+            .scroll_to_index(Some(99), 20.0);
+        let mut render = ScrollViewRenderObject::<Text>::from_view(&view);
+        let mut children = alloc::vec![Text::new("content").create_element()];
+        render.layout_with_children(LayoutConstraints::tight(100.0, 200.0), &mut children);
+        assert_eq!(render.set_bottom_overlay_inset(72.0), Some(true));
+        render.layout_with_children(LayoutConstraints::tight(100.0, 200.0), &mut children);
+        assert_eq!(render.content_size().height, 2082.0);
+        assert_eq!(render.offset().1, 1882.0);
+        assert_eq!(render.set_bottom_overlay_inset(72.0), Some(false));
+        assert_eq!(render.set_bottom_overlay_inset(0.0), Some(true));
+        render.layout_with_children(LayoutConstraints::tight(100.0, 200.0), &mut children);
+        assert_eq!(render.content_size().height, 2010.0);
+        assert_eq!(render.offset().1, 1810.0);
     }
 
     #[test]

@@ -483,8 +483,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
         }
 
         let palette = ColorPalette::default();
-        let bg_color = style::surface_color(&palette, style::SurfaceRole::Floating);
-        let border_color = palette.border();
+        let bg_color = style::GlassMaterial::floating().tint.with_opacity(1.0);
         let text_color = palette.text_primary();
         let hover_color = palette.menu_hover();
         let separator_color = palette.divider();
@@ -498,7 +497,6 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
             // Legacy popup windows are opaque. Keep their full rectangular
             // background so transparent rounded corners cannot appear black.
             canvas.fill_rect(0, 0, width, height, bg_color);
-            canvas.draw_rect(0, 0, width, height, border_color);
 
             // Draw items
             let mut current_y = MENU_EDGE_PADDING;
@@ -594,17 +592,27 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
         self.buffer = None;
     }
 
+    fn reads_backdrop(&self) -> bool {
+        true
+    }
+
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let palette = ColorPalette::default();
-        let bg_color = style::surface_color(&palette, style::SurfaceRole::Floating);
-        let border_color = palette.border();
         let text_color = palette.text_primary();
         let hover_color = palette.menu_hover();
         let separator_color = palette.divider();
         let item_height = self.effective_item_height();
 
         let rect = Rect::new(origin, self.size);
-        style::popover_surface(ctx, rect, bg_color, border_color, palette.shadow());
+        let radius = style::surface_radius(style::SurfaceRole::Floating);
+        style::elevation_shadow(
+            ctx,
+            rect,
+            radius,
+            palette.shadow(),
+            style::ElevationRole::Floating,
+        );
+        style::paint_glass_material(ctx, rect, radius, style::GlassMaterial::floating());
 
         let mut current_y = MENU_EDGE_PADDING;
         let font_size = MENU_FONT_SIZE;
@@ -919,7 +927,7 @@ mod tests {
 
     #[test]
     #[allow(deprecated)]
-    fn legacy_buffer_matches_retained_menu_semantics() {
+    fn legacy_popup_is_readable_opaque_fallback_and_retained_menu_reads_backdrop() {
         let _environment = install_test_input_environment(pointer_environment());
         let palette = ColorPalette::default();
         let mut menu = MenuRenderObject::new_adaptive(
@@ -932,13 +940,36 @@ mod tests {
         );
         menu.set_hovered(Some(0));
         menu.layout(LayoutConstraints::unconstrained());
+        // These assertions inspect physical 1x pixels. Other pipeline tests
+        // change the process-wide UI scale, so pin this fixture explicitly.
+        menu.buffer = Some(Buffer::from_logical_dimensions_with_scale(
+            menu.size.width as u32,
+            menu.size.height as u32,
+            1000,
+        ));
         menu.render();
 
         let buffer = menu
             .get_buffer()
             .expect("layout creates a legacy popup buffer");
-        assert_eq!(buffer.get_pixel(0, 0), Some(palette.border().to_bgra()));
-        assert_eq!(buffer.get_pixel(60, 0), Some(palette.border().to_bgra()));
+        assert_eq!(
+            buffer.get_pixel(0, 0),
+            Some(
+                style::GlassMaterial::floating()
+                    .tint
+                    .with_opacity(1.0)
+                    .to_bgra()
+            )
+        );
+        assert_eq!(
+            buffer.get_pixel(60, 0),
+            Some(
+                style::GlassMaterial::floating()
+                    .tint
+                    .with_opacity(1.0)
+                    .to_bgra()
+            )
+        );
         assert_eq!(
             buffer.get_pixel(50, 10),
             Some(palette.menu_hover().to_bgra())
@@ -947,17 +978,17 @@ mod tests {
 
         let mut paint = PaintContext::new();
         assert!(menu.paint(&mut paint, Point::ZERO));
+        assert!(menu.reads_backdrop());
         assert!(paint.commands().iter().any(|command| matches!(
             command,
-            PaintCommand::FillRoundedRect { corner_radius, color, .. }
+            PaintCommand::BackdropFilterRoundedRect { corner_radius, tint, .. }
                 if *corner_radius == style::surface_radius(style::SurfaceRole::Floating)
-                    && *color == style::surface_color(&palette, style::SurfaceRole::Floating)
+                    && *tint == style::GlassMaterial::floating().tint
         )));
-        assert!(paint.commands().iter().any(|command| matches!(
+        assert!(!paint.commands().iter().any(|command| matches!(
             command,
-            PaintCommand::StrokeRoundedRect { corner_radius, color, .. }
-                if *corner_radius == style::surface_radius(style::SurfaceRole::Floating)
-                    && *color == palette.border()
+            PaintCommand::StrokeRoundedRect { .. }
+                | PaintCommand::FillVerticalGradientRoundedRect { .. }
         )));
         assert!(paint.commands().iter().any(|command| matches!(
             command,

@@ -101,17 +101,17 @@ impl SemanticColor {
         Self {
             // Base Colors - white/light gray
             background: Color::rgb(1.0, 1.0, 1.0),
-            background_secondary: Color::rgb(0.97, 0.97, 0.97),
-            background_tertiary: Color::rgb(0.95, 0.95, 0.97),
+            background_secondary: Color::rgb(247u8, 247u8, 248u8),
+            background_tertiary: Color::rgb(242u8, 243u8, 245u8),
 
             // Text Colors - Apple label colors
-            text: Color::rgb(0, 0, 0),                    // label
-            text_secondary: Color::rgba(60, 60, 67, 0.6), // secondaryLabel
-            text_tertiary: Color::rgba(60, 60, 67, 0.3),  // tertiaryLabel
+            text: Color::rgb(35u8, 37u8, 42u8),
+            text_secondary: Color::rgb(84u8, 87u8, 96u8),
+            text_tertiary: Color::rgb(159u8, 162u8, 170u8),
             text_inverse: Color::rgb(1.0, 1.0, 1.0),
 
             // Primary - scarlet red (緋色)
-            primary: Color::rgb(0.82, 0.15, 0.15),
+            primary: Color::rgb(197u8, 45u8, 60u8),
             primary_light: Color::rgb(0.92, 0.35, 0.35),
             primary_dark: Color::rgb(0.60, 0.10, 0.10),
 
@@ -129,13 +129,13 @@ impl SemanticColor {
             info: Color::rgb(0.0, 0.48, 1.0),
 
             // Border & Divider
-            border: Color::rgb(0.78, 0.78, 0.78),
-            divider: Color::rgb(0.89, 0.89, 0.89),
+            border: Color::rgb(215u8, 217u8, 222u8),
+            divider: Color::rgb(232u8, 233u8, 236u8),
 
             // Surface
             surface: Color::rgb(1.0, 1.0, 1.0),
             surface_variant: Color::rgb(0.95, 0.95, 0.97),
-            button_background: Color::rgb(229, 229, 234), // systemGray5
+            button_background: Color::rgb(244u8, 245u8, 247u8),
             header_button_hover: Color::rgba(60, 60, 67, 0.12),
             header_button_pressed: Color::rgba(60, 60, 67, 0.20),
 
@@ -149,7 +149,7 @@ impl SemanticColor {
             window_titlebar_background: Color::rgb(0.92, 0.92, 0.92),
             window_titlebar_text_active: Color::rgb(0.0, 0.0, 0.0),
             window_titlebar_text_inactive: Color::rgb(0.39, 0.39, 0.39),
-            window_titlebar_border: Color::rgb(0.78, 0.78, 0.78),
+            window_titlebar_border: Color::rgb(215u8, 217u8, 222u8),
             window_shadow: Color::rgba(0.0, 0.0, 0.0, 0.2),
         }
     }
@@ -158,14 +158,14 @@ impl SemanticColor {
     pub fn dark() -> Self {
         Self {
             // Base Colors - dark gray/black
-            background: Color::rgb(0.12, 0.12, 0.12),
-            background_secondary: Color::rgb(0.18, 0.18, 0.18),
-            background_tertiary: Color::rgb(0.24, 0.24, 0.24),
+            background: Color::rgb(26u8, 27u8, 30u8),
+            background_secondary: Color::rgb(31u8, 33u8, 37u8),
+            background_tertiary: Color::rgb(39u8, 41u8, 46u8),
 
             // Text Colors - Apple label colors
-            text: Color::rgb(255, 255, 255),                 // label
-            text_secondary: Color::rgba(235, 235, 245, 0.6), // secondaryLabel
-            text_tertiary: Color::rgba(235, 235, 245, 0.3),  // tertiaryLabel
+            text: Color::rgb(239u8, 240u8, 243u8),
+            text_secondary: Color::rgb(167u8, 171u8, 181u8),
+            text_tertiary: Color::rgb(107u8, 111u8, 122u8),
             text_inverse: Color::rgb(0.0, 0.0, 0.0),
 
             // Primary - scarlet red (緋色, lighter variant for dark mode)
@@ -187,13 +187,13 @@ impl SemanticColor {
             info: Color::rgb(0.2, 0.55, 1.0),
 
             // Border & Divider
-            border: Color::rgb(0.31, 0.31, 0.31),
+            border: Color::rgb(70u8, 74u8, 84u8),
             divider: Color::rgb(0.24, 0.24, 0.24),
 
             // Surface
             surface: Color::rgb(0.18, 0.18, 0.18),
             surface_variant: Color::rgb(0.22, 0.22, 0.22),
-            button_background: Color::rgb(44, 44, 46), // systemGray5 (dark)
+            button_background: Color::rgb(46u8, 49u8, 56u8),
             header_button_hover: Color::rgba(235, 235, 245, 0.16),
             header_button_pressed: Color::rgba(235, 235, 245, 0.24),
 
@@ -207,7 +207,7 @@ impl SemanticColor {
             window_titlebar_background: Color::rgb(0.22, 0.22, 0.22),
             window_titlebar_text_active: Color::rgb(1.0, 1.0, 1.0),
             window_titlebar_text_inactive: Color::rgb(0.59, 0.59, 0.59),
-            window_titlebar_border: Color::rgb(0.31, 0.31, 0.31),
+            window_titlebar_border: Color::rgb(70u8, 74u8, 84u8),
             window_shadow: Color::rgba(0.0, 0.0, 0.0, 0.31),
         }
     }

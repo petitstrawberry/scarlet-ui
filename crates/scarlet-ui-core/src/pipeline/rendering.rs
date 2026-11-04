@@ -96,6 +96,10 @@ pub struct RenderingPipeline {
     paint_needs_full: bool,
     paint_background_color: Option<crate::color::Color>,
     paint_enabled: bool,
+    // Backdrop filters depend on preceding scene pixels, not just their own
+    // retained picture. Changed frames replay the scene until dependency-aware
+    // damage propagation is available.
+    scene_reads_backdrop: bool,
     paint_caches: BTreeMap<ElementId, PaintCache>,
     window_backdrop_cache: Option<WindowBackdropCache>,
     layer_store: LayerStore,
@@ -133,6 +137,7 @@ impl RenderingPipeline {
             paint_needs_full: true,
             paint_background_color: None,
             paint_enabled: true,
+            scene_reads_backdrop: false,
             paint_caches: BTreeMap::new(),
             window_backdrop_cache: None,
             layer_store: LayerStore::new(),
@@ -424,8 +429,11 @@ impl RenderingPipeline {
             return false;
         };
         let size = backdrop.size();
-        let cacheable = Self::repaint_boundary_physical_size(size, scale_milli)
-            .is_some_and(|(_, _, pixels)| pixels <= MAX_REPAINT_BOUNDARY_CACHE_PIXELS);
+        // A size-only backdrop cache cannot hold exterior shadow pixels when
+        // custom geometry insets are smaller than the elevation outsets.
+        let cacheable = backdrop.shadow_fits_cache_bounds()
+            && Self::repaint_boundary_physical_size(size, scale_milli)
+                .is_some_and(|(_, _, pixels)| pixels <= MAX_REPAINT_BOUNDARY_CACHE_PIXELS);
         if !cacheable {
             *cache = None;
             backdrop.paint(ctx, origin);
@@ -459,7 +467,6 @@ impl RenderingPipeline {
                 &backdrop_ctx,
                 Some(&shadow_damage),
             );
-            Self::prepare_cached_buffer_for_composite(&mut buffer);
             *cache = Some(WindowBackdropCache {
                 backdrop,
                 origin,
@@ -583,6 +590,44 @@ impl RenderingPipeline {
         }
     }
 
+    fn sync_select_popup_viewports(&mut self) -> bool {
+        fn visit(element: &mut dyn Element, parent: Point, window: Size, legacy: bool) -> bool {
+            let position = element.position();
+            let origin = Point::new(parent.x + position.x, parent.y + position.y);
+            let mut changed = false;
+            if let Some(select) = element.render_object_mut().and_then(|ro| {
+                ro.as_any_mut()
+                    .downcast_mut::<crate::views::SelectRenderObject>()
+            }) {
+                if select.set_popup_viewport(Rect::from_xywh(
+                    -origin.x,
+                    -origin.y,
+                    window.width,
+                    window.height,
+                )) {
+                    changed = true;
+                    if legacy {
+                        crate::element::ElementRenderObject::render(select);
+                    }
+                }
+            }
+            for child in element.children_mut() {
+                changed |= visit(child.as_mut(), origin, window, legacy);
+            }
+            changed
+        }
+        let changed = self.element_tree.root_mut().is_some_and(|root| {
+            visit(
+                root.as_mut(),
+                Point::ZERO,
+                self.window_size,
+                !self.paint_enabled,
+            )
+        });
+        self.paint_needs_full |= changed;
+        changed
+    }
+
     /// Handle a render frame
     ///
     /// This flushes all dirty phases and renders to the window buffer.
@@ -601,6 +646,7 @@ impl RenderingPipeline {
             crate::logln!("[RenderingPipeline] flush() completed");
         }
 
+        let popup_geometry_changed = self.sync_select_popup_viewports();
         let background_color = self.extract_background_color();
 
         if self.paint_enabled {
@@ -613,7 +659,11 @@ impl RenderingPipeline {
         if let Some(ref mut renderer) = self.renderer {
             renderer.set_background_color(background_color);
             if let Some(root) = self.element_tree.root() {
-                let dirty_ids = self.pipeline_owner.last_paint_ids();
+                let dirty_ids = if popup_geometry_changed {
+                    &[]
+                } else {
+                    self.pipeline_owner.last_paint_ids()
+                };
                 renderer.composite(root, dirty_ids);
             }
 
@@ -627,7 +677,8 @@ impl RenderingPipeline {
         &mut self,
         background_color: crate::color::Color,
     ) -> crate::error::Result<PresentedFrame<'_>> {
-        if !self.paint_backend.uses_cpu_picture_cache() {
+        self.refresh_backdrop_dependency();
+        if self.scene_reads_backdrop || !self.paint_backend.uses_cpu_picture_cache() {
             return self.render_direct_paint_path(background_color);
         }
         let size = self.window_size;
@@ -657,7 +708,12 @@ impl RenderingPipeline {
             self.paint_renderer = Some(CpuPaintRenderer::new(size, scale, background_color));
         }
 
+        let has_select_overlay = self
+            .element_tree
+            .root()
+            .is_some_and(Self::subtree_has_select_overlay);
         let mut force_full = self.paint_needs_full
+            || (has_select_overlay && !self.pipeline_owner.last_composite_ids().is_empty())
             || creating_renderer
             || self.paint_background_color != Some(background_color)
             || self.last_paint_ids_require_full_refresh();
@@ -862,7 +918,35 @@ impl RenderingPipeline {
         }
     }
 
-    /// GPU backends encode the visible paint commands directly. Repaint
+    fn subtree_reads_backdrop(element: &dyn Element) -> bool {
+        element
+            .render_object()
+            .is_some_and(|object| object.reads_backdrop())
+            || element
+                .children()
+                .iter()
+                .any(|child| Self::subtree_reads_backdrop(child.as_ref()))
+    }
+
+    fn refresh_backdrop_dependency(&mut self) {
+        if !self.paint_needs_full && self.pipeline_owner.last_paint_ids().is_empty() {
+            return;
+        }
+        // Query without painting: painting may update damage-history cells.
+        // Composite-only transforms cannot add or remove material commands.
+        let reads_backdrop = self
+            .element_tree
+            .root()
+            .is_some_and(Self::subtree_reads_backdrop);
+        if reads_backdrop != self.scene_reads_backdrop {
+            self.paint_caches.clear();
+            self.layer_store.clear();
+            self.paint_needs_full = true;
+        }
+        self.scene_reads_backdrop = reads_backdrop;
+    }
+
+    /// GPU backends and backdrop-dependent CPU scenes encode commands directly. Repaint
     /// boundaries remain useful for the CPU fallback but must not turn native
     /// GPU rendering into a rasterize/upload loop on each scroll frame.
     fn render_direct_paint_path(
@@ -870,7 +954,7 @@ impl RenderingPipeline {
         background_color: crate::color::Color,
     ) -> crate::error::Result<PresentedFrame<'_>> {
         let started = crate::debug::frame_log_enabled().then(crate::clock::Instant::now);
-        let force_full =
+        let force_recording_rebuild =
             self.paint_needs_full || self.paint_background_color != Some(background_color);
         self.dirty_scratch.clear_for_frame();
         self.dirty_scratch
@@ -881,6 +965,8 @@ impl RenderingPipeline {
             .extend_from_slice(self.pipeline_owner.last_composite_ids());
         self.dirty_scratch.ids.sort_unstable();
         self.dirty_scratch.ids.dedup();
+        let force_full = force_recording_rebuild
+            || (self.scene_reads_backdrop && !self.dirty_scratch.ids.is_empty());
         if !force_full && self.dirty_scratch.ids.is_empty() {
             return Ok(PresentedFrame::Idle);
         }
@@ -906,13 +992,13 @@ impl RenderingPipeline {
         }
         if self.paint_backend.supports_retained_display_lists() {
             if let Some(root) = self.element_tree.root() {
-                if force_full || !self.pipeline_owner.last_paint_ids().is_empty() {
+                if force_recording_rebuild || !self.pipeline_owner.last_paint_ids().is_empty() {
                     self.retained_paint.sync_tree(
                         root,
                         self.pipeline_owner.last_paint_ids(),
                         self.pipeline_owner.last_self_paint_ids(),
                         self.pipeline_owner.last_children_ids(),
-                        force_full,
+                        force_recording_rebuild,
                     );
                 }
                 for id in self.pipeline_owner.last_composite_ids() {
@@ -972,6 +1058,9 @@ impl RenderingPipeline {
         if self.paint_backend.supports_retained_display_lists() {
             self.retained_paint
                 .collect_bounds(&mut self.last_paint_bounds);
+            if let Some(root) = self.element_tree.root() {
+                Self::collect_select_overlay_bounds(root, Point::ZERO, &mut self.last_paint_bounds);
+            }
         } else if let Some(root) = self.element_tree.root() {
             Self::collect_paint_bounds(root, Point::ZERO, None, &mut self.last_paint_bounds);
         }
@@ -1793,7 +1882,6 @@ impl RenderingPipeline {
                 chunk_ctx,
                 None,
             );
-            Self::prepare_cached_buffer_for_composite(buffer);
             chunk.logical_bounds = Self::compact_picture_chunk(buffer);
             chunk.logical_bounds.origin.x += origin.x;
             chunk.logical_bounds.origin.y += origin.y;
@@ -1823,7 +1911,6 @@ impl RenderingPipeline {
             chunk_ctx,
             None,
         );
-        Self::prepare_cached_buffer_for_composite(&mut buffer);
         let mut logical_bounds = Self::compact_picture_chunk(&mut buffer);
         logical_bounds.origin.x += origin.x;
         logical_bounds.origin.y += origin.y;
@@ -1854,27 +1941,8 @@ impl RenderingPipeline {
         true
     }
 
-    /// CPU painting produces premultiplied pixels. DrawBufferRect consumes
-    /// straight-alpha pixels, so cached pictures must be converted before they
-    /// become sources for another composite pass.
-    fn prepare_cached_buffer_for_composite(buffer: &mut Buffer) {
-        for pixel in buffer.as_mut_slice() {
-            let [blue, green, red, alpha] = pixel.to_le_bytes();
-            if alpha == 0 || alpha == 255 {
-                continue;
-            }
-            let unpremultiply = |component: u8| {
-                ((u32::from(component) * 255 + u32::from(alpha) / 2) / u32::from(alpha)).min(255)
-                    as u8
-            };
-            *pixel = u32::from_le_bytes([
-                unpremultiply(blue),
-                unpremultiply(green),
-                unpremultiply(red),
-                alpha,
-            ]);
-        }
-    }
+    // CPU buffers now consistently store straight-alpha pixels, including
+    // antialiased shapes and text. Cached chunks can be sampled directly.
 
     // A picture chunk covers only the paint before/between/after nested layers.
     // Storing the entire parent viewport for every chunk multiplies transparent
@@ -2544,34 +2612,45 @@ impl RenderingPipeline {
             origin.y + element.position().y,
         );
         let mut painted = false;
-        let clip = Self::clip_for_element(element, abs);
-
-        if let Some((rect, radius)) = clip {
-            ctx.push_rounded_clip(rect, radius);
-        }
-
+        // A popup is window-level content, not part of its ancestor's scroll
+        // clip. EventDispatcher's select-overlay traversal uses the same rule.
         for child in element.children() {
-            if Self::paint_select_overlays(ctx, child.as_ref(), abs, damage_rects) {
-                painted = true;
-            }
+            painted |= Self::paint_select_overlays(ctx, child.as_ref(), abs, damage_rects);
         }
-
-        let paint_bounds = Self::element_paint_bounds(element, abs);
-        let should_paint_self = damage_rects
-            .map(|rects| Self::overlaps_any(paint_bounds, rects))
-            .unwrap_or(true);
-        if should_paint_self
-            && Self::is_expanded_select(element)
-            && Self::paint_element_self(ctx, element, abs)
+        if Self::is_expanded_select(element)
+            && damage_rects.is_none_or(|rects| {
+                Self::overlaps_any(Self::element_paint_bounds(element, abs), rects)
+            })
+            && let Some(ro) = element.render_object()
         {
-            painted = true;
+            painted |= ro.paint(ctx, abs);
         }
-
-        if clip.is_some() {
-            ctx.pop_clip();
-        }
-
         painted
+    }
+
+    fn subtree_has_select_overlay(element: &dyn Element) -> bool {
+        Self::is_expanded_select(element)
+            || element
+                .children()
+                .iter()
+                .any(|child| Self::subtree_has_select_overlay(child.as_ref()))
+    }
+
+    fn collect_select_overlay_bounds(
+        element: &dyn Element,
+        origin: Point,
+        bounds: &mut BTreeMap<ElementId, Rect>,
+    ) {
+        let abs = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+        if Self::is_expanded_select(element) {
+            bounds.insert(element.id(), Self::element_paint_bounds(element, abs));
+        }
+        for child in element.children() {
+            Self::collect_select_overlay_bounds(child.as_ref(), abs, bounds);
+        }
     }
 
     pub(super) fn clip_for_element(element: &dyn Element, abs: Point) -> Option<(Rect, f32)> {
@@ -2600,14 +2679,18 @@ impl RenderingPipeline {
             return false;
         };
 
+        if Self::is_expanded_select(element) {
+            return false;
+        }
         let before = ctx.commands().len();
         if ro.paint(ctx, abs) || ctx.commands().len() > before {
             return true;
         }
 
         if let Some(buf) = element.get_buffer() {
+            let offset = ro.buffer_origin();
             let rect = crate::geometry::Rect::new(
-                abs,
+                Point::new(abs.x + offset.x, abs.y + offset.y),
                 Size::new(buf.logical_width() as f32, buf.logical_height() as f32),
             );
             ctx.draw_buffer_ref(rect, buf);
@@ -2690,26 +2773,36 @@ impl RenderingPipeline {
         }
     }
 
-    pub(super) fn element_paint_bounds(element: &dyn Element, absolute_origin: Point) -> Rect {
-        let bounds = element.bounds();
-        let mut width = bounds.size.width;
-        let mut height = bounds.size.height;
-        let render_object = element.render_object();
-        if let Some(select) = render_object.and_then(|render_object| {
-            render_object
-                .as_any()
-                .downcast_ref::<crate::views::SelectRenderObject>()
-        }) {
-            height = height.max(select.paint_height());
+    pub(crate) fn element_paint_bounds(element: &dyn Element, absolute_origin: Point) -> Rect {
+        element.render_object().map_or_else(
+            || Rect::new(absolute_origin, element.bounds().size),
+            |render_object| Self::render_object_paint_bounds(render_object, absolute_origin),
+        )
+    }
+
+    pub(crate) fn render_object_paint_bounds(
+        render_object: &dyn crate::element::ElementRenderObject,
+        absolute_origin: Point,
+    ) -> Rect {
+        let mut bounds = Self::apply_paint_outsets(
+            Rect::new(absolute_origin, render_object.size()),
+            render_object.paint_outsets(),
+        );
+        if let Some(buffer) = render_object.get_buffer() {
+            let offset = render_object.buffer_origin();
+            let buffer_bounds = Rect::from_xywh(
+                absolute_origin.x + offset.x,
+                absolute_origin.y + offset.y,
+                buffer.logical_width() as f32,
+                buffer.logical_height() as f32,
+            );
+            let left = bounds.left().min(buffer_bounds.left());
+            let top = bounds.top().min(buffer_bounds.top());
+            let right = bounds.right().max(buffer_bounds.right());
+            let bottom = bounds.bottom().max(buffer_bounds.bottom());
+            bounds = Rect::from_xywh(left, top, right - left, bottom - top);
         }
-        if let Some(buffer) = element.get_buffer() {
-            width = width.max(buffer.logical_width() as f32);
-            height = height.max(buffer.logical_height() as f32);
-        }
-        let bounds = Rect::from_xywh(absolute_origin.x, absolute_origin.y, width, height);
-        render_object.map_or(bounds, |render_object| {
-            Self::apply_paint_outsets(bounds, render_object.paint_outsets())
-        })
+        bounds
     }
 
     fn apply_paint_outsets(bounds: Rect, outsets: crate::geometry::EdgeInsets) -> Rect {
@@ -2779,6 +2872,11 @@ impl RenderingPipeline {
             origin.y + element.position().y,
         );
         let paint_bounds = Self::element_paint_bounds(element, abs);
+        let active_clip = if Self::is_expanded_select(element) {
+            None
+        } else {
+            active_clip
+        };
         let visible_bounds = active_clip
             .and_then(|clip| Self::intersect_paint_bounds(paint_bounds, clip))
             .unwrap_or_else(|| {
@@ -2809,6 +2907,9 @@ impl RenderingPipeline {
         element_tree: &crate::element::ElementTree,
         path: &[ElementId],
     ) -> Option<Rect> {
+        let is_overlay = element_tree
+            .find_element(*path.last()?)
+            .is_some_and(Self::is_expanded_select);
         let mut element = element_tree.root()?;
         let mut origin = Point::ZERO;
         let mut active_clip = None;
@@ -2829,7 +2930,7 @@ impl RenderingPipeline {
                 };
             }
 
-            if let Some((clip, _)) = Self::clip_for_element(element, abs) {
+            if !is_overlay && let Some((clip, _)) = Self::clip_for_element(element, abs) {
                 active_clip = match active_clip {
                     Some(active) => Self::intersect_paint_bounds(active, clip),
                     None => Some(clip),
@@ -2851,6 +2952,9 @@ impl RenderingPipeline {
         element_tree: &crate::element::ElementTree,
         path: &[ElementId],
     ) -> Option<Rect> {
+        let is_overlay = element_tree
+            .find_element(*path.last()?)
+            .is_some_and(Self::is_expanded_select);
         let mut element = element_tree.root()?;
         let mut origin = Point::ZERO;
         let mut active_clip = None;
@@ -2874,7 +2978,7 @@ impl RenderingPipeline {
                 };
             }
 
-            if let Some((clip, _)) = Self::clip_for_element(element, abs) {
+            if !is_overlay && let Some((clip, _)) = Self::clip_for_element(element, abs) {
                 active_clip = match active_clip {
                     Some(active) => Self::intersect_paint_bounds(active, clip),
                     None => Some(clip),
@@ -3156,6 +3260,7 @@ impl RenderingPipeline {
             self.window_size,
             false,
         );
+        self.sync_select_popup_viewports();
         let layout_us = started.map(|start| start.elapsed().as_micros());
         let background_color = self.extract_background_color();
         let result = self.render_paint_path(background_color);
@@ -3189,6 +3294,7 @@ impl RenderingPipeline {
     /// In a full implementation, this would route events through the
     /// EventDispatcher to the target elements.
     pub fn handle_event(&mut self, _event: &crate::event::Event) -> bool {
+        self.sync_select_popup_viewports();
         let started = (crate::debug::frame_log_enabled()
             && matches!(
                 _event,
@@ -3511,10 +3617,208 @@ mod tests {
         select_pipeline.handle_event(&touch_frame(6, 3, TouchPhase::Down, 10, 10));
         select_pipeline.handle_event(&touch_frame(7, 3, TouchPhase::Up, 10, 10));
         assert!(expanded.get());
-        select_pipeline.handle_event(&touch_frame(8, 4, TouchPhase::Down, 10, 80));
-        select_pipeline.handle_event(&touch_frame(9, 4, TouchPhase::Up, 10, 80));
+        let trigger_height = select_pipeline
+            .element_tree()
+            .root()
+            .unwrap()
+            .bounds()
+            .size
+            .height;
+        // The form popup is detached: 6px gap, 4px inset, then row centers.
+        let second_row_y = (trigger_height + 6.0 + 4.0 + trigger_height * 1.5) as i32;
+        select_pipeline.handle_event(&touch_frame(8, 4, TouchPhase::Down, 10, second_row_y));
+        select_pipeline.handle_event(&touch_frame(9, 4, TouchPhase::Up, 10, second_row_y));
         assert_eq!(selected.get(), 1);
         assert!(!expanded.get());
+    }
+
+    #[test]
+    fn select_overlay_escapes_ancestor_clip_hits_above_trigger_and_repairs_close_damage() {
+        fn find_select(element: &dyn Element, parent: Point) -> Option<(ElementId, Point)> {
+            let origin = Point::new(
+                parent.x + element.position().x,
+                parent.y + element.position().y,
+            );
+            if element
+                .render_object()
+                .is_some_and(|ro| ro.as_any().is::<crate::views::SelectRenderObject>())
+            {
+                return Some((element.id(), origin));
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| find_select(child.as_ref(), origin))
+        }
+        struct CommandBackend {
+            renderer: CpuPaintRenderer,
+            retained: bool,
+        }
+        impl PaintBackend for CommandBackend {
+            fn supports_retained_display_lists(&self) -> bool {
+                self.retained
+            }
+            fn resize(&mut self, size: Size, scale: u32) {
+                self.renderer.resize(size, scale);
+            }
+            fn render<'a>(
+                &'a mut self,
+                context: &PaintContext<'_>,
+                background: crate::Color,
+                damage: Option<&[Rect]>,
+                _: Option<&[DamageRect]>,
+            ) -> crate::Result<BackendFrame<'a>> {
+                assert!(
+                    context.buffers().is_empty(),
+                    "direct/SGFX path must retain vector menu geometry"
+                );
+                self.renderer.set_background_color(background);
+                self.renderer.execute_with_damage(context, damage);
+                Ok(BackendFrame::Cpu {
+                    buffer: self.renderer.buffer(),
+                })
+            }
+        }
+        // CPU pictures, legacy buffers, direct commands, and retained command lists.
+        for mode in 0..4 {
+            let legacy = mode == 1;
+            let selected = State::new(crate::state::generate_state_id(), 1);
+            let select = Select::new(
+                alloc::vec![
+                    String::from("Compact"),
+                    String::from("Regular"),
+                    String::from("Comfortable")
+                ],
+                selected.clone(),
+            )
+            .style(crate::views::SelectStyle::Menu)
+            .width(260.0);
+            let expanded = select.expanded().clone();
+            let mut pipeline = RenderingPipeline::new();
+            pipeline.set_paint_enabled(!legacy);
+            if mode >= 2 {
+                pipeline.set_paint_backend(Box::new(CommandBackend {
+                    renderer: CpuPaintRenderer::new(
+                        Size::new(400.0, 240.0),
+                        1000,
+                        crate::Color::WHITE,
+                    ),
+                    retained: mode == 3,
+                }));
+            }
+            pipeline.set_root(
+                Window::new(
+                    "Select overlay",
+                    crate::views::VStack::new((
+                        Rectangle::new()
+                            .fill(crate::Color::WHITE)
+                            .frame(360.0, 80.0),
+                        select.clip().frame(260.0, 36.0),
+                        Rectangle::new()
+                            .fill(crate::Color::WHITE)
+                            .frame(360.0, 100.0),
+                    ))
+                    .spacing(0.0),
+                )
+                .decorated(false)
+                .size(Size::new(400.0, 240.0))
+                .create_element(),
+            );
+            pipeline.layout_initial();
+            let baseline = pipeline.render().unwrap().as_slice().to_vec();
+            let (id, origin) =
+                find_select(pipeline.element_tree.root().unwrap(), Point::ZERO).unwrap();
+            let click = |pressed: bool, x: i32, y: i32| {
+                Event::Mouse(if pressed {
+                    MouseEvent::ButtonPressed {
+                        button: MouseButton::Left,
+                        x,
+                        y,
+                        click_count: 1,
+                    }
+                } else {
+                    MouseEvent::ButtonReleased {
+                        button: MouseButton::Left,
+                        x,
+                        y,
+                        click_count: 1,
+                    }
+                })
+            };
+            let trigger_x = (origin.x + 245.0) as i32;
+            let trigger_y = (origin.y + 18.0) as i32;
+            pipeline.handle_event(&click(true, trigger_x, trigger_y));
+            pipeline.handle_event(&click(false, trigger_x, trigger_y));
+            assert!(expanded.get());
+            let opened = pipeline.render().unwrap().as_slice().to_vec();
+            let select_ro = pipeline
+                .element_tree
+                .find_element(id)
+                .unwrap()
+                .render_object()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<crate::views::SelectRenderObject>()
+                .unwrap();
+            let first_x = (0..400)
+                .find(|x| {
+                    select_ro.option_index_at_point(Point::new(*x as f32 - origin.x, -6.0))
+                        == Some(0)
+                })
+                .unwrap()
+                + 12;
+            let first_y = (origin.y - 6.0) as i32;
+            let changed_above = ((origin.y as i32 - 20).max(0)..origin.y as i32).any(|y| {
+                (0..400).any(|x| opened[y as usize * 400 + x] != baseline[y as usize * 400 + x])
+            });
+            assert!(
+                changed_above,
+                "popup text above trigger must paint outside clip, mode={mode}"
+            );
+            pipeline.handle_event(&Event::Mouse(MouseEvent::Moved {
+                x: first_x,
+                y: first_y,
+            }));
+            let hovered = pipeline
+                .element_tree
+                .find_element(id)
+                .unwrap()
+                .render_object()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<crate::views::SelectRenderObject>()
+                .unwrap()
+                .hovered_index();
+            assert_eq!(hovered, Some(0), "negative local-Y hover must escape clip");
+            pipeline.render().unwrap();
+            pipeline.handle_event(&Event::Keyboard(KeyEvent::Pressed {
+                keycode: KeyCode::Escape,
+                modifiers: crate::event::KeyModifiers::empty(),
+            }));
+            assert!(!expanded.get());
+            let repaired = pipeline.render().unwrap().as_slice().to_vec();
+            pipeline.request_redraw();
+            let full = pipeline.render().unwrap().as_slice().to_vec();
+            let mismatch = repaired
+                .iter()
+                .zip(&full)
+                .enumerate()
+                .find(|(_, (a, b))| a != b);
+            assert!(
+                mismatch.is_none(),
+                "closing overlay must remove old pixels, mode={mode}: {mismatch:?}"
+            );
+            pipeline.handle_event(&click(true, trigger_x, trigger_y));
+            pipeline.handle_event(&click(false, trigger_x, trigger_y));
+            pipeline.handle_event(&click(true, first_x, first_y));
+            pipeline.handle_event(&click(false, first_x, first_y));
+            assert_eq!(
+                selected.get(),
+                0,
+                "mouse must select a row above its trigger"
+            );
+            assert!(!expanded.get());
+        }
     }
 
     #[test]
@@ -3985,6 +4289,84 @@ mod tests {
         assert!(damage.iter().all(|&(x, y, width, height)| {
             x.saturating_add(width) <= 40 && y.saturating_add(height) <= 40
         }));
+    }
+
+    #[test]
+    fn backdrop_material_reads_preceding_scene_and_bypasses_picture_cache() {
+        use crate::color::Color;
+        use crate::views::{GlassMaterial, Spacer, Surface, ZStack};
+        let color = State::new(crate::state::generate_state_id(), Color::rgb(220, 40, 40));
+        let glass = Surface::section(Spacer::new().frame(40.0, 80.0))
+            .material(GlassMaterial::new(9.0, Color::WHITE.with_opacity(0.5)))
+            .corner_radius(10.0);
+        let root = ZStack::new((
+            PaintOnlyComponentHarness {
+                color: color.clone(),
+            },
+            ScrollView::new(glass)
+                .content_size(40.0, 80.0)
+                .wheel_sensitivity(1.0)
+                .frame(40.0, 40.0),
+        ))
+        .alignment(crate::Alignment::TopLeading)
+        .frame(40.0, 40.0)
+        .create_element();
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(root);
+        pipeline.layout_initial();
+        let first = pipeline
+            .render_with_damage()
+            .expect("initial material frame")
+            .0
+            .get_pixel(20, 20)
+            .unwrap();
+        assert!(pipeline.scene_reads_backdrop);
+        assert!(pipeline.paint_caches.is_empty());
+        assert_eq!(pipeline.paint_test_counters.boundary_rebuilds, 0);
+
+        color.set(Color::rgb(40, 80, 220));
+        let (buffer, damage) = pipeline
+            .render_with_damage()
+            .expect("changed backdrop frame");
+        let changed = buffer.get_pixel(20, 20).unwrap();
+        assert!(
+            damage.is_none(),
+            "changed backdrop dependencies require a full frame"
+        );
+        assert_ne!(
+            first, changed,
+            "glass must observe the sibling behind its boundary"
+        );
+        assert!((first >> 16 & 255) > (first & 255));
+        assert!((changed & 255) > (changed >> 16 & 255));
+        assert!(
+            pipeline.render_with_damage().is_none(),
+            "glass is not perpetual animation"
+        );
+
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: -20,
+            x: 20,
+            y: 20,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Wheel,
+        })));
+        let (_, damage) = pipeline
+            .render_with_damage()
+            .expect("material scroll frame");
+        assert!(
+            damage.is_none(),
+            "composite-only scroll also invalidates backdrop reads"
+        );
+
+        pipeline.set_root(PaintOnlyComponentHarness { color }.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+        assert!(
+            !pipeline.scene_reads_backdrop,
+            "ordinary cache routing returns when glass is removed"
+        );
     }
 
     #[test]
@@ -6072,7 +6454,6 @@ mod tests {
                 &ctx,
                 None,
             );
-            RenderingPipeline::prepare_cached_buffer_for_composite(&mut expected);
             let mut store = LayerStore::new();
             let generation = store.begin_rebuild();
             store.begin_container_rebuild(id, Some(owner), size, scale, generation);

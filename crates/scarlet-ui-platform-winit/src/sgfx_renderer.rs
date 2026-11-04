@@ -48,8 +48,9 @@ impl SgfxWindowPaintBackend {
         let width = width.max(1);
         let height = height.max(1);
         let supports_depth = window.supports_depth();
-        let encoder =
+        let mut encoder =
             SgfxPaintEncoder::new(width, height, supports_depth).map_err(|_| Error::RenderError)?;
+        encoder.set_analytic_glass(true);
         let targets = [
             encoder.target_texture(0).ok_or(Error::RenderError)?,
             encoder.target_texture(1).ok_or(Error::RenderError)?,
@@ -77,9 +78,10 @@ impl SgfxWindowPaintBackend {
         if self.encoder.width() == width && self.encoder.height() == height {
             return;
         }
-        let Ok(encoder) = SgfxPaintEncoder::new(width, height, self.supports_depth) else {
+        let Ok(mut encoder) = SgfxPaintEncoder::new(width, height, self.supports_depth) else {
             return;
         };
+        encoder.set_analytic_glass(true);
         let (Some(first_target), Some(second_target)) =
             (encoder.target_texture(0), encoder.target_texture(1))
         else {

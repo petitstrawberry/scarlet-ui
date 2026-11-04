@@ -654,6 +654,35 @@ impl Buffer {
         let alpha = src_a * opacity;
         let inv_a = 255.0 - alpha;
 
+        // Buffers store straight-alpha RGB, as does Canvas text rendering.
+        // Normalizing only transparent destinations keeps the opaque fast path
+        // byte-identical while preventing AA fringes from being multiplied
+        // twice when a rounded clipping layer is composited later.
+        if dst_bytes[3] == 0 {
+            return u32::from_le_bytes([
+                src_bytes[0],
+                src_bytes[1],
+                src_bytes[2],
+                alpha.clamp(0.0, 255.0) as u8,
+            ]);
+        }
+        if dst_bytes[3] < 255 {
+            let dst_alpha = dst_bytes[3] as f32 * inv_a / 255.0;
+            let out_alpha = alpha + dst_alpha;
+            if out_alpha <= 0.0 {
+                return 0;
+            }
+            let mut out = [0u8; 4];
+            for component in 0..3 {
+                out[component] = ((src_bytes[component] as f32 * alpha
+                    + dst_bytes[component] as f32 * dst_alpha)
+                    / out_alpha)
+                    .clamp(0.0, 255.0) as u8;
+            }
+            out[3] = out_alpha.clamp(0.0, 255.0) as u8;
+            return u32::from_le_bytes(out);
+        }
+
         let b = (src_bytes[0] as f32 * alpha + dst_bytes[0] as f32 * inv_a) / 255.0;
         let g = (src_bytes[1] as f32 * alpha + dst_bytes[1] as f32 * inv_a) / 255.0;
         let r = (src_bytes[2] as f32 * alpha + dst_bytes[2] as f32 * inv_a) / 255.0;

@@ -5,7 +5,7 @@
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::{Point, Rect, Size};
+use crate::geometry::{EdgeInsets, Point, Rect, Size};
 use crate::graphics;
 use crate::icon::{Icon, IconFill, IconSize, IconStyle, IconWeight};
 use crate::renderer::PaintContext;
@@ -38,6 +38,8 @@ pub struct Button {
     padding: f32,
     press_repeat: Option<(Duration, Duration)>,
     appearance: ButtonAppearance,
+    material: Option<style::GlassMaterial>,
+    enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,13 +63,32 @@ impl Button {
             background_color: palette.button_background(),
             hover_background_color: None,
             pressed_background_color: None,
-            border_color: Color::CLEAR,
+            border_color: palette.border(),
             text_color: palette.text_primary(),
-            font_size: 15.0,
-            padding: 4.0,
+            font_size: style::CONTROL_FONT_SIZE,
+            padding: style::CONTROL_PADDING,
             press_repeat: None,
             appearance: ButtonAppearance::Raised,
+            material: Some(style::GlassMaterial::button()),
+            enabled: true,
         }
+    }
+
+    /// Use the shared backdrop material on a raised button, without changing geometry or input.
+    /// Header-style buttons retain their compact, transparent treatment.
+    pub fn material(mut self, material: style::GlassMaterial) -> Self {
+        self.material = Some(material);
+        self
+    }
+
+    /// Enable interaction, or display a non-interactive disabled control.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Create a compact icon-only button.
@@ -91,12 +112,14 @@ impl Button {
             background_color: palette.button_background(),
             hover_background_color: None,
             pressed_background_color: None,
-            border_color: Color::CLEAR,
+            border_color: palette.border(),
             text_color: palette.text_primary(),
-            font_size: 15.0,
+            font_size: style::CONTROL_FONT_SIZE,
             padding: 7.0,
             press_repeat: None,
             appearance: ButtonAppearance::Raised,
+            material: Some(style::GlassMaterial::button()),
+            enabled: true,
         }
     }
 
@@ -232,9 +255,11 @@ impl Button {
         self
     }
 
-    /// Set the background color
+    /// Set a custom background color, opting out of the default glass material.
+    /// Call `material` afterward to restore a backdrop material.
     pub fn background_color(mut self, color: Color) -> Self {
         self.background_color = color;
+        self.material = None;
         self
     }
 
@@ -244,9 +269,11 @@ impl Button {
         self
     }
 
-    /// Set the border color
+    /// Set a custom border color, opting out of the default glass material.
+    /// Call `material` afterward to restore a backdrop material.
     pub fn border_color(mut self, color: Color) -> Self {
         self.border_color = color;
+        self.material = None;
         self
     }
 
@@ -316,12 +343,18 @@ impl Button {
 
     /// Invoke the click callback if present
     pub fn invoke_on_click(&self) {
+        if !self.enabled {
+            return;
+        }
         if let Some(callback) = self.on_click.as_ref() {
             callback();
         }
     }
 
     pub(crate) fn press_repeat_timing(&self) -> Option<(Duration, Duration)> {
+        if !self.enabled {
+            return None;
+        }
         self.on_click.as_ref()?;
         self.press_repeat
     }
@@ -342,6 +375,8 @@ impl Button {
         render_object.hover_background_color = self.hover_background_color;
         render_object.pressed_background_color = self.pressed_background_color;
         render_object.appearance = self.appearance;
+        render_object.material = self.material;
+        render_object.enabled = self.enabled;
         render_object
     }
 }
@@ -375,7 +410,11 @@ pub struct ButtonRenderObject {
     font_size: f32,
     padding: f32,
     appearance: ButtonAppearance,
+    material: Option<style::GlassMaterial>,
+    enabled: bool,
     hovered: bool,
+    focused: bool,
+    keyboard_pressed: bool,
     pressed: crate::views::press::PressSources,
     size: Size,
     buffer: Option<Buffer>,
@@ -424,7 +463,11 @@ impl ButtonRenderObject {
             font_size,
             padding,
             appearance: ButtonAppearance::Raised,
+            material: None,
+            enabled: true,
             hovered: false,
+            focused: false,
+            keyboard_pressed: false,
             pressed: crate::views::press::PressSources::default(),
             size: Size::ZERO,
             buffer: None,
@@ -441,70 +484,92 @@ impl ButtonRenderObject {
             let side = icon_size + self.padding * 2.0;
             return Size::new(side, side);
         }
-        let char_width = self.font_size * 0.6;
-
-        let text_width = self.label.len() as f32 * char_width;
+        let (text_width, _) = graphics::measure_text_sized(&self.label, self.font_size);
         let icon_width = if self.icon.is_some() {
             self.icon_size
                 .map(|size| size.logical_pixels() as f32)
-                .unwrap_or(self.font_size * 1.1)
-                + 6.0
+                .unwrap_or(16.0)
+                + style::CONTROL_GAP
         } else {
             0.0
         };
-        let width = text_width + icon_width + self.padding * 2.0;
-        let height = self.font_size * 1.2 + self.padding * 2.0;
+        let width = text_width as f32 + icon_width + self.padding * 2.0;
+        let height = graphics::line_height_sized(self.font_size) as f32 + self.padding * 2.0;
 
         Size { width, height }
     }
 
     pub fn set_hovered(&mut self, hovered: bool) {
-        self.hovered = hovered;
+        self.hovered = hovered && self.enabled;
     }
 
     pub fn set_pressed(&mut self, pressed: bool) {
-        self.pressed.set_mouse(pressed);
+        self.pressed.set_mouse(pressed && self.enabled);
     }
 
     pub fn set_touch_pressed(&mut self, id: u64, pressed: bool) {
-        self.pressed.set_touch(id, pressed);
+        self.pressed.set_touch(id, pressed && self.enabled);
     }
 
     pub fn is_pressed(&self) -> bool {
-        self.pressed.is_pressed()
+        self.pressed.is_pressed() || self.keyboard_pressed
     }
 
     pub fn is_mouse_pressed(&self) -> bool {
         self.pressed.is_mouse_pressed()
     }
 
-    fn shade_color(color: Color, factor: f32) -> Color {
-        let clamp = |v: f32| v.clamp(0.0, 1.0);
-        Color {
-            r: clamp(color.r * factor),
-            g: clamp(color.g * factor),
-            b: clamp(color.b * factor),
-            a: color.a,
+    pub(crate) fn is_focused(&self) -> bool {
+        self.focused && self.enabled
+    }
+
+    pub(crate) fn set_focused(&mut self, focused: bool) {
+        self.focused = focused && self.enabled;
+        if !self.focused {
+            self.keyboard_pressed = false;
+            self.pressed = Default::default();
+        }
+    }
+
+    pub(crate) fn set_keyboard_pressed(&mut self, pressed: bool) {
+        self.keyboard_pressed = pressed && self.enabled;
+    }
+
+    pub(crate) fn is_keyboard_pressed(&self) -> bool {
+        self.keyboard_pressed
+    }
+
+    fn current_text(&self) -> Color {
+        if self.enabled {
+            self.text_color
+        } else {
+            ColorPalette::default().text_tertiary()
         }
     }
 
     fn current_background(&self) -> Color {
-        if self.pressed.is_pressed() {
+        if !self.enabled {
+            return ColorPalette::default().background_secondary();
+        }
+        if self.is_pressed() {
             self.pressed_background_color
-                .unwrap_or_else(|| Self::shade_color(self.background_color, 0.92))
+                .unwrap_or_else(|| self.background_color.darken(0.08))
         } else if self.hovered {
             self.hover_background_color
-                .unwrap_or_else(|| Self::shade_color(self.background_color, 0.97))
+                .unwrap_or_else(|| self.background_color.darken(0.035))
         } else {
             self.background_color
         }
     }
 
     fn current_border(&self) -> Color {
-        if self.pressed.is_pressed() {
-            Self::shade_color(self.border_color, 0.90)
+        if !self.enabled {
+            return ColorPalette::default().divider();
+        }
+        if self.is_pressed() {
+            self.border_color.darken(0.08)
         } else if self.hovered {
-            Self::shade_color(self.border_color, 0.96)
+            self.border_color.darken(0.04)
         } else {
             self.border_color
         }
@@ -529,7 +594,11 @@ impl ElementRenderObject for ButtonRenderObject {
         let mut width = intrinsic.width;
         let mut height = intrinsic
             .height
-            .max(style::metrics().minimum_control_height);
+            .max(if self.appearance == ButtonAppearance::Header {
+                style::metrics().minimum_control_height
+            } else {
+                style::CONTROL_HEIGHT
+            });
 
         // Apply max constraints (don't exceed maximum)
         if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
@@ -548,9 +617,10 @@ impl ElementRenderObject for ButtonRenderObject {
 
         self.size = Size { width, height };
 
-        // Create buffer for this button
-        let w = libm::ceilf(width) as u32;
-        let h = libm::ceilf(height) as u32;
+        // Explicit-color controls retain their shadow outside the layout/hit box.
+        let outsets = self.paint_outsets();
+        let w = libm::ceilf(width + outsets.left + outsets.right) as u32;
+        let h = libm::ceilf(height + outsets.top + outsets.bottom) as u32;
 
         if crate::debug::is_enabled() {
             crate::logln!(
@@ -572,6 +642,19 @@ impl ElementRenderObject for ButtonRenderObject {
         self.size
     }
 
+    fn paint_outsets(&self) -> EdgeInsets {
+        if self.appearance == ButtonAppearance::Raised && self.material.is_none() {
+            style::elevation_outsets(style::ElevationRole::Raised)
+        } else {
+            EdgeInsets::ZERO
+        }
+    }
+
+    fn buffer_origin(&self) -> Point {
+        let outsets = self.paint_outsets();
+        Point::new(-outsets.left, -outsets.top)
+    }
+
     fn size(&self) -> Size {
         self.size
     }
@@ -585,57 +668,50 @@ impl ElementRenderObject for ButtonRenderObject {
     }
 
     fn render(&mut self) {
-        // Render button to buffer
-        if crate::debug::is_enabled() {
-            crate::logln!(
-                "[ButtonRenderObject] render: label='{}', buffer={}",
-                self.label,
-                self.buffer.is_some()
-            );
-        }
-        let background = self.current_background();
-        let border = self.current_border();
-        if let Some(ref mut buffer) = self.buffer {
-            let mut canvas = graphics::Canvas::for_buffer(buffer);
-            let width = canvas.width();
-            let height = canvas.height();
-
-            match self.appearance {
-                ButtonAppearance::Raised => {
-                    // Fill background
-                    canvas.fill_rect(0, 0, width, height, background);
-
-                    // Border
-                    canvas.draw_rect(0, 0, width, height, border);
-                }
-                ButtonAppearance::Header => {
-                    canvas.fill_rect(0, 0, width, height, Color::CLEAR);
-                    canvas_fill_rounded_rect(
-                        &mut canvas,
-                        width,
-                        height,
-                        style::radius_for(
-                            Rect::from_xywh(0.0, 0.0, width as f32, height as f32),
-                            style::metrics().control_radius,
-                        ),
-                        background,
-                    );
-                }
+        // Preserve the straight-alpha contract of compact legacy header buffers.
+        if self.appearance == ButtonAppearance::Header {
+            let background = self.current_background();
+            let text_color = self.current_text();
+            if let Some(buffer) = self.buffer.as_mut() {
+                let mut canvas = graphics::Canvas::for_buffer(buffer);
+                let width = canvas.width();
+                let height = canvas.height();
+                canvas.fill_rect(0, 0, width, height, Color::CLEAR);
+                canvas_fill_rounded_rect(
+                    &mut canvas,
+                    width,
+                    height,
+                    style::metrics().control_radius,
+                    background,
+                );
+                let (text_width, _) = graphics::measure_text_sized(&self.label, self.font_size);
+                canvas.draw_text_sized(
+                    ((width as i32 - text_width as i32) / 2).max(0),
+                    style::control_text_y(height as f32, self.font_size) as i32,
+                    &self.label,
+                    text_color,
+                    self.font_size,
+                );
             }
-
-            // Draw text centered
-            let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
-            let x = ((width as i32) - (text_w as i32)) / 2;
-            let y = ((height as i32) - (self.font_size as i32 * 6 / 5)) / 2;
-
-            canvas.draw_text_sized(
-                x.max(0),
-                y.max(0),
-                &self.label,
-                self.text_color,
-                self.font_size,
+            return;
+        }
+        // Keep the deprecated buffer route visually identical to retained paint.
+        let Some(mut buffer) = self.buffer.take() else {
+            return;
+        };
+        {
+            let mut ctx = PaintContext::new();
+            let origin = self.buffer_origin();
+            self.paint(&mut ctx, Point::new(-origin.x, -origin.y));
+            #[allow(deprecated)]
+            crate::renderer::CpuPaintRenderer::execute_into_buffer(
+                &mut buffer,
+                Color::CLEAR,
+                &ctx,
+                None,
             );
         }
+        self.buffer = Some(buffer);
     }
 
     fn get_buffer(&self) -> Option<&Buffer> {
@@ -646,6 +722,10 @@ impl ElementRenderObject for ButtonRenderObject {
         self.buffer = None;
     }
 
+    fn reads_backdrop(&self) -> bool {
+        self.appearance == ButtonAppearance::Raised && self.material.is_some()
+    }
+
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let rect = Rect::new(origin, self.size);
         let background = self.current_background();
@@ -653,13 +733,42 @@ impl ElementRenderObject for ButtonRenderObject {
 
         match self.appearance {
             ButtonAppearance::Raised => {
-                style::raised_control_surface(
-                    ctx,
-                    rect,
-                    background,
-                    border,
-                    self.pressed.is_pressed(),
-                );
+                // Glass controls share the thin editing surface. Feedback comes
+                // from the material tint, not a raised face or contact shadow.
+                if self.enabled && self.material.is_none() {
+                    let shadow = ColorPalette::default().shadow();
+                    style::elevation_shadow(
+                        ctx,
+                        rect,
+                        style::metrics().control_radius,
+                        shadow.with_opacity(shadow.a * if self.is_pressed() { 0.35 } else { 1.0 }),
+                        style::ElevationRole::Raised,
+                    );
+                }
+                if let Some(mut material) = self.material {
+                    if self.is_pressed() {
+                        material.tint = material
+                            .tint
+                            .darken(0.025)
+                            .with_opacity((material.tint.a + 0.12).min(1.0));
+                    } else if self.hovered {
+                        material.tint = material
+                            .tint
+                            .lighten(0.016)
+                            .with_opacity((material.tint.a + 0.06).min(1.0));
+                    }
+                    if !self.enabled {
+                        material.tint = material.tint.with_opacity(material.tint.a * 0.55);
+                    }
+                    style::paint_glass_material(
+                        ctx,
+                        rect,
+                        style::metrics().control_radius,
+                        material,
+                    );
+                } else {
+                    style::raised_control_surface(ctx, rect, background, border, self.is_pressed());
+                }
             }
             ButtonAppearance::Header => style::fill_control(ctx, rect, background),
         }
@@ -673,13 +782,13 @@ impl ElementRenderObject for ButtonRenderObject {
             let icon_size = self
                 .icon_size
                 .map(|size| size.logical_pixels() as f32)
-                .unwrap_or(available_icon_size)
+                .unwrap_or(16.0)
                 .min(available_icon_size);
             let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
             let group_width = if self.label.is_empty() {
                 icon_size
             } else {
-                icon_size + 6.0 + text_w as f32
+                icon_size + style::CONTROL_GAP + text_w as f32
             };
             let group_x = origin.x + ((self.size.width - group_width) / 2.0).max(0.0);
             crate::views::icon::paint_icon(
@@ -688,27 +797,31 @@ impl ElementRenderObject for ButtonRenderObject {
                 icon_size,
                 icon,
                 self.icon_style,
-                self.icon_color.unwrap_or(self.text_color),
+                if self.enabled {
+                    self.icon_color.unwrap_or(self.text_color)
+                } else {
+                    self.current_text()
+                },
             );
             if !self.label.is_empty() {
                 ctx.draw_text(
                     Point::new(
-                        group_x + icon_size + 6.0,
-                        origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0),
+                        group_x + icon_size + style::CONTROL_GAP,
+                        origin.y + style::control_text_y(self.size.height, self.font_size),
                     ),
                     self.label.clone(),
-                    self.text_color,
+                    self.current_text(),
                     self.font_size,
                 );
             }
         } else {
             let (text_w, _text_h) = graphics::measure_text_sized(&self.label, self.font_size);
             let x = origin.x + ((self.size.width - text_w as f32) / 2.0).max(0.0);
-            let y = origin.y + ((self.size.height - self.font_size * 1.2) / 2.0).max(0.0);
+            let y = origin.y + style::control_text_y(self.size.height, self.font_size);
             ctx.draw_text(
                 Point::new(x, y),
                 self.label.clone(),
-                self.text_color,
+                self.current_text(),
                 self.font_size,
             );
         }
@@ -732,6 +845,8 @@ impl ElementRenderObject for ButtonRenderObject {
             && self.font_size == button.font_size
             && self.padding == button.padding
             && self.appearance == button.appearance
+            && self.material == button.material
+            && self.enabled == button.enabled
         {
             return crate::element::UpdateResult::NoChange;
         }
@@ -748,6 +863,14 @@ impl ElementRenderObject for ButtonRenderObject {
         self.font_size = button.font_size;
         self.padding = button.padding;
         self.appearance = button.appearance;
+        self.material = button.material;
+        self.enabled = button.enabled;
+        if !self.enabled {
+            self.hovered = false;
+            self.focused = false;
+            self.keyboard_pressed = false;
+            self.pressed = Default::default();
+        }
         crate::element::UpdateResult::Updated
     }
 
@@ -808,6 +931,141 @@ mod tests {
         buffer.as_slice()[(y * buffer.width() + x) as usize]
     }
 
+    fn glass_tint(render_object: &ButtonRenderObject) -> Color {
+        let mut context = PaintContext::new();
+        render_object.paint(&mut context, Point::ZERO);
+        assert!(!context.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillVerticalGradientRoundedRect { .. } | PaintCommand::FillPath { .. }
+        )));
+        let filter_index = context
+            .commands()
+            .iter()
+            .position(|command| matches!(command, PaintCommand::BackdropFilterRoundedRect { .. }))
+            .expect("stock raised button should filter its backdrop");
+        assert!(
+            context.commands()[filter_index + 1..]
+                .iter()
+                .any(|command| matches!(command, PaintCommand::DrawText { .. })),
+            "foreground must be painted after backdrop filtering"
+        );
+        match &context.commands()[filter_index] {
+            PaintCommand::BackdropFilterRoundedRect { tint, .. } => *tint,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn stock_buttons_use_glass_with_distinct_uniform_states() {
+        let mut button = laid_out(Button::new("Save"));
+        assert!(button.reads_backdrop());
+        let rest = glass_tint(&button);
+        button.set_hovered(true);
+        let hover = glass_tint(&button);
+        button.set_pressed(true);
+        let pressed = glass_tint(&button);
+        button.set_pressed(false);
+        button.set_hovered(false);
+        button.set_focused(true);
+        let focused = glass_tint(&button);
+        let disabled = laid_out(Button::new("Save").enabled(false));
+        assert!(disabled.reads_backdrop());
+        assert_ne!(rest, hover);
+        assert_ne!(hover, pressed);
+        assert_eq!(rest, focused, "keyboard focus must not tint the glass face");
+        let mut focused_paint = PaintContext::new();
+        button.paint(&mut focused_paint, Point::ZERO);
+        assert!(
+            !focused_paint
+                .commands()
+                .iter()
+                .any(|command| matches!(command,
+                    PaintCommand::StrokeRoundedRect { stroke_width, .. } if *stroke_width == 3.0
+                ))
+        );
+        button.set_focused(false);
+        let mut unfocused_paint = PaintContext::new();
+        button.paint(&mut unfocused_paint, Point::ZERO);
+        assert!(
+            !unfocused_paint
+                .commands()
+                .iter()
+                .any(|command| matches!(command, PaintCommand::StrokeRoundedRect { .. }))
+        );
+        assert_ne!(rest, glass_tint(&disabled));
+        assert!(laid_out(Button::icon_only(Icon::Settings)).reads_backdrop());
+    }
+
+    #[test]
+    fn custom_button_chrome_and_headers_preserve_material_opt_out() {
+        let mut button =
+            laid_out(Button::new("Save").background_color(Color::rgb(255u8, 0u8, 0u8)));
+        assert!(!button.reads_backdrop());
+        assert!(
+            !laid_out(Button::new("Save").border_color(Color::rgb(255u8, 0u8, 0u8)))
+                .reads_backdrop()
+        );
+        assert!(!laid_out(Button::new("Save").header_style()).reads_backdrop());
+        button.update(
+            &Button::new("Save")
+                .background_color(Color::rgb(255u8, 0u8, 0u8))
+                .material(style::GlassMaterial::regular()),
+        );
+        assert!(button.reads_backdrop());
+        button.update(&Button::new("Save").header_style());
+        assert!(!button.reads_backdrop());
+    }
+
+    #[test]
+    fn glass_button_stays_thin_and_legible_without_a_contact_shadow() {
+        let mut button = laid_out(Button::new(""));
+        button.layout(LayoutConstraints::tight(100.0, 36.0));
+        for (hovered, pressed) in [(false, false), (true, false), (true, true)] {
+            button.set_hovered(hovered);
+            button.set_pressed(pressed);
+            let mut context = PaintContext::new();
+            button.paint(&mut context, Point::new(12.0, 12.0));
+            assert!(
+                !context.commands().iter().any(|command| matches!(
+                    command,
+                    PaintCommand::DrawRoundedRectShadow { .. }
+                        | PaintCommand::FillVerticalGradientRoundedRect { .. }
+                )),
+                "glass feedback must not add elevation or a bevel"
+            );
+            for scale in [1000, 2000] {
+                let mut renderer = crate::renderer::CpuPaintRenderer::new(
+                    Size::new(124.0, 64.0),
+                    scale,
+                    Color::WHITE,
+                );
+                renderer.execute(&context);
+                let buffer = renderer.buffer();
+                let factor = scale / 1000;
+                let pixel = |x: u32, y: u32| {
+                    buffer.as_slice()[(y * factor * buffer.width() + x * factor) as usize]
+                        .to_le_bytes()[0]
+                };
+                assert!(
+                    pixel(62, 28) < 250,
+                    "tint keeps the control visible on white"
+                );
+                assert_eq!(pixel(62, 54), 255, "no shadow below the control");
+            }
+            assert_eq!(button.paint_outsets(), EdgeInsets::ZERO);
+        }
+        let explicit = laid_out(Button::new("").background_color(Color::WHITE));
+        let mut context = PaintContext::new();
+        explicit.paint(&mut context, Point::ZERO);
+        assert!(
+            context
+                .commands()
+                .iter()
+                .any(|command| matches!(command, PaintCommand::DrawRoundedRectShadow { .. })),
+            "explicit-color buttons retain their compatibility treatment"
+        );
+    }
+
     #[test]
     fn header_style_uses_transparent_rest_and_distinct_semantic_state_fills() {
         let mut render_object = laid_out(Button::new("").header_style());
@@ -847,21 +1105,15 @@ mod tests {
     }
 
     #[test]
-    fn raised_button_keeps_its_legacy_shaded_interaction_colors() {
+    fn standard_button_has_distinct_flat_interaction_colors() {
         let mut render_object = laid_out(Button::new(""));
         let base = ColorPalette::default().button_background();
 
         assert_eq!(render_object.current_background(), base);
         render_object.set_hovered(true);
-        assert_eq!(
-            render_object.current_background(),
-            ButtonRenderObject::shade_color(base, 0.97)
-        );
+        assert_eq!(render_object.current_background(), base.darken(0.035));
         render_object.set_pressed(true);
-        assert_eq!(
-            render_object.current_background(),
-            ButtonRenderObject::shade_color(base, 0.92)
-        );
+        assert_eq!(render_object.current_background(), base.darken(0.08));
     }
 
     #[test]
@@ -892,7 +1144,7 @@ mod tests {
         ));
         let laptop_size = render_object.layout(LayoutConstraints::unconstrained());
 
-        assert_eq!(tablet_size.height, 26.0);
+        assert_eq!(tablet_size.height, 36.0);
         assert_eq!(laptop_size.height, tablet_size.height);
         assert_eq!(
             crate::current_input_environment().interaction_mode(),

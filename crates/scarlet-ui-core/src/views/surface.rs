@@ -18,7 +18,7 @@ use crate::renderer::PaintContext;
 use crate::view::View;
 
 use super::style;
-pub use super::style::{ElevationRole, SurfaceRole};
+pub use super::style::{ElevationRole, GlassMaterial, SurfaceRole};
 
 /// A semantic background surface that does not add padding or move its child.
 ///
@@ -35,6 +35,7 @@ pub struct Surface<V: View> {
     border_color: Option<Color>,
     bordered: bool,
     clip_content: bool,
+    material: Option<GlassMaterial>,
 }
 
 impl<V: View> Surface<V> {
@@ -52,6 +53,7 @@ impl<V: View> Surface<V> {
                 role,
                 SurfaceRole::Section | SurfaceRole::Floating | SurfaceRole::Overlay
             ),
+            material: None,
         }
     }
 
@@ -62,29 +64,44 @@ impl<V: View> Surface<V> {
 
     /// Create a menu/popover-style floating surface.
     pub fn floating(inner: V) -> Self {
-        Self::new(inner, SurfaceRole::Floating).elevation(ElevationRole::Floating)
+        Self::new(inner, SurfaceRole::Floating)
+            .elevation(ElevationRole::Floating)
+            .material(GlassMaterial::floating())
     }
 
     /// Create a dialog/sheet-style overlay surface.
     pub fn overlay(inner: V) -> Self {
-        Self::new(inner, SurfaceRole::Overlay).elevation(ElevationRole::Overlay)
+        Self::new(inner, SurfaceRole::Overlay)
+            .elevation(ElevationRole::Overlay)
+            .material(GlassMaterial::floating())
     }
 
     /// Set visual elevation without changing the surface's tonal role.
     pub fn elevation(mut self, elevation: ElevationRole) -> Self {
         self.elevation = elevation;
+        if elevation == ElevationRole::Raised && self.fill.is_none() && self.material.is_none() {
+            self.material = Some(GlassMaterial::regular());
+        }
         self
     }
 
     /// Use the restrained raised-card treatment.
-    pub fn raised(mut self) -> Self {
-        self.elevation = ElevationRole::Raised;
-        self
+    pub fn raised(self) -> Self {
+        self.elevation(ElevationRole::Raised)
     }
 
     /// Override the semantic fill color.
     pub fn fill(mut self, color: Color) -> Self {
         self.fill = Some(color);
+        self.material = None;
+        self
+    }
+
+    /// Use a real in-app backdrop blur and uniform tint instead of a solid fill.
+    /// No decorative border is added; callers can opt into one afterward.
+    pub fn material(mut self, material: GlassMaterial) -> Self {
+        self.material = Some(material);
+        self.bordered = false;
         self
     }
 
@@ -155,6 +172,7 @@ struct SurfaceRenderObject<V: View> {
     border_color: Option<Color>,
     bordered: bool,
     clip_content: bool,
+    material: Option<GlassMaterial>,
     size: Size,
     marker: PhantomData<fn() -> V>,
 }
@@ -169,6 +187,7 @@ impl<V: View> SurfaceRenderObject<V> {
             border_color: view.border_color,
             bordered: view.bordered,
             clip_content: view.clip_content,
+            material: view.material,
             size: Size::ZERO,
             marker: PhantomData,
         }
@@ -223,6 +242,10 @@ impl<V: View + Clone> ElementRenderObject for SurfaceRenderObject<V> {
 
     fn render(&mut self) {}
 
+    fn reads_backdrop(&self) -> bool {
+        self.material.is_some()
+    }
+
     fn paint(&self, ctx: &mut PaintContext<'_>, origin: Point) -> bool {
         let rect = self.rect(origin);
         if rect.size.width <= 0.0 || rect.size.height <= 0.0 {
@@ -232,7 +255,9 @@ impl<V: View + Clone> ElementRenderObject for SurfaceRenderObject<V> {
         let radius = style::radius_for(rect, self.corner_radius);
         let fill = self.resolved_fill(&palette);
         style::elevation_shadow(ctx, rect, radius, palette.shadow(), self.elevation);
-        if self.elevation == ElevationRole::Raised {
+        if let Some(material) = self.material {
+            style::paint_glass_material(ctx, rect, radius, material);
+        } else if self.elevation == ElevationRole::Raised {
             style::fill_raised_surface(ctx, rect, radius, fill, false);
         } else {
             ctx.fill_rounded_rect(rect, radius, fill);
@@ -286,6 +311,7 @@ impl<V: View + Clone> ElementRenderObject for SurfaceRenderObject<V> {
             || self.border_color != surface.border_color
             || self.bordered != surface.bordered
             || self.clip_content != surface.clip_content;
+        let changed = changed || self.material != surface.material;
         self.role = surface.role;
         self.elevation = surface.elevation;
         self.corner_radius = surface.corner_radius;
@@ -293,6 +319,7 @@ impl<V: View + Clone> ElementRenderObject for SurfaceRenderObject<V> {
         self.border_color = surface.border_color;
         self.bordered = surface.bordered;
         self.clip_content = surface.clip_content;
+        self.material = surface.material;
         if changed {
             UpdateResult::Updated
         } else {
@@ -329,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn raised_card_adds_one_restrained_shadow_and_gradient() {
+    fn raised_card_adds_soft_shadow_and_shared_material() {
         let surface = Surface::section(Spacer::new()).raised().bordered(true);
         let render = laid_out(&surface);
         let mut ctx = PaintContext::new();
@@ -339,7 +366,7 @@ mod tests {
             ctx.commands(),
             [
                 PaintCommand::DrawRoundedRectShadow { .. },
-                PaintCommand::FillVerticalGradientRoundedRect { .. }
+                PaintCommand::BackdropFilterRoundedRect { .. }
             ]
         ));
         assert_eq!(
@@ -362,6 +389,29 @@ mod tests {
         assert_eq!(overlay_ctx.commands().len(), 3);
         assert_ne!(floating.paint_outsets(), overlay.paint_outsets());
         assert!(overlay.paint_outsets().bottom > floating.paint_outsets().bottom);
+    }
+
+    #[test]
+    fn floating_surfaces_share_material_without_changing_section_defaults() {
+        for surface in [
+            Surface::floating(Spacer::new()),
+            Surface::overlay(Spacer::new()),
+        ] {
+            let render = laid_out(&surface);
+            let mut ctx = PaintContext::new();
+            render.paint(&mut ctx, Point::ZERO);
+            assert!(render.reads_backdrop());
+            assert!(ctx.commands().iter().any(|command| matches!(command,
+                PaintCommand::BackdropFilterRoundedRect { tint, .. }
+                    if *tint == GlassMaterial::floating().tint)));
+            assert!(!ctx.commands().iter().any(|command| matches!(
+                command,
+                PaintCommand::StrokeRoundedRect { .. }
+                    | PaintCommand::FillVerticalGradientRoundedRect { .. }
+            )));
+        }
+        assert!(!laid_out(&Surface::section(Spacer::new())).reads_backdrop());
+        assert!(!laid_out(&Surface::floating(Spacer::new()).fill(Color::WHITE)).reads_backdrop());
     }
 
     #[test]

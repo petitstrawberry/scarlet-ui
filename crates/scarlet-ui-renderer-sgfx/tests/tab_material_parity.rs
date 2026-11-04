@@ -1,0 +1,335 @@
+//! CPU/GPU comparison of the same stock TabView and showcase backdrop.
+#![cfg(not(target_arch = "wasm32"))]
+use scarlet_ui_core::{
+    NavigationLink, NavigationView,
+    element::{Element, LayoutConstraints},
+    prelude::*,
+    renderer::{CpuPaintRenderer, PaintContext},
+};
+use scarlet_ui_renderer_sgfx::SgfxPaintEncoder;
+use sgfx::ir::TextureFormat;
+use sgfx_backend_wgpu::{Context, Device};
+use std::{
+    fs,
+    io::{self, Write},
+    path::Path,
+};
+
+fn context() -> Option<Context> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        force_fallback_adapter: true,
+        ..Default::default()
+    }))
+    .or_else(|| pollster::block_on(instance.request_adapter(&Default::default())))?;
+    eprintln!("Tab parity adapter: {:?}", adapter.get_info());
+    if !adapter
+        .get_downlevel_capabilities()
+        .flags
+        .contains(wgpu::DownlevelFlags::VIEW_FORMATS)
+    {
+        return None;
+    }
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&Default::default(), None)).ok()?;
+    Some(Device::new(device, queue).create_context())
+}
+fn paint_tree<'a>(element: &'a dyn Element, ctx: &mut PaintContext<'a>, origin: Point) {
+    if let Some(render) = element.render_object() {
+        render.paint(ctx, origin);
+    }
+    for child in element.children() {
+        let p = child.position();
+        paint_tree(
+            child.as_ref(),
+            ctx,
+            Point::new(origin.x + p.x, origin.y + p.y),
+        );
+    }
+}
+fn tab_view(selected: usize, bottom: bool) -> TabView {
+    TabView::with_selected_index(vec![
+        TabItem::new("Mixer", || scarlet_ui_core::hstack! {
+            Text::new("Ch 1").frame(72.0,42.0), Text::new("Ch 2").frame(72.0,42.0),
+            Text::new("Master").frame(96.0,42.0),
+        }.spacing(8.0).padding(12.0)),
+        TabItem::new("Editor", || scarlet_ui_core::vstack! {
+            Text::new("Region Inspector").font_size(13.0), ProgressView::new(0.52).frame(220.0,18.0),
+        }.spacing(10.0).padding(12.0)),
+    ], State::new(scarlet_ui_core::generate_state_id(), selected))
+        .material(GlassMaterial::regular())
+        .tab_bar_placement(if bottom {TabBarPlacement::Bottom} else {TabBarPlacement::Top})
+}
+fn tab(selected: usize, bottom: bool) -> Box<dyn Element> {
+    let mut root = tab_view(selected, bottom).create_element();
+    root.layout(LayoutConstraints::tight(320.0, 150.0));
+    root
+}
+fn proof_background(ctx: &mut PaintContext<'_>) {
+    let panel = Rect::from_xywh(12.0, 24.0, 344.0, 150.0);
+    ctx.push_rounded_clip(panel, 20.0);
+    ctx.fill_rect(panel, Color::rgb(218, 225, 237));
+    let colors = [
+        Color::rgb(213, 183, 181),
+        Color::rgb(186, 185, 214),
+        Color::rgb(168, 198, 207),
+    ];
+    let cell = panel.size.width / 3.0;
+    for (index, color) in colors.into_iter().enumerate() {
+        let x = panel.origin.x + cell * index as f32;
+        ctx.fill_rect(
+            Rect::from_xywh(x, panel.origin.y, cell, panel.size.height),
+            color,
+        );
+        for line in 0..7 {
+            ctx.fill_rect(
+                Rect::from_xywh(
+                    x + 10.0,
+                    panel.origin.y + 14.0 + line as f32 * 19.0,
+                    cell - 20.0,
+                    1.0,
+                ),
+                Color::WHITE.with_opacity(0.30),
+            );
+        }
+    }
+    ctx.pop_clip();
+}
+fn save(path: &Path, width: u32, height: u32, bgra: &[u8]) -> io::Result<()> {
+    let mut f = io::BufWriter::new(fs::File::create(path)?);
+    write!(f, "P6\n{width} {height}\n255\n")?;
+    for p in bgra.chunks_exact(4) {
+        f.write_all(&[p[2], p[1], p[0]])?;
+    }
+    f.flush()
+}
+#[test]
+fn stock_tabs_match_cpu_and_gpu_on_the_same_background() {
+    let Some(context) = context() else {
+        assert!(
+            std::env::var_os("SCARLET_REQUIRE_GPU_TESTS").is_none(),
+            "GPU comparison requested but no usable WGPU adapter"
+        );
+        eprintln!("SKIP: no usable WGPU adapter; Tab GPU parity unverified");
+        return;
+    };
+    let output = std::env::var_os("SCARLET_TAB_PARITY_DIR").map(std::path::PathBuf::from);
+    if let Some(dir) = &output {
+        fs::create_dir_all(dir).unwrap();
+    }
+    for scale in [1000, 1500, 2000] {
+        let width = 368 * scale / 1000;
+        let height = 200 * scale / 1000;
+        let mut encoder = SgfxPaintEncoder::new(width, height, false).unwrap();
+        encoder.set_analytic_glass(true);
+        let target = encoder.target_texture(0).unwrap();
+        let mut resources = context.create_resources(encoder.resource_table());
+        let image = context
+            .create_image(width, height, TextureFormat::Bgra8Unorm)
+            .unwrap();
+        resources.map_image(target, image).unwrap();
+        let queue = context.create_queue();
+        for proof in [false, true] {
+            for bottom in [false, true] {
+                for selected in [0, 1] {
+                    let root = tab(selected, bottom);
+                    let mut paint = PaintContext::new();
+                    if proof {
+                        proof_background(&mut paint);
+                    }
+                    paint_tree(root.as_ref(), &mut paint, Point::new(24.0, 24.0));
+                    let mut cpu =
+                        CpuPaintRenderer::new(Size::new(368.0, 200.0), scale, Color::WHITE);
+                    cpu.execute(&paint);
+                    encoder
+                        .encode_frame(
+                            &mut queue.executor(&mut resources),
+                            0,
+                            None,
+                            &paint,
+                            Color::WHITE,
+                            scale,
+                            &[(0, 0, width, height)],
+                        )
+                        .unwrap();
+                    assert_eq!(encoder.backdrop_fallback_count(), 0);
+                    let gpu = resources.read_texture(target).unwrap();
+                    let cpu: Vec<u8> = cpu
+                        .buffer()
+                        .as_slice()
+                        .iter()
+                        .flat_map(|p| p.to_le_bytes())
+                        .collect();
+                    let name = format!(
+                        "{}-{}-selected{}-{}",
+                        if proof { "proof" } else { "plain" },
+                        if bottom { "bottom" } else { "top" },
+                        selected,
+                        scale
+                    );
+                    if let Some(dir) = &output {
+                        save(&dir.join(format!("{name}-cpu.ppm")), width, height, &cpu).unwrap();
+                        save(&dir.join(format!("{name}-gpu.ppm")), width, height, &gpu).unwrap();
+                    }
+                    let tab_y = if bottom { 138 } else { 24 };
+                    // Follow the compact bar's geometry; the former fixed samples
+                    // now intersect selected rounded corners, not material interiors.
+                    let bar = paint.commands().iter().find_map(|command| match command {
+                        scarlet_ui_core::renderer::PaintCommand::BackdropFilterRoundedRect { rect, .. } => Some(*rect),
+                        _ => None,
+                    }).unwrap();
+                    let mut max_delta = 0u8;
+                    for (fx, fy) in [
+                        (0.25, 6.0),
+                        (0.75, 6.0),
+                        (0.25, bar.size.height - 6.0),
+                        (0.75, bar.size.height - 6.0),
+                    ] {
+                        let x =
+                            ((bar.origin.x + bar.size.width * fx) * scale as f32 / 1000.0) as u32;
+                        let y = ((bar.origin.y + fy) * scale as f32 / 1000.0) as u32;
+                        let at = ((y * width + x) * 4) as usize;
+                        for c in 0..3 {
+                            max_delta = max_delta.max(cpu[at + c].abs_diff(gpu[at + c]));
+                        }
+                    }
+                    if !proof {
+                        // Content tabs sit within a surface without elevation.
+                        let x = 200 * scale / 1000;
+                        let y = (tab_y + 37) * scale / 1000;
+                        let at = ((y * width + x) * 4) as usize;
+                        assert_eq!(cpu[at], 255, "{name}: no tab shadow on content");
+                        assert_eq!(gpu[at], 255, "{name}: no tab shadow on content");
+                    }
+                    eprintln!("{name}: material interior max channel delta {max_delta}");
+                    assert!(
+                        max_delta <= 12,
+                        "{name}: CPU/GPU material color mismatch {max_delta}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn navigation_scene(width: u32, height: u32) -> Box<dyn Element> {
+    let links = (
+        NavigationLink::new("Overview", || Text::new("Overview")).icon(Icon::Home),
+        NavigationLink::new("Controls", || Text::new("Controls")).icon(Icon::Adjustments),
+        NavigationLink::new("Inputs", || Text::new("Inputs")).icon(Icon::FileText),
+        NavigationLink::new("Display", || {
+            scarlet_ui_core::vstack! {
+                Text::new("Display").font_size(24.0),
+                Text::new("Layouts and content").font_size(14.0),
+                tab_view(0, false).frame(320.0, 150.0),
+                scarlet_ui_core::hstack! {
+                    Button::new("Save changes").material(GlassMaterial::regular()),
+                    Button::new("Preview").material(GlassMaterial::regular()),
+                }.spacing(12.0),
+            }
+            .spacing(20.0)
+            .padding(20.0)
+        })
+        .icon(Icon::Photo),
+        NavigationLink::new("SGFX", || Text::new("SGFX")).icon(Icon::Package),
+    );
+    let view = NavigationView::new(links)
+        .presentation(NavigationPresentation::Automatic)
+        .sidebar_style(NavigationSidebarStyle::Floating)
+        .shows_icons(true)
+        .minimum_content_size(Size::new(320.0, 0.0));
+    view.selected_index_state().set(3);
+    let mut root = view.create_element();
+    root.layout(LayoutConstraints::tight(width as f32, height as f32));
+    root
+}
+
+#[test]
+fn responsive_navigation_renders_rounded_glass_in_portrait_and_landscape() {
+    let Some(context) = context() else {
+        assert!(
+            std::env::var_os("SCARLET_REQUIRE_GPU_TESTS").is_none(),
+            "GPU comparison requested but no usable WGPU adapter"
+        );
+        eprintln!("SKIP: no usable WGPU adapter; navigation GPU parity unverified");
+        return;
+    };
+    let output = std::env::var_os("SCARLET_TAB_PARITY_DIR").map(std::path::PathBuf::from);
+    if let Some(dir) = &output {
+        fs::create_dir_all(dir).unwrap();
+    }
+    for (width, height) in [(390, 640), (860, 560)] {
+        for scale in [1000, 2000] {
+            let pixel_width = width * scale / 1000;
+            let pixel_height = height * scale / 1000;
+            let root = navigation_scene(width, height);
+            let mut paint = PaintContext::new();
+            paint_tree(root.as_ref(), &mut paint, Point::ZERO);
+            let mut cpu =
+                CpuPaintRenderer::new(Size::new(width as f32, height as f32), scale, Color::WHITE);
+            cpu.execute(&paint);
+            let mut encoder = SgfxPaintEncoder::new(pixel_width, pixel_height, false).unwrap();
+            encoder.set_analytic_glass(true);
+            let target = encoder.target_texture(0).unwrap();
+            let mut resources = context.create_resources(encoder.resource_table());
+            let image = context
+                .create_image(pixel_width, pixel_height, TextureFormat::Bgra8Unorm)
+                .unwrap();
+            resources.map_image(target, image).unwrap();
+            let queue = context.create_queue();
+            encoder
+                .encode_frame(
+                    &mut queue.executor(&mut resources),
+                    0,
+                    None,
+                    &paint,
+                    Color::WHITE,
+                    scale,
+                    &[(0, 0, pixel_width, pixel_height)],
+                )
+                .unwrap();
+            assert_eq!(encoder.backdrop_fallback_count(), 0);
+            let gpu = resources.read_texture(target).unwrap();
+            let cpu: Vec<u8> = cpu
+                .buffer()
+                .as_slice()
+                .iter()
+                .flat_map(|p| p.to_le_bytes())
+                .collect();
+            let name = format!("navigation-{width}x{height}-{scale}");
+            if let Some(dir) = &output {
+                save(
+                    &dir.join(format!("{name}-cpu.ppm")),
+                    pixel_width,
+                    pixel_height,
+                    &cpu,
+                )
+                .unwrap();
+                save(
+                    &dir.join(format!("{name}-gpu.ppm")),
+                    pixel_width,
+                    pixel_height,
+                    &gpu,
+                )
+                .unwrap();
+            }
+            let (x, y) = if width < height {
+                (20, height - 12)
+            } else {
+                (100, height - 40)
+            };
+            let at = (((y * scale / 1000) * pixel_width + x * scale / 1000) * 4) as usize;
+            for c in 0..3 {
+                assert!(
+                    cpu[at + c].abs_diff(gpu[at + c]) <= 12,
+                    "{name}: CPU/GPU material mismatch"
+                );
+            }
+            assert_ne!(
+                &gpu[at..at + 3],
+                &[255, 255, 255],
+                "{name}: navigation surface must remain visible on white"
+            );
+        }
+    }
+}

@@ -1610,6 +1610,11 @@ impl EventDispatcher {
         let Some(root) = element_tree.root() else {
             return false;
         };
+        if let Some(mut overlay) = self.hit_test_select_overlay_recursive_ids(root, point) {
+            overlay.reverse();
+            path.extend(overlay);
+            return true;
+        }
         self.hit_test_recursive_ids_into(root, point, path)
     }
 

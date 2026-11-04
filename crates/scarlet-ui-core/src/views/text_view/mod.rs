@@ -57,6 +57,7 @@ pub struct TextView {
     line_numbers: bool,
     current_line_highlight: bool,
     background_color: Color,
+    material: Option<style::GlassMaterial>,
     text_color: Color,
     placeholder_color: Color,
     selection_color: Color,
@@ -112,6 +113,7 @@ impl TextView {
             line_numbers: false,
             current_line_highlight: false,
             background_color: style::surface_color(&palette, style::SurfaceRole::Canvas),
+            material: Some(style::GlassMaterial::editing()),
             text_color: palette.text(),
             placeholder_color: palette.text_secondary(),
             selection_color: style::text_selection_highlight(
@@ -254,7 +256,13 @@ impl TextView {
         self
     }
 
-    /// Set the text view background color.
+    /// Override the editing backdrop material without changing editing or layout.
+    pub fn material(mut self, material: style::GlassMaterial) -> Self {
+        self.material = Some(material);
+        self
+    }
+
+    /// Set a uniform background color, opting out of the default glass material.
     ///
     /// # Arguments
     ///
@@ -265,6 +273,7 @@ impl TextView {
     /// The updated text view.
     pub fn background(mut self, color: Color) -> Self {
         self.background_color = color;
+        self.material = None;
         self
     }
 
@@ -282,7 +291,7 @@ impl TextView {
         self
     }
 
-    /// Set the unfocused border color.
+    /// Set the unfocused border color, opting out of the default glass material.
     ///
     /// # Arguments
     ///
@@ -293,10 +302,11 @@ impl TextView {
     /// The updated text view.
     pub fn border_color(mut self, color: Color) -> Self {
         self.border_color = color;
+        self.material = None;
         self
     }
 
-    /// Set the focused border color.
+    /// Set the focused border color, opting out of the default glass material.
     ///
     /// # Arguments
     ///
@@ -307,6 +317,7 @@ impl TextView {
     /// The updated text view.
     pub fn focused_border_color(mut self, color: Color) -> Self {
         self.focused_border_color = color;
+        self.material = None;
         self
     }
 
@@ -479,6 +490,7 @@ pub struct TextViewRenderObject {
     line_numbers: bool,
     current_line_highlight: bool,
     background_color: Color,
+    material: Option<style::GlassMaterial>,
     text_color: Color,
     placeholder_color: Color,
     selection_color: Color,
@@ -543,6 +555,7 @@ impl TextViewRenderObject {
             line_numbers: view.line_numbers,
             current_line_highlight: view.current_line_highlight,
             background_color: view.background_color,
+            material: view.material,
             text_color: view.text_color,
             placeholder_color: view.placeholder_color,
             selection_color: view.selection_color,
@@ -728,8 +741,26 @@ impl ElementRenderObject for TextViewRenderObject {
         Rect::new(Point::ZERO, self.size).contains(point)
     }
 
+    fn reads_backdrop(&self) -> bool {
+        self.material.is_some()
+    }
+
     fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
-        paint::paint_text_view(
+        let paint_content = if let Some(material) = self.material {
+            style::paint_glass_material(
+                ctx,
+                Rect::new(origin, self.size),
+                style::metrics().control_radius,
+                material,
+            );
+            if self.focused {
+                style::glass_control_focus(ctx, Rect::new(origin, self.size), material);
+            }
+            paint::paint_text_view_content
+        } else {
+            paint::paint_text_view
+        };
+        paint_content(
             ctx,
             origin,
             self.size,
@@ -739,7 +770,11 @@ impl ElementRenderObject for TextViewRenderObject {
             self.focused,
             self.font_size,
             self.padding,
-            self.background_color,
+            if self.material.is_some() {
+                Color::CLEAR
+            } else {
+                self.background_color
+            },
             self.text_color,
             self.placeholder_color,
             self.selection_color,
@@ -815,4 +850,74 @@ fn clamp_byte_boundary(text: &str, byte: u32) -> u32 {
 fn preedit_prefix(preedit: &str, byte: u32) -> &str {
     let byte = clamp_byte_boundary(preedit, byte) as usize;
     &preedit[..byte]
+}
+
+#[cfg(test)]
+mod material_tests {
+    use super::*;
+    use crate::renderer::PaintCommand;
+
+    fn view() -> TextView {
+        TextView::new(
+            State::new(crate::state::generate_state_id(), String::from("one\ntwo")),
+            State::new(
+                crate::state::generate_state_id(),
+                TextSelection::collapsed(0),
+            ),
+        )
+    }
+
+    #[test]
+    fn editable_view_filters_before_content_and_preserves_focus_state() {
+        let view = view().line_numbers(true);
+        let mut object = TextViewRenderObject::from_view(&view);
+        object.layout(LayoutConstraints::tight(240.0, 120.0));
+        assert!(object.reads_backdrop());
+        let mut context = PaintContext::new();
+        object.paint(&mut context, Point::ZERO);
+        assert!(matches!(context.commands().first(), Some(
+            PaintCommand::BackdropFilterRoundedRect { tint, .. }
+        ) if *tint == style::GlassMaterial::editing().tint));
+        assert!(!context.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillVerticalGradientRoundedRect { .. }
+                | PaintCommand::StrokeRoundedRect { .. }
+        )));
+        assert!(context.commands().iter().any(|command| matches!(command,
+            PaintCommand::DrawText { text, .. } if text == "one"
+        )));
+        object.focused = true;
+        let mut focused = PaintContext::new();
+        object.paint(&mut focused, Point::ZERO);
+        assert!(matches!(focused.commands().first(), Some(
+            PaintCommand::BackdropFilterRoundedRect { tint, .. }
+        ) if *tint == style::GlassMaterial::editing().focused_editor().tint));
+        object.update(&view.background(Color::CLEAR));
+        assert!(!object.reads_backdrop());
+        assert!(object.focused);
+        assert_eq!(object.size, Size::new(240.0, 120.0));
+    }
+
+    #[test]
+    fn explicit_editor_colors_are_flat_and_material_can_be_restored() {
+        let color = Color::rgb(30u8, 50u8, 70u8);
+        let view = view().background(color).border_color(Color::CLEAR);
+        let mut object = TextViewRenderObject::from_view(&view);
+        object.layout(LayoutConstraints::tight(240.0, 120.0));
+        assert!(!object.reads_backdrop());
+        let mut context = PaintContext::new();
+        object.paint(&mut context, Point::ZERO);
+        assert!(matches!(context.commands().first(), Some(
+            PaintCommand::FillRoundedRect { color: face, .. }
+        ) if *face == color));
+        object.focused = true;
+        let mut focused = PaintContext::new();
+        object.paint(&mut focused, Point::ZERO);
+        assert!(!focused.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillVerticalGradientRoundedRect { .. }
+        )));
+        object.update(&view.material(style::GlassMaterial::editing()));
+        assert!(object.reads_backdrop());
+    }
 }
