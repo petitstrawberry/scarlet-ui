@@ -4,7 +4,7 @@ use alloc::string::ToString;
 
 use super::layout::{TextViewLayout, VisualLine};
 use super::{BORDER_WIDTH, TextDocument, TextPosition, TextSelection};
-use crate::color::{Color, ColorPalette};
+use crate::color::Color;
 use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 use crate::renderer::PaintContext;
@@ -71,12 +71,10 @@ pub fn paint_text_view(
         style::stroke_control(ctx, bounds, style::metrics().border_width, border_color);
     }
     if focused {
-        style::fill_control(
+        style::focus_indicator(
             ctx,
             bounds,
-            ColorPalette::default()
-                .text_primary()
-                .with_opacity(background_color.a * 0.035),
+            focused_border_color.with_opacity(focused_border_color.a * 0.68),
         );
     }
 

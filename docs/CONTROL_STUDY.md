@@ -24,9 +24,13 @@ renderer is removed.
   compact titlebar/menu density remain authoritative.
 - Measured glyph width and line advance replace byte-count width and guessed
   baselines. Fonts remain the platform's existing font selection.
-- Scarlet marks selection. Editing focus uses a stronger neutral material,
-  without a red wash, underline or colored perimeter. Foreground text and the
-  caret are painted afterward, keeping full contrast.
+- Scarlet marks selection and keyboard focus. Focus uses a soft three-pixel
+  rounded outline, following the supplied macOS search-field reference. The
+  glass face stays unchanged, without darkening, red wash or underline.
+  Foreground text and the caret remain sharp.
+- Buttons use a visible neutral glass face and slightly stronger soft elevation.
+  Their backdrop blur and translucency remain real; menus, thumbs, tabs and
+  structural surfaces do not inherit this button-specific material.
 - Neutral surfaces and readable type should carry the interface. Hover and press
   change the same material instead of introducing another color family.
 - Toggle and Slider use plain horizontal pill thumbs, without idle gloss or
@@ -89,6 +93,20 @@ cargo run --locked -p scarlet-ui-core --example control-study -- target/control-
 This writes PPM images at 1x/2x and a dimensions record. These are render-command
 diagnostics, not screenshots of the native application.
 
+The focus/button revision has a separate real-element diagnostic covering rest,
+hover, pointer hold, keyboard focus and focus loss on white, patterned and
+explicitly dark glass surfaces:
+
+```sh
+cargo run --locked -p scarlet-ui-core --example focus-button-study -- target/focus-button-study
+```
+
+This is also CPU render-command output, not a native application screenshot or
+a claim that the application has a global dark-theme switch. The main control
+study additionally covers disabled controls and form selects; unit tests cover
+the focused menu-style chevron and expanded-select behavior.
+
+
 ## Remaining checks before adoption
 
 - SGFX on physical hardware and web, plus dark-mode contrast.
@@ -115,13 +133,22 @@ The trial has not merged, deployed or published anything.
 
 ## Trial validation
 
-- Integrated core library before final neutral-focus adjustment: 533 passed,
-  1 ignored serially. Final editor suites: TextField18 and TextView65 passed.
+- Focus-ring/button revision: core library 534 passed, 1 ignored; shared control
+  geometry 3 passed; core doctests 23 passed; facade integration tests 32 passed.
   This includes AA, CPU material, popup, form controls, thumbs, tabs and sidebar.
+  Real-element CPU diagnostics were inspected at 1x/2x on plain, patterned and
+  explicitly dark surfaces. Enabled button label contrast in these diagnostics
+  is at least 10.3:1; this is not a whole-application accessibility audit.
+- This revision's actual Widget Factory control-study and plain-canvas button
+  views were also rendered through the normal pipeline with SGFX/Vulkan at
+  1x/2x. SwiftShader readback showed the corrected button material and focused
+  TextField ring, with zero backdrop fallbacks. This is software-Vulkan scene
+  output, not a physical-GPU result or native-window screenshot.
   A parallel legacy-popup pixel test can race process-global UI scale; it passes
   in isolation and in the serial full suite. This harness limitation remains.
 - Shared control geometry: 3 passed.
-- Widget Factory native tests: 10 passed, including responsive widths and touch;
+- Widget Factory native tests: 11 passed, including default button-material,
+  responsive-width and touch regressions;
   one manual performance benchmark is ignored in the ordinary suite.
 - Native Widget Factory binary builds; wasm32 Widget Factory library checks.
 - Real CPU window inspected at 1x, and an actual 2x launch checked text/layout.

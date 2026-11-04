@@ -5,7 +5,7 @@
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::{EdgeInsets, Point, Rect, Size};
+use crate::geometry::{EdgeInsets, Offset, Point, Rect, Size};
 use crate::graphics;
 use crate::icon::{Icon, IconFill, IconSize, IconStyle, IconWeight};
 use crate::renderer::PaintContext;
@@ -69,7 +69,7 @@ impl Button {
             padding: style::CONTROL_PADDING,
             press_repeat: None,
             appearance: ButtonAppearance::Raised,
-            material: Some(style::GlassMaterial::regular()),
+            material: Some(style::GlassMaterial::button()),
             enabled: true,
         }
     }
@@ -118,7 +118,7 @@ impl Button {
             padding: 7.0,
             press_repeat: None,
             appearance: ButtonAppearance::Raised,
-            material: Some(style::GlassMaterial::regular()),
+            material: Some(style::GlassMaterial::button()),
             enabled: true,
         }
     }
@@ -739,9 +739,38 @@ impl ElementRenderObject for ButtonRenderObject {
                         ctx,
                         rect,
                         style::metrics().control_radius,
-                        shadow.with_opacity(shadow.a * if self.is_pressed() { 0.35 } else { 1.0 }),
+                        shadow.with_opacity(
+                            shadow.a
+                                * if self.material.is_some() {
+                                    if self.is_pressed() {
+                                        1.25
+                                    } else if self.hovered {
+                                        3.0
+                                    } else {
+                                        2.5
+                                    }
+                                } else if self.is_pressed() {
+                                    0.35
+                                } else {
+                                    1.0
+                                },
+                        ),
                         style::ElevationRole::Raised,
                     );
+                    if self.material.is_some() {
+                        // Blur alone disappears against a flat white backdrop. A
+                        // compact contact shadow defines the rounded silhouette
+                        // without adding a permanent border or highlight line.
+                        ctx.draw_rounded_rect_shadow(
+                            rect,
+                            style::metrics().control_radius,
+                            Offset::new(0.0, 1.0),
+                            2.0,
+                            0.0,
+                            shadow
+                                .with_opacity(shadow.a * if self.is_pressed() { 0.5 } else { 0.8 }),
+                        );
+                    }
                 }
                 if let Some(mut material) = self.material {
                     if self.is_pressed() {
@@ -752,13 +781,8 @@ impl ElementRenderObject for ButtonRenderObject {
                     } else if self.hovered {
                         material.tint = material
                             .tint
+                            .lighten(0.016)
                             .with_opacity((material.tint.a + 0.06).min(1.0));
-                    }
-                    if self.is_focused() {
-                        material.tint = ColorPalette::default()
-                            .primary()
-                            .with_opacity(0.12)
-                            .blend_over(material.tint);
                     }
                     if !self.enabled {
                         material.tint = material.tint.with_opacity(material.tint.a * 0.55);
@@ -769,6 +793,9 @@ impl ElementRenderObject for ButtonRenderObject {
                         style::metrics().control_radius,
                         material,
                     );
+                    if self.is_focused() {
+                        style::glass_control_focus(ctx, rect, material);
+                    }
                 } else {
                     style::raised_control_surface(ctx, rect, background, border, self.is_pressed());
                 }
@@ -943,9 +970,7 @@ mod tests {
         render_object.paint(&mut context, Point::ZERO);
         assert!(!context.commands().iter().any(|command| matches!(
             command,
-            PaintCommand::FillVerticalGradientRoundedRect { .. }
-                | PaintCommand::StrokeRoundedRect { .. }
-                | PaintCommand::FillPath { .. }
+            PaintCommand::FillVerticalGradientRoundedRect { .. } | PaintCommand::FillPath { .. }
         )));
         let filter_index = context
             .commands()
@@ -981,7 +1006,26 @@ mod tests {
         assert!(disabled.reads_backdrop());
         assert_ne!(rest, hover);
         assert_ne!(hover, pressed);
-        assert_ne!(rest, focused);
+        assert_eq!(rest, focused, "keyboard focus must not tint the glass face");
+        let mut focused_paint = PaintContext::new();
+        button.paint(&mut focused_paint, Point::ZERO);
+        assert!(
+            focused_paint
+                .commands()
+                .iter()
+                .any(|command| matches!(command,
+                    PaintCommand::StrokeRoundedRect { stroke_width, .. } if *stroke_width == 3.0
+                ))
+        );
+        button.set_focused(false);
+        let mut unfocused_paint = PaintContext::new();
+        button.paint(&mut unfocused_paint, Point::ZERO);
+        assert!(
+            !unfocused_paint
+                .commands()
+                .iter()
+                .any(|command| matches!(command, PaintCommand::StrokeRoundedRect { .. }))
+        );
         assert_ne!(rest, glass_tint(&disabled));
         assert!(laid_out(Button::icon_only(Icon::Settings)).reads_backdrop());
     }
@@ -1004,6 +1048,63 @@ mod tests {
         assert!(button.reads_backdrop());
         button.update(&Button::new("Save").header_style());
         assert!(!button.reads_backdrop());
+    }
+
+    #[test]
+    fn glass_button_shadow_separates_a_white_face_from_white_canvas() {
+        let shadow_opacity = |button: &ButtonRenderObject| {
+            let mut context = PaintContext::new();
+            button.paint(&mut context, Point::new(12.0, 12.0));
+            context
+                .commands()
+                .iter()
+                .filter_map(|command| match command {
+                    PaintCommand::DrawRoundedRectShadow { color, .. } => Some(color.a),
+                    _ => None,
+                })
+                .collect::<alloc::vec::Vec<_>>()
+        };
+        let mut button = Button::new("")
+            .material(style::GlassMaterial::new(18.0, Color::WHITE))
+            .build_render_object();
+        button.layout(LayoutConstraints::tight(100.0, 36.0));
+        let rest = shadow_opacity(&button);
+        assert_eq!(rest.len(), 2, "glass buttons need soft and contact shadows");
+        let bounds = button.paint_outsets();
+        for scale in [1000, 2000] {
+            let mut context = PaintContext::new();
+            button.paint(&mut context, Point::new(12.0, 12.0));
+            let mut renderer =
+                crate::renderer::CpuPaintRenderer::new(Size::new(124.0, 64.0), scale, Color::WHITE);
+            renderer.execute(&context);
+            let buffer = renderer.buffer();
+            let factor = scale / 1000;
+            let pixel = |x: u32, y: u32| {
+                buffer.as_slice()[(y * factor * buffer.width() + x * factor) as usize].to_le_bytes()
+                    [0]
+            };
+            assert_eq!(pixel(62, 30), 255, "face stays white");
+            assert!(pixel(62, 48) <= 230, "shadow must define the lower edge");
+            assert_eq!(pixel(62, 54), 255, "shadow remains compact");
+        }
+        button.set_hovered(true);
+        let hover = shadow_opacity(&button);
+        assert!(hover[0] > rest[0]);
+        button.set_pressed(true);
+        let pressed = shadow_opacity(&button);
+        assert!(pressed[0] < rest[0] && pressed[1] < rest[1]);
+        assert_eq!(
+            button.paint_outsets(),
+            bounds,
+            "states preserve paint bounds"
+        );
+        assert!(shadow_opacity(&laid_out(Button::new("").enabled(false))).is_empty());
+        assert!(shadow_opacity(&laid_out(Button::new("").header_style())).is_empty());
+        assert_eq!(
+            shadow_opacity(&laid_out(Button::new("").background_color(Color::WHITE))).len(),
+            1,
+            "explicit-color buttons keep their original shadow"
+        );
     }
 
     #[test]

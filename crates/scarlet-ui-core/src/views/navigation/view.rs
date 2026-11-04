@@ -33,7 +33,7 @@ fn navigation_selected_state(key: usize) -> State<usize> {
 const DEFAULT_MINIMUM_CONTENT_WIDTH: f32 = 320.0;
 const DEFAULT_MINIMUM_CONTENT_HEIGHT: f32 = 240.0;
 
-/// Visual treatment of sidebar navigation. Bottom-bar navigation is unaffected.
+/// Visual treatment of navigation, retained across adaptive presentations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NavigationSidebarStyle {
     /// The original edge-to-edge rail and narrow selection indicator.
@@ -41,6 +41,8 @@ pub enum NavigationSidebarStyle {
     Simple,
     /// An inset rounded panel with softly tinted, rounded destination rows.
     /// Uses the shared in-app backdrop material and a uniform selected tint.
+    /// In bottom-bar presentation, keeps the full destination cells in a softly
+    /// rounded glass strip with a content-edge selection indicator.
     Floating,
 }
 

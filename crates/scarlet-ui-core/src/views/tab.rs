@@ -8,7 +8,7 @@ use crate::element::{
     ComponentElement, Element, ElementRenderObject, LayoutConstraints, RenderElement,
 };
 use crate::event::{Event, MouseButton, MouseEvent, Phase, TouchGesture, TouchPhase};
-use crate::geometry::{Point, Rect, Size};
+use crate::geometry::{EdgeInsets, Point, Rect, Size};
 use crate::graphics;
 use crate::input_environment::InteractionMode;
 use crate::renderer::PaintContext;
@@ -790,6 +790,14 @@ impl ElementRenderObject for TabViewRenderObject {
         self.material.is_some() && !self.labels.is_empty()
     }
 
+    fn paint_outsets(&self) -> EdgeInsets {
+        if self.material.is_some() {
+            style::elevation_outsets(style::ElevationRole::Raised)
+        } else {
+            EdgeInsets::ZERO
+        }
+    }
+
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let indicator_height = if self.indicator_height.is_finite() {
             self.indicator_height.max(0.0).min(self.tab_bar_height)
@@ -798,12 +806,25 @@ impl ElementRenderObject for TabViewRenderObject {
         };
         let tab_bar_y = origin.y + self.tab_bar_origin_y();
         let bar = Rect::from_xywh(origin.x, tab_bar_y, self.size.width, self.tab_bar_height);
-        ctx.push_clip(Rect::from_xywh(
+        let clip = Rect::from_xywh(
             origin.x,
             tab_bar_y,
             self.size.width,
             self.tab_bar_height.min(self.size.height),
-        ));
+        );
+        if self.material.is_some() {
+            let shadow = ColorPalette::default().shadow();
+            style::elevation_shadow(
+                ctx,
+                bar,
+                8.0,
+                shadow.with_opacity(shadow.a * 1.75),
+                style::ElevationRole::Raised,
+            );
+            ctx.push_rounded_clip(clip, style::radius_for(clip, 8.0));
+        } else {
+            ctx.push_clip(clip);
+        }
         if let Some(mut material) = self.material {
             // A restrained structural tint keeps the strip legible even on a
             // white canvas. It is a uniform material tint, not a bevel.
@@ -812,7 +833,7 @@ impl ElementRenderObject for TabViewRenderObject {
                 .with_opacity(0.045)
                 .blend_over(material.tint);
             material.tint = self.background_color.blend_over(material.tint);
-            style::paint_glass_material(ctx, bar, 0.0, material);
+            style::paint_glass_material(ctx, bar, style::radius_for(bar, 8.0), material);
         } else if self.background_color.a > 0.0 {
             ctx.fill_rect(bar, self.background_color);
         }
@@ -846,7 +867,24 @@ impl ElementRenderObject for TabViewRenderObject {
                 (rect.size.width - inset_x * 2.0).max(0.0),
                 (rect.size.height - inset_y * 2.0).max(0.0),
             );
-            let radius = style::radius_for(face, if self.material.is_some() { 0.0 } else { 12.0 });
+            let radius = style::radius_for(face, if self.material.is_some() { 6.0 } else { 12.0 });
+            // Only the exposed corners curve. Extending the face through the
+            // content edge and clipping it back keeps a tab attached to its view.
+            let attached_face = if self.material.is_some() {
+                Rect::from_xywh(
+                    face.origin.x,
+                    face.origin.y
+                        - if self.tab_bar_position == TabBarPosition::Bottom {
+                            radius
+                        } else {
+                            0.0
+                        },
+                    face.size.width,
+                    face.size.height + radius,
+                )
+            } else {
+                face
+            };
             let pressed = self.pressed_index() == Some(index);
             if index == selected {
                 if let Some(mut material) = self.material {
@@ -863,9 +901,9 @@ impl ElementRenderObject for TabViewRenderObject {
                             .tint
                             .with_opacity((material.tint.a + 0.04).min(1.0));
                     }
-                    // The selected face remains attached to the content edge;
-                    // no pill radius, bevel or fixed specular line is added.
-                    style::paint_glass_material(ctx, face, radius, material);
+                    ctx.push_clip(face);
+                    style::paint_glass_material(ctx, attached_face, radius, material);
+                    ctx.pop_clip();
                 } else {
                     // Selection remains visible when held. Depth comes from the
                     // material and a soft shadow, never a fixed highlight line.
@@ -894,7 +932,9 @@ impl ElementRenderObject for TabViewRenderObject {
                 } else {
                     self.hover_color
                 };
-                ctx.fill_rounded_rect(face, radius, fill);
+                ctx.push_clip(face);
+                ctx.fill_rounded_rect(attached_face, radius, fill);
+                ctx.pop_clip();
             }
             let text_color = if index == selected {
                 self.selected_text_color
@@ -913,8 +953,8 @@ impl ElementRenderObject for TabViewRenderObject {
             );
         }
 
-        // Explicit custom separators and indicators remain source-compatible.
-        // Neither is used by the default material-based appearance.
+        // The selection indicator meets the content edge. Explicit custom
+        // separators and indicators remain source-compatible.
         if self.border_color.a > 0.0 {
             ctx.fill_rect(
                 Rect::from_xywh(
@@ -1388,10 +1428,24 @@ mod tests {
                 glass[0].0,
                 Rect::from_xywh(0.0, tabs.tab_bar_origin_y(), 300.0, 30.0)
             );
-            assert_eq!(
-                glass[1],
-                (selected, 0.0, 18.0),
-                "selected tab is full height, not a chip"
+            assert_eq!(glass[0].1, 8.0, "the strip has restrained outer corners");
+            let selected_glass = Rect::from_xywh(
+                selected.origin.x,
+                selected.origin.y
+                    - if placement == TabBarPlacement::Bottom {
+                        6.0
+                    } else {
+                        0.0
+                    },
+                selected.size.width,
+                selected.size.height + 6.0,
+            );
+            assert_eq!(glass[1], (selected_glass, 6.0, 18.0));
+            assert!(
+                ctx.commands().iter().any(|command| matches!(
+                    command, PaintCommand::PushClip { rect, .. } if *rect == selected
+                )),
+                "selected tab remains full height and attached, not a chip"
             );
             let indicator = ctx
                 .commands()
@@ -1416,10 +1470,17 @@ mod tests {
                     PaintCommand::StrokePath { .. }
                         | PaintCommand::StrokeRoundedRect { .. }
                         | PaintCommand::FillVerticalGradientRoundedRect { .. }
-                        | PaintCommand::DrawRoundedRectShadow { .. }
                 )),
                 "no bevel or fixed decorative rim"
             );
+            assert!(
+                matches!(
+                    ctx.commands().first(),
+                    Some(PaintCommand::DrawRoundedRectShadow { .. })
+                ),
+                "a single whole-strip shadow separates glass from white"
+            );
+            assert_ne!(tabs.paint_outsets(), EdgeInsets::ZERO);
         }
     }
 

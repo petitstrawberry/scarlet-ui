@@ -784,15 +784,15 @@ impl ElementRenderObject for SelectRenderObject {
                 } else if self.hovered {
                     material.tint = material.tint.darken(0.012);
                 }
-                if self.is_focused() && !self.expanded {
-                    material = style::focused_editing_material(material);
-                }
                 style::paint_glass_material(
                     ctx,
                     trigger,
                     style::metrics().control_radius,
                     material,
                 );
+                if self.is_focused() && !self.expanded {
+                    style::glass_control_focus(ctx, trigger, material);
+                }
                 if w > 44.0 {
                     ctx.push_clip(Rect::from_xywh(
                         origin.x + 12.0,
@@ -843,10 +843,10 @@ impl ElementRenderObject for SelectRenderObject {
                     };
                     let mut material = style::GlassMaterial::thumb();
                     material.tint = fill.blend_over(material.tint);
-                    if self.is_focused() {
-                        material = style::focused_editing_material(material);
-                    }
                     style::paint_glass_material(ctx, button, 10.0, material);
+                    if self.is_focused() {
+                        style::glass_control_focus(ctx, button, material);
+                    }
                     let cx = button.origin.x + 10.0;
                     let cy = button.origin.y + 10.0;
                     for (dy, direction) in [(-2.0, -1.0), (2.0, 1.0)] {
@@ -1331,7 +1331,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_select_focus_tints_only_the_chevron_segment() {
+    fn menu_select_focus_outlines_only_the_chevron_segment() {
         for expanded in [false, true] {
             let mut select = menu_select(expanded);
             select.set_focused(true);
@@ -1354,9 +1354,22 @@ mod tests {
             } else {
                 assert_eq!(focus, alloc::vec![Rect::from_xywh(238.0, 8.0, 20.0, 20.0)]);
             }
-            assert!(!ctx.commands().iter().any(|command| matches!(command,
-                PaintCommand::StrokeRoundedRect { color, .. } if *color == ColorPalette::default().primary()
-            )));
+            let rings: Vec<_> = ctx
+                .commands()
+                .iter()
+                .filter_map(|command| match command {
+                    PaintCommand::StrokeRoundedRect { rect, .. } => Some(*rect),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                rings,
+                if expanded {
+                    alloc::vec![]
+                } else {
+                    alloc::vec![Rect::from_xywh(238.0, 8.0, 20.0, 20.0)]
+                }
+            );
         }
     }
 

@@ -734,7 +734,7 @@ impl WidgetFactory {
     }
 
     fn button(&self) -> impl View + Clone + use<> {
-        Button::new("Factory Button").material(GlassMaterial::regular())
+        Button::new("Factory Button")
     }
 
     fn text_field(&self) -> impl View + Clone + use<> {
@@ -951,20 +951,14 @@ impl WidgetFactory {
         .width(self.demo_width(220.0))
     }
 
-    fn configurable_layouts(&self, show_tab_backdrop: bool) -> impl View + Clone + use<> {
-        let tabs = if show_tab_backdrop {
-            Either::A(ZStack::new((
-                MaterialBackdrop { phase: 1 }.frame(self.demo_width(320.0), 150.0),
-                self.tab_view(),
-            )))
-        } else {
-            Either::B(self.tab_view())
-        };
+    fn configurable_layouts(&self) -> impl View + Clone + use<> {
+        // The ordinary layout gallery should show TabView itself. The colored
+        // material stress scene belongs to Controls, not behind tab content.
         vstack! {
             self.row("Split layout", self.split_layout_select()),
             self.row("SplitView", self.split_view()),
             self.row("Tab bar", self.tab_bar_placement_select()),
-            self.row("TabView", tabs),
+            self.row("TabView", self.tab_view()),
         }
         .spacing(16.0)
         .alignment(Alignment::Leading)
@@ -978,7 +972,7 @@ impl WidgetFactory {
             self.row("Rectangle", self.rectangle()),
             self.row("Divider", self.divider()),
             self.row("ScrollView both", self.scroll_view()),
-            self.configurable_layouts(false),
+            self.configurable_layouts(),
         }
         .spacing(16.0)
         .alignment(Alignment::Leading)
@@ -1005,7 +999,6 @@ impl WidgetFactory {
         let button = vstack![
             Text::new("Action").text_style(TextStyle::Callout),
             Button::new("Save changes")
-                .material(GlassMaterial::regular())
                 .on_click(move || count.update(|value| *value += 1))
                 .frame_width(130.0),
         ]
@@ -1077,9 +1070,7 @@ impl WidgetFactory {
             self.row(
                 "Disabled",
                 vstack![
-                    Button::new("Save changes")
-                        .material(GlassMaterial::regular())
-                        .enabled(false),
+                    Button::new("Save changes").enabled(false),
                     TextField::new(self.study_disabled_text.clone())
                         .enabled(false)
                         .frame_width(self.demo_width(280.0)),
@@ -1176,7 +1167,7 @@ impl WidgetFactory {
             self.row("ScrollView both", self.scroll_view()),
             self.row("ScrollView x", self.horizontal_scroll_view()),
             self.row("ScrollView y", self.vertical_scroll_view()),
-            self.configurable_layouts(true),
+            self.configurable_layouts(),
         }
         .spacing(16.0)
         .alignment(Alignment::Leading)
@@ -1428,6 +1419,58 @@ mod tests {
     use super::*;
     use scarlet_ui::event::Phase;
     use scarlet_ui::views::SplitViewRenderObject;
+
+    #[test]
+    fn layout_gallery_keeps_glass_tabs_without_the_diagnostic_backdrop() {
+        use scarlet_ui::renderer::{PaintCommand, PaintContext};
+        fn inspect(element: &dyn Element, tabs: &mut usize, proofs: &mut usize) {
+            if let Some(render) = element.render_object() {
+                if render.as_any().is::<MaterialBackdropRender>() {
+                    *proofs += 1;
+                }
+                if render
+                    .as_any()
+                    .is::<scarlet_ui::views::TabViewRenderObject>()
+                {
+                    *tabs += 1;
+                    let mut ctx = PaintContext::new();
+                    render.paint(&mut ctx, Point::ZERO);
+                    assert_eq!(
+                        ctx.commands()
+                            .iter()
+                            .filter(|command| matches!(
+                                command,
+                                PaintCommand::BackdropFilterRoundedRect { .. }
+                            ))
+                            .count(),
+                        2,
+                        "the standard tabs keep their real strip and selected-face glass"
+                    );
+                }
+            }
+            for child in element.children() {
+                inspect(child.as_ref(), tabs, proofs);
+            }
+        }
+        let app = WidgetFactory::new();
+        let mut root = app.configurable_layouts().create_element();
+        root.layout(LayoutConstraints::tight(800.0, 600.0));
+        let (mut tabs, mut proofs) = (0, 0);
+        inspect(root.as_ref(), &mut tabs, &mut proofs);
+        assert_eq!(tabs, 1);
+        assert_eq!(
+            proofs, 0,
+            "diagnostic color card must not look like part of TabView"
+        );
+
+        let mut controls = app.controls_page().create_element();
+        controls.layout(LayoutConstraints::tight(800.0, 600.0));
+        inspect(controls.as_ref(), &mut tabs, &mut proofs);
+        assert!(
+            proofs > 0,
+            "the explicit material stress study remains available"
+        );
+    }
 
     #[test]
     fn nested_scroll_demo_starts_with_readable_leading_heading_and_track_labels() {
@@ -2139,6 +2182,53 @@ mod tests {
             assert!(render_object.first_extent() > initial_extent + 20.0);
         }
     }
+    #[test]
+    fn factory_demo_buttons_keep_the_visible_default_glass_material() {
+        use scarlet_ui::element::LayoutConstraints;
+        use scarlet_ui::renderer::{PaintCommand, PaintContext};
+        fn inspect(element: &dyn Element) -> usize {
+            let mut count = 0;
+            if let Some(render) = element.render_object()
+                && render
+                    .as_any()
+                    .is::<scarlet_ui::views::ButtonRenderObject>()
+            {
+                let mut paint = PaintContext::new();
+                render.paint(&mut paint, Point::ZERO);
+                let tint = paint
+                    .commands()
+                    .iter()
+                    .find_map(|command| match command {
+                        PaintCommand::BackdropFilterRoundedRect { tint, .. } => Some(*tint),
+                        _ => None,
+                    })
+                    .expect("demo button should retain its glass material");
+                let expected = GlassMaterial::button().tint;
+                assert_eq!(
+                    (tint.r, tint.g, tint.b),
+                    (expected.r, expected.g, expected.b)
+                );
+                // Disabled buttons retain the same tint with lower opacity.
+                assert!(tint.a <= expected.a);
+                count += 1;
+            }
+            count
+                + element
+                    .children()
+                    .iter()
+                    .map(|child| inspect(child.as_ref()))
+                    .sum::<usize>()
+        }
+        let app = WidgetFactory::new();
+        for (mut element, expected_count) in [
+            (app.button().create_element(), 1),
+            (app.control_study().create_element(), 2),
+        ] {
+            element.layout(LayoutConstraints::loose(1000.0, 2000.0));
+            assert_eq!(inspect(element.as_ref()), expected_count);
+        }
+    }
+
     #[test]
     fn material_backdrop_padding_fits_narrow_pages() {
         let app = WidgetFactory::new();

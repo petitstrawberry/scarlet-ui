@@ -80,7 +80,7 @@ const DESKTOP_VISUAL_METRICS: VisualMetrics = VisualMetrics {
     item_radius: 4.0,
     popover_radius: 8.0,
     border_width: 1.0,
-    focus_stroke_width: 2.0,
+    focus_stroke_width: 3.0,
     minimum_control_height: 24.0,
     navigation_indicator_width: 3.0,
     navigation_item_height: 40.0,
@@ -163,6 +163,20 @@ impl GlassMaterial {
         }
     }
 
+    /// Neutral button face that stays visible on a plain canvas while retaining
+    /// the shared backdrop blur. This does not change menu or thumb materials.
+    pub fn button() -> Self {
+        let palette = ColorPalette::default();
+        let tint = match palette.scheme() {
+            crate::color::ColorScheme::Light => palette.button_background().darken(0.035),
+            crate::color::ColorScheme::Dark => palette.button_background().lighten(0.035),
+        };
+        Self {
+            tint: tint.with_opacity(0.78),
+            ..Self::regular()
+        }
+    }
+
     /// Denser, softly toned editing surface. The neutral tint keeps its bounds
     /// legible even over a plain white canvas without adding an outline.
     pub fn editing() -> Self {
@@ -190,22 +204,9 @@ impl GlassMaterial {
         }
     }
 
-    /// Neutral editing focus: deeper frosting and contrast without accent wash.
-    /// The contrast direction follows the material so custom dark faces remain legible.
-    pub fn focused_editor(mut self) -> Self {
-        let luminance = self.tint.r * 0.2126 + self.tint.g * 0.7152 + self.tint.b * 0.0722;
-        let neutral = if luminance < 0.5 {
-            ColorPalette::dark()
-        } else {
-            ColorPalette::light()
-        }
-        .text_primary();
-        let opacity = (self.tint.a + 0.12).min(1.0);
-        self.tint = neutral
-            .with_opacity(0.035)
-            .blend_over(self.tint)
-            .with_opacity(opacity);
-        self.blur_radius += 4.0;
+    /// Keep the editing face stable while focus is painted as a separate ring.
+    /// Retained for source compatibility with material customization code.
+    pub fn focused_editor(self) -> Self {
         self
     }
 
@@ -219,13 +220,6 @@ impl Default for GlassMaterial {
     fn default() -> Self {
         Self::regular()
     }
-}
-
-/// Editing focus changes neutral depth rather than washing the face in accent.
-/// A small contrast shift remains visible on a uniform backdrop; foreground
-/// caret/selection paint stays independent and sharp. Bounds never change.
-pub(crate) fn focused_editing_material(material: GlassMaterial) -> GlassMaterial {
-    material.focused_editor()
 }
 
 pub(crate) fn paint_glass_material(
@@ -310,14 +304,31 @@ pub(crate) fn control_fill(palette: &ColorPalette, hovered: bool, pressed: bool)
 }
 
 pub(crate) fn control_focus(ctx: &mut PaintContext<'_>, rect: Rect, palette: &ColorPalette) {
-    focus_indicator(ctx, rect, focus_highlight(palette));
+    let color = match palette.scheme() {
+        crate::color::ColorScheme::Light => focus_highlight(palette).with_opacity(0.68),
+        crate::color::ColorScheme::Dark => {
+            focus_highlight(palette).lighten(0.22).with_opacity(0.85)
+        }
+    };
+    focus_indicator(ctx, rect, color);
 }
 
-/// Focus changes the material across its face, without a perimeter or underline.
-/// Paint before foreground content so text, icons and carets keep full contrast.
+/// An inset, rounded focus ring. It follows the material contour without
+/// changing layout, painting outside the hit box, or tinting the face.
 pub(crate) fn focus_indicator(ctx: &mut PaintContext<'_>, rect: Rect, tint: Color) {
     let radius = radius_for(rect, metrics().control_radius);
-    ctx.fill_rounded_rect(rect, radius, tint.with_opacity(0.12));
+    ctx.stroke_rounded_rect(rect, radius, metrics().focus_stroke_width, tint);
+}
+
+/// Match focus contrast to an explicitly supplied light or dark glass face.
+pub(crate) fn glass_control_focus(ctx: &mut PaintContext<'_>, rect: Rect, material: GlassMaterial) {
+    let luminance = material.tint.r * 0.2126 + material.tint.g * 0.7152 + material.tint.b * 0.0722;
+    let palette = if luminance < 0.5 {
+        ColorPalette::dark()
+    } else {
+        ColorPalette::light()
+    };
+    control_focus(ctx, rect, &palette);
 }
 
 /// Explicit-color compatibility surface. It is a uniform fill, not simulated glass.
@@ -635,20 +646,29 @@ mod tests {
     }
 
     #[test]
-    fn focus_changes_the_material_without_an_underline_or_perimeter() {
+    fn focus_ring_follows_control_contour_without_changing_face_or_bounds() {
         let rect = Rect::from_xywh(0.0, 0.0, 120.0, 36.0);
         let mut ctx = PaintContext::new();
         control_focus(&mut ctx, rect, &ColorPalette::light());
         let [
-            PaintCommand::FillRoundedRect {
-                rect: face, color, ..
+            PaintCommand::StrokeRoundedRect {
+                rect: bounds,
+                corner_radius,
+                stroke_width,
+                color,
             },
         ] = ctx.commands()
         else {
-            panic!("focus must be a single material light, not an outline or underline");
+            panic!("focus must be a rounded ring, not a face fill or underline");
         };
-        assert_eq!(*face, rect);
-        assert_eq!(color.a, 0.12);
+        assert_eq!(*bounds, rect);
+        assert_eq!(*corner_radius, metrics().control_radius);
+        assert_eq!(*stroke_width, 3.0);
+        assert_eq!(color.a, 0.68);
+        assert_eq!(
+            GlassMaterial::editing().focused_editor(),
+            GlassMaterial::editing()
+        );
     }
 
     #[test]

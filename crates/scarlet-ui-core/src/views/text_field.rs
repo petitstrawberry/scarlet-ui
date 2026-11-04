@@ -450,8 +450,6 @@ impl ElementRenderObject for TextFieldRenderObject {
         let paint_content = if let Some(mut material) = self.material {
             if !self.enabled {
                 material.tint = palette.background_secondary().with_opacity(0.86);
-            } else if self.focused {
-                material = material.focused_editor();
             } else if self.hovered {
                 material.tint = material
                     .tint
@@ -463,6 +461,13 @@ impl ElementRenderObject for TextFieldRenderObject {
                 style::metrics().control_radius,
                 material,
             );
+            if self.focused && self.enabled {
+                style::glass_control_focus(
+                    ctx,
+                    crate::geometry::Rect::new(origin, self.size),
+                    material,
+                );
+            }
             paint::paint_text_view_content
         } else {
             paint::paint_text_view
@@ -1119,7 +1124,6 @@ mod tests {
         assert!(!context.commands().iter().any(|command| matches!(
             command,
             PaintCommand::FillVerticalGradientRoundedRect { .. }
-                | PaintCommand::StrokeRoundedRect { .. }
         )));
         assert!(
             context
@@ -1144,8 +1148,11 @@ mod tests {
         assert_eq!(rest, style::GlassMaterial::editing().tint);
         field.set_hovered(true);
         assert_ne!(rest, glass_tint(&field));
+        let hovered = glass_tint(&field);
         field.set_focused(true);
-        assert_ne!(rest, glass_tint(&field));
+        assert_eq!(hovered, glass_tint(&field));
+        field.set_hovered(false);
+        assert_eq!(rest, glass_tint(&field));
         field.update(&TextField::new(text).enabled(false));
         assert!(!field.is_focused());
         assert!(field.reads_backdrop());
@@ -1155,7 +1162,7 @@ mod tests {
 
     #[test]
     #[allow(deprecated)]
-    fn neutral_focus_is_visible_on_light_and_dark_blank_backdrops() {
+    fn focus_ring_is_visible_without_darkening_light_or_dark_glass() {
         for palette in [ColorPalette::light(), ColorPalette::dark()] {
             let material =
                 style::GlassMaterial::new(18.0, palette.button_background().with_opacity(0.78));
@@ -1163,8 +1170,9 @@ mod tests {
                 .material(material);
             let mut object = TextFieldRenderObject::from_view(&view);
             object.layout(LayoutConstraints::tight(160.0, 36.0));
-            let mut samples = [0u32; 2];
-            for (focused, sample) in [false, true].into_iter().zip(samples.iter_mut()) {
+            let mut face_samples = [0u32; 2];
+            let mut ring_samples = [0u32; 2];
+            for (index, focused) in [false, true].into_iter().enumerate() {
                 object.set_focused(focused);
                 let mut context = PaintContext::new();
                 object.paint(&mut context, Point::ZERO);
@@ -1176,34 +1184,45 @@ mod tests {
                     &context,
                     None,
                 );
-                *sample = buffer.as_slice()[18 * 160 + 80];
+                face_samples[index] = buffer.as_slice()[18 * 160 + 80];
+                ring_samples[index] = buffer.as_slice()[160 + 80];
+                assert!(
+                    matches!(context.commands()[0], PaintCommand::BackdropFilterRoundedRect { tint, .. } if tint == material.tint)
+                );
+                assert_eq!(
+                    context
+                        .commands()
+                        .iter()
+                        .filter(|command| matches!(command, PaintCommand::StrokeRoundedRect { .. }))
+                        .count(),
+                    usize::from(focused)
+                );
             }
-            let channel = |pixel: u32, shift: u32| ((pixel >> shift) & 255) as i32;
-            let differences = [0, 8, 16]
-                .map(|shift| (channel(samples[1], shift) - channel(samples[0], shift)).abs());
-            assert!(
-                *differences.iter().max().unwrap() >= 6,
-                "neutral focus must remain visible over {:?}: {:?}",
-                palette.scheme(),
-                differences
+            assert_eq!(
+                face_samples[0], face_samples[1],
+                "focus must not recolor the face"
             );
-            let mut context = PaintContext::new();
-            object.paint(&mut context, Point::ZERO);
-            let PaintCommand::BackdropFilterRoundedRect {
-                tint: focused_tint, ..
-            } = context.commands()[0]
-            else {
-                panic!("focused field must retain its glass material");
+            let luminance = |pixel: u32| {
+                let channels = [16, 8, 0].map(|shift| ((pixel >> shift) & 255) as f32 / 255.0);
+                let linear = channels.map(|v| {
+                    if v <= 0.04045 {
+                        v / 12.92
+                    } else {
+                        ((v + 0.055) / 1.055).powf(2.4)
+                    }
+                });
+                linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722
             };
-            let red_mixture = palette
-                .primary()
-                .with_opacity(0.12)
-                .blend_over(material.tint);
-            assert_ne!(focused_tint, red_mixture);
+            let rest = luminance(ring_samples[0]);
+            let focus = luminance(ring_samples[1]);
+            let contrast = (rest.max(focus) + 0.05) / (rest.min(focus) + 0.05);
             assert!(
-                focused_tint.r <= focused_tint.b + 0.01,
-                "neutral face must not acquire a red accent"
+                contrast >= 3.0,
+                "focus ring contrast on {:?}: {contrast}",
+                palette.scheme()
             );
+            object.set_focused(false);
+            assert_eq!(glass_tint(&object), material.tint);
             assert_eq!(object.size(), Size::new(160.0, 36.0));
         }
     }
@@ -1230,8 +1249,8 @@ mod tests {
             PaintCommand::FillRoundedRect { color: face, .. }
         ) if *face == color));
         assert!(matches!(focused.commands().get(1), Some(
-            PaintCommand::FillRoundedRect { color: overlay, .. }
-        ) if *overlay == ColorPalette::default().text_primary().with_opacity(0.035)));
+            PaintCommand::StrokeRoundedRect { color, .. }
+        ) if *color == ColorPalette::default().primary().with_opacity(0.68)));
         assert!(!focused.commands().iter().any(|command| matches!(
             command,
             PaintCommand::FillVerticalGradientRoundedRect { .. }
@@ -1458,8 +1477,7 @@ mod tests {
         );
         assert!(!ctx.commands().iter().any(|command| matches!(
             command,
-            PaintCommand::StrokeRoundedRect { .. }
-                | PaintCommand::FillVerticalGradientRoundedRect { .. }
+            PaintCommand::FillVerticalGradientRoundedRect { .. }
         )));
     }
 

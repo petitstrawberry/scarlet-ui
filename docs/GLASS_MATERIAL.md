@@ -1,18 +1,30 @@
 # Shared glass material trial
 
 `GlassMaterial` expresses visual intent independently of the renderer:
-- `regular()`: button material, 18 logical-pixel support and 0.64 tint opacity.
+- `regular()`: general material, 18 logical-pixel support and 0.64 tint opacity.
+- `button()`: a neutral, more visible 0.78-tint face with the same backdrop blur.
+  It separates resting buttons from a plain white canvas without adding a bevel.
 - `editing()`: the same family with a denser 0.78 neutral button-surface tint
   for editable text; it stays distinguishable on a plain white canvas.
 - `thumb()`: 6-pixel support and 0.72 tint for small interactive faces.
 - `floating()`: 18-pixel support and 0.70 tint for menus and popovers.
 
+Enabled glass buttons also have a soft ambient shadow and a compact contact
+shadow, so their silhouette remains visible even with a white face on white.
+Hover strengthens the ambient shadow; pressing lowers both shadows. Disabled
+and header buttons do not gain these shadows, and explicit-color buttons keep
+their original treatment. This changes neither the layout nor the hit area.
+
 The tint uses the semantic surface color. These are prototype design tokens,
 not separate assets or per-widget highlight effects. `new(radius, tint)` permits
-explicit customization. `focused_editor()` strengthens blur/opacity and applies
-small neutral contrast based on the material luminance. Editing focus does not
-mix in the primary accent or add a decorative line. CPU pixel regressions cover
-visible neutral differences on light and dark blank backgrounds. Geometry, input, semantic state color and foreground
+explicit customization. Focus uses a three-logical-pixel rounded scarlet ring,
+following the control contour while leaving the glass tint and blur unchanged.
+It does not darken the face, wash it red, or add an underline. The ring stays
+inside the existing bounds, so focus does not change layout or hit targets.
+`focused_editor()` is retained as a no-op for source compatibility. CPU pixel
+regressions verify unchanged center pixels and at least 3:1 ring contrast on
+plain light and explicitly supplied dark material surfaces. Geometry, input,
+semantic state color and foreground
 content are independent of material. Default editable TextView/TextField surfaces
 use editing material; explicit caller colors use uniform custom faces. Structural
 header/titlebar backgrounds are uniform rather than faux-glass gradients. Main

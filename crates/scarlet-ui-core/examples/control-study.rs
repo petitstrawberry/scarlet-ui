@@ -123,7 +123,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     ];
     let mut specimens = Vec::new();
     let mut metadata = String::from(
-        "ScarletUI actual control elements; DejaVu Sans; CPU paint commands.\nLogical dimensions, not rescaled screenshots. CPU antialiased contours, native gradients and cached soft drop shadows.\n",
+        "ScarletUI actual control elements; DejaVu Sans; CPU paint commands.\nLogical dimensions, not rescaled screenshots. CPU antialiased contours, real backdrop blur and soft drop shadows.\n",
     );
     for (row, (name, y)) in rows.iter().enumerate() {
         if baseline && row >= 3 {
@@ -199,7 +199,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         ctx.draw_text(
             Point::new(48.0, 98.0),
             format!(
-                "CPU paint at {}x native resolution. Antialiased contours, gradients and soft shadows.",
+                "CPU paint at {}x native resolution. Antialiased glass contours and soft shadows.",
                 scale / 1000
             ),
             muted,

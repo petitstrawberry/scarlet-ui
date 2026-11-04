@@ -746,16 +746,16 @@ impl ElementRenderObject for TextViewRenderObject {
     }
 
     fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
-        let paint_content = if let Some(mut material) = self.material {
-            if self.focused {
-                material = material.focused_editor();
-            }
+        let paint_content = if let Some(material) = self.material {
             style::paint_glass_material(
                 ctx,
                 Rect::new(origin, self.size),
                 style::metrics().control_radius,
                 material,
             );
+            if self.focused {
+                style::glass_control_focus(ctx, Rect::new(origin, self.size), material);
+            }
             paint::paint_text_view_content
         } else {
             paint::paint_text_view
