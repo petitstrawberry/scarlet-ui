@@ -5,7 +5,7 @@
 use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::{Element, ElementRenderObject, RenderElement};
-use crate::geometry::{EdgeInsets, Offset, Point, Rect, Size};
+use crate::geometry::{EdgeInsets, Point, Rect, Size};
 use crate::graphics;
 use crate::icon::{Icon, IconFill, IconSize, IconStyle, IconWeight};
 use crate::renderer::PaintContext;
@@ -617,7 +617,7 @@ impl ElementRenderObject for ButtonRenderObject {
 
         self.size = Size { width, height };
 
-        // Preserve the same layout/hit box while allowing the material's soft shadow.
+        // Explicit-color controls retain their shadow outside the layout/hit box.
         let outsets = self.paint_outsets();
         let w = libm::ceilf(width + outsets.left + outsets.right) as u32;
         let h = libm::ceilf(height + outsets.top + outsets.bottom) as u32;
@@ -643,7 +643,7 @@ impl ElementRenderObject for ButtonRenderObject {
     }
 
     fn paint_outsets(&self) -> EdgeInsets {
-        if self.appearance == ButtonAppearance::Raised {
+        if self.appearance == ButtonAppearance::Raised && self.material.is_none() {
             style::elevation_outsets(style::ElevationRole::Raised)
         } else {
             EdgeInsets::ZERO
@@ -733,44 +733,17 @@ impl ElementRenderObject for ButtonRenderObject {
 
         match self.appearance {
             ButtonAppearance::Raised => {
-                if self.enabled {
+                // Glass controls share the thin editing surface. Feedback comes
+                // from the material tint, not a raised face or contact shadow.
+                if self.enabled && self.material.is_none() {
                     let shadow = ColorPalette::default().shadow();
                     style::elevation_shadow(
                         ctx,
                         rect,
                         style::metrics().control_radius,
-                        shadow.with_opacity(
-                            shadow.a
-                                * if self.material.is_some() {
-                                    if self.is_pressed() {
-                                        1.25
-                                    } else if self.hovered {
-                                        3.0
-                                    } else {
-                                        2.5
-                                    }
-                                } else if self.is_pressed() {
-                                    0.35
-                                } else {
-                                    1.0
-                                },
-                        ),
+                        shadow.with_opacity(shadow.a * if self.is_pressed() { 0.35 } else { 1.0 }),
                         style::ElevationRole::Raised,
                     );
-                    if self.material.is_some() {
-                        // Blur alone disappears against a flat white backdrop. A
-                        // compact contact shadow defines the rounded silhouette
-                        // without adding a permanent border or highlight line.
-                        ctx.draw_rounded_rect_shadow(
-                            rect,
-                            style::metrics().control_radius,
-                            Offset::new(0.0, 1.0),
-                            2.0,
-                            0.0,
-                            shadow
-                                .with_opacity(shadow.a * if self.is_pressed() { 0.5 } else { 0.8 }),
-                        );
-                    }
                 }
                 if let Some(mut material) = self.material {
                     if self.is_pressed() {
@@ -793,18 +766,11 @@ impl ElementRenderObject for ButtonRenderObject {
                         style::metrics().control_radius,
                         material,
                     );
-                    if self.is_focused() {
-                        style::glass_control_focus(ctx, rect, material);
-                    }
                 } else {
                     style::raised_control_surface(ctx, rect, background, border, self.is_pressed());
                 }
             }
             ButtonAppearance::Header => style::fill_control(ctx, rect, background),
-        }
-
-        if self.is_focused() && !self.reads_backdrop() {
-            style::control_focus(ctx, rect, &ColorPalette::default());
         }
 
         if let Some(icon) = self.icon {
@@ -1010,7 +976,7 @@ mod tests {
         let mut focused_paint = PaintContext::new();
         button.paint(&mut focused_paint, Point::ZERO);
         assert!(
-            focused_paint
+            !focused_paint
                 .commands()
                 .iter()
                 .any(|command| matches!(command,
@@ -1051,59 +1017,52 @@ mod tests {
     }
 
     #[test]
-    fn glass_button_shadow_separates_a_white_face_from_white_canvas() {
-        let shadow_opacity = |button: &ButtonRenderObject| {
+    fn glass_button_stays_thin_and_legible_without_a_contact_shadow() {
+        let mut button = laid_out(Button::new(""));
+        button.layout(LayoutConstraints::tight(100.0, 36.0));
+        for (hovered, pressed) in [(false, false), (true, false), (true, true)] {
+            button.set_hovered(hovered);
+            button.set_pressed(pressed);
             let mut context = PaintContext::new();
             button.paint(&mut context, Point::new(12.0, 12.0));
+            assert!(
+                !context.commands().iter().any(|command| matches!(
+                    command,
+                    PaintCommand::DrawRoundedRectShadow { .. }
+                        | PaintCommand::FillVerticalGradientRoundedRect { .. }
+                )),
+                "glass feedback must not add elevation or a bevel"
+            );
+            for scale in [1000, 2000] {
+                let mut renderer = crate::renderer::CpuPaintRenderer::new(
+                    Size::new(124.0, 64.0),
+                    scale,
+                    Color::WHITE,
+                );
+                renderer.execute(&context);
+                let buffer = renderer.buffer();
+                let factor = scale / 1000;
+                let pixel = |x: u32, y: u32| {
+                    buffer.as_slice()[(y * factor * buffer.width() + x * factor) as usize]
+                        .to_le_bytes()[0]
+                };
+                assert!(
+                    pixel(62, 28) < 250,
+                    "tint keeps the control visible on white"
+                );
+                assert_eq!(pixel(62, 54), 255, "no shadow below the control");
+            }
+            assert_eq!(button.paint_outsets(), EdgeInsets::ZERO);
+        }
+        let explicit = laid_out(Button::new("").background_color(Color::WHITE));
+        let mut context = PaintContext::new();
+        explicit.paint(&mut context, Point::ZERO);
+        assert!(
             context
                 .commands()
                 .iter()
-                .filter_map(|command| match command {
-                    PaintCommand::DrawRoundedRectShadow { color, .. } => Some(color.a),
-                    _ => None,
-                })
-                .collect::<alloc::vec::Vec<_>>()
-        };
-        let mut button = Button::new("")
-            .material(style::GlassMaterial::new(18.0, Color::WHITE))
-            .build_render_object();
-        button.layout(LayoutConstraints::tight(100.0, 36.0));
-        let rest = shadow_opacity(&button);
-        assert_eq!(rest.len(), 2, "glass buttons need soft and contact shadows");
-        let bounds = button.paint_outsets();
-        for scale in [1000, 2000] {
-            let mut context = PaintContext::new();
-            button.paint(&mut context, Point::new(12.0, 12.0));
-            let mut renderer =
-                crate::renderer::CpuPaintRenderer::new(Size::new(124.0, 64.0), scale, Color::WHITE);
-            renderer.execute(&context);
-            let buffer = renderer.buffer();
-            let factor = scale / 1000;
-            let pixel = |x: u32, y: u32| {
-                buffer.as_slice()[(y * factor * buffer.width() + x * factor) as usize].to_le_bytes()
-                    [0]
-            };
-            assert_eq!(pixel(62, 30), 255, "face stays white");
-            assert!(pixel(62, 48) <= 230, "shadow must define the lower edge");
-            assert_eq!(pixel(62, 54), 255, "shadow remains compact");
-        }
-        button.set_hovered(true);
-        let hover = shadow_opacity(&button);
-        assert!(hover[0] > rest[0]);
-        button.set_pressed(true);
-        let pressed = shadow_opacity(&button);
-        assert!(pressed[0] < rest[0] && pressed[1] < rest[1]);
-        assert_eq!(
-            button.paint_outsets(),
-            bounds,
-            "states preserve paint bounds"
-        );
-        assert!(shadow_opacity(&laid_out(Button::new("").enabled(false))).is_empty());
-        assert!(shadow_opacity(&laid_out(Button::new("").header_style())).is_empty());
-        assert_eq!(
-            shadow_opacity(&laid_out(Button::new("").background_color(Color::WHITE))).len(),
-            1,
-            "explicit-color buttons keep their original shadow"
+                .any(|command| matches!(command, PaintCommand::DrawRoundedRectShadow { .. })),
+            "explicit-color buttons retain their compatibility treatment"
         );
     }
 

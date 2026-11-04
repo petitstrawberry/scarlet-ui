@@ -58,7 +58,9 @@ pub mod error;
 pub mod event;
 pub mod file_dialog;
 pub mod geometry;
+pub mod glass;
 pub mod graphics;
+pub use glass::{GlassQuality, glass_quality, set_glass_quality};
 pub mod icon;
 mod id;
 pub mod input_environment;
@@ -194,6 +196,7 @@ pub mod prelude {
         MouseEvent, ScrollSource, WheelPhase,
     };
     pub use crate::geometry::*;
+    pub use crate::glass::{GlassQuality, glass_quality, set_glass_quality};
     pub use crate::graphics::{
         FontStack, GlyphRasterKey, RasterizedGlyph, add_default_font_fallback,
         clear_default_font_fallbacks, default_font_stack, measure_text_sized_with_font_stack,

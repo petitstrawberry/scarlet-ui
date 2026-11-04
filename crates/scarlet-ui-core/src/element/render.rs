@@ -470,6 +470,13 @@ pub trait RenderObject: Any {
     fn owns_child_viewport(&self) -> bool {
         false
     }
+
+    /// Accept the bottom portion of this viewport covered by container chrome.
+    /// Scroll containers add travel so their last item can clear the overlay.
+    /// `None` means unsupported; `Some` reports whether layout changed.
+    fn set_bottom_overlay_inset(&mut self, _inset: f32) -> Option<bool> {
+        None
+    }
 }
 
 /// Element that wraps a RenderObject

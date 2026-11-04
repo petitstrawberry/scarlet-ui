@@ -121,6 +121,7 @@ fn stock_tabs_match_cpu_and_gpu_on_the_same_background() {
         let width = 368 * scale / 1000;
         let height = 200 * scale / 1000;
         let mut encoder = SgfxPaintEncoder::new(width, height, false).unwrap();
+        encoder.set_analytic_glass(true);
         let target = encoder.target_texture(0).unwrap();
         let mut resources = context.create_resources(encoder.resource_table());
         let image = context
@@ -171,37 +172,34 @@ fn stock_tabs_match_cpu_and_gpu_on_the_same_background() {
                         save(&dir.join(format!("{name}-gpu.ppm")), width, height, &gpu).unwrap();
                     }
                     let tab_y = if bottom { 138 } else { 24 };
-                    // Interior material samples avoid text, AA contours and line edges.
+                    // Follow the compact bar's geometry; the former fixed samples
+                    // now intersect selected rounded corners, not material interiors.
+                    let bar = paint.commands().iter().find_map(|command| match command {
+                        scarlet_ui_core::renderer::PaintCommand::BackdropFilterRoundedRect { rect, .. } => Some(*rect),
+                        _ => None,
+                    }).unwrap();
                     let mut max_delta = 0u8;
-                    for (x, y) in [
-                        (30, tab_y + 5),
-                        (55, tab_y + 5),
-                        (100, tab_y + 5),
-                        (200, tab_y + 5),
-                        (300, tab_y + 5),
-                        (300, tab_y + 28),
+                    for (fx, fy) in [
+                        (0.25, 6.0),
+                        (0.75, 6.0),
+                        (0.25, bar.size.height - 6.0),
+                        (0.75, bar.size.height - 6.0),
                     ] {
-                        let x = x * scale / 1000;
-                        let y = y * scale / 1000;
+                        let x =
+                            ((bar.origin.x + bar.size.width * fx) * scale as f32 / 1000.0) as u32;
+                        let y = ((bar.origin.y + fy) * scale as f32 / 1000.0) as u32;
                         let at = ((y * width + x) * 4) as usize;
                         for c in 0..3 {
                             max_delta = max_delta.max(cpu[at + c].abs_diff(gpu[at + c]));
                         }
                     }
                     if !proof {
-                        // A real shadow must separate the whole strip from a
-                        // featureless white page in both rendering backends.
+                        // Content tabs sit within a surface without elevation.
                         let x = 200 * scale / 1000;
                         let y = (tab_y + 37) * scale / 1000;
                         let at = ((y * width + x) * 4) as usize;
-                        assert!(
-                            cpu[at] < 255 && gpu[at] < 255,
-                            "{name}: whole-strip shadow disappeared on white"
-                        );
-                        assert!(
-                            cpu[at].abs_diff(gpu[at]) <= 12,
-                            "{name}: CPU/GPU shadow mismatch"
-                        );
+                        assert_eq!(cpu[at], 255, "{name}: no tab shadow on content");
+                        assert_eq!(gpu[at], 255, "{name}: no tab shadow on content");
                     }
                     eprintln!("{name}: material interior max channel delta {max_delta}");
                     assert!(
@@ -271,6 +269,7 @@ fn responsive_navigation_renders_rounded_glass_in_portrait_and_landscape() {
                 CpuPaintRenderer::new(Size::new(width as f32, height as f32), scale, Color::WHITE);
             cpu.execute(&paint);
             let mut encoder = SgfxPaintEncoder::new(pixel_width, pixel_height, false).unwrap();
+            encoder.set_analytic_glass(true);
             let target = encoder.target_texture(0).unwrap();
             let mut resources = context.create_resources(encoder.resource_table());
             let image = context

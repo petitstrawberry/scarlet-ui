@@ -62,12 +62,10 @@ impl SgfxPaintEncoder {
     ) -> core::result::Result<LoweredFrame<'a>, FrameError<E::Error>> {
         // Global state changes may intentionally span recording boundaries.
         // Preserve their original sequence with one flat lowering pass.
-        if backdrop::contains_backdrop(paint)
-            || paint.commands().iter().any(|command| {
-                matches!(command,
+        if paint.commands().iter().any(|command| {
+            matches!(command,
             PaintCommand::DrawDisplayList { list, .. } if !list.is_self_contained())
-            })
-        {
+        }) {
             let flat = paint.flattened();
             return self
                 .lower(&flat, scale, area)
@@ -75,6 +73,11 @@ impl SgfxPaintEncoder {
                 .map_err(FrameError::Lowering);
         }
         self.glyph_atlas_rebuild_required = false;
+        let backdrop_budget = (
+            self.backdrop_pixels,
+            self.backdrop_filters,
+            self.backdrop_fallbacks,
+        );
         match self.try_lower_retained(executor, paint, scale, area) {
             Err(FrameError::Lowering(Error::FrameTooComplex))
                 if self.glyph_atlas_rebuild_required =>
@@ -84,6 +87,11 @@ impl SgfxPaintEncoder {
                 for atlas in &mut self.glyph_atlases {
                     atlas.reset(self.frame_serial);
                 }
+                (
+                    self.backdrop_pixels,
+                    self.backdrop_filters,
+                    self.backdrop_fallbacks,
+                ) = backdrop_budget;
                 let flat = paint.flattened();
                 let frame = self.lower(&flat, scale, area)?;
                 Ok(owned_frame(frame))
@@ -142,6 +150,14 @@ impl SgfxPaintEncoder {
                 _ => {}
             }
             if let PaintCommand::DrawDisplayList { origin, list } = command {
+                if opacity == 1. {
+                    if let Some(layer) =
+                        self.lower_cached_layer(executor, list, *origin, scale, &clips, full)?
+                    {
+                        append_frame(&mut frame, layer)?;
+                        continue;
+                    }
+                }
                 if opacity == 1. {
                     // A static shadow stack is rasterized only on a cache miss.
                     // Cache all layers together, then sample its alpha coverage.
@@ -232,6 +248,7 @@ impl SgfxPaintEncoder {
                                             ]
                                         }
                                         DrawSource::Solid => offsets.shapes,
+                                        DrawSource::PremultipliedTexture(_) => offsets.shapes,
                                         DrawSource::Backdrop(_) => {
                                             unreachable!("backdrops bypass mesh reuse")
                                         }
@@ -643,6 +660,60 @@ mod tests {
             &[(0, 0, 200, 120)],
         )
     }
+    #[test]
+    fn glass_keeps_static_mesh_and_shadow_caches_warm() {
+        let mut encoder = encoder();
+        let shape = shape();
+        let mut shadow = PaintContext::new();
+        shadow.draw_rounded_rect_shadow(
+            Rect::from_xywh(20.0, 20.0, 100.0, 36.0),
+            18.0,
+            scarlet_ui_core::geometry::Offset::new(0.0, 2.0),
+            8.0,
+            0.0,
+            UiColor::BLACK.with_opacity(0.1),
+        );
+        let shadow = shadow.into_display_list();
+        let mut glass = PaintContext::new();
+        glass.refractive_glass_rounded_rect(
+            Rect::from_xywh(20.0, 20.0, 100.0, 36.0),
+            18.0,
+            6.0,
+            UiColor::WHITE.with_opacity(0.4),
+            1.0,
+        );
+        let glass = glass.into_display_list();
+        let scene = |x| {
+            let mut p = PaintContext::new();
+            p.draw_display_list(Point::new(x, 0.0), Arc::clone(&shape));
+            p.draw_display_list(Point::ZERO, Arc::clone(&shadow));
+            p.draw_display_list(Point::ZERO, Arc::clone(&glass));
+            p
+        };
+        let mut cold = Executor::default();
+        encode(&mut encoder, &mut cold, &scene(0.0)).unwrap();
+        assert_eq!(encoder.retained_meshes.len(), 1);
+        assert_eq!(
+            encoder.shadow_cache.as_ref().unwrap().list_id,
+            shadow.identity()
+        );
+        let mut warm = Executor::default();
+        encode(&mut encoder, &mut warm, &scene(4.0)).unwrap();
+        assert_eq!(encoder.retained_meshes.len(), 1);
+        assert_eq!(
+            encoder.backdrop_filters, 1,
+            "background must be resampled on warm frames"
+        );
+        assert!(
+            warm.writes < cold.writes,
+            "unchanged mesh buffers must not be uploaded again"
+        );
+        assert!(
+            warm.passes < cold.passes,
+            "shadow coverage must not be rerendered"
+        );
+    }
+
     #[test]
     fn recording_state_can_span_opacity_and_clip_boundaries() {
         for opacity in [false, true] {

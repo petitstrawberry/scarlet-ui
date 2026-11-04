@@ -591,6 +591,7 @@ pub(crate) struct WidgetFactory {
     toggle_off: State<bool>,
     text_value: State<String>,
     study_count: State<u32>,
+    glass_quality: State<usize>,
     study_disabled_text: State<String>,
     study_disabled_selected: State<usize>,
     selected: State<usize>,
@@ -616,6 +617,7 @@ impl WidgetFactory {
             text_value: State::new(StateId::new(22), String::from("Factory text field")),
             selected: State::new(StateId::new(23), 1usize),
             study_count: State::new(StateId::new(30), 0),
+            glass_quality: State::new(StateId::new(34), 2),
             study_disabled_text: State::new(StateId::new(31), String::from("Project name")),
             study_disabled_selected: State::new(StateId::new(32), 0),
             split_layout: State::new(StateId::new(27), 0usize),
@@ -916,12 +918,13 @@ impl WidgetFactory {
         TabView::new(vec![
             TabItem::new("Mixer", || {
                 hstack! {
-                    Text::new("Ch 1").frame(72.0, 42.0),
-                    Text::new("Ch 2").frame(72.0, 42.0),
-                    Text::new("Master").frame(96.0, 42.0),
+                    Text::new("Ch 1").alignment(Alignment::Center).frame(72.0, 32.0),
+                    Text::new("Ch 2").alignment(Alignment::Center).frame(72.0, 32.0),
+                    Text::new("Master").alignment(Alignment::Center).frame(72.0, 32.0),
                 }
                 .spacing(8.0)
                 .padding(12.0)
+                .alignment(Alignment::Top)
             }),
             TabItem::new("Editor", || {
                 vstack! {
@@ -930,13 +933,14 @@ impl WidgetFactory {
                 }
                 .spacing(10.0)
                 .padding(12.0)
+                .alignment(Alignment::Top)
             }),
         ])
         .material(GlassMaterial::regular())
         .tab_bar_placement(tab_bar_placement_for_selection(
             self.tab_bar_placement.get(),
         ))
-        .frame(self.demo_width(320.0), 150.0)
+        .frame(self.demo_width(320.0), 112.0)
     }
 
     fn tab_bar_placement_select(&self) -> impl View + Clone + use<> {
@@ -1053,6 +1057,24 @@ impl WidgetFactory {
             Text::new("Buttons, inputs and menus with a shared material.")
                 .text_style(TextStyle::Callout)
                 .tone(TextTone::Secondary),
+            hstack![
+                Text::new("Glass quality").text_style(TextStyle::Callout),
+                Select::new(
+                    vec![
+                        String::from("Tint only"),
+                        String::from("Frosted"),
+                        String::from("Refractive")
+                    ],
+                    self.glass_quality.clone()
+                )
+                .width(160.0)
+                .on_change(|index| set_glass_quality(match index {
+                    0 => GlassQuality::TintOnly,
+                    1 => GlassQuality::Frosted,
+                    _ => GlassQuality::Refractive,
+                })),
+            ]
+            .spacing(12.0),
             ZStack::new((
                 MaterialBackdrop {
                     phase: (self.study_count.get() % 3) as usize
@@ -1189,6 +1211,7 @@ impl View for WidgetFactory {
             &self.toggle_off,
             &self.text_value,
             &self.study_count,
+            &self.glass_quality,
             &self.study_disabled_text,
             &self.study_disabled_selected,
             &self.selected,
@@ -1443,8 +1466,8 @@ mod tests {
                                 PaintCommand::BackdropFilterRoundedRect { .. }
                             ))
                             .count(),
-                        2,
-                        "the standard tabs keep their real strip and selected-face glass"
+                        1,
+                        "one glass bar with a flat selected face"
                     );
                 }
             }
@@ -1470,6 +1493,63 @@ mod tests {
             proofs > 0,
             "the explicit material stress study remains available"
         );
+    }
+
+    #[test]
+    fn mixer_content_has_equal_columns_and_is_centered_inside_tab_view() {
+        use scarlet_ui::renderer::{PaintCommand, PaintContext};
+        fn labels(element: &dyn Element, origin: Point, out: &mut Vec<(String, Rect)>) {
+            let origin = Point::new(
+                origin.x + element.position().x,
+                origin.y + element.position().y,
+            );
+            if let Some(render) = element.render_object()
+                && render.as_any().is::<scarlet_ui::views::TextRenderObject>()
+            {
+                let mut paint = PaintContext::new();
+                render.paint(&mut paint, origin);
+                for command in paint.commands() {
+                    if let PaintCommand::DrawText { text, .. } = command {
+                        out.push((
+                            text.clone(),
+                            Rect::from_xywh(
+                                origin.x,
+                                origin.y,
+                                render.size().width,
+                                render.size().height,
+                            ),
+                        ));
+                    }
+                }
+            }
+            for child in element.children() {
+                labels(child.as_ref(), origin, out);
+            }
+        }
+        let app = WidgetFactory::new();
+        for width in [375., 800., 1200.] {
+            app.viewport.set(Size::new(width, 600.));
+            for placement in [0, 1, 2] {
+                app.tab_bar_placement.set(placement);
+                let demo_width = app.demo_width(320.);
+                let mut root = app.tab_view().create_element();
+                root.layout(LayoutConstraints::tight(demo_width, 112.));
+                let mut items = Vec::new();
+                labels(root.as_ref(), Point::ZERO, &mut items);
+                items.retain(|(label, _)| ["Ch 1", "Ch 2", "Master"].contains(&label.as_str()));
+                assert_eq!(items.len(), 3);
+                for (index, (label, rect)) in items.iter().enumerate() {
+                    let center = rect.origin.x + rect.size.width * 0.5;
+                    let expected = demo_width * 0.5 + (index as f32 - 1.) * 80.;
+                    assert!(
+                        (center - expected).abs() < 0.5,
+                        "{label} at {center}, expected {expected} (width {width}, placement {placement})"
+                    );
+                    assert!((rect.origin.y - items[0].1.origin.y).abs() < 0.5);
+                    assert!(rect.origin.y >= 0. && rect.origin.y + rect.size.height <= 112.);
+                }
+            }
+        }
     }
 
     #[test]

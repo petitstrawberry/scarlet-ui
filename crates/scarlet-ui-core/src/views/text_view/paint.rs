@@ -74,7 +74,7 @@ pub fn paint_text_view(
         style::focus_indicator(
             ctx,
             bounds,
-            focused_border_color.with_opacity(focused_border_color.a * 0.68),
+            focused_border_color.with_opacity(focused_border_color.a * 0.40),
         );
     }
 

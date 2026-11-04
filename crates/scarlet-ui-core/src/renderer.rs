@@ -154,6 +154,8 @@ pub enum PaintCommand {
         corner_radius: f32,
         blur_radius: f32,
         tint: Color,
+        /// Convex edge displacement strength, 0 disables optical treatment.
+        refraction: f32,
     },
     /// Draw a blurred rounded-rectangle shadow behind `rect`.
     DrawRoundedRectShadow {
@@ -233,6 +235,9 @@ pub struct DisplayList {
     identity: u64,
     context: PaintContext<'static>,
     self_contained: bool,
+    raster_bounds: Option<Rect>,
+    reads_backdrop: bool,
+    has_extensions: bool,
 }
 
 impl Debug for DisplayList {
@@ -245,6 +250,19 @@ impl Debug for DisplayList {
 }
 
 impl DisplayList {
+    /// Cached dependency on paint preceding this recording.
+    pub fn reads_backdrop(&self) -> bool {
+        self.reads_backdrop
+    }
+    /// Whether this recording contains backend-specific payloads.
+    pub fn has_extensions(&self) -> bool {
+        self.has_extensions
+    }
+    /// Conservative local bounds of a layer eligible for GPU raster retention.
+    /// This is a hint; unsupported commands must retain normal paint semantics.
+    pub fn raster_cache_bounds(&self) -> Option<Rect> {
+        self.raster_bounds
+    }
     /// Stable identity of this immutable recording.
     pub fn identity(&self) -> u64 {
         self.identity
@@ -326,6 +344,17 @@ impl<'a> PaintContext<'a> {
             }
         }
         Arc::new(DisplayList {
+            reads_backdrop: self.commands.iter().any(|c| match c {
+                PaintCommand::BackdropFilterRoundedRect { .. } => true,
+                PaintCommand::DrawDisplayList { list, .. } => list.reads_backdrop(),
+                _ => false,
+            }),
+            has_extensions: self.commands.iter().any(|c| match c {
+                PaintCommand::Extension { .. } => true,
+                PaintCommand::DrawDisplayList { list, .. } => list.has_extensions(),
+                _ => false,
+            }),
+            raster_bounds: None,
             self_contained: self_contained && depth == 0,
             identity: NEXT_LIST_ID.allocate(),
             context: PaintContext {
@@ -345,6 +374,91 @@ impl<'a> PaintContext<'a> {
         })
     }
 
+    /// Record an immutable layer whose unchanged pixels can be retained on the GPU.
+    /// `bounds` must include all painting, including shadows and overflowing children.
+    /// Backdrop reads must be covered by earlier opaque paint in this recording;
+    /// otherwise the result remains a normal display list without a raster hint.
+    pub fn into_cached_layer(self, bounds: Rect) -> Arc<DisplayList> {
+        let isolated = self.backdrop_is_local();
+        let mut list = self.into_display_list();
+        Arc::get_mut(&mut list).unwrap().raster_bounds = isolated.then_some(bounds);
+        list
+    }
+
+    // Prove that each filter reads only earlier opaque paint in this recording.
+    // A glass label alone is not isolated; a card including its opaque backing is.
+    fn backdrop_is_local(&self) -> bool {
+        let mut opaque: Vec<Rect> = Vec::new();
+        let mut clips: Vec<Rect> = Vec::new();
+        for command in &self.commands {
+            match command {
+                PaintCommand::PushClip {
+                    rect,
+                    corner_radius,
+                } => {
+                    let r = corner_radius
+                        .max(0.)
+                        .min(rect.size.width * 0.5)
+                        .min(rect.size.height * 0.5);
+                    clips.push(Rect::from_xywh(
+                        rect.left() + r,
+                        rect.top() + r,
+                        (rect.size.width - 2. * r).max(0.),
+                        (rect.size.height - 2. * r).max(0.),
+                    ));
+                }
+                PaintCommand::PopClip => {
+                    clips.pop();
+                }
+                PaintCommand::FillRoundedRect {
+                    rect,
+                    corner_radius,
+                    color,
+                } if color.a >= 1. => {
+                    let r = corner_radius
+                        .max(0.)
+                        .min(rect.size.width * 0.5)
+                        .min(rect.size.height * 0.5);
+                    let mut bounds = Rect::from_xywh(
+                        rect.left() + r,
+                        rect.top() + r,
+                        (rect.size.width - 2. * r).max(0.),
+                        (rect.size.height - 2. * r).max(0.),
+                    );
+                    for clip in &clips {
+                        let left = bounds.left().max(clip.left());
+                        let top = bounds.top().max(clip.top());
+                        bounds = Rect::from_xywh(
+                            left,
+                            top,
+                            (bounds.right().min(clip.right()) - left).max(0.),
+                            (bounds.bottom().min(clip.bottom()) - top).max(0.),
+                        );
+                    }
+                    opaque.push(bounds);
+                }
+                PaintCommand::BackdropFilterRoundedRect {
+                    rect, blur_radius, ..
+                } => {
+                    let halo = blur_radius.max(0.) * 1.25 + 2.;
+                    if !opaque.iter().any(|b| {
+                        b.left() <= rect.left() - halo
+                            && b.top() <= rect.top() - halo
+                            && b.right() >= rect.right() + halo
+                            && b.bottom() >= rect.bottom() + halo
+                    }) {
+                        return false;
+                    }
+                }
+                PaintCommand::Extension { .. }
+                | PaintCommand::SetOpacity { .. }
+                | PaintCommand::DrawDisplayList { .. } => return false,
+                _ => {}
+            }
+        }
+        true
+    }
+
     /// Replay unchanged paint content without cloning strings, paths, or pixels.
     pub fn draw_display_list(&mut self, origin: Point, list: Arc<DisplayList>) {
         self.commands
@@ -355,6 +469,39 @@ impl<'a> PaintContext<'a> {
     pub fn flattened(&self) -> PaintContext<'_> {
         let mut result = PaintContext::new();
         self.append_flattened(&mut result, Point::ZERO);
+        result
+    }
+
+    /// Prepare a GPU tile without changing the window-space raster snapping of
+    /// text, icons or images. The tile offset is an integral logical translation.
+    #[doc(hidden)]
+    pub fn raster_tile_context(
+        &self,
+        scene_origin: Point,
+        offset: Point,
+        scale_milli: u32,
+    ) -> PaintContext<'_> {
+        let mut result = self.flattened();
+        let scale = scale_milli.max(1) as f32 / 1000.;
+        let text_snap = |value: f32, origin: f32| (value + origin) as i32 as f32 - origin;
+        let pixel_snap =
+            |value: f32, origin: f32| ((value + origin) * scale) as i32 as f32 / scale - origin;
+        for command in &mut result.commands {
+            match command {
+                PaintCommand::DrawText { position, .. } => {
+                    position.x = text_snap(position.x, scene_origin.x);
+                    position.y = text_snap(position.y, scene_origin.y);
+                }
+                PaintCommand::DrawBuffer { dst: rect, .. }
+                | PaintCommand::DrawBufferRect { dst: rect, .. }
+                | PaintCommand::DrawIcon { rect, .. } => {
+                    rect.origin.x = pixel_snap(rect.origin.x, scene_origin.x);
+                    rect.origin.y = pixel_snap(rect.origin.y, scene_origin.y);
+                }
+                _ => {}
+            }
+        }
+        result.translate(offset);
         result
     }
 
@@ -465,6 +612,30 @@ impl<'a> PaintContext<'a> {
             corner_radius,
             blur_radius,
             tint,
+            refraction: 0.0,
+        });
+    }
+
+    /// Bounded convex refraction of the preceding scene. Like backdrop blur,
+    /// requires `reads_backdrop()`. Strength is clamped to 0..1.
+    pub fn refractive_glass_rounded_rect(
+        &mut self,
+        rect: Rect,
+        corner_radius: f32,
+        blur_radius: f32,
+        tint: Color,
+        strength: f32,
+    ) {
+        self.commands.push(PaintCommand::BackdropFilterRoundedRect {
+            rect,
+            corner_radius,
+            blur_radius,
+            tint,
+            refraction: if strength.is_finite() {
+                strength.clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
         });
     }
 
@@ -1753,6 +1924,7 @@ impl CpuPaintRenderer {
         blur_radius: f32,
         tint: Color,
         opacity: f32,
+        refraction: f32,
     ) {
         if ![
             rect.left(),
@@ -1761,6 +1933,7 @@ impl CpuPaintRenderer {
             rect.bottom(),
             radius,
             blur_radius,
+            refraction,
             tint.r,
             tint.g,
             tint.b,
@@ -1880,6 +2053,12 @@ impl CpuPaintRenderer {
             .coverage
             .resize((right - left) as usize + 1, 0.0);
         let scale = self.scale_milli as f32 / 1000.0;
+        let logical = Rect::from_xywh(
+            rect.left() / scale,
+            rect.top() / scale,
+            rect.size.width / scale,
+            rect.size.height / scale,
+        );
         for y in top..bottom {
             self.scratch.coverage.fill(0.0);
             for sample in 0..COVERAGE_SAMPLES {
@@ -1919,15 +2098,57 @@ impl CpuPaintRenderer {
                 }
                 let index = y as usize * stride + x as usize;
                 let old = premultiply_pixel(pixels[index]);
-                let filtered = if blur {
+                let filtered = if blur && refraction <= 0.0 {
                     self.backdrop.pixels
                         [(y - sample_top) as usize * width + (x - sample_left) as usize]
+                } else if blur {
+                    let p = crate::glass::glass_sample(
+                        logical,
+                        radius / scale,
+                        Point::new((x as f32 + 0.5) / scale, (y as f32 + 0.5) / scale),
+                        refraction,
+                    );
+                    let sx =
+                        (p.x * scale - 0.5 - sample_left as f32).clamp(0.0, (width - 1) as f32);
+                    let sy =
+                        (p.y * scale - 0.5 - sample_top as f32).clamp(0.0, (height - 1) as f32);
+                    let x0 = sx as usize;
+                    let y0 = sy as usize;
+                    let x1 = (x0 + 1).min(width - 1);
+                    let y1 = (y0 + 1).min(height - 1);
+                    let tx = sx - x0 as f32;
+                    let ty = sy - y0 as f32;
+                    let mut sample = [0.0; 4];
+                    for c in 0..4 {
+                        let a = self.backdrop.pixels[y0 * width + x0][c] * (1.0 - tx)
+                            + self.backdrop.pixels[y0 * width + x1][c] * tx;
+                        let b = self.backdrop.pixels[y1 * width + x0][c] * (1.0 - tx)
+                            + self.backdrop.pixels[y1 * width + x1][c] * tx;
+                        sample[c] = a * (1.0 - ty) + b * ty;
+                    }
+                    sample
                 } else {
                     old
                 };
+                let reflection = if blur && refraction > 0.0 {
+                    let (d, nx, ny) = crate::glass::glass_edge(
+                        rect,
+                        radius,
+                        Point::new(x as f32 + 0.5, y as f32 + 0.5),
+                    );
+                    crate::glass::glass_reflection(d / scale, nx, ny) * refraction.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 let mut output = [0.0; 4];
                 for c in 0..4 {
-                    let material = tint[c] + filtered[c] * (1.0 - tint_alpha);
+                    let mut material = tint[c] + filtered[c] * (1.0 - tint_alpha);
+                    let light = if c == 3 || reflection >= 0.0 {
+                        255.0
+                    } else {
+                        0.0
+                    };
+                    material += (light - material) * reflection.abs();
                     output[c] = old[c] + (material - old[c]) * amount;
                 }
                 pixels[index] = unpremultiply_pixel(output);
@@ -2386,8 +2607,16 @@ impl CpuPaintRenderer {
                     corner_radius,
                     blur_radius,
                     tint,
+                    refraction,
                 } => {
-                    self.paint_backdrop(*rect, *corner_radius, *blur_radius, *tint, opacity);
+                    self.paint_backdrop(
+                        *rect,
+                        *corner_radius,
+                        *blur_radius,
+                        *tint,
+                        opacity,
+                        *refraction,
+                    );
                 }
                 PaintCommand::DrawRoundedRectShadow {
                     rect,
@@ -3537,6 +3766,7 @@ mod tests {
             12.0,
             Color::rgba(255, 255, 255, 128),
             1.0,
+            0.0,
         );
         assert_eq!(renderer.backdrop.frame_pixels, MAX_BACKDROP_FRAME_PIXELS);
         assert_eq!(renderer.backdrop_fallback_count(), 1);
@@ -3595,7 +3825,7 @@ mod tests {
         for radius in [0.0, -4.0] {
             renderer.buffer.clear(Color::BLACK);
             renderer.backdrop.frame_pixels = MAX_BACKDROP_FRAME_PIXELS;
-            renderer.paint_backdrop(rect, 6.0, radius, Color::rgba(255, 255, 255, 128), 1.0);
+            renderer.paint_backdrop(rect, 6.0, radius, Color::rgba(255, 255, 255, 128), 1.0, 0.0);
             assert_eq!(
                 renderer.buffer().as_slice()[center],
                 Color::rgb(128, 128, 128).to_bgra()
@@ -3603,7 +3833,7 @@ mod tests {
             assert_eq!(renderer.backdrop_fallback_count(), 0);
         }
         renderer.buffer.clear(Color::BLACK);
-        renderer.paint_backdrop(rect, 6.0, 12.0, Color::rgb(220, 40, 80), 1.0);
+        renderer.paint_backdrop(rect, 6.0, 12.0, Color::rgb(220, 40, 80), 1.0, 0.0);
         assert_eq!(
             renderer.buffer().as_slice()[center],
             Color::rgb(220, 40, 80).to_bgra()
@@ -3614,7 +3844,7 @@ mod tests {
             "opaque materials need no blur"
         );
         renderer.buffer.clear(Color::BLACK);
-        renderer.paint_backdrop(rect, 6.0, 12.0, Color::rgba(220, 40, 80, 60), 0.5);
+        renderer.paint_backdrop(rect, 6.0, 12.0, Color::rgba(220, 40, 80, 60), 0.5, 0.0);
         assert_eq!(
             renderer.buffer().as_slice()[center],
             Color::rgb(110, 20, 40).to_bgra()

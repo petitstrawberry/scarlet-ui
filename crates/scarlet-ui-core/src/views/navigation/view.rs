@@ -41,8 +41,8 @@ pub enum NavigationSidebarStyle {
     Simple,
     /// An inset rounded panel with softly tinted, rounded destination rows.
     /// Uses the shared in-app backdrop material and a uniform selected tint.
-    /// In bottom-bar presentation, keeps the full destination cells in a softly
-    /// rounded glass strip with a content-edge selection indicator.
+    /// In bottom-bar presentation, floats an inset glass capsule above the
+    /// window edge. Selection uses a translucent tint without an indicator line.
     Floating,
 }
 

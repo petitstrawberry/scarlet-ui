@@ -10,6 +10,7 @@
 use super::*;
 use scarlet_ui_core::geometry::Rect;
 use sgfx::ir::{BlendComponent, BlendFactor, BlendOp};
+mod analytic;
 
 const MAX_SNAPSHOT_PIXELS: u64 = 16_777_216;
 const MAX_FRAME_COPY_PIXELS: u64 = 8_388_608;
@@ -25,7 +26,9 @@ pub(super) struct Backdrop {
     radius: f32,
     opacity: f32,
     tint: [f32; 4],
-    working: usize,
+    // None uses the full-resolution snapshot and one reusable blur scratch.
+    working: Option<usize>,
+    optics: Option<[f32; 8]>,
 }
 struct WorkingImages {
     width: u32,
@@ -41,17 +44,24 @@ pub(super) struct Resources {
     additive_solid: RenderPipelineId,
     erase: RenderPipelineId,
     working: Vec<WorkingImages>,
+    full_resolution_work: Option<TextureId>,
+    analytic: Option<analytic::Resources>,
 }
 
 pub(super) fn contains_backdrop(paint: &PaintContext<'_>) -> bool {
     paint.commands().iter().any(|command| match command {
         PaintCommand::BackdropFilterRoundedRect { .. } => true,
-        PaintCommand::DrawDisplayList { list, .. } => contains_backdrop(list.context()),
+        PaintCommand::DrawDisplayList { list, .. } => list.reads_backdrop(),
         _ => false,
     })
 }
 
 impl SgfxPaintEncoder {
+    /// Enable per-pixel glass on backends supporting SGFX WGSL pipelines.
+    /// Portable fixed-pipeline backends keep the mesh implementation by default.
+    pub fn set_analytic_glass(&mut self, enabled: bool) {
+        self.analytic_glass = enabled;
+    }
     /// Number of materials rendered as opaque tint because the bounded blur
     /// budget or minimum working resolution was exceeded in the latest frame.
     pub const fn backdrop_fallback_count(&self) -> u32 {
@@ -67,10 +77,11 @@ impl SgfxPaintEncoder {
         corner_radius: f32,
         blur_radius: f32,
         tint: UiColor,
+        refraction: f32,
         opacity: f32,
         scale: f32,
     ) -> Result<()> {
-        if !blur_radius.is_finite() || !corner_radius.is_finite() {
+        if !blur_radius.is_finite() || !corner_radius.is_finite() || !refraction.is_finite() {
             return Err(Error::InvalidFrame);
         }
         let color = ui_color(tint, 1.)?;
@@ -80,6 +91,22 @@ impl SgfxPaintEncoder {
         }
         let physical = FloatRect::from_logical(rect, scale);
         if physical.is_empty() {
+            return Ok(());
+        }
+        // Scrolling can leave whole materials outside an ancestor's viewport.
+        // Reject those before building optical geometry or requesting scratch images.
+        let Some(visible) = tessellator.effective_scissor() else {
+            return Ok(());
+        };
+        if physical
+            .intersect(FloatRect::new(
+                visible.x as f32,
+                visible.y as f32,
+                visible.width as f32,
+                visible.height as f32,
+            ))
+            .is_none()
+        {
             return Ok(());
         }
         let radius = (blur_radius.max(0.) * scale).min(MAX_PHYSICAL_RADIUS);
@@ -102,7 +129,7 @@ impl SgfxPaintEncoder {
         if u64::from(self.width) * u64::from(self.height) > MAX_SNAPSHOT_PIXELS
             || self.backdrop_pixels.saturating_add(pixels) > MAX_FRAME_COPY_PIXELS
             || self.backdrop_filters >= MAX_FRAME_FILTERS
-            || !adequate_resolution(bounds, radius)
+            || (refraction <= 0.0 && !adequate_resolution(bounds, radius))
         {
             if let Some(geometry) = tessellator.fill_rounded_rect(rect, corner_radius)? {
                 self.backdrop_fallbacks = self.backdrop_fallbacks.saturating_add(1);
@@ -116,19 +143,50 @@ impl SgfxPaintEncoder {
             }
             return Ok(());
         }
+        // Optical detail is optional under load. Keep room for clipping and
+        // foreground geometry; degraded glass still uses the ordinary blur.
+        let full_resolution = refraction > 0.0;
+        let analytic = self.analytic_glass && full_resolution;
+        let refraction = if analytic
+            || (self.backdrop_filters < 16
+                && tessellator.vertices().len() + 16_384 < crate::geometry::MAX_FRAME_VERTICES)
+        {
+            refraction.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         // The material and ancestor clips affect only the output, never the halo.
-        tessellator.push_clip(rect, corner_radius)?;
-        let u0 = (physical.x - bounds.x as f32) / bounds.width as f32;
-        let v0 = (physical.y - bounds.y as f32) / bounds.height as f32;
-        let u1 = (physical.right() - bounds.x as f32) / bounds.width as f32;
-        let v1 = (physical.bottom() - bounds.y as f32) / bounds.height as f32;
-        let geometry =
-            tessellator.textured_rect(physical, [[u0, v0], [u1, v0], [u1, v1], [u0, v1]]);
-        tessellator.pop_clip();
+        if !analytic {
+            tessellator.push_clip(rect, corner_radius)?;
+        }
+        let sampling = if full_resolution {
+            FloatRect::new(0., 0., self.width as f32, self.height as f32)
+        } else {
+            FloatRect::new(
+                bounds.x as f32,
+                bounds.y as f32,
+                bounds.width as f32,
+                bounds.height as f32,
+            )
+        };
+        let u0 = (physical.x - sampling.x) / sampling.width;
+        let v0 = (physical.y - sampling.y) / sampling.height;
+        let u1 = (physical.right() - sampling.x) / sampling.width;
+        let v1 = (physical.bottom() - sampling.y) / sampling.height;
+        let geometry = if analytic {
+            tessellator.textured_rect(physical, [[u0, v0], [u1, v0], [u1, v1], [u0, v1]])
+        } else if refraction > 0.0 {
+            tessellator.refractive_rect(rect, corner_radius, sampling, refraction.clamp(0.0, 1.0))
+        } else {
+            tessellator.textured_rect(physical, [[u0, v0], [u1, v0], [u1, v1], [u0, v1]])
+        };
+        if !analytic {
+            tessellator.pop_clip();
+        }
         let Some(geometry) = geometry? else {
             return Ok(());
         };
-        let working = self.prepare_backdrop(bounds, radius)?;
+        let working = self.prepare_backdrop(bounds, radius, full_resolution)?;
         self.backdrop_pixels += pixels;
         self.backdrop_filters += 1;
         // Even a material at the start of the scene must observe the background
@@ -148,11 +206,43 @@ impl SgfxPaintEncoder {
                 opacity,
                 tint: color,
                 working,
+                optics: analytic.then_some([
+                    physical.x,
+                    physical.y,
+                    physical.width,
+                    physical.height,
+                    corner_radius * scale,
+                    scale,
+                    refraction,
+                    0.,
+                ]),
             }),
-        )
+        )?;
+        if refraction > 0.0 && !analytic {
+            tessellator.push_clip(rect, corner_radius)?;
+            let rim =
+                tessellator.glass_rim(rect, corner_radius, opacity * refraction.clamp(0.0, 1.0));
+            tessellator.pop_clip();
+            if let Some(geometry) = rim? {
+                draws.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
+                draws.push(Draw {
+                    geometry,
+                    source: DrawSource::Solid,
+                    vertex_buffer: None,
+                    offset: [0.0, 0.0],
+                    snap_phase: [0.0, 0.0],
+                });
+            }
+        }
+        Ok(())
     }
 
-    fn prepare_backdrop(&mut self, bounds: PixelBounds, radius: f32) -> Result<usize> {
+    fn prepare_backdrop(
+        &mut self,
+        bounds: PixelBounds,
+        radius: f32,
+        full_resolution: bool,
+    ) -> Result<Option<usize>> {
         if self.backdrop.is_none() {
             let table = &self.table;
             let component = BlendComponent::new(BlendFactor::One, BlendFactor::One, BlendOp::Add);
@@ -168,7 +258,9 @@ impl SgfxPaintEncoder {
                     table,
                     self.width,
                     self.height,
-                    TextureUsage::COPY_DST | TextureUsage::SAMPLED,
+                    TextureUsage::COPY_DST
+                        | TextureUsage::SAMPLED
+                        | TextureUsage::RENDER_ATTACHMENT,
                 )?,
                 vertex_buffer: table
                     .define_buffer(
@@ -185,16 +277,37 @@ impl SgfxPaintEncoder {
                 additive_solid: pipeline(table, false, additive)?,
                 erase: pipeline(table, false, erase)?,
                 working: Vec::new(),
+                full_resolution_work: None,
+                analytic: None,
             });
         }
         let (width, height) = working_extent(bounds, radius);
         let resources = self.backdrop.as_mut().ok_or(Error::InvalidFrame)?;
+        if full_resolution {
+            if resources.full_resolution_work.is_none() {
+                resources.full_resolution_work = Some(texture(
+                    &self.table,
+                    self.width,
+                    self.height,
+                    TextureUsage::SAMPLED | TextureUsage::RENDER_ATTACHMENT,
+                )?);
+            }
+            if self.analytic_glass && resources.analytic.is_none() {
+                resources.analytic = Some(analytic::Resources::new(
+                    &self.table,
+                    resources.snapshot,
+                    resources.full_resolution_work.unwrap(),
+                    self.sampler,
+                )?);
+            }
+            return Ok(None);
+        }
         if let Some(index) = resources
             .working
             .iter()
             .position(|images| images.width == width && images.height == height)
         {
-            return Ok(index);
+            return Ok(Some(index));
         }
         let usage = TextureUsage::SAMPLED | TextureUsage::RENDER_ATTACHMENT;
         resources
@@ -207,38 +320,78 @@ impl SgfxPaintEncoder {
             first: texture(&self.table, width, height, usage)?,
             second: texture(&self.table, width, height, usage)?,
         });
-        Ok(resources.working.len() - 1)
+        Ok(Some(resources.working.len() - 1))
     }
 
-    pub(super) fn submit_backdrop<E: CommandExecutor>(
+    pub(super) fn backdrop_work_bytes(&self, filter: Backdrop) -> Result<Vec<u8>> {
+        if filter.optics.is_some() {
+            return Ok(analytic::parameters(filter, self.width, self.height));
+        }
+        let resources = self.backdrop.as_ref().ok_or(Error::InvalidFrame)?;
+        let working = filter.working.map(|index| &resources.working[index]);
+        encode_paint_vertices(&work_vertices(filter, working, self.width, self.height))
+    }
+
+    /// Append barriers and passes in-order without a queue submission per glass.
+    /// Buffer uploads are ordered copies, so the small work buffer is reusable.
+    pub(super) fn encode_backdrop<'r, 'data>(
         &self,
-        executor: &mut E,
+        encoder: &mut CommandEncoder<'r, 'data>,
+        table: &'r ResourceTable,
+        bytes: &'data [u8],
         target: TextureId,
         draw: Draw,
         filter: Backdrop,
-    ) -> core::result::Result<(), FrameError<E::Error>> {
+    ) -> Result<()> {
         let resources = self.backdrop.as_ref().ok_or(Error::InvalidFrame)?;
-        let working = resources
-            .working
-            .get(filter.working)
-            .ok_or(Error::InvalidFrame)?;
-        let table = &self.table;
+        if filter.optics.is_some() {
+            return resources
+                .analytic
+                .as_ref()
+                .ok_or(Error::InvalidFrame)?
+                .encode(
+                    encoder,
+                    table,
+                    bytes,
+                    resources.snapshot,
+                    resources.full_resolution_work.unwrap(),
+                    target,
+                    self.vertex_buffer,
+                    draw,
+                    filter,
+                    self.width,
+                    self.height,
+                );
+        }
+        let working = filter.working.map(|index| &resources.working[index]);
         let stage = |_| Error::sgfx(Stage::EncodeCommands);
         let target = table.texture_ref(target).map_err(stage)?;
         let snapshot = table.texture_ref(resources.snapshot).map_err(stage)?;
-        let first = table.texture_ref(working.first).map_err(stage)?;
-        let second = table.texture_ref(working.second).map_err(stage)?;
+        let first = match working {
+            Some(working) => table.texture_ref(working.first).map_err(stage)?,
+            None => snapshot,
+        };
+        let second = table
+            .texture_ref(match working {
+                Some(working) => working.second,
+                None => resources.full_resolution_work.ok_or(Error::InvalidFrame)?,
+            })
+            .map_err(stage)?;
         let buffer = table.buffer_ref(resources.vertex_buffer).map_err(stage)?;
         let sampler = table.sampler_ref(self.sampler).map_err(stage)?;
-        let area = PixelRect::new(0, 0, working.width, working.height).map_err(stage)?;
+        let (work_width, work_height, area) = match working {
+            Some(working) => (
+                working.width,
+                working.height,
+                PixelRect::new(0, 0, working.width, working.height).map_err(stage)?,
+            ),
+            None => (self.width, self.height, pixel_rect(filter.bounds)?),
+        };
         let copy = pixel_rect(filter.bounds)?;
-        let vertices = work_vertices(filter, working, self.width, self.height);
-        let bytes = encode_paint_vertices(&vertices)?;
-        let mut encoder = CommandEncoder::new(table);
         encoder
             .copy_texture_to_texture(target, copy, snapshot, copy)
             .map_err(stage)?;
-        encoder.write_buffer(buffer, 0, &bytes).map_err(stage)?;
+        encoder.write_buffer(buffer, 0, bytes).map_err(stage)?;
         let transparent = ir_color([0.; 4])?;
         let white = ir_color([1.; 4])?;
         for (source, destination, pipeline, first_vertex, vertex_count) in [
@@ -246,6 +399,11 @@ impl SgfxPaintEncoder {
             (first, second, resources.additive_texture, 6, 54),
             (second, first, resources.additive_texture, 60, 54),
         ] {
+            // Refractive glass keeps source pixels at their original resolution.
+            // Blur directly between snapshot and scratch; no downsample pass.
+            if working.is_none() && first_vertex == 0 {
+                continue;
+            }
             let descriptor = RenderPassDesc::new(
                 table,
                 destination,
@@ -261,7 +419,7 @@ impl SgfxPaintEncoder {
             pass.set_texture(source).map_err(stage)?;
             pass.set_sampler(sampler).map_err(stage)?;
             pass.set_uniforms(DrawUniforms::new(
-                pixel_transform(working.width, working.height)?,
+                pixel_transform(work_width, work_height)?,
                 white,
             ))
             .map_err(stage)?;
@@ -315,8 +473,7 @@ impl SgfxPaintEncoder {
                 .map_err(stage)?;
         }
         pass.end().map_err(stage)?;
-        let commands = encoder.finish().map_err(stage)?;
-        executor.execute(&commands).map_err(FrameError::Execution)
+        Ok(())
     }
 }
 
@@ -402,18 +559,18 @@ fn pipeline(table: &ResourceTable, textured: bool, blend: BlendState) -> Result<
 }
 fn work_vertices(
     filter: Backdrop,
-    working: &WorkingImages,
+    working: Option<&WorkingImages>,
     width: u32,
     height: u32,
 ) -> Vec<Vertex> {
     let mut vertices = Vec::with_capacity(WORK_VERTICES as usize);
+    let b = filter.bounds;
     let mut quad = |uv: [[f32; 2]; 4], weight| {
-        let positions = [
-            [0., 0.],
-            [working.width as f32, 0.],
-            [working.width as f32, working.height as f32],
-            [0., working.height as f32],
-        ];
+        let (x, y, w, h) = match working {
+            Some(working) => (0., 0., working.width as f32, working.height as f32),
+            None => (b.x as f32, b.y as f32, b.width as f32, b.height as f32),
+        };
+        let positions = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
         for index in [0, 1, 2, 0, 2, 3] {
             vertices.push(Vertex {
                 position: positions[index],
@@ -422,7 +579,6 @@ fn work_vertices(
             });
         }
     };
-    let b = filter.bounds;
     let (u0, v0, u1, v1) = (
         b.x as f32 / width as f32,
         b.y as f32 / height as f32,
@@ -430,18 +586,28 @@ fn work_vertices(
         (b.y + b.height) as f32 / height as f32,
     );
     quad([[u0, v0], [u1, v0], [u1, v1], [u0, v1]], 1.);
+    let (left, top, right, bottom, sample_width, sample_height) = if working.is_some() {
+        (0., 0., 1., 1., b.width, b.height)
+    } else {
+        (u0, v0, u1, v1, width, height)
+    };
     for axis in 0..2 {
         for (index, weight) in WEIGHTS.into_iter().enumerate() {
             let shift = (index as f32 - 4.) * filter.radius
                 / 4.
                 / if axis == 0 {
-                    b.width as f32
+                    sample_width as f32
                 } else {
-                    b.height as f32
+                    sample_height as f32
                 };
             let (u, v) = if axis == 0 { (shift, 0.) } else { (0., shift) };
             quad(
-                [[u, v], [1. + u, v], [1. + u, 1. + v], [u, 1. + v]],
+                [
+                    [left + u, top + v],
+                    [right + u, top + v],
+                    [right + u, bottom + v],
+                    [left + u, bottom + v],
+                ],
                 weight / 256.,
             );
         }
@@ -454,6 +620,50 @@ mod tests {
     use super::*;
     use crate::lowering::tests::RecordingExecutor;
     use scarlet_ui_core::geometry::Point;
+
+    #[test]
+    fn optical_mesh_is_bounded_and_degrades_to_blur_after_sixteen_filters() {
+        let mut encoder = SgfxPaintEncoder::new(200, 120, false).unwrap();
+        let mut paint = PaintContext::new();
+        for _ in 0..20 {
+            paint.refractive_glass_rounded_rect(
+                Rect::from_xywh(20., 20., 80., 40.),
+                12.,
+                12.,
+                UiColor::rgba(1., 1., 1., 0.2),
+                1.,
+            );
+        }
+        let frame = encoder
+            .lower(
+                &paint,
+                1000,
+                PixelBounds {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 120,
+                },
+            )
+            .unwrap();
+        let glass: Vec<_> = frame
+            .draws
+            .iter()
+            .filter(|d| matches!(d.source, DrawSource::Backdrop(_)))
+            .collect();
+        assert_eq!(glass.len(), 20);
+        assert!(
+            glass[..16]
+                .iter()
+                .all(|d| d.geometry.vertex_count > 6 && d.geometry.vertex_count < 8192)
+        );
+        assert!(glass[16..].iter().all(|d| d.geometry.vertex_count < 1000));
+        assert_eq!(
+            encoder.backdrop_fallback_count(),
+            0,
+            "optical cap still preserves blur"
+        );
+    }
 
     #[test]
     fn backdrop_is_an_ordered_barrier_and_forces_full_replay() {
@@ -494,6 +704,61 @@ mod tests {
             PixelRect::new(0, 0, 200, 120).unwrap()
         );
         assert!(!kinds.contains(&"set-programmable-pipeline"));
+        assert_eq!(renderer.backdrop_fallback_count(), 0);
+    }
+
+    #[test]
+    fn multiple_glasses_share_one_submission_and_cull_outside_scrollport() {
+        let mut renderer = SgfxPaintEncoder::new(200, 120, false).unwrap();
+        let mut paint = PaintContext::new();
+        paint.fill_rounded_rect(Rect::from_xywh(0., 0., 200., 120.), 0., UiColor::WHITE);
+        paint.push_rounded_clip(Rect::from_xywh(0., 0., 100., 120.), 0.);
+        for i in 0..12 {
+            paint.backdrop_filter_rounded_rect(
+                Rect::from_xywh(10., 10. + i as f32 * 5., 60., 30.),
+                8.,
+                8.,
+                UiColor::WHITE.with_opacity(0.2),
+            );
+        }
+        for _ in 0..64 {
+            paint.refractive_glass_rounded_rect(
+                Rect::from_xywh(110., 20., 80., 40.),
+                12.,
+                8.,
+                UiColor::WHITE,
+                1.,
+            );
+        }
+        paint.pop_clip();
+        let mut executor = RecordingExecutor::default();
+        renderer
+            .encode_frame(
+                &mut executor,
+                0,
+                None,
+                &paint,
+                UiColor::BLACK,
+                1000,
+                &[(0, 0, 200, 120)],
+            )
+            .unwrap();
+        assert_eq!(
+            executor.command_kinds.len(),
+            1,
+            "no per-material queue submission"
+        );
+        assert_eq!(
+            executor.command_kinds[0]
+                .iter()
+                .filter(|k| **k == "copy")
+                .count(),
+            12
+        );
+        assert_eq!(
+            renderer.backdrop_filters, 12,
+            "invisible materials consume no filter budget"
+        );
         assert_eq!(renderer.backdrop_fallback_count(), 0);
     }
 
@@ -626,15 +891,16 @@ mod tests {
             radius: 12.,
             opacity: 1.,
             tint: [0.; 4],
-            working: 0,
+            working: Some(0),
+            optics: None,
         };
         assert_eq!(WEIGHTS.iter().sum::<f32>(), 256.);
         let mut renderer = SgfxPaintEncoder::new(200, 100, false).unwrap();
         renderer
-            .prepare_backdrop(filter.bounds, filter.radius)
+            .prepare_backdrop(filter.bounds, filter.radius, false)
             .unwrap();
         let resources = renderer.backdrop.as_ref().unwrap();
-        let vertices = work_vertices(filter, &resources.working[0], 200, 100);
+        let vertices = work_vertices(filter, Some(&resources.working[0]), 200, 100);
         assert_eq!(vertices.len(), WORK_VERTICES as usize);
         for vertex in &vertices[6..] {
             assert_eq!(vertex.color, [vertex.color[0]; 4]);

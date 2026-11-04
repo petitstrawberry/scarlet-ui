@@ -244,21 +244,18 @@ impl TabView {
         self
     }
 
-    /// Use a shared backdrop material while retaining the tab-strip structure.
-    ///
-    /// The full-height selected tab meets the content edge, with a functional
-    /// scarlet selection indicator. The surrounding strip and selected tab
-    /// sample the real backdrop instead of using opaque fills. A later
-    /// [`Self::style`] call can override the colors or hide the indicator.
+    /// Use a centered, content-sized glass bar with an inset selection.
+    /// Regular widths place it above content; compact widths use the bottom.
+    /// A later `style` call can customize colors or opt into an indicator.
     /// Content layout and selection behavior are unchanged.
     pub fn material(mut self, material: style::GlassMaterial) -> Self {
         let palette = ColorPalette::default();
         self.material = Some(material);
         self.style.background_color = Color::TRANSPARENT;
-        self.style.selected_color = Color::TRANSPARENT;
+        self.style.selected_color = palette.primary().with_opacity(0.10);
         self.style.hover_color = palette.text().with_opacity(0.045);
         self.style.border_color = Color::TRANSPARENT;
-        self.style.indicator_height = 2.0;
+        self.style.indicator_height = 0.0;
         self
     }
 
@@ -620,8 +617,26 @@ impl TabViewRenderObject {
         text_width as f32 + self.tab_padding * 2.0
     }
 
+    fn bar_rect(&self) -> Rect {
+        let width = if self.material.is_some() {
+            self.labels
+                .iter()
+                .map(|label| self.tab_width(label))
+                .sum::<f32>()
+                .min(self.size.width)
+        } else {
+            self.size.width
+        };
+        Rect::from_xywh(
+            (self.size.width - width) * 0.5,
+            self.tab_bar_origin_y(),
+            width,
+            self.tab_bar_height,
+        )
+    }
+
     fn tab_rect(&self, index: usize) -> Rect {
-        let x = self
+        let x: f32 = self
             .labels
             .iter()
             .take(index)
@@ -631,7 +646,12 @@ impl TabViewRenderObject {
             .labels
             .get(index)
             .map_or(0.0, |label| self.tab_width(label));
-        Rect::from_xywh(x, self.tab_bar_origin_y(), width, self.tab_bar_height)
+        Rect::from_xywh(
+            self.bar_rect().origin.x + x,
+            self.tab_bar_origin_y(),
+            width,
+            self.tab_bar_height,
+        )
     }
 
     fn tab_index_at(&self, point: Point) -> Option<usize> {
@@ -791,11 +811,7 @@ impl ElementRenderObject for TabViewRenderObject {
     }
 
     fn paint_outsets(&self) -> EdgeInsets {
-        if self.material.is_some() {
-            style::elevation_outsets(style::ElevationRole::Raised)
-        } else {
-            EdgeInsets::ZERO
-        }
+        EdgeInsets::ZERO
     }
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
@@ -805,23 +821,21 @@ impl ElementRenderObject for TabViewRenderObject {
             0.0
         };
         let tab_bar_y = origin.y + self.tab_bar_origin_y();
-        let bar = Rect::from_xywh(origin.x, tab_bar_y, self.size.width, self.tab_bar_height);
-        let clip = Rect::from_xywh(
-            origin.x,
+        let local_bar = self.bar_rect();
+        let bar = Rect::from_xywh(
+            origin.x + local_bar.origin.x,
             tab_bar_y,
-            self.size.width,
+            local_bar.size.width,
+            self.tab_bar_height,
+        );
+        let clip = Rect::from_xywh(
+            bar.origin.x,
+            tab_bar_y,
+            bar.size.width,
             self.tab_bar_height.min(self.size.height),
         );
         if self.material.is_some() {
-            let shadow = ColorPalette::default().shadow();
-            style::elevation_shadow(
-                ctx,
-                bar,
-                8.0,
-                shadow.with_opacity(shadow.a * 1.75),
-                style::ElevationRole::Raised,
-            );
-            ctx.push_rounded_clip(clip, style::radius_for(clip, 8.0));
+            ctx.push_rounded_clip(clip, style::radius_for(clip, self.tab_bar_height * 0.5));
         } else {
             ctx.push_clip(clip);
         }
@@ -833,7 +847,12 @@ impl ElementRenderObject for TabViewRenderObject {
                 .with_opacity(0.045)
                 .blend_over(material.tint);
             material.tint = self.background_color.blend_over(material.tint);
-            style::paint_glass_material(ctx, bar, style::radius_for(bar, 8.0), material);
+            style::paint_glass_material(
+                ctx,
+                bar,
+                style::radius_for(bar, self.tab_bar_height * 0.5),
+                material,
+            );
         } else if self.background_color.a > 0.0 {
             ctx.fill_rect(bar, self.background_color);
         }
@@ -852,13 +871,7 @@ impl ElementRenderObject for TabViewRenderObject {
                 local_rect.size.width,
                 local_rect.size.height,
             );
-            // Glass retains the original full-height tab geometry. Insets are
-            // reserved for the existing non-material treatment.
-            let inset = if self.material.is_some() {
-                0.0_f32
-            } else {
-                3.0_f32
-            };
+            let inset = 3.0_f32;
             let inset_x = inset.min(rect.size.width * 0.5);
             let inset_y = inset.min(rect.size.height * 0.5);
             let face = Rect::from_xywh(
@@ -867,63 +880,27 @@ impl ElementRenderObject for TabViewRenderObject {
                 (rect.size.width - inset_x * 2.0).max(0.0),
                 (rect.size.height - inset_y * 2.0).max(0.0),
             );
-            let radius = style::radius_for(face, if self.material.is_some() { 6.0 } else { 12.0 });
-            // Only the exposed corners curve. Extending the face through the
-            // content edge and clipping it back keeps a tab attached to its view.
-            let attached_face = if self.material.is_some() {
-                Rect::from_xywh(
-                    face.origin.x,
-                    face.origin.y
-                        - if self.tab_bar_position == TabBarPosition::Bottom {
-                            radius
-                        } else {
-                            0.0
-                        },
-                    face.size.width,
-                    face.size.height + radius,
-                )
-            } else {
-                face
-            };
+            let radius = style::radius_for(face, 12.0);
             let pressed = self.pressed_index() == Some(index);
             if index == selected {
-                if let Some(mut material) = self.material {
-                    let selection = self.selected_color.with_opacity(
-                        (self.selected_color.a * if pressed { 1.5 } else { 1.0 }).min(1.0),
-                    );
-                    material.tint = selection.blend_over(material.tint);
-                    if pressed {
-                        material.tint = material
-                            .tint
-                            .with_opacity((material.tint.a + 0.08).min(1.0));
-                    } else if self.hovered_index == Some(index) {
-                        material.tint = material
-                            .tint
-                            .with_opacity((material.tint.a + 0.04).min(1.0));
-                    }
-                    ctx.push_clip(face);
-                    style::paint_glass_material(ctx, attached_face, radius, material);
-                    ctx.pop_clip();
+                let fill = if self.material.is_some() {
+                    self.selected_color.with_opacity(
+                        (self.selected_color.a
+                            * if pressed {
+                                1.6
+                            } else if self.hovered_index == Some(index) {
+                                1.2
+                            } else {
+                                1.0
+                            })
+                        .min(1.0),
+                    )
+                } else if pressed {
+                    self.selected_color.darken(0.04)
                 } else {
-                    // Selection remains visible when held. Depth comes from the
-                    // material and a soft shadow, never a fixed highlight line.
-                    if !pressed && self.selected_color.a > 0.0 {
-                        ctx.draw_rounded_rect_shadow(
-                            face,
-                            radius,
-                            crate::geometry::Offset::new(0.0, 1.0),
-                            2.0,
-                            0.0,
-                            Color::BLACK.with_opacity(0.07 * self.selected_color.a),
-                        );
-                    }
-                    let fill = if pressed {
-                        self.selected_color.darken(0.04)
-                    } else {
-                        self.selected_color
-                    };
-                    style::fill_raised_surface(ctx, face, radius, fill, pressed);
-                }
+                    self.selected_color
+                };
+                ctx.fill_rounded_rect(face, radius, fill);
             } else if pressed || self.hovered_index == Some(index) {
                 let fill = if pressed {
                     self.hover_color
@@ -933,7 +910,7 @@ impl ElementRenderObject for TabViewRenderObject {
                     self.hover_color
                 };
                 ctx.push_clip(face);
-                ctx.fill_rounded_rect(attached_face, radius, fill);
+                ctx.fill_rounded_rect(face, radius, fill);
                 ctx.pop_clip();
             }
             let text_color = if index == selected {
@@ -1402,85 +1379,41 @@ mod tests {
     }
 
     #[test]
-    fn glass_tabs_keep_the_original_strip_and_selected_content_edge() {
+    fn glass_tabs_use_one_material_and_flat_selection_at_both_edges() {
         for placement in [TabBarPlacement::Top, TabBarPlacement::Bottom] {
             let mut tabs = tab_render_object(&glass_tabs(placement));
             tabs.layout(LayoutConstraints::tight(300.0, 180.0));
-            assert!(tabs.reads_backdrop());
             let mut ctx = PaintContext::new();
             tabs.paint(&mut ctx, Point::ZERO);
-            let selected = tabs.tab_rect(0);
-            let glass: Vec<_> = ctx
-                .commands()
-                .iter()
-                .filter_map(|command| match command {
-                    PaintCommand::BackdropFilterRoundedRect {
-                        rect,
-                        corner_radius,
-                        blur_radius,
-                        ..
-                    } => Some((*rect, *corner_radius, *blur_radius)),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(glass.len(), 2, "strip and selected tab share real glass");
             assert_eq!(
-                glass[0].0,
-                Rect::from_xywh(0.0, tabs.tab_bar_origin_y(), 300.0, 30.0)
+                ctx.commands()
+                    .iter()
+                    .filter(|command| matches!(
+                        command,
+                        PaintCommand::BackdropFilterRoundedRect { .. }
+                    ))
+                    .count(),
+                1
             );
-            assert_eq!(glass[0].1, 8.0, "the strip has restrained outer corners");
-            let selected_glass = Rect::from_xywh(
-                selected.origin.x,
-                selected.origin.y
-                    - if placement == TabBarPlacement::Bottom {
-                        6.0
-                    } else {
-                        0.0
-                    },
-                selected.size.width,
-                selected.size.height + 6.0,
-            );
-            assert_eq!(glass[1], (selected_glass, 6.0, 18.0));
-            assert!(
-                ctx.commands().iter().any(|command| matches!(
-                    command, PaintCommand::PushClip { rect, .. } if *rect == selected
-                )),
-                "selected tab remains full height and attached, not a chip"
-            );
-            let indicator = ctx
-                .commands()
-                .iter()
-                .find_map(|command| match command {
-                    PaintCommand::FillPath { path, color } if *color == tabs.indicator_color => {
-                        Some(path)
-                    }
-                    _ => None,
-                })
-                .expect("functional selection indicator");
-            let edge = if placement == TabBarPlacement::Top {
-                28.0
-            } else {
-                150.0
-            };
-            assert_eq!(indicator[0].y, edge);
-            assert_eq!(indicator[2].y, edge + 2.0);
             assert!(
                 !ctx.commands().iter().any(|command| matches!(
                     command,
-                    PaintCommand::StrokePath { .. }
-                        | PaintCommand::StrokeRoundedRect { .. }
-                        | PaintCommand::FillVerticalGradientRoundedRect { .. }
+                    PaintCommand::DrawRoundedRectShadow { .. } | PaintCommand::FillPath { .. }
                 )),
-                "no bevel or fixed decorative rim"
+                "no contact shadow or selection rule"
             );
-            assert!(
-                matches!(
-                    ctx.commands().first(),
-                    Some(PaintCommand::DrawRoundedRectShadow { .. })
-                ),
-                "a single whole-strip shadow separates glass from white"
+            assert_eq!(tabs.paint_outsets(), EdgeInsets::ZERO);
+            let bar = tabs.bar_rect();
+            assert!(bar.size.width < tabs.size.width);
+            assert!((bar.origin.x * 2.0 + bar.size.width - tabs.size.width).abs() < 0.01);
+            assert_eq!(
+                tabs.tab_index_at(Point::new(1.0, bar.origin.y + 15.0)),
+                None
             );
-            assert_ne!(tabs.paint_outsets(), EdgeInsets::ZERO);
+            assert_eq!(
+                tabs.tab_index_at(Point::new(bar.origin.x + 15.0, bar.origin.y + 15.0)),
+                Some(0)
+            );
         }
     }
 
@@ -1495,7 +1428,7 @@ mod tests {
                 .iter()
                 .rev()
                 .find_map(|command| match command {
-                    PaintCommand::BackdropFilterRoundedRect { tint, .. } => Some(*tint),
+                    PaintCommand::FillRoundedRect { color, .. } => Some(*color),
                     _ => None,
                 })
                 .unwrap()
@@ -1504,7 +1437,7 @@ mod tests {
         tabs.handle_event(
             &Event::Mouse(MouseEvent::ButtonPressed {
                 button: MouseButton::Left,
-                x: 12,
+                x: (tabs.tab_rect(0).origin.x + 12.0) as i32,
                 y: 12,
                 click_count: 1,
             }),
@@ -1516,7 +1449,7 @@ mod tests {
         tabs.handle_event(
             &Event::Mouse(MouseEvent::ButtonCancelled {
                 button: MouseButton::Left,
-                x: 12,
+                x: (tabs.tab_rect(0).origin.x + 12.0) as i32,
                 y: 12,
             }),
             Phase::Target,
@@ -1678,7 +1611,7 @@ mod tests {
             );
             assert_eq!(face.1, 12.0);
             assert!(
-                ctx.commands()
+                !ctx.commands()
                     .iter()
                     .any(|command| matches!(command, PaintCommand::DrawRoundedRectShadow { .. }))
             );
@@ -1714,7 +1647,7 @@ mod tests {
         tabs.paint(&mut ctx, Point::ZERO);
         assert!(ctx.commands().iter().any(|command| matches!(command,
             PaintCommand::FillRoundedRect { color, .. }
-            if *color == tabs.selected_color.darken(0.04).darken(0.035))));
+            if *color == tabs.selected_color.darken(0.04))));
         assert!(ctx.commands().iter().any(|command| matches!(command,
             PaintCommand::DrawText { text, color, .. }
             if text == "Mixer" && *color == tabs.selected_text_color)));

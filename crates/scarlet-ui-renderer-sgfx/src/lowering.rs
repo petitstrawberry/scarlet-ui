@@ -2,6 +2,7 @@
 mod backdrop;
 mod retained;
 mod shadow_cache;
+mod tiles;
 
 use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
@@ -67,6 +68,7 @@ enum DrawSource {
     Solid,
     Texture(TextureId),
     PixelTexture(TextureId),
+    PremultipliedTexture(TextureId),
     Glyph(TextureId),
     IconGlyph(TextureId),
     // An ordered pass barrier, never batchable or retained as an isolated mesh.
@@ -434,6 +436,7 @@ pub struct SgfxPaintEncoder {
     vertex_buffer: BufferId,
     solid_pipeline: RenderPipelineId,
     texture_pipeline: RenderPipelineId,
+    premultiplied_pipeline: RenderPipelineId,
     glyph_pipeline: RenderPipelineId,
     sampler: SamplerId,
     pixel_sampler: SamplerId,
@@ -456,10 +459,14 @@ pub struct SgfxPaintEncoder {
     retained_meshes: Vec<retained::RetainedMesh>,
     recording_mesh: bool,
     shadow_cache: Option<shadow_cache::ShadowCache>,
+    shape_cache: crate::geometry::ShapeCache,
     backdrop: Option<backdrop::Resources>,
     backdrop_pixels: u64,
     backdrop_filters: u32,
     backdrop_fallbacks: u32,
+    analytic_glass: bool,
+    raster_tiles: Vec<tiles::Tile>,
+    tile_backdrop: Option<backdrop::Resources>,
 }
 
 impl SgfxPaintEncoder {
@@ -551,6 +558,7 @@ impl SgfxPaintEncoder {
             FragmentProgram::TextureVertexColor(TextureSampleMode::AlphaMask),
         )?
         .id();
+        let premultiplied_pipeline = tiles::pipeline(&table)?;
         let sampler = table
             .define_sampler(SamplerDesc::new(
                 // Keep text, icons, and retained surfaces smooth when a
@@ -597,7 +605,11 @@ impl SgfxPaintEncoder {
 
         Ok(Self {
             retained_meshes: Vec::new(),
+            analytic_glass: false,
+            raster_tiles: Vec::new(),
+            tile_backdrop: None,
             shadow_cache: None,
+            shape_cache: crate::geometry::ShapeCache::default(),
             backdrop: None,
             backdrop_pixels: 0,
             backdrop_filters: 0,
@@ -608,6 +620,7 @@ impl SgfxPaintEncoder {
             vertex_buffer,
             solid_pipeline,
             texture_pipeline,
+            premultiplied_pipeline,
             glyph_pipeline,
             sampler,
             pixel_sampler,
@@ -792,6 +805,9 @@ impl SgfxPaintEncoder {
     /// texture uploads remain valid and are not needlessly uploaded again. The
     /// next presentation target must also be fully repainted by the platform.
     pub fn discard_frame(&mut self) {
+        for tile in &mut self.raster_tiles {
+            tile.invalidate();
+        }
         if let Some(cache) = self.shadow_cache.as_mut() {
             cache.list_id = 0;
         }
@@ -1062,6 +1078,7 @@ impl SgfxPaintEncoder {
         );
         let mut tessellator =
             Tessellator::new(scale_milli, self.width, self.height, render_bounds)?;
+        tessellator.shape_cache = core::mem::take(&mut self.shape_cache);
         let mut draws = Vec::new();
         let mut uploads = Vec::new();
         let mut buffer_mappings: Vec<(u64, TextureId)> = Vec::new();
@@ -1102,6 +1119,7 @@ impl SgfxPaintEncoder {
                     corner_radius,
                     blur_radius,
                     tint,
+                    refraction,
                 } => {
                     self.lower_backdrop(
                         &mut tessellator,
@@ -1110,6 +1128,7 @@ impl SgfxPaintEncoder {
                         *corner_radius,
                         *blur_radius,
                         *tint,
+                        *refraction,
                         opacity,
                         scale,
                     )?;
@@ -1584,6 +1603,7 @@ impl SgfxPaintEncoder {
             DrawSource::Solid,
         )?;
         let vertex_bytes = encode_paint_vertices(tessellator.vertices())?;
+        self.shape_cache = core::mem::take(&mut tessellator.shape_cache);
         Ok(LoweredFrame {
             vertex_bytes,
             draws,
@@ -2617,6 +2637,9 @@ impl SgfxPaintEncoder {
         let texture_pipeline = table
             .render_pipeline_ref(self.texture_pipeline)
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+        let premultiplied_pipeline = table
+            .render_pipeline_ref(self.premultiplied_pipeline)
+            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
         let glyph_pipeline = table
             .render_pipeline_ref(self.glyph_pipeline)
             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -2624,6 +2647,15 @@ impl SgfxPaintEncoder {
         let transform = pixel_transform(self.width, self.height)?;
         let white = ir_color([1.0, 1.0, 1.0, 1.0])?;
 
+        // Upload data must outlive the batched command stream.
+        let backdrop_bytes: Vec<Option<Vec<u8>>> = frame
+            .draws
+            .iter()
+            .map(|draw| match draw.source {
+                DrawSource::Backdrop(filter) => self.backdrop_work_bytes(filter).map(Some),
+                _ => Ok(None),
+            })
+            .collect::<Result<_>>()?;
         let mut encoder = CommandEncoder::new(&table);
         let mut stream_commands = 0usize;
         let mut vertices_written = false;
@@ -2639,7 +2671,7 @@ impl SgfxPaintEncoder {
             let mut first_pass = true;
             while draw_index < frame.draws.len() {
                 if let DrawSource::Backdrop(filter) = frame.draws[draw_index].source {
-                    if stream_commands > 0 {
+                    if stream_commands.saturating_add(64) > MAX_COMMANDS {
                         let commands = encoder
                             .finish()
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
@@ -2647,7 +2679,24 @@ impl SgfxPaintEncoder {
                         encoder = CommandEncoder::new(&table);
                         stream_commands = 0;
                     }
-                    self.submit_backdrop(executor, target_id, frame.draws[draw_index], filter)?;
+                    if !vertices_written && !frame.vertex_bytes.is_empty() {
+                        encoder
+                            .write_buffer(vertex_buffer, 0, &frame.vertex_bytes)
+                            .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
+                        vertices_written = true;
+                        stream_commands += 1;
+                    }
+                    self.encode_backdrop(
+                        &mut encoder,
+                        &table,
+                        backdrop_bytes[draw_index]
+                            .as_deref()
+                            .ok_or(Error::InvalidFrame)?,
+                        target_id,
+                        frame.draws[draw_index],
+                        filter,
+                    )?;
+                    stream_commands += 63; // Conservative IR bound, including reserved pass endings.
                     draw_index += 1;
                     first_pass = false;
                     continue;
@@ -2702,6 +2751,9 @@ impl SgfxPaintEncoder {
                         DrawSource::Backdrop(_) => unreachable!("backdrop is a pass barrier"),
                         DrawSource::Texture(texture) | DrawSource::PixelTexture(texture) => {
                             (texture_pipeline, Some(texture))
+                        }
+                        DrawSource::PremultipliedTexture(texture) => {
+                            (premultiplied_pipeline, Some(texture))
                         }
                         DrawSource::Glyph(texture) | DrawSource::IconGlyph(texture) => {
                             (glyph_pipeline, Some(texture))
@@ -2846,20 +2898,40 @@ impl SgfxPaintEncoder {
 
 fn extension_context(paint: &PaintContext<'_>) -> PaintContext<'static> {
     let mut extensions = PaintContext::new();
-    paint.visit_commands(&mut |command, origin| {
-        if let PaintCommand::Extension { rect, payload } = command {
-            extensions.draw_extension(
-                scarlet_ui_core::geometry::Rect::new(
-                    scarlet_ui_core::geometry::Point::new(
-                        rect.origin.x + origin.x,
-                        rect.origin.y + origin.y,
+    fn visit(
+        paint: &PaintContext<'_>,
+        origin: scarlet_ui_core::geometry::Point,
+        out: &mut PaintContext<'static>,
+    ) {
+        use scarlet_ui_core::geometry::{Point, Rect};
+        for command in paint.commands() {
+            match command {
+                PaintCommand::Extension { rect, payload } => out.draw_extension(
+                    Rect::new(
+                        Point::new(rect.origin.x + origin.x, rect.origin.y + origin.y),
+                        rect.size,
                     ),
-                    rect.size,
+                    Arc::clone(payload),
                 ),
-                Arc::clone(payload),
-            );
+                PaintCommand::DrawDisplayList {
+                    origin: local,
+                    list,
+                } if list.has_extensions() => {
+                    visit(
+                        list.context(),
+                        Point::new(origin.x + local.x, origin.y + local.y),
+                        out,
+                    );
+                }
+                _ => {}
+            }
         }
-    });
+    }
+    visit(
+        paint,
+        scarlet_ui_core::geometry::Point::ZERO,
+        &mut extensions,
+    );
     extensions
 }
 

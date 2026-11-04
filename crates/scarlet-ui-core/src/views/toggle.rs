@@ -236,10 +236,10 @@ impl ElementRenderObject for ToggleRenderObject {
             ctx.draw_rounded_rect_shadow(
                 held_rect,
                 11.0,
-                Offset::new(0.0, 1.0),
+                Offset::new(0.0, 0.5),
                 2.0,
                 0.0,
-                Color::BLACK.with_opacity(0.10),
+                Color::BLACK.with_opacity(0.035),
             );
             style::paint_glass_material(
                 ctx,
@@ -254,10 +254,10 @@ impl ElementRenderObject for ToggleRenderObject {
             ctx.draw_rounded_rect_shadow(
                 thumb_rect,
                 8.0,
-                Offset::new(0.0, 1.0),
+                Offset::new(0.0, 0.5),
                 2.0,
                 0.0,
-                Color::BLACK.with_opacity(0.10),
+                Color::BLACK.with_opacity(0.035),
             );
             style::paint_glass_material(
                 ctx,
@@ -311,6 +311,7 @@ mod tests {
                             corner_radius,
                             blur_radius,
                             tint,
+                            ..
                         } => Some((*rect, *corner_radius, *blur_radius, *tint)),
                         _ => None,
                     })
@@ -325,7 +326,7 @@ mod tests {
                     )
                 );
                 assert_eq!(radius, rect.size.height / 2.0);
-                assert_eq!(blur, style::GlassMaterial::thumb().blur_radius);
+                assert!(blur > 0.0 && blur < style::GlassMaterial::thumb().blur_radius);
                 assert_eq!(tint.a, style::GlassMaterial::thumb().tint.a);
                 let center = Point::new(
                     rect.origin.x + rect.size.width / 2.0,

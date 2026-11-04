@@ -790,9 +790,6 @@ impl ElementRenderObject for SelectRenderObject {
                     style::metrics().control_radius,
                     material,
                 );
-                if self.is_focused() && !self.expanded {
-                    style::glass_control_focus(ctx, trigger, material);
-                }
                 if w > 44.0 {
                     ctx.push_clip(Rect::from_xywh(
                         origin.x + 12.0,
@@ -844,9 +841,6 @@ impl ElementRenderObject for SelectRenderObject {
                     let mut material = style::GlassMaterial::thumb();
                     material.tint = fill.blend_over(material.tint);
                     style::paint_glass_material(ctx, button, 10.0, material);
-                    if self.is_focused() {
-                        style::glass_control_focus(ctx, button, material);
-                    }
                     let cx = button.origin.x + 10.0;
                     let cy = button.origin.y + 10.0;
                     for (dy, direction) in [(-2.0, -1.0), (2.0, 1.0)] {
@@ -1331,7 +1325,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_select_focus_outlines_only_the_chevron_segment() {
+    fn menu_select_keeps_internal_focus_without_a_ring() {
         for expanded in [false, true] {
             let mut select = menu_select(expanded);
             select.set_focused(true);
@@ -1362,14 +1356,7 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(
-                rings,
-                if expanded {
-                    alloc::vec![]
-                } else {
-                    alloc::vec![Rect::from_xywh(238.0, 8.0, 20.0, 20.0)]
-                }
-            );
+            assert!(rings.is_empty());
         }
     }
 

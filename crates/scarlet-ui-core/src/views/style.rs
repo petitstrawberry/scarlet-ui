@@ -80,7 +80,7 @@ const DESKTOP_VISUAL_METRICS: VisualMetrics = VisualMetrics {
     item_radius: 4.0,
     popover_radius: 8.0,
     border_width: 1.0,
-    focus_stroke_width: 3.0,
+    focus_stroke_width: 1.5,
     minimum_control_height: 24.0,
     navigation_indicator_width: 3.0,
     navigation_item_height: 40.0,
@@ -141,11 +141,12 @@ pub enum ElevationRole {
     Overlay,
 }
 
-/// A frosted in-app backdrop material shared by controls and surfaces.
+/// An in-app backdrop material shared by controls and surfaces.
 ///
 /// The renderer samples content already painted behind the shape, blurs it,
-/// and applies a uniform tint. Foreground content remains sharp. This does
-/// not sample the operating-system desktop or simulate optical refraction.
+/// and applies a uniform tint. Refractive quality also displaces backdrop
+/// samples near curved edges and adds a directional rim reflection. Foreground
+/// content remains sharp. This does not sample the operating-system desktop.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlassMaterial {
     /// Logical blur kernel support radius, not Gaussian sigma.
@@ -196,11 +197,12 @@ impl GlassMaterial {
         }
     }
 
-    /// Floating menu or popover surface, slightly denser than a button.
+    /// Floating menu or popover: retain background structure near the rim
+    /// while keeping a neutral wash behind its text.
     pub fn floating() -> Self {
         Self {
-            tint: ColorPalette::default().surface().with_opacity(0.70),
-            ..Self::regular()
+            blur_radius: 8.0,
+            tint: ColorPalette::default().surface().with_opacity(0.52),
         }
     }
 
@@ -228,12 +230,28 @@ pub(crate) fn paint_glass_material(
     radius: f32,
     material: GlassMaterial,
 ) {
-    ctx.backdrop_filter_rounded_rect(
-        rect,
-        radius_for(rect, radius),
-        material.blur_radius,
-        material.tint,
-    );
+    match crate::glass::glass_quality() {
+        crate::glass::GlassQuality::TintOnly => ctx.fill_rounded_rect(
+            rect,
+            radius_for(rect, radius),
+            material.tint.with_opacity(material.tint.a.max(0.88)),
+        ),
+        crate::glass::GlassQuality::Frosted => ctx.backdrop_filter_rounded_rect(
+            rect,
+            radius_for(rect, radius),
+            material.blur_radius,
+            material.tint,
+        ),
+        crate::glass::GlassQuality::Refractive => ctx.refractive_glass_rounded_rect(
+            rect,
+            radius_for(rect, radius),
+            // Keep the lens clear. Refractive filtering retains source resolution,
+            // so large surfaces need no artificial minimum blur.
+            material.blur_radius * 0.14,
+            material.tint,
+            1.0,
+        ),
+    }
 }
 
 impl ElevationRole {
@@ -305,9 +323,9 @@ pub(crate) fn control_fill(palette: &ColorPalette, hovered: bool, pressed: bool)
 
 pub(crate) fn control_focus(ctx: &mut PaintContext<'_>, rect: Rect, palette: &ColorPalette) {
     let color = match palette.scheme() {
-        crate::color::ColorScheme::Light => focus_highlight(palette).with_opacity(0.68),
+        crate::color::ColorScheme::Light => focus_highlight(palette).with_opacity(0.40),
         crate::color::ColorScheme::Dark => {
-            focus_highlight(palette).lighten(0.22).with_opacity(0.85)
+            focus_highlight(palette).lighten(0.22).with_opacity(0.52)
         }
     };
     focus_indicator(ctx, rect, color);
@@ -663,8 +681,8 @@ mod tests {
         };
         assert_eq!(*bounds, rect);
         assert_eq!(*corner_radius, metrics().control_radius);
-        assert_eq!(*stroke_width, 3.0);
-        assert_eq!(color.a, 0.68);
+        assert_eq!(*stroke_width, 1.5);
+        assert_eq!(color.a, 0.40);
         assert_eq!(
             GlassMaterial::editing().focused_editor(),
             GlassMaterial::editing()

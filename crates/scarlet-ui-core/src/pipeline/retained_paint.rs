@@ -20,6 +20,7 @@ struct Node {
     paint: Option<Arc<DisplayList>>,
     overlay: Option<Arc<DisplayList>>,
     group: Option<(u64, Arc<DisplayList>)>,
+    reads_backdrop: bool,
 }
 
 #[derive(Default)]
@@ -76,6 +77,7 @@ impl RetainedPaint {
             paint: None,
             overlay: None,
             group: None,
+            reads_backdrop: false,
         });
         let position = element.position();
         let bounds = RenderingPipeline::element_paint_bounds(element, Point::ZERO);
@@ -122,7 +124,10 @@ impl RetainedPaint {
                 self_ids,
                 structural_ids,
                 subtree_dirty,
-                element.retains_virtual_items(),
+                element.retains_virtual_items()
+                    || element
+                        .render_object()
+                        .is_some_and(|r| r.owns_child_viewport()),
                 Some(id),
             );
         }
@@ -133,8 +138,29 @@ impl RetainedPaint {
                 stamp.max(self.nodes[child].subtree_stamp)
             });
         self.nodes.get_mut(&id).unwrap().subtree_stamp = stamp;
+        let reads_backdrop = element.render_object().is_some_and(|r| r.reads_backdrop())
+            || self.nodes[&id]
+                .children
+                .iter()
+                .any(|child| self.nodes[child].reads_backdrop);
+        self.nodes.get_mut(&id).unwrap().reads_backdrop = reads_backdrop;
         if group {
-            self.refresh_group(id);
+            self.cache_static_subtrees(id);
+        }
+    }
+    fn cache_static_subtrees(&mut self, id: ElementId) {
+        self.refresh_group(id);
+        if self.nodes[&id].reads_backdrop
+            && self.nodes[&id]
+                .group
+                .as_ref()
+                .is_some_and(|(_, list)| list.raster_cache_bounds().is_none())
+        {
+            self.nodes.get_mut(&id).unwrap().group = None;
+            let children = self.nodes[&id].children.clone();
+            for child in children {
+                self.cache_static_subtrees(child);
+            }
         }
     }
     fn refresh_group(&mut self, id: ElementId) {
@@ -151,9 +177,44 @@ impl RetainedPaint {
                 None,
                 false,
             );
-            let list = context.flattened().into_display_list();
+            let context = context.flattened();
+            let list = if context.commands().len() > 1 {
+                context.into_cached_layer(self.group_bounds(id))
+            } else {
+                context.into_display_list()
+            };
             self.nodes.get_mut(&id).unwrap().group = Some((stamp, list));
         }
+    }
+    fn group_bounds(&self, id: ElementId) -> Rect {
+        let node = &self.nodes[&id];
+        let mut bounds = node.bounds;
+        for child in &node.children {
+            let child_node = &self.nodes[child];
+            let local = self.group_bounds(*child);
+            let mut child_bounds = Rect::new(
+                Point::new(
+                    local.origin.x + child_node.position.x,
+                    local.origin.y + child_node.position.y,
+                ),
+                local.size,
+            );
+            if let Some((clip, _)) = node.clip {
+                let Some(clipped) = intersect(child_bounds, clip) else {
+                    continue;
+                };
+                child_bounds = clipped;
+            }
+            let left = bounds.left().min(child_bounds.left());
+            let top = bounds.top().min(child_bounds.top());
+            bounds = Rect::from_xywh(
+                left,
+                top,
+                bounds.right().max(child_bounds.right()) - left,
+                bounds.bottom().max(child_bounds.bottom()) - top,
+            );
+        }
+        bounds
     }
     /// Sync only the moving subtree. Geometry recordings are reused, even when
     /// virtualization mounts more children. This never visits sibling panes.
