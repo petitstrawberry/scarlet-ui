@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test smoke-helpers.test.mjs",
+    "test:host": "node --test status-background.test.mjs",
     "smoke": "node smoke.mjs"
   },
   "devDependencies": {

@@ -1,5 +1,12 @@
 # Software-WebGPU CI smoke
 
+The separate `npm run test:host` check uses Playwright's headless Chromium
+(`npx playwright install chromium --only-shell`) to test the Widget Factory
+host page without Wasm or WebGPU. It compares canvas pixels and geometry with
+and without the standalone status-background element, including rotation,
+appearance and input. It cannot validate iOS's native status-bar blur. It does
+not change the Chrome/sandbox requirements of the GPU smoke below.
+
 This bounded smoke test serves a previously built `target/web-samples` artifact
 on an ephemeral `127.0.0.1` port. It does not open the public Pages site.
 
