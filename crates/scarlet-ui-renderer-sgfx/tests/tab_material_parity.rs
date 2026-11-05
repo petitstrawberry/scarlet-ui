@@ -333,3 +333,104 @@ fn responsive_navigation_renders_rounded_glass_in_portrait_and_landscape() {
         }
     }
 }
+
+/// A popup must keep labels readable even when the page changes from white to
+/// black underneath it. Exercise the portable Scarlet/Web path as well as WGSL.
+#[test]
+fn menu_background_contrast_is_bounded_in_both_render_paths() {
+    use scarlet_ui_core::{
+        element::ElementRenderObject,
+        views::menu::{MenuItemContent, MenuRenderObject},
+    };
+    let Some(context) = context() else {
+        assert!(std::env::var_os("SCARLET_REQUIRE_GPU_TESTS").is_none());
+        return;
+    };
+    scarlet_ui_core::graphics::set_default_font(include_bytes!(
+        "../../../examples/web-counter/assets/DejaVuSans.ttf"
+    ))
+    .unwrap();
+    let output = std::env::var_os("SCARLET_TAB_PARITY_DIR").map(std::path::PathBuf::from);
+    if let Some(dir) = &output {
+        fs::create_dir_all(dir).unwrap();
+    }
+    let mut menu = MenuRenderObject::new_adaptive(
+        vec![
+            MenuItemContent::new("Slider preset"),
+            MenuItemContent::new("Set sample text").shortcut("Ctrl+L"),
+        ],
+        220.,
+    );
+    let size = menu.layout(LayoutConstraints::unconstrained());
+    for analytic in [false, true] {
+        for scale in [1000, 1500, 2000] {
+            let (width, height) = (480 * scale / 1000, 180 * scale / 1000);
+            let mut encoder = SgfxPaintEncoder::new(width, height, false).unwrap();
+            encoder.set_analytic_glass(analytic);
+            let target = encoder.target_texture(0).unwrap();
+            let mut resources = context.create_resources(encoder.resource_table());
+            resources
+                .map_image(
+                    target,
+                    context
+                        .create_image(width, height, TextureFormat::Bgra8Unorm)
+                        .unwrap(),
+                )
+                .unwrap();
+            let queue = context.create_queue();
+            let mut frames = Vec::new();
+            for (name, background) in [("light", Color::WHITE), ("dark", Color::BLACK)] {
+                let mut paint = PaintContext::new();
+                paint.draw_text(
+                    Point::new(80., 48.),
+                    "Widget Factory",
+                    Color::rgb(70, 70, 75),
+                    32.,
+                );
+                paint.draw_text(
+                    Point::new(80., 90.),
+                    "PaintCommand default rendering",
+                    Color::rgb(70, 70, 75),
+                    16.,
+                );
+                menu.paint(&mut paint, Point::new(40., 40.));
+                encoder
+                    .encode_frame(
+                        &mut queue.executor(&mut resources),
+                        0,
+                        None,
+                        &paint,
+                        background,
+                        scale,
+                        &[(0, 0, width, height)],
+                    )
+                    .unwrap();
+                assert_eq!(encoder.backdrop_fallback_count(), 0);
+                let pixels = resources.read_texture(target).unwrap();
+                if let Some(dir) = &output {
+                    save(
+                        &dir.join(format!("menu-{analytic}-{scale}-{name}.ppm")),
+                        width,
+                        height,
+                        &pixels,
+                    )
+                    .unwrap();
+                }
+                frames.push(pixels);
+            }
+            let mut max_delta = 0;
+            for y in (48 * scale / 1000)..((40. + size.height - 8.) * scale as f32 / 1000.) as u32 {
+                for x in (48 * scale / 1000)..(252 * scale / 1000) {
+                    let at = ((y * width + x) * 4) as usize;
+                    for c in 0..3 {
+                        max_delta = max_delta.max(frames[0][at + c].abs_diff(frames[1][at + c]));
+                    }
+                }
+            }
+            assert!(
+                max_delta <= 35,
+                "background competes with menu labels: analytic={analytic}, scale={scale}, contrast={max_delta}"
+            );
+        }
+    }
+}

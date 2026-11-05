@@ -206,6 +206,15 @@ impl GlassMaterial {
         }
     }
 
+    /// Reading surface for menus and selection lists. A denser neutral tint
+    /// separates short labels from text and controls behind the popup.
+    pub fn menu() -> Self {
+        Self {
+            blur_radius: 18.0,
+            tint: ColorPalette::default().surface().with_opacity(0.88),
+        }
+    }
+
     /// Keep the editing face stable while focus is painted as a separate ring.
     /// Retained for source compatibility with material customization code.
     pub fn focused_editor(self) -> Self {
@@ -230,6 +239,23 @@ pub(crate) fn paint_glass_material(
     radius: f32,
     material: GlassMaterial,
 ) {
+    paint_glass_material_with_blur(ctx, rect, radius, material, material.blur_radius * 0.14);
+}
+
+pub(crate) fn paint_menu_material(ctx: &mut PaintContext<'_>, rect: Rect, radius: f32) {
+    let material = GlassMaterial::menu();
+    // Menus are reading surfaces, so retain more diffusion than a navigation
+    // lens even in Refractive quality. The rim still uses the shared optics.
+    paint_glass_material_with_blur(ctx, rect, radius, material, material.blur_radius * 0.5);
+}
+
+fn paint_glass_material_with_blur(
+    ctx: &mut PaintContext<'_>,
+    rect: Rect,
+    radius: f32,
+    material: GlassMaterial,
+    refractive_blur_radius: f32,
+) {
     match crate::glass::glass_quality() {
         crate::glass::GlassQuality::TintOnly => ctx.fill_rounded_rect(
             rect,
@@ -245,9 +271,7 @@ pub(crate) fn paint_glass_material(
         crate::glass::GlassQuality::Refractive => ctx.refractive_glass_rounded_rect(
             rect,
             radius_for(rect, radius),
-            // Keep the lens clear. Refractive filtering retains source resolution,
-            // so large surfaces need no artificial minimum blur.
-            material.blur_radius * 0.14,
+            refractive_blur_radius,
             material.tint,
             1.0,
         ),

@@ -892,9 +892,7 @@ impl ElementRenderObject for SelectRenderObject {
                 local_popup.size,
             );
             style::floating_shadow(ctx, popup, POPUP_RADIUS, palette.shadow());
-            // Keep trigger geometry and popup interaction unchanged. Only the
-            // shared material reads the actual in-app scene behind the popup.
-            style::paint_glass_material(ctx, popup, POPUP_RADIUS, style::GlassMaterial::floating());
+            style::paint_menu_material(ctx, popup, POPUP_RADIUS);
             ctx.push_rounded_clip(popup, POPUP_RADIUS);
             // Opening moves keyboard focus feedback to the active row. Keep
             // the menu material neutral, without a tinted header or full wash.

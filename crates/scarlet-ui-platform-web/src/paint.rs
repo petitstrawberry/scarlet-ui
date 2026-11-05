@@ -24,8 +24,12 @@ impl WebPaint {
         height: u32,
         menus: Rc<RefCell<crate::menu::WebMenu>>,
     ) -> Result<Self> {
-        let encoder = SgfxPaintEncoder::new(width.max(1), height.max(1), true)
+        let mut encoder = SgfxPaintEncoder::new(width.max(1), height.max(1), true)
             .map_err(|_| Error::RenderError)?;
+        // This platform already requires WebGPU. Accumulate blur taps in the
+        // fragment shader, avoiding repeated 8-bit additive rounding and mesh
+        // interpolation of the lens in browsers, including Safari.
+        encoder.set_analytic_glass(true);
         let target = encoder.target_texture(0).ok_or(Error::RenderError)?;
         let session = window
             .create_mapped_target_session(encoder.resource_table(), &[target])
@@ -53,7 +57,8 @@ impl PaintBackend for WebPaint {
         }
         self.resize_failed = true;
         // Allocate the new targets before replacing the old session.
-        if let Ok(encoder) = SgfxPaintEncoder::new(width, height, true) {
+        if let Ok(mut encoder) = SgfxPaintEncoder::new(width, height, true) {
+            encoder.set_analytic_glass(true);
             if let Some(target) = encoder.target_texture(0) {
                 if let Ok(session) = self
                     .window

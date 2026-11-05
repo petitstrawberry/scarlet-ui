@@ -8,6 +8,29 @@ use crate::error::{Error, Result};
 
 pub(crate) const MAX_FRAME_VERTICES: usize = 196_608;
 
+/// A point on an inset rounded contour; 13 points per quarter include both
+/// tangent endpoints, so the straight sides never cut across a rounded corner.
+fn glass_contour(rect: Rect, radius: f32, inset: f32, index: usize) -> Point {
+    let radius = radius
+        .max(0.)
+        .min(rect.size.width.min(rect.size.height) * 0.5);
+    let r = (radius - inset).max(0.);
+    let corner = (index / 13) % 4;
+    let step = index % 13;
+    let angle = core::f32::consts::PI * (-1. + corner as f32 * 0.5 + step as f32 / 24.);
+    let cx = if corner == 0 || corner == 3 {
+        rect.left() + inset + r
+    } else {
+        rect.right() - inset - r
+    };
+    let cy = if corner < 2 {
+        rect.top() + inset + r
+    } else {
+        rect.bottom() - inset - r
+    };
+    Point::new(cx + libm::cosf(angle) * r, cy + libm::sinf(angle) * r)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Vertex {
     pub(crate) position: [f32; 2],
@@ -638,8 +661,10 @@ impl Tessellator {
         self.finish_range(start)
     }
 
-    /// Edge-dense grid: at most 17x17 quads regardless of surface area.
-    /// The large flat center needs just one cell; no displacement texture.
+    /// Follow the curved boundary with concentric contours. A rectangular UV
+    /// grid interpolates across the outside of rounded corners (where there is
+    /// no refraction), creating diagonal kinks on thin background lines.
+    /// This fixed-size mesh is cached, including its optical samples.
     fn refractive_rect_raw(
         &mut self,
         rect: Rect,
@@ -648,47 +673,44 @@ impl Tessellator {
         strength: f32,
     ) -> Result<Option<GeometryRange>> {
         let start = self.vertices.len();
-        let edge = radius
-            .max(12.0)
-            .min(rect.size.width * 0.5)
-            .min(rect.size.height * 0.5);
-        let coordinate = |i: usize, length: f32| {
-            if i <= 8 {
-                edge * i as f32 / 8.0
-            } else {
-                length - edge * (17 - i) as f32 / 8.0
-            }
+        let edge = scarlet_ui_core::glass::glass_bezel(rect, radius);
+        let vertex = |p: Point| {
+            let sample = scarlet_ui_core::glass::glass_sample(rect, radius, p, strength);
+            Vertex::textured(
+                Point2::new(p.x * self.scale, p.y * self.scale),
+                [
+                    (sample.x * self.scale - source.x) / source.width,
+                    (sample.y * self.scale - source.y) / source.height,
+                ],
+            )
         };
-        for y in 0..17 {
-            for x in 0..17 {
-                let vertex = |ix, iy| {
-                    let p = scarlet_ui_core::geometry::Point::new(
-                        rect.left() + coordinate(ix, rect.size.width),
-                        rect.top() + coordinate(iy, rect.size.height),
-                    );
-                    let sample = scarlet_ui_core::glass::glass_sample(rect, radius, p, strength);
-                    Vertex::textured(
-                        Point2::new(p.x * self.scale, p.y * self.scale),
-                        [
-                            (sample.x * self.scale - source.x) / source.width,
-                            (sample.y * self.scale - source.y) / source.height,
-                        ],
-                    )
-                };
-                let points = [
-                    vertex(x, y),
-                    vertex(x + 1, y),
-                    vertex(x + 1, y + 1),
-                    vertex(x, y + 1),
-                ];
-                self.push_triangle([points[0], points[1], points[2]])?;
-                self.push_triangle([points[0], points[2], points[3]])?;
+        let mut rings = [[Vertex::solid(Point2::new(0., 0.)); 52]; 7];
+        for (ring, fraction) in [0., 0.04, 0.12, 0.28, 0.50, 0.75, 1.]
+            .into_iter()
+            .enumerate()
+        {
+            for i in 0..52 {
+                rings[ring][i] = vertex(glass_contour(rect, radius, edge * fraction, i));
             }
+        }
+        let center = vertex(Point::new(
+            rect.left() + rect.size.width * 0.5,
+            rect.top() + rect.size.height * 0.5,
+        ));
+        for ring in 0..6 {
+            for i in 0..52 {
+                let next = (i + 1) % 52;
+                self.push_triangle([rings[ring][i], rings[ring][next], rings[ring + 1][next]])?;
+                self.push_triangle([rings[ring][i], rings[ring + 1][next], rings[ring + 1][i]])?;
+            }
+        }
+        for i in 0..52 {
+            self.push_triangle([rings[6][i], rings[6][(i + 1) % 52], center])?;
         }
         self.finish_range(start)
     }
 
-    /// Two thin reflection bands, 12 segments per corner. Colors are already
+    /// Grazing rim and curved shoulder, 12 segments per corner. Colors are already
     /// assigned per vertex and must not be replaced by color_geometry.
     fn glass_rim_raw(
         &mut self,
@@ -704,38 +726,48 @@ impl Tessellator {
         if r < 1.25 {
             return Ok(None);
         }
-        let centers = [
-            (rect.left() + r, rect.top() + r),
-            (rect.right() - r, rect.top() + r),
-            (rect.right() - r, rect.bottom() - r),
-            (rect.left() + r, rect.bottom() - r),
-        ];
+        let bezel = scarlet_ui_core::glass::glass_bezel(rect, radius);
         let vertex = |i: usize, d: f32| {
             let corner = (i / 13) % 4;
             let step = i % 13;
             let angle = core::f32::consts::PI * (-1.0 + corner as f32 * 0.5 + step as f32 / 24.0);
             let nx = libm::cosf(angle);
             let ny = libm::sinf(angle);
-            let p = Point2::new(
-                (centers[corner].0 + nx * (r - d)) * self.scale,
-                (centers[corner].1 + ny * (r - d)) * self.scale,
-            );
-            let reflection = scarlet_ui_core::glass::glass_reflection(d, -nx, -ny);
+            let p = glass_contour(rect, radius, d, i);
+            let reflection = scarlet_ui_core::glass::glass_surface_reflection(d, -nx, -ny, bezel);
             let rgb = if reflection >= 0.0 { 1.0 } else { 0.0 };
             Vertex {
-                position: [p.x, p.y],
+                position: [p.x * self.scale, p.y * self.scale],
                 tex_coord: [0.0, 0.0],
                 color: [rgb, rgb, rgb, reflection.abs() * opacity],
             }
         };
         // Calculate outside mutable borrowing of the tessellator.
-        let mut rings = [[Vertex::solid(Point2::new(0.0, 0.0)); 52]; 3];
-        for (ring, d) in [0.0, 0.55, 1.25].into_iter().enumerate() {
-            for i in 0..52 {
+        let mut rings = [[Vertex::solid(Point2::new(0.0, 0.0)); 52]; 7];
+        for i in 0..52 {
+            let angle =
+                core::f32::consts::PI * (-1. + (i / 13) as f32 * 0.5 + (i % 13) as f32 / 24.);
+            let (rim_width, _) = scarlet_ui_core::glass::glass_highlight_edge(
+                -libm::cosf(angle),
+                -libm::sinf(angle),
+            );
+            let rim_width = rim_width.min(bezel * 0.25);
+            for (ring, d) in [
+                0.,
+                rim_width * 0.4,
+                rim_width,
+                (rim_width + bezel * 0.10).min(bezel * 0.4),
+                bezel * 0.4,
+                bezel * 0.7,
+                bezel,
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 rings[ring][i] = vertex(i, d);
             }
         }
-        for ring in 0..2 {
+        for ring in 0..6 {
             for i in 0..52 {
                 let next = (i + 1) % 52;
                 self.push_triangle([rings[ring][i], rings[ring][next], rings[ring + 1][next]])?;
