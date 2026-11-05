@@ -338,10 +338,21 @@ impl ElementRenderObject for NavigationViewRenderObject {
             (size.height - safe.bottom()).max(0.0),
         );
         let mut content_insets = insets;
+        // The platform's bottom reservation already supplies breathing room
+        // below the floating capsule. Share it with the transparent outer
+        // margin instead of stacking another 8px above the safe edge.
+        let shared_bottom_margin = if overlay {
+            FLOATING_BAR_MARGIN_Y
+                .min(insets.bottom)
+                .min(geometry.navigation.size.height.min(safe.size.height) * 0.5)
+        } else {
+            0.0
+        };
         if presentation == NavigationPresentation::BottomBar {
             geometry.navigation.size.height = geometry.navigation.size.height.min(safe.size.height);
             geometry.navigation.origin =
                 Point::new(safe.left(), safe.bottom() - geometry.navigation.size.height);
+            geometry.navigation.origin.y += shared_bottom_margin;
             geometry.navigation.size.width = safe.size.width;
             if !overlay {
                 geometry.content.size.height =
@@ -402,7 +413,15 @@ impl ElementRenderObject for NavigationViewRenderObject {
             ));
             content.set_position(geometry.content.origin);
             let cover = if overlay {
-                Some(geometry.navigation)
+                // ScrollView separately reserves the platform bottom inset.
+                // Only the overlap above that inset is additional chrome.
+                Some(Rect::new(
+                    geometry.navigation.origin,
+                    Size::new(
+                        geometry.navigation.size.width,
+                        (geometry.navigation.size.height - shared_bottom_margin).max(0.0),
+                    ),
+                ))
             } else {
                 None
             };
@@ -432,7 +451,7 @@ impl ElementRenderObject for NavigationViewRenderObject {
                         - content_insets.top
                         - content_insets.bottom
                         - if overlay {
-                            geometry.navigation.size.height
+                            geometry.navigation.size.height - shared_bottom_margin
                         } else {
                             0.0
                         })
@@ -1760,6 +1779,57 @@ mod tests {
     }
 
     #[test]
+    fn floating_bar_shares_bottom_air_with_system_insets_without_hiding_last_row() {
+        use crate::view::View;
+        use crate::views::{Rectangle, ScrollView};
+        // Browser chrome can leave no bottom reservation; standalone and
+        // rotated viewports can report different bottom and side reservations.
+        // These are synthetic layout inputs, not device-model constants.
+        for (size, insets) in [
+            (Size::new(390., 664.), EdgeInsets::ZERO),
+            (Size::new(390., 664.), EdgeInsets::only_bottom(4.)),
+            (Size::new(390., 844.), EdgeInsets::new(0., 47., 0., 34.)),
+            (Size::new(844., 390.), EdgeInsets::new(47., 0., 47., 21.)),
+        ] {
+            let scroll = ScrollView::new(Rectangle::new())
+                .vertical()
+                .content_size(0., 1200.)
+                .scroll_to_index(Some(59), 20.);
+            let mut children = vec![scroll.create_element(), floating_sidebar().create_element()];
+            let mut render = NavigationViewRenderObject::new_with_presentation(
+                200.,
+                0.,
+                NavigationPresentation::BottomBar,
+            );
+            render.set_safe_area_insets(insets);
+            render.layout_with_children(
+                LayoutConstraints::tight(size.width, size.height),
+                &mut children,
+            );
+            assert_eq!(children[0].bounds(), Rect::new(Point::ZERO, size));
+            let bar = children[1]
+                .render_object()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<NavigationSidebarRenderObject>()
+                .unwrap();
+            let panel = bar.glass_bottom_panel(children[1].position());
+            assert_eq!(panel.bottom(), size.height - insets.bottom.max(8.));
+            assert!(panel.left() >= insets.left);
+            assert!(panel.right() <= size.width - insets.right);
+            assert_eq!(
+                children[0].children()[0].bounds().bottom(),
+                panel.top() - 8.,
+                "last row retains only the upper floating margin"
+            );
+            for index in 0..bar.labels.len() {
+                let item = bar.glass_bottom_item(children[1].position(), index);
+                assert!(item.bottom() <= size.height - insets.bottom);
+            }
+        }
+    }
+
+    #[test]
     fn safe_area_keeps_floating_chrome_safe_while_scrollport_remains_full_height() {
         use crate::view::View;
         use crate::views::scroll::ScrollViewRenderObject;
@@ -1779,7 +1849,7 @@ mod tests {
         assert_eq!(children[0].bounds(), Rect::from_xywh(0., 0., 400., 800.));
         assert_eq!(children[1].bounds().left(), 13.);
         assert_eq!(children[1].bounds().right(), 383.);
-        assert_eq!(children[1].bounds().bottom(), 771.);
+        assert_eq!(children[1].bounds().bottom(), 779.);
         assert_eq!(
             children[0].children()[0].bounds().bottom(),
             children[1].bounds().top(),
@@ -1792,7 +1862,10 @@ mod tests {
             .as_any()
             .downcast_ref::<ScrollViewRenderObject<Rectangle>>()
             .unwrap();
-        assert_eq!(scroll.content_size().height, 1200. + 47. + 29. + bar_height);
+        assert_eq!(
+            scroll.content_size().height,
+            1200. + 47. + 29. + bar_height - 8.
+        );
         render.update_configuration(
             200.,
             0.,
