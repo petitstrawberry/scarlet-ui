@@ -30,10 +30,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Install Linux font discovery dependencies
+    - name: Install Linux font discovery and software GPU dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install --yes --no-install-recommends libfontconfig-dev pkg-config
+        sudo apt-get install --yes --no-install-recommends libfontconfig-dev pkg-config libvulkan1 mesa-vulkan-drivers
         pkg-config --modversion fontconfig
     - uses: cachix/install-nix-action@v31
       if: matrix.toolchain == 'scarlet'
@@ -65,6 +65,10 @@ jobs:
     - name: Run tests
       # Include the warm-scroll allocation regression under both compilers.
       # Only the target-specific SWS platform package is excluded on the host.
+      env:
+        # Lavapipe runs the real pixel comparisons even on GPU-less runners.
+        WGPU_BACKEND: vulkan
+        SCARLET_REQUIRE_GPU_TESTS: "1"
       run: cargo test --locked --verbose --workspace --exclude scarlet-ui-platform-sws
     - name: Test preview macro registration examples
       # The destination crate's preview cfg must be enabled to test registration.

@@ -44,6 +44,30 @@ export function coloredPixels(image, rectangle, predicate) {
 export const red = (r, g, b) => r > 170 && g < 95 && b < 105;
 export const dark = (r, g, b) => r < 150 && g < 150 && b < 150;
 
+// Locate the enabled Toggle's compact accent track in the content column.
+// Slider/ProgressView tracks are wider and thinner; navigation is excluded by
+// the caller. Returning its own bounds keeps the off assertion just as strict.
+export function togglePixels(image, rectangle) {
+  let band;
+  const candidates=[];
+  for(let y=rectangle.y;y<=rectangle.y+rectangle.height;y++) {
+    const row=y<rectangle.y+rectangle.height
+      ? coloredPixels(image,{...rectangle,y,height:1},red) : {count:0};
+    if(row.count) {
+      band ??= {y,height:0};
+      band.height++;
+    } else if(band) {
+      if(band.height>=10 && band.height<=22) {
+        const area={...rectangle,...band};
+        const pixels=coloredPixels(image,area,red);
+        if(pixels.count>60 && pixels.count<800) candidates.push({...pixels,area});
+      }
+      band=undefined;
+    }
+  }
+  return candidates.length===1 ? candidates[0] : null;
+}
+
 export const white = (r, g, b) => r > 235 && g > 235 && b > 235;
 export function hasTextOnWhite(image, rectangle, minimumInk) {
   return coloredPixels(image, rectangle, dark).count > minimumInk &&
