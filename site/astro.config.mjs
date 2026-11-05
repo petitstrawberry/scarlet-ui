@@ -22,6 +22,7 @@ export default defineConfig({
           { label: 'Architecture', slug: 'reference/architecture' },
           { label: 'Application contract', slug: 'reference/application-contract' },
           { label: 'Browser guide', slug: 'reference/browser-samples' },
+          { label: 'Preview server protocol', slug: 'reference/preview-protocol' },
         ] },
         { label: 'API Reference', link: '/docs/' },
       ],

@@ -6,11 +6,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const repositoryRoot = path.resolve(here, '../..');
 export const sourceBase = 'https://github.com/petitstrawberry/scarlet-ui/blob/main/';
+export const assetBase = 'https://raw.githubusercontent.com/petitstrawberry/scarlet-ui/main/';
 export const documents = [
   { source: 'README.md', slug: 'project' },
   { source: 'docs/ARCHITECTURE.md', slug: 'architecture' },
   { source: 'docs/1.0-contract.md', slug: 'application-contract' },
   { source: 'samples/README.md', slug: 'browser-samples' },
+  { source: 'docs/PREVIEW_PROTOCOL.md', slug: 'preview-protocol' },
 ];
 
 export function rewriteDestination(destination, source) {
@@ -26,7 +28,12 @@ export function rewriteDestination(destination, source) {
   if (resolved === '..' || resolved.startsWith('../')) {
     throw new Error(`Documentation link escapes the repository: ${source}: ${value}`);
   }
-  const rewritten = sourceBase + resolved + suffix;
+  // Images must resolve to bytes, never GitHub's HTML blob viewer. This also
+  // covers reference-style image definitions and linked full-size images.
+  const isImage = /\.(?:png|jpe?g|gif|webp|avif|svg)$/i.test(resolved);
+  const document = documents.find((entry) => entry.source === resolved);
+  const rewritten = document ? `/reference/${document.slug}/${suffix}`
+    : (isImage ? assetBase : sourceBase) + resolved + suffix;
   return angled ? `<${rewritten}>` : rewritten;
 }
 

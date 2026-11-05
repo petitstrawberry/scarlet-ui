@@ -24,12 +24,14 @@ files under `site/src/content/docs/reference/`:
 | `architecture.md` | `docs/ARCHITECTURE.md` |
 | `application-contract.md` | `docs/1.0-contract.md` |
 | `browser-samples.md` | `samples/README.md` |
+| `preview-protocol.md` | `docs/PREVIEW_PROTOCOL.md` |
 
 Do not maintain or commit the generated copies. Edit their originals instead.
 Each imported page gets Starlight title frontmatter from its first H1 and a
 source attribution. Fenced examples and inline code are retained; relative
-Markdown links resolve to the corresponding GitHub `main` source location so
-links do not accidentally depend on the site's deployment prefix. External
+Markdown links to imported documents resolve to their site reference routes.
+Other relative links resolve to the corresponding GitHub `main` source location;
+image files use raw GitHub URLs so browsers receive image bytes, not blob-viewer HTML. External
 links and same-page anchors stay unchanged. The importer does not rewrite API
 examples or silently correct source documentation.
 

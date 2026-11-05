@@ -29,3 +29,17 @@ not a new logo or a web-font download. Titles and descriptions come from each
 built page. The homepage card adds selected real stock-control pixels from
 `assets/sharing/`; other pages remain typographic. Capture provenance and crop
 bounds are documented in `assets/sharing/PROVENANCE.md`. No AI-generated artwork or external image service is involved.
+
+## README and application links
+
+The root README reuses `public/assets/widget-factory.png` above without edits.
+It links to the live site; it is a browser sample capture, not a native app screenshot.
+
+The homepage's “Built with ScarletUI” links were checked against the public
+[Kureha Code README](https://github.com/petitstrawberry/kureha-code#readme) and
+[Resonara README](https://github.com/petitstrawberry/resonara#readme) on 2026-11-05.
+Both explicitly identify ScarletUI as their UI toolkit. Descriptions reflect
+those READMEs; they do not imply production readiness or verified platform coverage.
+No application screenshots are included: their public source trees did not
+contain suitable screen captures. Add a visual showcase only with actual,
+verified captures and their provenance, not illustrations or app icons.

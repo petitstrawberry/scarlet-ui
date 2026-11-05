@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { importMarkdown, rewriteDestination, sourceBase, syncDocs, documents, repositoryRoot } from './sync-docs.mjs';
+import { importMarkdown, rewriteDestination, sourceBase, assetBase, syncDocs, documents, repositoryRoot } from './sync-docs.mjs';
 
 test('first H1 becomes a quoted frontmatter title, with source attribution', () => {
   const result = importMarkdown('# Title: example\n\nIntro.\n\n# Another heading\n', 'docs/Test.md');
@@ -14,9 +14,9 @@ test('first H1 becomes a quoted frontmatter title, with source attribution', () 
 });
 test('inline and reference links resolve against original source location', () => {
   const result = importMarkdown('# Docs\n[Root](../README.md#intro) ![Image](./shot.png "Screenshot")\n[link]: <../samples/README.md> "Guide"\n', 'docs/Test.md');
-  assert.ok(result.includes(`[Root](${sourceBase}README.md#intro)`));
-  assert.ok(result.includes(`![Image](${sourceBase}docs/shot.png "Screenshot")`));
-  assert.ok(result.includes(`[link]: <${sourceBase}samples/README.md> "Guide"`));
+  assert.ok(result.includes(`[Root](/reference/project/#intro)`));
+  assert.ok(result.includes(`![Image](${assetBase}docs/shot.png "Screenshot")`));
+  assert.ok(result.includes(`[link]: </reference/browser-samples/> "Guide"`));
 });
 test('external URLs, local anchors, protocol-relative and mail links remain unchanged', () => {
   for (const url of ['https://example.test/x', '#heading', '//example.test/x', 'mailto:hello@example.test']) {
@@ -29,7 +29,7 @@ test('fenced examples retain links and H1 text exactly, including long and tilde
     const result = importMarkdown(block + '\n# Real title\n[change](docs/ARCHITECTURE.md)\n', 'README.md');
     assert.ok(result.includes(block));
     assert.match(result, /title: "Real title"/);
-    assert.ok(result.includes(`${sourceBase}docs/ARCHITECTURE.md`));
+    assert.ok(result.includes(`/reference/architecture/`));
   }
 });
 test('inline code remains byte-identical while adjacent Markdown links change', () => {
@@ -60,4 +60,10 @@ test('sync writes generated pages without modifying repository sources', async (
       assert.match(await readFile(path.join(root, 'site/src/content/docs/reference', `${slug}.md`), 'utf8'), /title: "Test"/);
     }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('image references, angle destinations, and query fragments use raw bytes', () => {
+  const result = importMarkdown('# Docs\n![shot][screen]\n[screen]: <../site/public/assets/widget-factory.png?raw=1#view> "Preview"\n', 'docs/Test.md');
+  assert.ok(result.includes(`<${assetBase}site/public/assets/widget-factory.png?raw=1#view>`));
+  assert.equal(rewriteDestination('docs/PREVIEW_PROTOCOL.md#protocol-v1', 'README.md'), '/reference/preview-protocol/#protocol-v1');
 });
