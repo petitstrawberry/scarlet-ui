@@ -13,6 +13,11 @@ export const documents = [
   { source: 'docs/1.0-contract.md', slug: 'application-contract' },
   { source: 'samples/README.md', slug: 'browser-samples' },
   { source: 'docs/PREVIEW_PROTOCOL.md', slug: 'preview-protocol' },
+  { source: 'docs/APPLICATION_GUIDE.md', slug: 'application-guide' },
+  { source: 'docs/PLATFORM_GUIDE.md', slug: 'platform-guide' },
+  { source: 'docs/LIVE_PREVIEW.md', slug: 'live-preview' },
+  { source: 'docs/DEVELOPMENT.md', slug: 'development' },
+  { source: 'docs/README.md', slug: 'documentation' },
 ];
 
 export function rewriteDestination(destination, source) {
@@ -32,7 +37,9 @@ export function rewriteDestination(destination, source) {
   // covers reference-style image definitions and linked full-size images.
   const isImage = /\.(?:png|jpe?g|gif|webp|avif|svg)$/i.test(resolved);
   const document = documents.find((entry) => entry.source === resolved);
-  const rewritten = document ? `/reference/${document.slug}/${suffix}`
+  const publicAsset = isImage && resolved.startsWith('site/public/');
+  const rewritten = publicAsset ? '/' + resolved.slice('site/public/'.length) + suffix
+    : document ? `/reference/${document.slug}/${suffix}`
     : (isImage ? assetBase : sourceBase) + resolved + suffix;
   return angled ? `<${rewritten}>` : rewritten;
 }

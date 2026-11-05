@@ -25,13 +25,18 @@ files under `site/src/content/docs/reference/`:
 | `application-contract.md` | `docs/1.0-contract.md` |
 | `browser-samples.md` | `samples/README.md` |
 | `preview-protocol.md` | `docs/PREVIEW_PROTOCOL.md` |
+| `application-guide.md` | `docs/APPLICATION_GUIDE.md` |
+| `platform-guide.md` | `docs/PLATFORM_GUIDE.md` |
+| `live-preview.md` | `docs/LIVE_PREVIEW.md` |
+| `development.md` | `docs/DEVELOPMENT.md` |
+| `documentation.md` | `docs/README.md` |
 
 Do not maintain or commit the generated copies. Edit their originals instead.
 Each imported page gets Starlight title frontmatter from its first H1 and a
 source attribution. Fenced examples and inline code are retained; relative
 Markdown links to imported documents resolve to their site reference routes.
 Other relative links resolve to the corresponding GitHub `main` source location;
-image files use raw GitHub URLs so browsers receive image bytes, not blob-viewer HTML. External
+images under `site/public/` use their packaged site paths; other image files use raw GitHub URLs so browsers receive image bytes, not blob-viewer HTML. External
 links and same-page anchors stay unchanged. The importer does not rewrite API
 examples or silently correct source documentation.
 
@@ -150,3 +155,9 @@ forwards pointer events to the existing platform-web canvas handler and applies
 `touch-action: none` there; the rest of the specimen retains page pan/zoom.
 Wheel and keyboard events are not intercepted. Test this boundary when changing
 paper geometry; JavaScript unit tests and the browser smoke cover the mapping.
+
+
+To refresh the README thumbnail after capturing updated controls, run
+`npm run update-readme-card` from `site/`. Commit the source crops and generated
+`public/assets/project-card.png` together. See `assets/sharing/PROVENANCE.md` and
+`ASSETS.md` for capture sources and fallback images.

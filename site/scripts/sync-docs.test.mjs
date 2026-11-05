@@ -62,8 +62,9 @@ test('sync writes generated pages without modifying repository sources', async (
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('image references, angle destinations, and query fragments use raw bytes', () => {
+test('image references retain query fragments and use packaged assets or raw bytes', () => {
   const result = importMarkdown('# Docs\n![shot][screen]\n[screen]: <../site/public/assets/widget-factory.png?raw=1#view> "Preview"\n', 'docs/Test.md');
-  assert.ok(result.includes(`<${assetBase}site/public/assets/widget-factory.png?raw=1#view>`));
+  assert.ok(result.includes(`</assets/widget-factory.png?raw=1#view>`));
+  assert.equal(rewriteDestination('site/public/assets/project-card.png?raw=1', 'README.md'), '/assets/project-card.png?raw=1');
   assert.equal(rewriteDestination('docs/PREVIEW_PROTOCOL.md#protocol-v1', 'README.md'), '/reference/preview-protocol/#protocol-v1');
 });

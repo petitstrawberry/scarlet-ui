@@ -12,15 +12,15 @@ const controls = new URL('../assets/sharing/', import.meta.url);
 async function controlArtwork() {
   const parts = [
     ['tabs.png', 20, 45], ['button.png', 20, 125],
-    ['toggle.png', 155, 130], ['slider.png', 20, 205],
+    ['toggle.png', 240, 130], ['slider.png', 20, 205],
   ];
   const layers = [];
   for (const [name, left, top] of parts) {
     const source = fileURLToPath(new URL(name, controls));
     const { width } = await sharp(source).metadata();
     // Native 2× captures are reduced to 1.6× logical size for crisp sharing
-    // previews, without redrawing or relabeling the actual controls.
-    const input = await sharp(source).resize(Math.round(width * 0.8), null, { kernel: 'lanczos3' }).png().toBuffer();
+    // previews; wide controls fit within 360 pixels. No controls are redrawn or relabeled.
+    const input = await sharp(source).resize(Math.round(Math.min(width * 0.8, 360)), null, { kernel: 'lanczos3' }).png().toBuffer();
     layers.push({ input, left, top });
   }
   return sharp({ create: { width: 420, height: 280, channels: 3, background: '#fff' } })

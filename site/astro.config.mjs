@@ -18,7 +18,12 @@ export default defineConfig({
         { label: 'Getting started', slug: 'getting-started' },
         { label: 'Try in your browser', slug: 'try' },
         { label: 'Guides', items: [
-          { label: 'Project guide', slug: 'reference/project' },
+          { label: 'Project overview', slug: 'reference/project' },
+          { label: 'Documentation index', slug: 'reference/documentation' },
+          { label: 'Application guide', slug: 'reference/application-guide' },
+          { label: 'Platforms and backends', slug: 'reference/platform-guide' },
+          { label: 'Live preview', slug: 'reference/live-preview' },
+          { label: 'Development', slug: 'reference/development' },
           { label: 'Architecture', slug: 'reference/architecture' },
           { label: 'Application contract', slug: 'reference/application-contract' },
           { label: 'Browser guide', slug: 'reference/browser-samples' },
