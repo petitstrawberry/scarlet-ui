@@ -4457,6 +4457,133 @@ mod tests {
     }
 
     #[test]
+    fn framed_button_click_composes_with_modifier_for_mouse_and_touch() {
+        use crate::event::{TouchChange, TouchFrame, TouchPhase};
+        for own_action in [false, true] {
+            for touch in [false, true] {
+                let own = Rc::new(Cell::new(0));
+                let modifier = Rc::new(Cell::new(0));
+                let parent = Rc::new(Cell::new(0));
+                let mut button = Button::new("Task");
+                if own_action {
+                    let count = own.clone();
+                    button = button.on_click(move || count.set(count.get() + 1));
+                }
+                let count = modifier.clone();
+                let outer = parent.clone();
+                let view = button
+                    .frame(100.0, 50.0)
+                    .on_click(move || count.set(count.get() + 1))
+                    .on_click(move || outer.set(outer.get() + 1));
+                let mut pipeline = RenderingPipeline::new();
+                pipeline.set_root(view.create_element());
+                pipeline.layout_initial();
+                pipeline.render_with_damage();
+                for pressed in [true, false] {
+                    let event = if touch {
+                        Event::TouchFrame(TouchFrame {
+                            seat_id: 0,
+                            serial: if pressed { 1 } else { 2 },
+                            time_ns: if pressed { 1 } else { 10_000_000 },
+                            changes: alloc::vec![TouchChange {
+                                seat_id: 0,
+                                serial: if pressed { 1 } else { 2 },
+                                time_ns: if pressed { 1 } else { 10_000_000 },
+                                id: 1,
+                                phase: if pressed {
+                                    TouchPhase::Down
+                                } else {
+                                    TouchPhase::Up
+                                },
+                                x: 10,
+                                y: 10,
+                                pressure: None,
+                                touch_major: None,
+                            }],
+                        })
+                    } else {
+                        Event::Mouse(if pressed {
+                            MouseEvent::ButtonPressed {
+                                button: MouseButton::Left,
+                                x: 10,
+                                y: 10,
+                                click_count: 1,
+                            }
+                        } else {
+                            MouseEvent::ButtonReleased {
+                                button: MouseButton::Left,
+                                x: 10,
+                                y: 10,
+                                click_count: 1,
+                            }
+                        })
+                    };
+                    pipeline.handle_event(&event);
+                }
+                assert_eq!(own.get(), usize::from(own_action), "touch={touch}");
+                assert_eq!(modifier.get(), usize::from(!own_action), "touch={touch}");
+                assert_eq!(parent.get(), 0, "handled clicks must stop bubbling");
+            }
+        }
+    }
+
+    #[test]
+    fn modifier_button_release_outside_capture_cancels_click() {
+        let count = Rc::new(Cell::new(0));
+        let captured = count.clone();
+        let view = Button::new("Task")
+            .frame(100.0, 50.0)
+            .on_click(move || captured.set(captured.get() + 1));
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(view.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+        pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonPressed {
+            button: MouseButton::Left,
+            x: 10,
+            y: 10,
+            click_count: 1,
+        }));
+        pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+            button: MouseButton::Left,
+            x: 200,
+            y: 200,
+            click_count: 1,
+        }));
+        assert_eq!(count.get(), 0);
+    }
+
+    #[test]
+    fn non_button_click_modifier_still_activates_once() {
+        let count = Rc::new(Cell::new(0));
+        let captured = count.clone();
+        let view = crate::views::Rectangle::new()
+            .frame(100.0, 50.0)
+            .on_click(move || captured.set(captured.get() + 1));
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(view.create_element());
+        pipeline.layout_initial();
+        pipeline.render_with_damage();
+        for event in [
+            MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: 10,
+                y: 10,
+                click_count: 1,
+            },
+            MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 10,
+                y: 10,
+                click_count: 1,
+            },
+        ] {
+            pipeline.handle_event(&Event::Mouse(event));
+        }
+        assert_eq!(count.get(), 1);
+    }
+
+    #[test]
     fn button_release_outside_capture_cancels_click() {
         let clicked = State::new(crate::state::generate_state_id(), false);
         let clicked_callback = clicked.clone();

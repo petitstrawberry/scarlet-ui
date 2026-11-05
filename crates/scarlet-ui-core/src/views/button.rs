@@ -341,6 +341,10 @@ impl Button {
         self.icon_size
     }
 
+    pub(crate) fn has_click_callback(&self) -> bool {
+        self.on_click.is_some()
+    }
+
     /// Invoke the click callback if present
     pub fn invoke_on_click(&self) {
         if !self.enabled {

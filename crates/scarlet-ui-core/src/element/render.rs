@@ -1613,7 +1613,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     {
                         button.invoke_on_click();
                         crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
-                        return true;
+                        return button.has_click_callback();
                     }
                     if let Some(item) = self.view.as_any().downcast_ref::<crate::views::MenuItem>()
                     {
@@ -1945,8 +1945,13 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         {
             if let MouseEvent::ButtonReleased {
                 button: MouseButton::Left,
+                x,
+                y,
                 ..
             } = mouse_event
+                && self
+                    .render_object
+                    .hit_test(Point::new(*x as f32, *y as f32))
             {
                 if let Some(render_object) =
                     self.render_object
@@ -2039,7 +2044,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         }
                         render_object.set_pressed(false);
                         crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
-                        return true;
+                        // Preserve the visual transition while allowing a wrapping
+                        // click modifier to supply the action for this button.
+                        return button.has_click_callback();
                     }
                     _ => {}
                 }

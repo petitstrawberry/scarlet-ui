@@ -266,7 +266,14 @@ pub trait ViewExt: View {
         crate::views::AlignmentFrame::new(self, alignment)
     }
 
-    /// Add a click handler to this view
+    /// Add a click handler to this view.
+    ///
+    /// Handles unconsumed primary mouse releases and touch taps in target or
+    /// bubble phase. A wrapped `Button` without its own action lets these events
+    /// bubble, including through layout modifiers such as `.frame(...)`.
+    /// A Button action or an inner click handler takes precedence and stops
+    /// propagation. This modifier does not synthesize keyboard activation;
+    /// use `Button::on_click` for a focused Button's Enter/Space action.
     ///
     /// # Arguments
     /// * `callback` - Function to call when clicked
