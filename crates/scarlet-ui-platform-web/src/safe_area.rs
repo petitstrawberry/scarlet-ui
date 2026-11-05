@@ -72,9 +72,9 @@ mod browser {
                 .ok_or_else(|| JsValue::from_str("Canvas has no document"))?;
             let probe: HtmlElement = doc.create_element("div")?.dyn_into()?;
             probe.set_attribute("aria-hidden", "true")?;
-            probe.style().set_css_text("position:fixed;left:0;top:0;width:env(safe-area-inset-left,0px);height:env(safe-area-inset-top,0px);visibility:hidden;pointer-events:none;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)");
+            probe.style().set_css_text("position:fixed;left:0;top:0;box-sizing:content-box;border:0;width:env(safe-area-inset-left,0px);height:env(safe-area-inset-top,0px);visibility:hidden;pointer-events:none;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)");
             let trailing: HtmlElement = doc.create_element("div")?.dyn_into()?;
-            trailing.style().set_css_text("position:absolute;left:0;top:0;width:env(safe-area-inset-right,0px);height:env(safe-area-inset-bottom,0px)");
+            trailing.style().set_css_text("position:absolute;left:0;top:0;box-sizing:content-box;border:0;padding:0;width:env(safe-area-inset-right,0px);height:env(safe-area-inset-bottom,0px)");
             probe.append_child(&trailing)?;
             // Two content-box sensors watch all four individual env values,
             // including changes that leave both viewport size and inset sums

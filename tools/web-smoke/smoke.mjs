@@ -691,6 +691,9 @@ try {
     let insets={left:13,top:41,right:17,bottom:29};
     await applySafeArea(insets);
     await ready('/widget-factory/','scarlet_ui_widget_factory');
+    // Common host resets must not collapse the env() content-box sensors.
+    await page.addStyleTag({content:'* { box-sizing: border-box; }'});
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
     const safeHeading=()=>({x:insets.left+16,y:insets.top+44,width:240,height:42});
     const clearEdges=frame=>[
       {x:0,y:0,width:frame.width,height:insets.top},
@@ -712,12 +715,18 @@ try {
     await page.mouse.click(selectX+80,selectY+14);
     await untilPixels('factory-safe-area-select',frame=>changedPixels(beforeSelect,frame,{x:selectX,y:selectY,width:230,height:145})>500&&clearEdges(frame));
     await page.keyboard.press('Escape');
+    // Keep both inset sums and the viewport size unchanged, so only the
+    // individual env() sensors can detect this redistribution of the edges.
+    insets={left:0,top:5,right:30,bottom:65};
+    await applySafeArea(insets);
+    await untilPixels('factory-safe-area-redistributed',frame=>hasTextOnWhite(frame,safeHeading(),100)&&clearEdges(frame));
+    await safeNavigate(1,'factory-safe-area-redistributed-navigation');
     // Safe-area changes must take effect even when the backing size is unchanged.
     insets={left:29,top:83,right:31,bottom:37};
     await applySafeArea(insets);
     await untilPixels('factory-safe-area-changed',frame=>hasTextOnWhite(frame,safeHeading(),100)&&clearEdges(frame));
     await safeNavigate(0,'factory-safe-area-updated-navigation');
-    report.checks.push('browser safe-area API drives initial layout, same-size changes, floating navigation input and Select popup bounds');
+    report.checks.push('browser safe-area API drives initial layout, same-size/same-sum changes under a CSS reset, floating navigation input and Select popup bounds');
   } finally {
     await applySafeArea({});
     await safeAreaSession.detach();
