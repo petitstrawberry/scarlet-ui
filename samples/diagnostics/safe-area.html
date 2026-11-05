@@ -26,7 +26,7 @@ try {
     try {
       const [left,top,right,bottom]=browser_safe_area_insets();
       document.querySelector('#insets').textContent=`左 ${left} / 上 ${top} / 右 ${right} / 下 ${bottom} CSS px`;
-      output.textContent=JSON.stringify({insets:{left,top,right,bottom},viewport:{width:innerWidth,height:innerHeight},visualViewport:visualViewport?{width:visualViewport.width,height:visualViewport.height,offsetLeft:visualViewport.offsetLeft,offsetTop:visualViewport.offsetTop,scale:visualViewport.scale}:null},null,2);
+      output.textContent=JSON.stringify({insets:{left,top,right,bottom},standalone:navigator.standalone===true,displayMode:matchMedia('(display-mode: standalone)').matches?'standalone':matchMedia('(display-mode: fullscreen)').matches?'fullscreen':'browser',viewport:{width:innerWidth,height:innerHeight},visualViewport:visualViewport?{width:visualViewport.width,height:visualViewport.height,offsetLeft:visualViewport.offsetLeft,offsetTop:visualViewport.offsetTop,scale:visualViewport.scale}:null},null,2);
       document.body.dataset.ready='true';
     } catch(error) {
       output.textContent=String(error);
