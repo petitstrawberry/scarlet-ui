@@ -745,12 +745,23 @@ impl Tessellator {
         // Calculate outside mutable borrowing of the tessellator.
         let mut rings = [[Vertex::solid(Point2::new(0.0, 0.0)); 52]; 7];
         for i in 0..52 {
-            // Spend the same seven rings across the shoulder instead of packing
-            // three rings into a subpixel silhouette highlight.
-            for (ring, d) in [0., 0.06, 0.16, 0.30, 0.50, 0.75, 1.]
-                .map(|fraction| bezel * fraction)
-                .into_iter()
-                .enumerate()
+            let angle =
+                core::f32::consts::PI * (-1. + (i / 13) as f32 * 0.5 + (i % 13) as f32 / 24.);
+            let (width, _) =
+                scarlet_ui_core::glass::glass_contour_edge(-libm::cosf(angle), -libm::sinf(angle));
+            let width = width.min(bezel * 0.10);
+            // Resolve the compact shade independently from the broad reflection.
+            for (ring, d) in [
+                0.,
+                width * 0.5,
+                width,
+                bezel * 0.16,
+                bezel * 0.4,
+                bezel * 0.7,
+                bezel,
+            ]
+            .into_iter()
+            .enumerate()
             {
                 rings[ring][i] = vertex(i, d);
             }

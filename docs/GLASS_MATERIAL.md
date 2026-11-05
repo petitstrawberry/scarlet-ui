@@ -7,9 +7,16 @@ structural wash (0.018 additional text tint) and a 0.075 selection overlay.
 Navigation hover raises the selected overlay to 0.11. Backdrop sampling,
 refraction, blur and existing elevation shadows retain their geometry.
 
-Refractive light comes from a low-amplitude, broad curved-shoulder response;
-there is no separate bright silhouette stroke or painted surface gradient.
-CPU, portable SGFX and analytic WGSL use the same reflection model. The hidden
+Refractive light comes from a low-amplitude curved-shoulder response, strongest
+on the upper/lower shoulders. A compact dark contour is firmer and slightly
+wider at the sides, becoming finer at the top/bottom. This follows the supplied
+iOS reference's directional contrast; the screenshot alone cannot identify
+whether its dark edge comes from a stroke, refraction, or contact shading.
+White highlights are clipped against the white reference background, so their
+full strength cannot be recovered from that screenshot. This is a visual
+approximation, without a bright all-around outline or painted face gradient.
+CPU, portable SGFX and analytic WGSL use the same signed shading/reflection
+model. The hidden
 `glass_highlight_edge` helper remains available for source compatibility but is
 no longer used by built-in rendering.
 

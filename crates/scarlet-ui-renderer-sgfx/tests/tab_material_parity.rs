@@ -546,7 +546,7 @@ fn shoulder_reflection_stays_soft_and_matches_cpu() {
                             (y as f32 + 0.5) * 1000. / scale as f32,
                         );
                         let (distance, _, _) = glass_edge(rect, 24., point);
-                        if distance < 0.75 || distance >= glass_bezel(rect, 24.) {
+                        if distance < 0.5 || distance >= glass_bezel(rect, 24.) {
                             continue;
                         }
                         let at = ((y * width + x) * 4) as usize;
@@ -556,8 +556,27 @@ fn shoulder_reflection_stays_soft_and_matches_cpu() {
                         }
                     }
                 }
+                if name == "light" {
+                    let factor = scale as f32 / 1000.;
+                    let side = ((24. * factor) as u32..(27. * factor) as u32)
+                        .map(|x| gpu[((height / 2 * width + x) * 4) as usize])
+                        .min()
+                        .unwrap();
+                    let top = ((24. * factor) as u32..(27. * factor) as u32)
+                        .map(|y| gpu[((y * width + width / 2) * 4) as usize])
+                        .min()
+                        .unwrap();
+                    assert!(side + 3 < gpu[center], "sides need a compact dark contour");
+                    assert!(
+                        side + 3 < top,
+                        "side contours must be firmer than horizontal edges"
+                    );
+                }
                 let label = format!("shoulder-{name}-{scale}-{analytic}");
                 eprintln!("{label}: CPU/GPU delta {max_delta}, reflection lift {max_lift}");
+                if let Some(dir) = &output {
+                    save(&dir.join(format!("{label}-gpu.ppm")), width, height, &gpu).unwrap();
+                }
                 assert!(
                     max_lift <= 40,
                     "{label}: reflection must not paint a bright outline"
@@ -566,9 +585,6 @@ fn shoulder_reflection_stays_soft_and_matches_cpu() {
                     max_delta <= 14,
                     "{label}: shoulder differs between renderers"
                 );
-                if let Some(dir) = &output {
-                    save(&dir.join(format!("{label}-gpu.ppm")), width, height, &gpu).unwrap();
-                }
             }
         }
     }
