@@ -1,56 +1,43 @@
 #[path = "../src/safe_area.rs"]
 mod safe_area;
 
-use safe_area::canvas_insets;
-use scarlet_ui_core::geometry::{EdgeInsets, Rect, Size};
+use safe_area::{SafeAreaMode, canvas_insets};
+use scarlet_ui_core::geometry::{EdgeInsets, Size};
 
 #[test]
-fn full_screen_canvas_receives_browser_insets_without_device_constants() {
-    let viewport = Size::new(417., 893.);
+fn viewport_mode_preserves_api_values_without_window_size_heuristics() {
     let insets = EdgeInsets::new(7., 53., 11., 31.);
-    assert_eq!(
-        canvas_insets(
-            viewport,
-            Rect::from_xywh(0., 0., 417., 893.),
-            viewport,
-            insets
-        ),
-        insets
-    );
-    assert_eq!(
-        canvas_insets(
-            Size::new(893., 417.),
-            Rect::from_xywh(0., 0., 893., 417.),
-            Size::new(893., 417.),
-            EdgeInsets::new(53., 0., 53., 21.)
-        ),
-        EdgeInsets::new(53., 0., 53., 21.)
-    );
-}
-
-#[test]
-fn host_insetting_and_embedded_specimens_do_not_receive_padding_twice() {
-    let viewport = Size::new(417., 893.);
-    let insets = EdgeInsets::new(7., 53., 11., 31.);
-    for rect in [
-        Rect::from_xywh(7., 53., 399., 809.),
-        Rect::from_xywh(40., 200., 300., 240.),
-        Rect::from_xywh(40., -80., 300., 240.),
+    for css in [
+        Size::new(417., 893.),
+        Size::new(417., 1100.),
+        Size::new(893., 417.),
     ] {
         assert_eq!(
-            canvas_insets(viewport, rect, rect.size, insets),
-            EdgeInsets::ZERO
+            canvas_insets(SafeAreaMode::Viewport, css, css, insets),
+            insets
         );
     }
 }
 
 #[test]
-fn css_scaling_projects_insets_into_logical_canvas_coordinates() {
-    let viewport = Size::new(400., 800.);
+fn contained_mode_does_not_apply_browser_insets_twice() {
     assert_eq!(
         canvas_insets(
-            viewport,
-            Rect::from_xywh(0., 0., 400., 800.),
+            SafeAreaMode::Contained,
+            Size::new(300., 240.),
+            Size::new(300., 240.),
+            EdgeInsets::new(7., 53., 11., 31.)
+        ),
+        EdgeInsets::ZERO
+    );
+}
+
+#[test]
+fn css_scaling_projects_api_values_into_canvas_logical_coordinates() {
+    assert_eq!(
+        canvas_insets(
+            SafeAreaMode::Viewport,
+            Size::new(400., 800.),
             Size::new(800., 1600.),
             EdgeInsets::new(0., 40., 0., 20.)
         ),

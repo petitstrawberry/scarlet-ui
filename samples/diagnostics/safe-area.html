@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>ScarletUI safe area API</title>
+<style>
+html { background:#fff; color:#202124; font:16px/1.6 system-ui,sans-serif }
+body { margin:0; padding:max(20px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) max(20px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left)) }
+h1 { font-size:24px } pre { white-space:pre-wrap; overflow-wrap:anywhere; padding:16px; border:1px solid #bbb; border-radius:8px }
+button { font:inherit; padding:8px 16px }
+</style>
+<h1>Safe area API</h1>
+<p>ScarletUIのRust／WebAssembly APIで読み取った、実行中のブラウザの値です。単位はCSS pxです。</p>
+<pre id="values" role="status" aria-live="polite">読み込み中…</pre>
+<button id="refresh" type="button">再取得</button>
+<p>端末を回転して値の変化を確認できます。<a href="https://webkit.org/demos/safe-area-insets/safe-areas.html">WebKit公式の表示例</a></p>
+<p>このページはWebGPUアダプタを作成しません。0はブラウザが返した値です。ネイティブWebViewでは、OSのsafeAreaInsetsをホストAPIから渡す構成も使えます。</p>
+<script type="module">
+const output=document.querySelector('#values');
+try {
+  const {default:init,browser_safe_area_insets}=await import('../../widget-factory/pkg/scarlet_ui_widget_factory.js');
+  await init();
+  function measure() {
+    try {
+      const [left,top,right,bottom]=browser_safe_area_insets();
+      output.textContent=JSON.stringify({insets:{left,top,right,bottom},viewport:{width:innerWidth,height:innerHeight},visualViewport:visualViewport?{width:visualViewport.width,height:visualViewport.height,offsetLeft:visualViewport.offsetLeft,offsetTop:visualViewport.offsetTop,scale:visualViewport.scale}:null},null,2);
+      document.body.dataset.ready='true';
+    } catch(error) {
+      output.textContent=String(error);
+      document.body.dataset.ready='error';
+    }
+  }
+  document.querySelector('#refresh').addEventListener('click',measure);
+  for(const kind of ['resize','orientationchange','pageshow']) addEventListener(kind,()=>requestAnimationFrame(measure));
+  visualViewport?.addEventListener('resize',()=>requestAnimationFrame(measure));
+  measure();
+} catch(error) {
+  output.textContent=String(error);
+  document.body.dataset.ready='error';
+}
+</script>
+</html>

@@ -5,6 +5,7 @@ mod damage;
 mod menu;
 mod paint;
 mod safe_area;
+pub use safe_area::{SafeAreaMode, browser_safe_area_insets};
 mod text_edit;
 mod text_input;
 mod touch;
@@ -37,6 +38,13 @@ use web_sys::{
 };
 
 type Tick = Box<dyn FnMut() -> Result<Option<std::time::Duration>>>;
+
+/// Browser layout ownership. Embedded applications opt out of window safe-area
+/// padding when their containing DOM layout already owns it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WebOptions {
+    pub safe_area: SafeAreaMode,
+}
 
 struct FrameLoop {
     tick: Option<Tick>,
@@ -164,12 +172,22 @@ fn tick_now(state: &Rc<RefCell<FrameLoop>>) {
 /// Full-screen pages use `viewport-fit=cover` and size the canvas to the current
 /// viewport (for example `100dvh`). CSS `env(safe-area-inset-*)` values then
 /// reserve the interactive content while the backing surface stays full-size.
-/// Insets already provided by an embedding container are not applied twice.
+/// Embedded canvases use run_with_options and SafeAreaMode::Contained when
+/// their containing DOM layout already owns safe-area positioning.
 /// Native WebView hosts can instead forward their OS API result through
 /// [`WebApp::set_safe_area_insets`], including subsequent safe-area changes.
 pub async fn run<A: Application + View>(
     canvas: HtmlCanvasElement,
     app: A,
+) -> std::result::Result<WebApp, JsValue> {
+    run_with_options(canvas, app, WebOptions::default()).await
+}
+
+/// Start a canvas application with explicit safe-area layout ownership.
+pub async fn run_with_options<A: Application + View>(
+    canvas: HtmlCanvasElement,
+    app: A,
+    options: WebOptions,
 ) -> std::result::Result<WebApp, JsValue> {
     let size = canvas_size(&canvas);
     let scale = scale_milli();
@@ -178,7 +196,7 @@ pub async fn run<A: Application + View>(
         .await
         .map_err(|e| JsValue::from_str(&format!("WebGPU initialization failed: {e}")))?;
     let menus = Rc::new(RefCell::new(menu::WebMenu::default()));
-    let safe_area = Rc::new(safe_area::SafeArea::new(canvas.clone())?);
+    let safe_area = Rc::new(safe_area::SafeArea::new(canvas.clone(), options.safe_area)?);
     menus.borrow_mut().set_safe_area_insets(safe_area.insets());
     menus.borrow_mut().resize(size);
     let paint = paint::WebPaint::new(gpu, canvas.width(), canvas.height(), menus.clone())

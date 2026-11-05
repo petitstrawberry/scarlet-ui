@@ -94,11 +94,18 @@ async fn start_on(canvas_id: &str, compact: bool) -> std::result::Result<(), JsV
         .and_then(|document| document.get_element_by_id(canvas_id))
         .ok_or_else(|| JsValue::from_str(&format!("Missing #{canvas_id} canvas")))?
         .dyn_into()?;
-    let app = scarlet_ui::run_web(
+    let app = scarlet_ui::run_web_with_options(
         canvas,
         Counter {
             count: State::new(StateId::new(1), 0),
             compact,
+        },
+        scarlet_ui::WebOptions {
+            safe_area: if compact {
+                scarlet_ui::SafeAreaMode::Contained
+            } else {
+                scarlet_ui::SafeAreaMode::Viewport
+            },
         },
     )
     .await?;

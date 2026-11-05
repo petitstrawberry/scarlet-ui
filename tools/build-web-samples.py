@@ -205,6 +205,9 @@ def stage_input_diagnostic(stage: Path, identity: dict) -> None:
     html = html.replace('<script type="module">', trace + '<script type="module">', 1)
     (destination / 'index.html').write_text(html)
     shutil.copy2(ROOT / 'samples/diagnostics/focus-trace.js', destination / 'focus-trace.js')
+    safe_area = stage / 'diagnostics/safe-area'
+    safe_area.mkdir(parents=True)
+    shutil.copy2(ROOT / 'samples/diagnostics/safe-area.html', safe_area / 'index.html')
 
 
 def build(output: Path, profile: str) -> None:

@@ -166,6 +166,29 @@ try {
     }
   });
   page.on('crash',()=>failure('crash','Browser page crashed'));
+  setPhase('GPU-independent safe-area API');
+  const areaApiSession=await context.newCDPSession(page);
+  const deviceCount=()=>report.events.filter(entry=>entry.kind==='gpu-diagnostic'&&entry.detail.kind==='device-created').length;
+  const devicesBefore=deviceCount();
+  try {
+    const insets={left:13,top:41,right:17,bottom:29};
+    await areaApiSession.send('Emulation.setSafeAreaInsetsOverride',{insets});
+    await page.goto(origin+'/diagnostics/safe-area/',{waitUntil:'domcontentloaded'});
+    await page.waitForFunction(()=>document.body.dataset.ready,{timeout:45000});
+    assert.equal(await page.locator('body').getAttribute('data-ready'),'true',await page.locator('#values').textContent());
+    const readArea=async()=>JSON.parse(await page.locator('#values').textContent()).insets;
+    assert.deepEqual(await readArea(),insets);
+    const changed={left:17,top:29,right:13,bottom:41};
+    await areaApiSession.send('Emulation.setSafeAreaInsetsOverride',{insets:changed});
+    await page.getByRole('button',{name:'再取得'}).click();
+    assert.deepEqual(await readArea(),changed,'Raw values must remain readable when viewport and inset sums are unchanged');
+    assert.equal(deviceCount(),devicesBefore,'Reading safe areas must not create a GPU device');
+    await screenshot('safe-area-api-without-gpu');
+    report.checks.push('Rust safe-area API returns browser values before app startup, without a canvas or GPU device');
+  } finally {
+    await areaApiSession.send('Emulation.setSafeAreaInsetsOverride',{insets:{}});
+    await areaApiSession.detach();
+  }
   {
   setPhase('toolkit homepage and live specimen');
   await page.goto(origin+'/',{waitUntil:'domcontentloaded'});

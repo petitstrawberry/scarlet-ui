@@ -161,6 +161,11 @@ class PackageValidation(unittest.TestCase):
         self.assertIn('"source_commit": "test-commit"', html)
         self.assertIn('<script src="./focus-trace.js"></script>', html)
         self.assertFalse((page.parent / 'pkg').exists())
+        safe_area = self.root / 'diagnostics/safe-area/index.html'
+        self.assertTrue(safe_area.is_file())
+        self.assertIn('browser_safe_area_insets', safe_area.read_text())
+        self.assertIn('viewport-fit=cover', safe_area.read_text())
+        self.assertNotIn('await start()', safe_area.read_text())
         for name, data in before.items():
             self.assertEqual((self.root / name).read_bytes(), data, name)
         builder.validate(self.root)

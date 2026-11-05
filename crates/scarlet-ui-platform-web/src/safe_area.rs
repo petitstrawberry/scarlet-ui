@@ -1,5 +1,15 @@
 //! Browser/host safe-area acquisition, independent of the GPU backend.
-use scarlet_ui_core::geometry::{EdgeInsets, Rect, Size};
+use scarlet_ui_core::geometry::{EdgeInsets, Size};
+
+/// Who owns safe-area layout for a browser canvas.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SafeAreaMode {
+    /// The canvas fills the browser viewport; Window content respects CSS env().
+    #[default]
+    Viewport,
+    /// A DOM container already positions this embedded canvas safely.
+    Contained,
+}
 
 fn normalized(insets: EdgeInsets) -> EdgeInsets {
     let edge = |v: f32| if v.is_finite() { v.max(0.) } else { 0. };
@@ -11,43 +21,32 @@ fn normalized(insets: EdgeInsets) -> EdgeInsets {
     )
 }
 
-/// Project browser-reserved edges into canvas-local logical coordinates.
-/// A canvas already inset by its host gets zero. Offscreen document specimens
-/// keep their authored layout instead of reflowing as the document scrolls.
+/// Convert API values to canvas logical units. Ownership is explicit: viewport
+/// comparisons and document scrolling must not silently discard system insets.
 pub(crate) fn canvas_insets(
-    viewport: Size,
-    canvas: Rect,
+    mode: SafeAreaMode,
+    css: Size,
     logical: Size,
     insets: EdgeInsets,
 ) -> EdgeInsets {
-    if canvas.size.width <= 0.
-        || canvas.size.height <= 0.
-        || canvas.left() < -0.5
-        || canvas.top() < -0.5
-        || canvas.right() > viewport.width + 0.5
-        || canvas.bottom() > viewport.height + 0.5
-    {
+    if mode == SafeAreaMode::Contained || css.width <= 0. || css.height <= 0. {
         return EdgeInsets::ZERO;
     }
     let insets = normalized(insets);
-    let x = logical.width / canvas.size.width;
-    let y = logical.height / canvas.size.height;
+    let x = logical.width / css.width;
+    let y = logical.height / css.height;
     EdgeInsets::new(
-        (insets.left - canvas.left()).max(0.).min(canvas.size.width) * x,
-        (insets.top - canvas.top()).max(0.).min(canvas.size.height) * y,
-        (canvas.right() - viewport.width + insets.right)
-            .max(0.)
-            .min(canvas.size.width)
-            * x,
-        (canvas.bottom() - viewport.height + insets.bottom)
-            .max(0.)
-            .min(canvas.size.height)
-            * y,
+        insets.left * x,
+        insets.top * y,
+        insets.right * x,
+        insets.bottom * y,
     )
 }
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) use browser::SafeArea;
+#[cfg(target_arch = "wasm32")]
+pub use browser::browser_safe_area_insets;
 
 #[cfg(target_arch = "wasm32")]
 mod browser {
@@ -58,6 +57,7 @@ mod browser {
 
     pub(crate) struct SafeArea {
         canvas: HtmlCanvasElement,
+        mode: SafeAreaMode,
         probe: HtmlElement,
         pending: Rc<Cell<bool>>,
         current: Cell<EdgeInsets>,
@@ -66,7 +66,7 @@ mod browser {
         _observer_callback: Closure<dyn FnMut()>,
     }
     impl SafeArea {
-        pub fn new(canvas: HtmlCanvasElement) -> Result<Self, JsValue> {
+        pub fn new(canvas: HtmlCanvasElement, mode: SafeAreaMode) -> Result<Self, JsValue> {
             let doc = canvas
                 .owner_document()
                 .ok_or_else(|| JsValue::from_str("Canvas has no document"))?;
@@ -90,6 +90,7 @@ mod browser {
                 .append_child(&probe)?;
             Ok(Self {
                 canvas,
+                mode,
                 probe,
                 pending,
                 current: Cell::new(EdgeInsets::ZERO),
@@ -118,44 +119,18 @@ mod browser {
             self.current.get()
         }
         fn browser_insets(&self) -> EdgeInsets {
-            let Some(window) = web_sys::window() else {
+            if self.mode == SafeAreaMode::Contained {
                 return EdgeInsets::ZERO;
+            }
+            let Ok(insets) = read_probe(&self.probe) else {
+                // Preserve the last known safe area on a DOM read failure.
+                // The explicit getter below reports failures to its caller.
+                return self.current.get();
             };
-            let Some(style) = window.get_computed_style(&self.probe).ok().flatten() else {
-                return EdgeInsets::ZERO;
-            };
-            let edge = |name| {
-                style
-                    .get_property_value(name)
-                    .ok()
-                    .and_then(|s| s.trim().trim_end_matches("px").parse::<f32>().ok())
-                    .unwrap_or(0.)
-            };
-            let insets = EdgeInsets::new(
-                edge("padding-left"),
-                edge("padding-top"),
-                edge("padding-right"),
-                edge("padding-bottom"),
-            );
             let rect = self.canvas.get_bounding_client_rect();
-            let width = window
-                .inner_width()
-                .ok()
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.) as f32;
-            let height = window
-                .inner_height()
-                .ok()
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.) as f32;
             canvas_insets(
-                Size::new(width, height),
-                Rect::from_xywh(
-                    rect.x() as f32,
-                    rect.y() as f32,
-                    rect.width() as f32,
-                    rect.height() as f32,
-                ),
+                self.mode,
+                Size::new(rect.width() as f32, rect.height() as f32),
                 Size::new(
                     self.canvas.client_width() as f32,
                     self.canvas.client_height() as f32,
@@ -163,6 +138,53 @@ mod browser {
                 insets,
             )
         }
+    }
+
+    fn read_probe(probe: &HtmlElement) -> Result<EdgeInsets, JsValue> {
+        let window = probe
+            .owner_document()
+            .and_then(|doc| doc.default_view())
+            .ok_or_else(|| JsValue::from_str("Safe-area document has no window"))?;
+        let style = window
+            .get_computed_style(probe)?
+            .ok_or_else(|| JsValue::from_str("Safe-area computed style is unavailable"))?;
+        let edge = |name| -> Result<f32, JsValue> {
+            style
+                .get_property_value(name)?
+                .trim()
+                .trim_end_matches("px")
+                .parse::<f32>()
+                .map_err(|_| JsValue::from_str("Safe-area value is not a CSS pixel length"))
+        };
+        Ok(normalized(EdgeInsets::new(
+            edge("padding-left")?,
+            edge("padding-top")?,
+            edge("padding-right")?,
+            edge("padding-bottom")?,
+        )))
+    }
+
+    /// Read the browser's raw CSS env(safe-area-inset-*) values, in CSS pixels.
+    ///
+    /// This one-shot API needs a document body but no canvas, WebGPU adapter,
+    /// or running WebApp. Zero means the browser reported zero; DOM failures
+    /// return an error. Full-screen pages opt in with viewport-fit=cover.
+    /// Native hosts that do not expose these CSS variables use their OS API
+    /// and WebApp::set_safe_area_insets instead of inferring device dimensions.
+    pub fn browser_safe_area_insets() -> Result<EdgeInsets, JsValue> {
+        let document = web_sys::window()
+            .and_then(|w| w.document())
+            .ok_or_else(|| JsValue::from_str("Safe-area document is unavailable"))?;
+        let probe: HtmlElement = document.create_element("div")?.dyn_into()?;
+        probe.set_attribute("aria-hidden", "true")?;
+        probe.style().set_css_text("position:fixed;visibility:hidden;pointer-events:none;width:0;height:0;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)");
+        document
+            .body()
+            .ok_or_else(|| JsValue::from_str("Safe-area document has no body"))?
+            .append_child(&probe)?;
+        let result = read_probe(&probe);
+        probe.remove();
+        result
     }
     impl Drop for SafeArea {
         fn drop(&mut self) {
