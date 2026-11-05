@@ -258,78 +258,110 @@ fn responsive_navigation_renders_rounded_glass_in_portrait_and_landscape() {
     if let Some(dir) = &output {
         fs::create_dir_all(dir).unwrap();
     }
-    for (width, height) in [(390, 640), (860, 560)] {
-        for scale in [1000, 2000] {
-            let pixel_width = width * scale / 1000;
-            let pixel_height = height * scale / 1000;
-            let root = navigation_scene(width, height);
-            let mut paint = PaintContext::new();
-            paint_tree(root.as_ref(), &mut paint, Point::ZERO);
-            let mut cpu =
-                CpuPaintRenderer::new(Size::new(width as f32, height as f32), scale, Color::WHITE);
-            cpu.execute(&paint);
-            let mut encoder = SgfxPaintEncoder::new(pixel_width, pixel_height, false).unwrap();
-            encoder.set_analytic_glass(true);
-            let target = encoder.target_texture(0).unwrap();
-            let mut resources = context.create_resources(encoder.resource_table());
-            let image = context
-                .create_image(pixel_width, pixel_height, TextureFormat::Bgra8Unorm)
-                .unwrap();
-            resources.map_image(target, image).unwrap();
-            let queue = context.create_queue();
-            encoder
-                .encode_frame(
-                    &mut queue.executor(&mut resources),
-                    0,
-                    None,
-                    &paint,
-                    Color::WHITE,
-                    scale,
-                    &[(0, 0, pixel_width, pixel_height)],
-                )
-                .unwrap();
-            assert_eq!(encoder.backdrop_fallback_count(), 0);
-            let gpu = resources.read_texture(target).unwrap();
-            let cpu: Vec<u8> = cpu
-                .buffer()
-                .as_slice()
-                .iter()
-                .flat_map(|p| p.to_le_bytes())
-                .collect();
-            let name = format!("navigation-{width}x{height}-{scale}");
-            if let Some(dir) = &output {
-                save(
-                    &dir.join(format!("{name}-cpu.ppm")),
-                    pixel_width,
-                    pixel_height,
-                    &cpu,
-                )
-                .unwrap();
-                save(
-                    &dir.join(format!("{name}-gpu.ppm")),
-                    pixel_width,
-                    pixel_height,
-                    &gpu,
-                )
-                .unwrap();
+    for analytic in [false, true] {
+        for proof in [false, true] {
+            for (width, height) in [(390, 640), (860, 560)] {
+                for scale in [1000, 2000] {
+                    let pixel_width = width * scale / 1000;
+                    let pixel_height = height * scale / 1000;
+                    let root = navigation_scene(width, height);
+                    let mut paint = PaintContext::new();
+                    if proof {
+                        let colors = [
+                            Color::rgb(213, 183, 181),
+                            Color::rgb(186, 185, 214),
+                            Color::rgb(168, 198, 207),
+                        ];
+                        for (index, color) in colors.into_iter().enumerate() {
+                            paint.fill_rect(
+                                Rect::from_xywh(
+                                    index as f32 * width as f32 / 3.,
+                                    0.,
+                                    width as f32 / 3.,
+                                    height as f32,
+                                ),
+                                color,
+                            );
+                        }
+                        for y in (0..height).step_by(19) {
+                            paint.fill_rect(
+                                Rect::from_xywh(0., y as f32, width as f32, 1.),
+                                Color::WHITE.with_opacity(0.3),
+                            );
+                        }
+                    }
+                    paint_tree(root.as_ref(), &mut paint, Point::ZERO);
+                    let mut cpu = CpuPaintRenderer::new(
+                        Size::new(width as f32, height as f32),
+                        scale,
+                        Color::WHITE,
+                    );
+                    cpu.execute(&paint);
+                    let mut encoder =
+                        SgfxPaintEncoder::new(pixel_width, pixel_height, false).unwrap();
+                    encoder.set_analytic_glass(analytic);
+                    let target = encoder.target_texture(0).unwrap();
+                    let mut resources = context.create_resources(encoder.resource_table());
+                    let image = context
+                        .create_image(pixel_width, pixel_height, TextureFormat::Bgra8Unorm)
+                        .unwrap();
+                    resources.map_image(target, image).unwrap();
+                    let queue = context.create_queue();
+                    encoder
+                        .encode_frame(
+                            &mut queue.executor(&mut resources),
+                            0,
+                            None,
+                            &paint,
+                            Color::WHITE,
+                            scale,
+                            &[(0, 0, pixel_width, pixel_height)],
+                        )
+                        .unwrap();
+                    assert_eq!(encoder.backdrop_fallback_count(), 0);
+                    let gpu = resources.read_texture(target).unwrap();
+                    let cpu: Vec<u8> = cpu
+                        .buffer()
+                        .as_slice()
+                        .iter()
+                        .flat_map(|p| p.to_le_bytes())
+                        .collect();
+                    let name = format!("navigation-{width}x{height}-{scale}-{analytic}-{proof}");
+                    if let Some(dir) = &output {
+                        save(
+                            &dir.join(format!("{name}-cpu.ppm")),
+                            pixel_width,
+                            pixel_height,
+                            &cpu,
+                        )
+                        .unwrap();
+                        save(
+                            &dir.join(format!("{name}-gpu.ppm")),
+                            pixel_width,
+                            pixel_height,
+                            &gpu,
+                        )
+                        .unwrap();
+                    }
+                    let (x, y) = if width < height {
+                        (20, height - 12)
+                    } else {
+                        (100, height - 40)
+                    };
+                    let at = (((y * scale / 1000) * pixel_width + x * scale / 1000) * 4) as usize;
+                    for c in 0..3 {
+                        assert!(
+                            cpu[at + c].abs_diff(gpu[at + c]) <= 12,
+                            "{name}: CPU/GPU material mismatch"
+                        );
+                    }
+                    assert_ne!(
+                        &gpu[at..at + 3],
+                        &[255, 255, 255],
+                        "{name}: navigation surface must remain visible on white"
+                    );
+                }
             }
-            let (x, y) = if width < height {
-                (20, height - 12)
-            } else {
-                (100, height - 40)
-            };
-            let at = (((y * scale / 1000) * pixel_width + x * scale / 1000) * 4) as usize;
-            for c in 0..3 {
-                assert!(
-                    cpu[at + c].abs_diff(gpu[at + c]) <= 12,
-                    "{name}: CPU/GPU material mismatch"
-                );
-            }
-            assert_ne!(
-                &gpu[at..at + 3],
-                &[255, 255, 255],
-                "{name}: navigation surface must remain visible on white"
-            );
         }
     }
 }
@@ -431,6 +463,129 @@ fn menu_background_contrast_is_bounded_in_both_render_paths() {
                 max_delta <= 35,
                 "background competes with menu labels: analytic={analytic}, scale={scale}, contrast={max_delta}"
             );
+        }
+    }
+}
+
+/// Strong contour strokes are especially visible on dark glass. Compare the
+/// entire shoulder, including corners, in both SGFX paths rather than checking
+/// only the flat material interior.
+#[test]
+fn shoulder_reflection_stays_soft_and_matches_cpu() {
+    use scarlet_ui_core::{
+        color::ColorPalette,
+        glass::{glass_bezel, glass_edge},
+    };
+    let Some(context) = context() else {
+        assert!(std::env::var_os("SCARLET_REQUIRE_GPU_TESTS").is_none());
+        return;
+    };
+    let output = std::env::var_os("SCARLET_TAB_PARITY_DIR").map(std::path::PathBuf::from);
+    if let Some(dir) = &output {
+        fs::create_dir_all(dir).unwrap();
+    }
+    let rect = Rect::from_xywh(24., 24., 272., 112.);
+    for (name, background, tint) in [
+        (
+            "dark",
+            Color::rgb(24, 24, 24),
+            ColorPalette::dark().surface(),
+        ),
+        (
+            "light",
+            Color::rgb(180, 180, 180),
+            ColorPalette::light().surface(),
+        ),
+    ] {
+        for scale in [1000, 1500, 2000] {
+            let (width, height) = (320 * scale / 1000, 160 * scale / 1000);
+            let mut paint = PaintContext::new();
+            paint.refractive_glass_rounded_rect(rect, 24., 2.52, tint.with_opacity(0.64), 1.);
+            let mut cpu = CpuPaintRenderer::new(Size::new(320., 160.), scale, background);
+            cpu.execute(&paint);
+            let cpu: Vec<u8> = cpu
+                .buffer()
+                .as_slice()
+                .iter()
+                .flat_map(|p| p.to_le_bytes())
+                .collect();
+            for analytic in [false, true] {
+                let mut encoder = SgfxPaintEncoder::new(width, height, false).unwrap();
+                encoder.set_analytic_glass(analytic);
+                let target = encoder.target_texture(0).unwrap();
+                let mut resources = context.create_resources(encoder.resource_table());
+                resources
+                    .map_image(
+                        target,
+                        context
+                            .create_image(width, height, TextureFormat::Bgra8Unorm)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                let queue = context.create_queue();
+                encoder
+                    .encode_frame(
+                        &mut queue.executor(&mut resources),
+                        0,
+                        None,
+                        &paint,
+                        background,
+                        scale,
+                        &[(0, 0, width, height)],
+                    )
+                    .unwrap();
+                assert_eq!(encoder.backdrop_fallback_count(), 0);
+                let gpu = resources.read_texture(target).unwrap();
+                let center = ((height / 2 * width + width / 2) * 4) as usize;
+                let mut max_delta = 0;
+                let mut max_lift = 0;
+                for y in 0..height {
+                    for x in 0..width {
+                        let point = Point::new(
+                            (x as f32 + 0.5) * 1000. / scale as f32,
+                            (y as f32 + 0.5) * 1000. / scale as f32,
+                        );
+                        let (distance, _, _) = glass_edge(rect, 24., point);
+                        if distance < 0.5 || distance >= glass_bezel(rect, 24.) {
+                            continue;
+                        }
+                        let at = ((y * width + x) * 4) as usize;
+                        for c in 0..3 {
+                            max_delta = max_delta.max(cpu[at + c].abs_diff(gpu[at + c]));
+                            max_lift = max_lift.max(gpu[at + c].saturating_sub(gpu[center + c]));
+                        }
+                    }
+                }
+                if name == "light" {
+                    let factor = scale as f32 / 1000.;
+                    let side = ((24. * factor) as u32..(27. * factor) as u32)
+                        .map(|x| gpu[((height / 2 * width + x) * 4) as usize])
+                        .min()
+                        .unwrap();
+                    let top = ((24. * factor) as u32..(27. * factor) as u32)
+                        .map(|y| gpu[((y * width + width / 2) * 4) as usize])
+                        .min()
+                        .unwrap();
+                    assert!(side + 3 < gpu[center], "sides need a compact dark contour");
+                    assert!(
+                        side + 3 < top,
+                        "side contours must be firmer than horizontal edges"
+                    );
+                }
+                let label = format!("shoulder-{name}-{scale}-{analytic}");
+                eprintln!("{label}: CPU/GPU delta {max_delta}, reflection lift {max_lift}");
+                if let Some(dir) = &output {
+                    save(&dir.join(format!("{label}-gpu.ppm")), width, height, &gpu).unwrap();
+                }
+                assert!(
+                    max_lift <= 40,
+                    "{label}: reflection must not paint a bright outline"
+                );
+                assert!(
+                    max_delta <= 14,
+                    "{label}: shoulder differs between renderers"
+                );
+            }
         }
     }
 }

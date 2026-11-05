@@ -737,7 +737,7 @@ impl NavigationSidebarRenderObject {
         }
         let radius = style::radius_for(panel, FLOATING_BAR_RADIUS);
         let mut material = style::GlassMaterial::regular();
-        material.tint = palette.text().with_opacity(0.045).blend_over(material.tint);
+        material.tint = palette.text().with_opacity(0.018).blend_over(material.tint);
         style::elevation_shadow(
             ctx,
             panel,
@@ -768,7 +768,7 @@ impl NavigationSidebarRenderObject {
                     style::radius_for(face, FLOATING_BAR_RADIUS - 4.0),
                     palette
                         .primary()
-                        .with_opacity(if hovered { 0.14 } else { 0.10 }),
+                        .with_opacity(if hovered { 0.11 } else { 0.075 }),
                 );
             } else if hovered {
                 ctx.fill_rounded_rect(
@@ -839,7 +839,7 @@ impl NavigationSidebarRenderObject {
         let mut material = style::GlassMaterial::regular();
         // A neutral structural tint remains visible over a plain white canvas,
         // while retaining real backdrop response and the existing geometry.
-        material.tint = palette.text().with_opacity(0.045).blend_over(material.tint);
+        material.tint = palette.text().with_opacity(0.018).blend_over(material.tint);
         style::paint_glass_material(ctx, panel, 16.0, material);
         // Clip destinations to the inset panel on short windows.
         let content = Rect::from_xywh(
@@ -853,7 +853,7 @@ impl NavigationSidebarRenderObject {
             let row = self.floating_row(origin, index);
             let selected = self.selected_index.get() == index;
             if selected {
-                ctx.fill_rounded_rect(row, 12.0, palette.primary().with_opacity(0.10));
+                ctx.fill_rounded_rect(row, 12.0, palette.primary().with_opacity(0.075));
             } else if self.hovered_index == Some(index) {
                 ctx.fill_rounded_rect(row, 12.0, palette.menu_hover());
             }
@@ -1608,8 +1608,8 @@ mod tests {
         assert_ne!(inside, outside, "panel must not disappear on a white page");
         let red = (inside >> 16) & 255;
         assert!(
-            (238..=249).contains(&red),
-            "structural tone remains restrained"
+            (248..=253).contains(&red),
+            "lighter structural tint stays visible without a heavy gray face"
         );
     }
 

@@ -710,7 +710,7 @@ impl Tessellator {
         self.finish_range(start)
     }
 
-    /// Grazing rim and curved shoulder, 12 segments per corner. Colors are already
+    /// Soft curved-shoulder reflection, 12 segments per corner. Colors are already
     /// assigned per vertex and must not be replaced by color_geometry.
     fn glass_rim_raw(
         &mut self,
@@ -747,16 +747,15 @@ impl Tessellator {
         for i in 0..52 {
             let angle =
                 core::f32::consts::PI * (-1. + (i / 13) as f32 * 0.5 + (i % 13) as f32 / 24.);
-            let (rim_width, _) = scarlet_ui_core::glass::glass_highlight_edge(
-                -libm::cosf(angle),
-                -libm::sinf(angle),
-            );
-            let rim_width = rim_width.min(bezel * 0.25);
+            let (width, _) =
+                scarlet_ui_core::glass::glass_contour_edge(-libm::cosf(angle), -libm::sinf(angle));
+            let width = width.min(bezel * 0.10);
+            // Resolve the compact shade independently from the broad reflection.
             for (ring, d) in [
                 0.,
-                rim_width * 0.4,
-                rim_width,
-                (rim_width + bezel * 0.10).min(bezel * 0.4),
+                width * 0.5,
+                width,
+                bezel * 0.16,
                 bezel * 0.4,
                 bezel * 0.7,
                 bezel,
