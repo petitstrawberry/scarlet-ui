@@ -4,9 +4,7 @@ ScarletUI is a cross-platform declarative UI framework for Rust applications.
 
 [Official website](https://ui.scarlet-os.org/) · [Getting started](https://ui.scarlet-os.org/getting-started/) · [API reference](https://ui.scarlet-os.org/docs/)
 
-[![ScarletUI Sketch sample with a drawing canvas, color controls, and slider](site/public/assets/widget-factory.png)](https://ui.scarlet-os.org/)
-
-The real ScarletUI Sketch sample, captured from its browser build. [Try the samples](https://ui.scarlet-os.org/try/).
+[![ScarletUI — cross-platform, declarative UI for Rust, with tabs, a button, toggle, and slider](https://ui.scarlet-os.org/assets/social-card.png)](https://ui.scarlet-os.org/)
 
 It lets you write UI in a SwiftUI-like style while staying in ordinary Rust:
 views are composed with macros and modifiers, state updates are synchronized with

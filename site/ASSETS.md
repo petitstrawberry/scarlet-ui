@@ -32,8 +32,10 @@ bounds are documented in `assets/sharing/PROVENANCE.md`. No AI-generated artwork
 
 ## README and application links
 
-The root README reuses `public/assets/widget-factory.png` above without edits.
-It links to the live site; it is a browser sample capture, not a native app screenshot.
+The root README links to the official site’s generated `assets/social-card.png`
+sharing image. It uses the same title, description and real stock-control crops
+described above; it is a composed project thumbnail. The image and its surrounding
+link both use the official site, so the README follows published artwork updates.
 
 The homepage's “Built with ScarletUI” links were checked against the public
 [Kureha Code README](https://github.com/petitstrawberry/kureha-code#readme) and
