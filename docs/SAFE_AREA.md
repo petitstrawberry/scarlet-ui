@@ -41,6 +41,26 @@ margin only once, leaving the last item 8px above the capsule. Insets reported
 by the host drive this geometry in both browser and standalone modes, including
 rotation; no device-model dimensions are assumed.
 
+Applications can explicitly opt into partial bottom overlap with
+`NavigationView::floating_bar_bottom_overlap(max_pixels)`. It defaults to zero
+because a platform safe area may describe an actual OS obstruction. This only
+affects floating bottom bars in portrait allocations; landscape, sidebars and
+simple bars retain the full reservation. It never changes capsule, icon, label
+or hit-cell dimensions. Overlap stops before the capsule's bottom gap drops
+below 20 logical pixels, and the scroll/static-content clearance follows the
+same placement so the last item remains above the capsule.
+
+Widget Factory opts into at most 12 logical pixels on Web only. For bottom
+insets 0 / 16 / 21 / 34 / 65, portrait capsule gaps are respectively
+8 / 16 / 20 / 22 / 53 logical pixels; a landscape bottom inset of 21 retains
+21. This takes the partial-overlap approach of
+[Phanpy's experimental tab bar](https://github.com/cheeaun/phanpy/blob/main/src/components/shortcuts.css),
+without copying its side-inset averaging or applying a home-indicator assumption
+to all native platforms. The 20px floor is a conservative application choice,
+not an OS guarantee of the indicator's bounds. Validate its clearance and
+bottom-edge taps on the actual iPhone; CPU geometry/rendering cannot reproduce
+system gesture interception. No bar thickness or icon-size change is included.
+
 For artwork that should start at the viewport edge, opt out on that scrollport:
 `ScrollView::new(artwork).content_safe_area(SafeAreaEdges::NONE)`.
 Unhandled reservations remain available to descendants that need safe controls.

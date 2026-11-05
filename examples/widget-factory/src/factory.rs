@@ -1267,6 +1267,11 @@ impl Application for WidgetFactory {
                 }
                 .presentation(NavigationPresentation::Automatic)
                 .sidebar_style(NavigationSidebarStyle::Floating)
+                .floating_bar_bottom_overlap(if cfg!(target_arch = "wasm32") {
+                    12.0
+                } else {
+                    0.0
+                })
                 .shows_icons(true)
                 .sidebar_width(Self::SIDEBAR_WIDTH)
                 .minimum_content_size(Size::new(Self::MIN_CONTENT_WIDTH, 0.0))
