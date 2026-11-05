@@ -1,10 +1,10 @@
-//! Portable, destination-dependent glass material. Only fixed SGFX shaders are
-//! used, including on WebGPU. Every filter is an ordered render-pass barrier.
+//! Destination-dependent glass material, with portable fixed-pipeline and
+//! optional per-pixel WGSL paths. Every filter is an ordered render-pass barrier.
 //!
 //! One full-target snapshot is retained, but only the expanded source rectangle
-//! is copied. The two downsampled working images use 16..256 power-of-two size
-//! classes: at most 50 images / 1.88 MiB across all classes. A frame copies at
-//! most 8 Mpixels and each filter shades at most 3 * 256 * 256 working pixels.
+//! is copied. Frosted working images use 16..256 power-of-two size classes;
+//! refractive materials keep full-resolution scratch images. Both reuse their
+//! resources, and a frame copies at most 8 Mpixels.
 //! Budget exhaustion or insufficient working resolution uses an explicit
 //! opaque-tint fallback, never a fake or silently over-broad blur.
 use super::*;
@@ -18,7 +18,75 @@ const MAX_FRAME_FILTERS: u32 = 64;
 const MAX_PHYSICAL_RADIUS: f32 = 64.;
 const WEIGHTS: [f32; 9] = [1., 8., 28., 56., 70., 56., 28., 8., 1.];
 const QUAD_VERTICES: u32 = 6;
-const WORK_VERTICES: u32 = QUAD_VERTICES * 19;
+const MAX_BLUR_TAPS: usize = 65;
+const WORK_VERTICES: u32 = QUAD_VERTICES * (1 + 2 * MAX_BLUR_TAPS as u32);
+
+/// Dense Gaussian sampling, pairing adjacent texels through linear filtering.
+/// Keeping taps at most two physical texels apart avoids the repeated text/
+/// dot patterns produced by stretching a nine-tap kernel over a wide radius.
+fn blur_kernel(radius: f32) -> Vec<(f32, f32)> {
+    if radius <= 4.0 {
+        return WEIGHTS
+            .iter()
+            .enumerate()
+            .map(|(i, w)| ((i as f32 - 4.) * radius * 0.25, w / 256.))
+            .collect();
+    }
+    let support = libm::ceilf(radius.min(MAX_PHYSICAL_RADIUS)) as usize;
+    let variance = radius * radius / 8.;
+    let weight = |x: usize| libm::expf(-((x * x) as f32) / (2. * variance));
+    let mut taps = Vec::with_capacity(MAX_BLUR_TAPS);
+    taps.push((0., 1.));
+    let mut total = 1.;
+    for x in (1..=support).step_by(2) {
+        let a = weight(x);
+        let b = if x < support { weight(x + 1) } else { 0. };
+        let sum = a + b;
+        let offset = x as f32 + b / sum;
+        taps.push((-offset, sum));
+        taps.push((offset, sum));
+        total += 2. * sum;
+    }
+    for tap in &mut taps {
+        tap.1 /= total;
+    }
+    taps
+}
+
+fn working_radii(filter: Backdrop, working: Option<&WorkingImages>) -> [f32; 2] {
+    match working {
+        Some(w) => [
+            filter.radius * w.width as f32 / filter.bounds.width as f32,
+            filter.radius * w.height as f32 / filter.bounds.height as f32,
+        ],
+        None => [filter.radius; 2],
+    }
+}
+
+fn portable_blur_kernel(radius: f32) -> Vec<(f32, f32)> {
+    let mut taps = blur_kernel(radius);
+    if radius > 4. {
+        // Each fixed-pipeline tap lands in an UNORM8 attachment. Distribute
+        // exactly 255 units, preserving constant color/alpha through both
+        // passes instead of accumulating rounding loss in translucent glass.
+        let mut remaining = 255.;
+        for tap in &mut taps[1..] {
+            let units = libm::roundf(tap.1 * 255.);
+            remaining -= units;
+            tap.1 = units / 255.;
+        }
+        taps[0].1 = remaining / 255.;
+    }
+    taps
+}
+
+fn blur_tap_count(radius: f32) -> u32 {
+    if radius <= 4. {
+        9
+    } else {
+        1 + 2 * (libm::ceilf(radius.min(MAX_PHYSICAL_RADIUS)) as u32).div_ceil(2)
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct Backdrop {
@@ -394,10 +462,19 @@ impl SgfxPaintEncoder {
         encoder.write_buffer(buffer, 0, bytes).map_err(stage)?;
         let transparent = ir_color([0.; 4])?;
         let white = ir_color([1.; 4])?;
+        let radii = working_radii(filter, working);
+        let horizontal = blur_tap_count(radii[0]) * QUAD_VERTICES;
+        let vertical = blur_tap_count(radii[1]) * QUAD_VERTICES;
         for (source, destination, pipeline, first_vertex, vertex_count) in [
             (snapshot, first, resources.replace, 0, 6),
-            (first, second, resources.additive_texture, 6, 54),
-            (second, first, resources.additive_texture, 60, 54),
+            (first, second, resources.additive_texture, 6, horizontal),
+            (
+                second,
+                first,
+                resources.additive_texture,
+                6 + horizontal,
+                vertical,
+            ),
         ] {
             // Refractive glass keeps source pixels at their original resolution.
             // Blur directly between snapshot and scratch; no downsample pass.
@@ -586,15 +663,14 @@ fn work_vertices(
         (b.y + b.height) as f32 / height as f32,
     );
     quad([[u0, v0], [u1, v0], [u1, v1], [u0, v1]], 1.);
-    let (left, top, right, bottom, sample_width, sample_height) = if working.is_some() {
-        (0., 0., 1., 1., b.width, b.height)
+    let (left, top, right, bottom, sample_width, sample_height) = if let Some(w) = working {
+        (0., 0., 1., 1., w.width, w.height)
     } else {
         (u0, v0, u1, v1, width, height)
     };
-    for axis in 0..2 {
-        for (index, weight) in WEIGHTS.into_iter().enumerate() {
-            let shift = (index as f32 - 4.) * filter.radius
-                / 4.
+    for (axis, radius) in working_radii(filter, working).into_iter().enumerate() {
+        for (offset, weight) in portable_blur_kernel(radius) {
+            let shift = offset
                 / if axis == 0 {
                     sample_width as f32
                 } else {
@@ -608,7 +684,7 @@ fn work_vertices(
                     [right + u, bottom + v],
                     [left + u, bottom + v],
                 ],
-                weight / 256.,
+                weight,
             );
         }
     }
@@ -618,6 +694,21 @@ fn work_vertices(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dense_kernels_preserve_energy_and_have_no_sampling_gaps() {
+        for step in 1..=640 {
+            let radius = step as f32 / 10.;
+            for mut taps in [blur_kernel(radius), portable_blur_kernel(radius)] {
+                assert_eq!(taps.len(), blur_tap_count(radius) as usize);
+                assert!(taps.len() <= MAX_BLUR_TAPS);
+                assert!((taps.iter().map(|t| t.1).sum::<f32>() - 1.).abs() < 0.00001);
+                assert!(taps.iter().all(|t| t.1 >= 0. && t.1 <= 1.));
+                taps.sort_by(|a, b| a.0.total_cmp(&b.0));
+                assert!(taps.windows(2).all(|p| p[1].0 - p[0].0 <= 2.001));
+            }
+        }
+    }
     use crate::lowering::tests::RecordingExecutor;
     use scarlet_ui_core::geometry::Point;
 
@@ -901,7 +992,11 @@ mod tests {
             .unwrap();
         let resources = renderer.backdrop.as_ref().unwrap();
         let vertices = work_vertices(filter, Some(&resources.working[0]), 200, 100);
-        assert_eq!(vertices.len(), WORK_VERTICES as usize);
+        let radii = working_radii(filter, Some(&resources.working[0]));
+        assert_eq!(
+            vertices.len(),
+            ((1 + blur_tap_count(radii[0]) + blur_tap_count(radii[1])) * QUAD_VERTICES) as usize
+        );
         for vertex in &vertices[6..] {
             assert_eq!(vertex.color, [vertex.color[0]; 4]);
         }

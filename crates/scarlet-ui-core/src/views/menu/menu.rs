@@ -483,7 +483,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
         }
 
         let palette = ColorPalette::default();
-        let bg_color = style::GlassMaterial::floating().tint.with_opacity(1.0);
+        let bg_color = style::GlassMaterial::menu().tint.with_opacity(1.0);
         let text_color = palette.text_primary();
         let hover_color = palette.menu_hover();
         let separator_color = palette.divider();
@@ -612,7 +612,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
             palette.shadow(),
             style::ElevationRole::Floating,
         );
-        style::paint_glass_material(ctx, rect, radius, style::GlassMaterial::floating());
+        style::paint_menu_material(ctx, rect, radius);
 
         let mut current_y = MENU_EDGE_PADDING;
         let font_size = MENU_FONT_SIZE;
@@ -955,7 +955,7 @@ mod tests {
         assert_eq!(
             buffer.get_pixel(0, 0),
             Some(
-                style::GlassMaterial::floating()
+                style::GlassMaterial::menu()
                     .tint
                     .with_opacity(1.0)
                     .to_bgra()
@@ -964,7 +964,7 @@ mod tests {
         assert_eq!(
             buffer.get_pixel(60, 0),
             Some(
-                style::GlassMaterial::floating()
+                style::GlassMaterial::menu()
                     .tint
                     .with_opacity(1.0)
                     .to_bgra()
@@ -983,7 +983,7 @@ mod tests {
             command,
             PaintCommand::BackdropFilterRoundedRect { corner_radius, tint, .. }
                 if *corner_radius == style::surface_radius(style::SurfaceRole::Floating)
-                    && *tint == style::GlassMaterial::floating().tint
+                    && *tint == style::GlassMaterial::menu().tint
         )));
         assert!(!paint.commands().iter().any(|command| matches!(
             command,

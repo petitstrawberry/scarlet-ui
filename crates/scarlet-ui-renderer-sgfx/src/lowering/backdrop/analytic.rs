@@ -4,6 +4,8 @@ use super::*;
 use crate::{Error, Result};
 use sgfx::ir::*;
 
+const PARAMETER_BYTES: usize = 80 + MAX_BLUR_TAPS * 16;
+
 pub(super) struct Resources {
     uniform: BufferId,
     snapshot_group: BindGroupId,
@@ -34,7 +36,11 @@ impl Resources {
         .map_err(stage)?;
         let uniform = table
             .define_buffer(
-                BufferDesc::new(80, BufferUsage::UNIFORM | BufferUsage::COPY_DST).map_err(stage)?,
+                BufferDesc::new(
+                    PARAMETER_BYTES as u64,
+                    BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+                )
+                .map_err(stage)?,
             )
             .map_err(stage)?
             .id();
@@ -50,7 +56,7 @@ impl Resources {
                                 BindingResource::Buffer {
                                     buffer: uniform,
                                     offset: 0,
-                                    size: 80
+                                    size: PARAMETER_BYTES as u64
                                 }
                             ),
                             BindGroupEntry::new(1, BindingResource::Texture(texture)),
@@ -198,6 +204,7 @@ impl Resources {
 pub(super) fn parameters(filter: Backdrop, width: u32, height: u32) -> Vec<u8> {
     let o = filter.optics.unwrap();
     let b = filter.bounds;
+    let kernel = blur_kernel(filter.radius);
     let values = [
         o[0],
         o[1],
@@ -214,11 +221,21 @@ pub(super) fn parameters(filter: Backdrop, width: u32, height: u32) -> Vec<u8> {
         filter.radius,
         o[6],
         filter.opacity,
-        0.,
+        kernel.len() as f32,
         b.x as f32,
         b.y as f32,
         b.width as f32,
         b.height as f32,
     ];
-    values.into_iter().flat_map(f32::to_le_bytes).collect()
+    let mut bytes: Vec<u8> = Vec::with_capacity(PARAMETER_BYTES);
+    bytes.extend(values.into_iter().flat_map(f32::to_le_bytes));
+    for (offset, weight) in kernel {
+        bytes.extend(
+            [offset, weight, 0., 0.]
+                .into_iter()
+                .flat_map(f32::to_le_bytes),
+        );
+    }
+    bytes.resize(PARAMETER_BYTES, 0);
+    bytes
 }

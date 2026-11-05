@@ -460,7 +460,7 @@ fn large_refractive_dock_preserves_detail_without_grid_seams() {
     };
     let (width, height) = (960, 600);
     let mut renderer = SgfxPaintEncoder::new(width, height, false).unwrap();
-    renderer.set_analytic_glass(true);
+
     let target = renderer.target_texture(0).unwrap();
     let mut resources = context.create_resources(renderer.resource_table());
     resources
@@ -472,55 +472,59 @@ fn large_refractive_dock_preserves_detail_without_grid_seams() {
         )
         .unwrap();
     let queue = context.create_queue();
-    for shift in [0., 0.25, 0.5] {
-        let mut paint = PaintContext::new();
-        // The user's failure case: thin progress tracks passing behind a wide
-        // floating capsule, especially its rounded upper-left edge.
-        for y in [224., 233., 242.] {
-            paint.fill_rounded_rect(
-                Rect::from_xywh(16., y + shift, 300., 2.),
+    for analytic in [false, true] {
+        renderer.set_analytic_glass(analytic);
+        for shift in [0., 0.25, 0.5] {
+            let mut paint = PaintContext::new();
+            // The user's failure case: thin progress tracks passing behind a wide
+            // floating capsule, especially its rounded upper-left edge.
+            for y in [224., 233., 242.] {
+                paint.fill_rounded_rect(
+                    Rect::from_xywh(16., y + shift, 300., 2.),
+                    1.,
+                    Color::rgb(0.75, 0.1, 0.2),
+                );
+            }
+            // Fine stripes expose a silent 256px working-image downgrade.
+            for x in (330..450).step_by(8) {
+                paint.fill_rounded_rect(Rect::from_xywh(x as f32, 224., 4., 46.), 0., Color::BLACK);
+            }
+            paint.refractive_glass_rounded_rect(
+                Rect::from_xywh(12., 220., 456., 56.),
+                28.,
+                2.52,
+                Color::WHITE.with_opacity(0.35),
                 1.,
-                Color::rgb(0.75, 0.1, 0.2),
             );
-        }
-        // Fine stripes expose a silent 256px working-image downgrade.
-        for x in (330..450).step_by(8) {
-            paint.fill_rounded_rect(Rect::from_xywh(x as f32, 224., 4., 46.), 0., Color::BLACK);
-        }
-        paint.refractive_glass_rounded_rect(
-            Rect::from_xywh(12., 220., 456., 56.),
-            28.,
-            2.52,
-            Color::WHITE.with_opacity(0.35),
-            1.,
-        );
-        renderer
-            .encode_frame(
-                &mut queue.executor(&mut resources),
-                0,
-                None,
-                &paint,
-                Color::WHITE,
-                2000,
-                &[(0, 0, width, height)],
-            )
-            .unwrap();
-        assert_eq!(renderer.backdrop_fallback_count(), 0);
-        let pixels = resources.read_texture(target).unwrap();
-        let dark = rgba(&pixels, width, 664, 500)[0];
-        let bright = rgba(&pixels, width, 672, 500)[0];
-        assert!(
-            bright > dark + 60,
-            "fine background structure must survive: {dark} vs {bright}"
-        );
-        if let Some(dir) = std::env::var_os("SCARLET_GLASS_PROOF_DIR") {
-            std::fs::create_dir_all(&dir).unwrap();
-            let mut file =
-                std::fs::File::create(std::path::Path::new(&dir).join(format!("dock-{shift}.ppm")))
-                    .unwrap();
-            write!(file, "P6\n{width} {height}\n255\n").unwrap();
-            for p in pixels.chunks_exact(4) {
-                file.write_all(&[p[2], p[1], p[0]]).unwrap();
+            renderer
+                .encode_frame(
+                    &mut queue.executor(&mut resources),
+                    0,
+                    None,
+                    &paint,
+                    Color::WHITE,
+                    2000,
+                    &[(0, 0, width, height)],
+                )
+                .unwrap();
+            assert_eq!(renderer.backdrop_fallback_count(), 0);
+            let pixels = resources.read_texture(target).unwrap();
+            let dark = rgba(&pixels, width, 664, 500)[0];
+            let bright = rgba(&pixels, width, 672, 500)[0];
+            assert!(
+                bright > dark + 60,
+                "fine background structure must survive: {dark} vs {bright}"
+            );
+            if let Some(dir) = std::env::var_os("SCARLET_GLASS_PROOF_DIR") {
+                std::fs::create_dir_all(&dir).unwrap();
+                let mut file = std::fs::File::create(
+                    std::path::Path::new(&dir).join(format!("dock-{analytic}-{shift}.ppm")),
+                )
+                .unwrap();
+                write!(file, "P6\n{width} {height}\n255\n").unwrap();
+                for p in pixels.chunks_exact(4) {
+                    file.write_all(&[p[2], p[1], p[0]]).unwrap();
+                }
             }
         }
     }
@@ -606,6 +610,8 @@ fn warm_scroll_layer_costs() {
 fn warm_glass_scene_costs() {
     use scarlet_ui_core::geometry::{Offset, Point};
     let context = context().expect("GPU benchmark requires an adapter");
+    let analytic = std::env::var("SCARLET_BENCH_ANALYTIC").as_deref() != Ok("0");
+    eprintln!("analytic glass: {analytic}");
     let glass_count: usize = std::env::var("SCARLET_BENCH_GLASS_COUNT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -638,7 +644,7 @@ fn warm_glass_scene_costs() {
     ] {
         for retained in [false, true] {
             let mut renderer = SgfxPaintEncoder::new(600, 400, false).unwrap();
-            renderer.set_analytic_glass(true);
+            renderer.set_analytic_glass(analytic);
             let target = renderer.target_texture(0).unwrap();
             let mut resources = context.create_resources(renderer.resource_table());
             resources
@@ -726,6 +732,65 @@ fn warm_glass_scene_costs() {
                 "{mode} retained={retained}: warm encode {:?}, frame+GPU readback {:?} (600x400, 24 moving objects, shadow, {glass_count} glass panels)",
                 encode_time / 8,
                 elapsed / 8
+            );
+        }
+    }
+}
+
+#[test]
+fn wide_blur_does_not_alias_fine_background_stripes() {
+    let Some(context) = context() else {
+        return;
+    };
+    let queue = context.create_queue();
+    let (width, height) = (320, 160);
+    for analytic in [false, true] {
+        let mut renderer = SgfxPaintEncoder::new(width, height, false).unwrap();
+        renderer.set_analytic_glass(analytic);
+        let target = renderer.target_texture(0).unwrap();
+        let mut resources = context.create_resources(renderer.resource_table());
+        resources
+            .map_image(
+                target,
+                context
+                    .create_image(width, height, TextureFormat::Bgra8Unorm)
+                    .unwrap(),
+            )
+            .unwrap();
+        for period in [3, 4, 5, 9] {
+            let mut paint = PaintContext::new();
+            for x in (0..width).step_by(period) {
+                paint.fill_rect(
+                    Rect::from_xywh(x as f32, 0., (period / 2) as f32, height as f32),
+                    Color::BLACK,
+                );
+            }
+            // Use the stock navigation material: the assertion bounds visible
+            // residual contrast, including portable UNORM8 accumulation.
+            paint.refractive_glass_rounded_rect(
+                Rect::from_xywh(16., 16., 288., 128.),
+                16.,
+                18.,
+                scarlet_ui_core::prelude::GlassMaterial::regular().tint,
+                1.,
+            );
+            renderer
+                .encode_frame(
+                    &mut queue.executor(&mut resources),
+                    0,
+                    None,
+                    &paint,
+                    Color::WHITE,
+                    1000,
+                    &[(0, 0, width, height)],
+                )
+                .unwrap();
+            let pixels = resources.read_texture(target).unwrap();
+            let samples: Vec<_> = (80..240).map(|x| rgba(&pixels, width, x, 80)[0]).collect();
+            let contrast = samples.iter().max().unwrap() - samples.iter().min().unwrap();
+            assert!(
+                contrast <= 4,
+                "sparse blur leaves periodic stripes: analytic={analytic}, period={period}, contrast={contrast}"
             );
         }
     }

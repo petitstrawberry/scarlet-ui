@@ -2059,6 +2059,7 @@ impl CpuPaintRenderer {
             rect.size.width / scale,
             rect.size.height / scale,
         );
+        let bezel = crate::glass::glass_bezel(logical, radius / scale);
         for y in top..bottom {
             self.scratch.coverage.fill(0.0);
             for sample in 0..COVERAGE_SAMPLES {
@@ -2136,7 +2137,8 @@ impl CpuPaintRenderer {
                         radius,
                         Point::new(x as f32 + 0.5, y as f32 + 0.5),
                     );
-                    crate::glass::glass_reflection(d / scale, nx, ny) * refraction.clamp(0.0, 1.0)
+                    crate::glass::glass_surface_reflection(d / scale, nx, ny, bezel)
+                        * refraction.clamp(0.0, 1.0)
                 } else {
                     0.0
                 };

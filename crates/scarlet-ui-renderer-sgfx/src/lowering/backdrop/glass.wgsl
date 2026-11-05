@@ -4,6 +4,7 @@ struct Parameters {
     tint: vec4<f32>,
     optics: vec4<f32>,
     capture: vec4<f32>,
+    kernel: array<vec4<f32>, 65>,
 };
 @group(0) @binding(0) var<uniform> p: Parameters;
 @group(0) @binding(1) var source: texture_2d<f32>;
@@ -22,13 +23,12 @@ fn clip_position(position: vec2<f32>) -> vec4<f32> {
     return clip_position(position.xy);
 }
 fn blur(position: vec2<f32>, axis: vec2<f32>) -> vec4<f32> {
-    let weights = array<f32, 9>(1.0, 8.0, 28.0, 56.0, 70.0, 56.0, 28.0, 8.0, 1.0);
     var result = vec4<f32>(0.0);
-    for (var i = 0u; i < 9u; i += 1u) {
-        let sample_position = position + axis * (f32(i) - 4.0) * p.optics.x * 0.25;
-        result += textureSampleLevel(source, linear_sampler, sample_position / p.extent.xy, 0.0) * weights[i];
+    for (var i = 0u; i < u32(p.optics.w); i += 1u) {
+        let sample_position = position + axis * p.kernel[i].x;
+        result += textureSampleLevel(source, linear_sampler, sample_position / p.extent.xy, 0.0) * p.kernel[i].y;
     }
-    return result / 256.0;
+    return result;
 }
 @fragment fn horizontal(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     return blur(position.xy, vec2(1.0, 0.0));
@@ -55,10 +55,17 @@ fn coverage(position: vec2<f32>) -> f32 {
 @fragment fn erase(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     return vec4(0.0, 0.0, 0.0, coverage(position.xy));
 }
+fn specular_lobe(cosine: f32) -> f32 {
+    let x = clamp(cosine, 0.0, 1.0);
+    let x2 = x * x;
+    let x4 = x2 * x2;
+    let x8 = x4 * x4;
+    return x8 * x8;
+}
 @fragment fn glass(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let e = edge(position.xy);
     let scale = p.extent.z;
-    let bezel = max(0.0, min(min(p.extent.w, 12.0 * scale), min(p.rect.z, p.rect.w) * 0.25));
+    let bezel = max(0.0, min(clamp(p.extent.w * 1.5, 16.0 * scale, 24.0 * scale), min(p.rect.z, p.rect.w) * 0.35));
     var sample_position = position.xy;
     if (bezel > 0.0 && e.x >= 0.0 && e.x < bezel) {
         let t = clamp(1.0 - e.x / bezel, 0.0, 0.98);
@@ -67,14 +74,29 @@ fn coverage(position: vec2<f32>) -> f32 {
         let sin_t = sin_i / 1.5;
         let cos_t = sqrt(1.0 - sin_t * sin_t);
         let tangent = (sin_i * cos_t - cos_i * sin_t) / (cos_i * cos_t + sin_i * sin_t);
-        sample_position += e.yz * min(tangent * bezel * 1.65, bezel * 1.4) * p.optics.y;
+        let thickness = min(bezel, 12.0 * scale);
+        sample_position += e.yz * min(tangent * thickness * 1.65, thickness * 1.4) * p.optics.y;
     }
     let background = textureSampleLevel(source, linear_sampler, sample_position / p.extent.xy, 0.0);
     var material = vec4(p.tint.rgb * p.tint.a, p.tint.a) + background * (1.0 - p.tint.a);
-    let band = max(0.0, 1.0 - abs((e.x / scale - 0.55) / 0.7));
-    let light = clamp(dot(e.yz, vec2(0.6, 0.8)), -1.0, 1.0);
-    let reflection = band * select(0.065 * light, 0.30 * light, light >= 0.0) * p.optics.y;
-    let reflected = select(vec4(0.0, 0.0, 0.0, 1.0), vec4(1.0), reflection >= 0.0);
-    material += (reflected - material) * abs(reflection);
+    let reflection_t = clamp(1.0 - max(e.x, 0.0) / max(bezel, 0.0001), 0.0, 1.0);
+    let normal_xy = reflection_t * reflection_t;
+    let normal_z = sqrt(max(1.0 - normal_xy * normal_xy, 0.0));
+    let direction = clamp(dot(e.yz, vec2(0.6, 0.8)), -1.0, 1.0);
+    let key = specular_lobe(direction * normal_xy * 0.85 + normal_z * 0.5267827);
+    let fill = specular_lobe(-direction * normal_xy * 0.94 + normal_z * 0.34117445);
+    let grazing = 1.0 - normal_z;
+    let grazing2 = grazing * grazing;
+    let fresnel = grazing2 * grazing2 * grazing;
+    let surface = 0.06 * fresnel + (0.46 * key + 0.22 * fill) * normal_xy;
+    let edge_key2 = max(direction, 0.0) * max(direction, 0.0);
+    let edge_fill2 = max(-direction, 0.0) * max(-direction, 0.0);
+    let edge_key = edge_key2 * edge_key2;
+    let edge_fill = edge_fill2 * edge_fill2;
+    let rim_width = min((0.35 + 0.80 * edge_key + 0.35 * edge_fill) * scale, bezel * 0.25);
+    let rim_strength = 0.04 + 0.74 * edge_key + 0.40 * edge_fill;
+    let rim = rim_strength * clamp((rim_width - max(e.x, 0.0)) / max(rim_width * 0.6, 0.0001), 0.0, 1.0);
+    let reflection = (rim + (1.0 - rim) * surface) * p.optics.y;
+    material += (vec4(1.0) - material) * reflection;
     return material * coverage(position.xy);
 }
