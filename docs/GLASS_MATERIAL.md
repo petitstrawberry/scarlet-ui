@@ -1,5 +1,29 @@
 # Shared glass material trial
 
+## Navigation and shoulder tuning
+
+Floating navigation and material-backed content tabs use a lighter neutral
+structural wash (0.018 additional text tint) and a 0.075 selection overlay.
+Navigation hover raises the selected overlay to 0.11. Backdrop sampling,
+refraction, blur and existing elevation shadows retain their geometry.
+
+Refractive light comes from a low-amplitude, broad curved-shoulder response;
+there is no separate bright silhouette stroke or painted surface gradient.
+CPU, portable SGFX and analytic WGSL use the same reflection model. The hidden
+`glass_highlight_edge` helper remains available for source compatibility but is
+no longer used by built-in rendering.
+
+Validation: `cargo test -p scarlet-ui-core --lib` and
+`SCARLET_REQUIRE_GPU_TESTS=1 SCARLET_TAB_PARITY_DIR=/tmp/glass-study cargo test
+-p scarlet-ui-renderer-sgfx --test tab_material_parity -- --nocapture`.
+The latter exports diagnostic PPMs for portrait/landscape navigation over plain
+and patterned backgrounds, and light/dark shoulder specimens at 1x, 1.5x and 2x.
+Both SGFX paths run on the actual Metal adapter. These are offscreen render
+commands, not native-window or browser screenshots. Native Widget Factory built
+and launched on macOS, but interactive visual QA was blocked by the locked Mac.
+
+## Material presets
+
 `GlassMaterial` expresses visual intent independently of the renderer:
 - `regular()`: general material, 18 logical-pixel support and 0.64 tint opacity.
 - `button()`: a neutral, more visible 0.78-tint face with the same backdrop blur.

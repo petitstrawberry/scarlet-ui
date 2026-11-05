@@ -100,7 +100,9 @@ pub fn glass_reflection(distance: f32, inward_x: f32, inward_y: f32) -> f32 {
     glass_surface_reflection(distance, inward_x, inward_y, 16.)
 }
 
-/// Width and strength of the narrow boundary reflection. Both vary around the
+/// Legacy narrow-boundary parameters, retained for source compatibility.
+/// Built-in materials use only `glass_surface_reflection`, without this outline.
+/// Both values vary around the
 /// contour: the key-lit corner is broader/brighter, the opposing return weaker,
 /// and the sides between them nearly disappear. Width is in logical pixels.
 #[doc(hidden)]
@@ -116,11 +118,11 @@ pub fn glass_highlight_edge(inward_x: f32, inward_y: f32) -> (f32, f32) {
     )
 }
 
-/// A narrow directional boundary reflection and a separate curved highlight.
+/// A soft directional reflection spread across the curved shoulder.
 /// The normal tilts toward the viewer across the same shoulder as refraction.
 /// This moves and broadens the specular lobe across the surface instead of
-/// painting a uniformly bright outline. A weaker opposing light and grazing
-/// Fresnel reflection retain the return highlight seen on transparent glass.
+/// painting a bright outline. A weaker opposing light and a small grazing
+/// Fresnel response keep the backdrop visible, including on dark surfaces.
 #[doc(hidden)]
 pub fn glass_surface_reflection(distance: f32, inward_x: f32, inward_y: f32, bezel: f32) -> f32 {
     if distance < 0. || bezel <= 0. || distance >= bezel {
@@ -135,20 +137,16 @@ pub fn glass_surface_reflection(distance: f32, inward_x: f32, inward_y: f32, bez
         let x2 = x * x;
         let x4 = x2 * x2;
         let x8 = x4 * x4;
-        x8 * x8
+        x8
     };
     let key = lobe(direction * normal_xy * 0.85 + normal_z * 0.5267827);
     let fill = lobe(-direction * normal_xy * 0.94 + normal_z * 0.34117445);
     let grazing = 1. - normal_z;
     let grazing2 = grazing * grazing;
     let fresnel = grazing2 * grazing2 * grazing;
-    let surface = 0.06 * fresnel + (0.46 * key + 0.22 * fill) * normal_xy;
-    // The silhouette is its own narrow white edge, not the blurred tail of
-    // the specular lobe. Let raster coverage antialias its outside boundary.
-    let (rim_width, rim_strength) = glass_highlight_edge(inward_x, inward_y);
-    let rim_width = rim_width.min(bezel * 0.25);
-    let rim = rim_strength * ((rim_width - distance) / (rim_width * 0.6)).clamp(0., 1.);
-    rim + (1. - rim) * surface
+    // No separate silhouette stroke: the same smooth shoulder carries all light.
+    // Keep the response low enough that dark glass does not acquire a white rim.
+    0.012 * fresnel + (0.16 * key + 0.06 * fill) * normal_xy
 }
 
 #[cfg(test)]
@@ -158,18 +156,14 @@ mod tests {
     fn light_reflects_across_the_curved_surface_not_only_the_outline() {
         let bezel = 20.;
         let reflection = |d, x, y| glass_surface_reflection(d, x, y, bezel);
-        let (key_width, key_strength) = glass_highlight_edge(0.6, 0.8);
-        let (side_width, side_strength) = glass_highlight_edge(-0.8, 0.6);
-        assert!(key_width > side_width * 2. && key_width < 1.25);
-        assert!(key_strength > side_strength * 5.);
-        assert!(reflection(0.2, 0.6, 0.8) > 0.50);
-        assert!(reflection(1.5, 0.6, 0.8) > reflection(1.5, -0.8, 0.6));
-        assert!(reflection(1., -0.6, -0.8) > 0.10);
+        assert!(reflection(3., 0.6, 0.8) > reflection(3., -0.8, 0.6));
+        assert!(reflection(3., -0.6, -0.8) > 0.01);
+        assert!(reflection(2., 0.6, 0.8) > reflection(0., 0.6, 0.8));
         assert_eq!(reflection(bezel, 0., 1.), 0.);
         assert_eq!(reflection(-1., 0., 1.), 0.);
         for i in 0..100 {
             let value = reflection(i as f32 * bezel / 100., 0., 1.);
-            assert!((0. ..=1.).contains(&value));
+            assert!((0. ..=0.18).contains(&value));
         }
     }
     #[test]

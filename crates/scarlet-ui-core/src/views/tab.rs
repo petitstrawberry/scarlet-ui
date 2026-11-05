@@ -252,7 +252,7 @@ impl TabView {
         let palette = ColorPalette::default();
         self.material = Some(material);
         self.style.background_color = Color::TRANSPARENT;
-        self.style.selected_color = palette.primary().with_opacity(0.10);
+        self.style.selected_color = palette.primary().with_opacity(0.075);
         self.style.hover_color = palette.text().with_opacity(0.045);
         self.style.border_color = Color::TRANSPARENT;
         self.style.indicator_height = 0.0;
@@ -844,7 +844,7 @@ impl ElementRenderObject for TabViewRenderObject {
             // white canvas. It is a uniform material tint, not a bevel.
             material.tint = ColorPalette::default()
                 .text()
-                .with_opacity(0.045)
+                .with_opacity(0.018)
                 .blend_over(material.tint);
             material.tint = self.background_color.blend_over(material.tint);
             style::paint_glass_material(

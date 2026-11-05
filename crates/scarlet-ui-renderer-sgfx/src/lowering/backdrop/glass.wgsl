@@ -60,7 +60,7 @@ fn specular_lobe(cosine: f32) -> f32 {
     let x2 = x * x;
     let x4 = x2 * x2;
     let x8 = x4 * x4;
-    return x8 * x8;
+    return x8;
 }
 @fragment fn glass(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let e = edge(position.xy);
@@ -88,15 +88,8 @@ fn specular_lobe(cosine: f32) -> f32 {
     let grazing = 1.0 - normal_z;
     let grazing2 = grazing * grazing;
     let fresnel = grazing2 * grazing2 * grazing;
-    let surface = 0.06 * fresnel + (0.46 * key + 0.22 * fill) * normal_xy;
-    let edge_key2 = max(direction, 0.0) * max(direction, 0.0);
-    let edge_fill2 = max(-direction, 0.0) * max(-direction, 0.0);
-    let edge_key = edge_key2 * edge_key2;
-    let edge_fill = edge_fill2 * edge_fill2;
-    let rim_width = min((0.35 + 0.80 * edge_key + 0.35 * edge_fill) * scale, bezel * 0.25);
-    let rim_strength = 0.04 + 0.74 * edge_key + 0.40 * edge_fill;
-    let rim = rim_strength * clamp((rim_width - max(e.x, 0.0)) / max(rim_width * 0.6, 0.0001), 0.0, 1.0);
-    let reflection = (rim + (1.0 - rim) * surface) * p.optics.y;
+    // Match core::glass_surface_reflection: soft shoulder, no silhouette stroke.
+    let reflection = (0.012 * fresnel + (0.16 * key + 0.06 * fill) * normal_xy) * p.optics.y;
     material += (vec4(1.0) - material) * reflection;
     return material * coverage(position.xy);
 }
