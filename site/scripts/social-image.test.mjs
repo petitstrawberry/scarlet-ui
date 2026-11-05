@@ -31,3 +31,13 @@ test('source markup is escaped and long document titles fit without clipping', a
     assert.equal((await sharp(output).metadata()).width, 1200);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+
+test('README thumbnail matches the current homepage sharing artwork', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'scarlet-readme-card-'));
+  try {
+    const output = path.join(directory, 'homepage.png');
+    await renderSocialImage({ title: 'ScarletUI', subtitle: 'Cross-platform, declarative UI for Rust.', homepage: true, output });
+    assert.deepEqual(await readFile(output), await readFile(new URL('../public/assets/project-card.png', import.meta.url)));
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

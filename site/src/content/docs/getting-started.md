@@ -29,7 +29,8 @@ cargo build --locked -p scarlet-ui --no-default-features --features std,platform
 
 These commands build native code. They do not select the WebAssembly backend.
 For platform feature selection, application examples and development commands,
-see the [project reference](../reference/project/).
+see the [platform guide](../reference/platform-guide/), [application guide](../reference/application-guide/),
+and [development commands](../reference/development/).
 
 ## Understand the application model
 

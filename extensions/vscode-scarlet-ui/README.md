@@ -2,6 +2,8 @@
 
 ScarletUI Preview controls the `scarlet-ui-preview serve` IPC server from VS Code. It starts the long-running JSON-RPC server, opens native preview windows, switches preview sources, selects previews, rebuilds, and closes the preview window.
 
+For the server startup and wire format, see the [Preview Server Protocol](../../docs/PREVIEW_PROTOCOL.md).
+
 ## Prerequisites
 
 - A ScarletUI repository or crate checked out locally.

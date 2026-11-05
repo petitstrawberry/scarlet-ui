@@ -2,6 +2,10 @@
 
 ScarletUI is a cross-platform declarative UI framework for Rust applications.
 
+[Official website](https://ui.scarlet-os.org/) · [Getting started](https://ui.scarlet-os.org/getting-started/) · [API reference](https://ui.scarlet-os.org/docs/)
+
+[![ScarletUI — cross-platform, declarative UI for Rust, with tabs, a button, toggle, and slider](site/public/assets/project-card.png)](https://ui.scarlet-os.org/)
+
 It lets you write UI in a SwiftUI-like style while staying in ordinary Rust:
 views are composed with macros and modifiers, state updates are synchronized with
 the rendered UI, and view structure is represented by Rust types. That means the
@@ -71,399 +75,33 @@ selected platform backend.
 - **Cross-platform backend model**: application code does not directly depend on
   SWS, winit, or another windowing backend.
 
-## Application Model
+## Get started
 
+Clone this repository and explore the native Widget Factory:
 
-Window decoration defaults are selected by the backend: winit uses system
-frames and titlebars, while SWS uses ScarletUI decorations. The selection is
-resolved when a scene is built, so windows created before `app.run()` also
-receive the backend policy. Explicit `WindowDecoration::CUSTOM`, `SYSTEM`,
-and `NONE` choices remain authoritative.
-
-Window children receive the content area's layout constraints. To track the
-available viewport, expand the content with `.frame(f32::INFINITY, f32::INFINITY)`
-and observe it with `.on_geometry_change(|geometry| geometry.size(), ...)`.
-Geometry callbacks run after layout and report only changed values. Do not
-subtract titlebar heights from `PlatformWindow::size()`: that is the platform
-surface size, including client-rendered chrome and any shadow outsets, whereas
-the child geometry already excludes those. Native decorations are outside the
-winit client surface. Min/max sizes and resizability are forwarded to winit.
-
-Platform resize notifications update layout and presentation through
-`PlatformWindow::apply_resize`; winit does not echo their size back to the OS.
-`PlatformWindow::resize` remains the explicit application request. SWS keeps
-its existing backing-buffer negotiation through the default implementation.
-The runner also reconciles the native extent with the rendered extent each
-tick, covering native restoration or resize changes whose notification was
-not delivered. Losing window focus cancels stale view capture without synthesizing a click.
-
-On macOS, the application runner stays inside winit's native event loop and
-finishes resize layout and presentation before the native redraw callback
-returns. This preserves AppKit's live-resize tracking and avoids stretching a
-stale frame after the mouse is released. Other backends retain the polling
-runner. New scenes created during callbacks use the active event loop.
-
-SWS windows support native gamepad events and optional menu navigation.
-See [gamepad input](docs/GAMEPAD_INPUT.md) for game controls, reset handling,
-and per-window policy.
-
-`Application::scenes()` is the application UI entry point. `#[derive(View)]`
-collects the application's State dependencies; scene-only applications do not
-need a component body method. Reusable View components select their child
-builder explicitly with `#[view(body = method_name)]`, as the counter above does
-with `content()`. Mounting a derived View without that attribute is a
-configuration error, not an alternate way to enter the application's scenes.
-
-Each scene declaration produces a top-level `Window`. At runtime, ScarletUI
-creates one `WindowSlot` per opened window:
-
-```text
-Application::scenes()
-  -> Scene declarations
-  -> ApplicationRunner
-  -> Box<dyn PlatformBackend>
-  -> WindowSlot { WindowId, PipelineId, RenderingPipeline, PlatformWindow }
+```sh
+git clone https://github.com/petitstrawberry/scarlet-ui.git
+cd scarlet-ui
+cargo run --locked -p scarlet-ui-widget-factory
 ```
 
-Application code should not choose or name a platform implementation. It imports
-the normal ScarletUI prelude, declares views and scenes, and calls `app.run()`.
-
-The normative runtime and reconciliation model is documented in
-[ScarletUI Architecture](docs/ARCHITECTURE.md).
-The [1.0 application and extension contract](docs/1.0-contract.md) specifies
-public features, Scene/Window lifetime, launch/open/close behavior and platform
-extension responsibilities using the current implementation.
-
-Use `ViewExt::on_event_capture` on a container to handle shortcuts before a
-focused descendant, such as a `TextField`, receives them. Its callback runs
-only during capture, from the root to the target's parent. Returning `true`
-stops target and bubble dispatch; returning `false` lets the control handle
-the event normally. Events dispatched only to the target, such as IME commits
-and focus changes, do not invoke capture handlers. `on_event` keeps its target
-and bubble behavior.
-
-Frame admission, safe discard, and application recovery follow the
-[frame-failure contract](docs/FRAME_FAILURES.md). `Application::on_render_error`
-reports transient capacity pressure, rejected frames, and recovery-required GPU
-failures separately; a discarded frame is never reported as presented.
-
-## Browser Samples
-
-The experimental WebGPU backend runs the counter and the shared Widget Factory
-in a browser, including the SGFX canvas and shared menus. See the
-[Samples build and run guide](samples/README.md) for a release-mode static
-package, browser requirements and current limitations. The existing native
-Widget Factory uses the same view definitions.
-
-## Live Preview
-
-ScarletUI preview is a native desktop development tool. It is separate from the
-normal application runtime: application binaries still call `app.run()`, and
-platform selection remains a build feature.
-
-A preview crate marks one or more view functions with `#[scarlet_ui::preview]`.
-The function can return a view fragment directly; a `Window` wrapper is only
-needed when the preview wants to exercise window-specific behavior. Stateful
-previews should return the state-owning view itself so its `listenables()` stay
-mounted; do not return an already-expanded fragment that has read `State::get()`.
-
-For binary crates, a simple `[lib] path = "src/main.rs"` target keeps preview
-setup minimal.
-
-```rust
-use scarlet_ui::prelude::*;
-
-#[scarlet_ui::preview(width = 420.0, height = 260.0)]
-fn counter_preview() -> impl View + Clone + 'static {
-    CounterApp::default()
-}
-
-#[scarlet_ui::preview]
-fn button_preview() -> impl View + Clone + 'static {
-    Button::new("OK")
-}
-```
-
-Preview names are generated from function names, such as `counter_preview` to
-`Counter Preview`. `#[scarlet_ui::preview(name = "...")]` is available only when
-an explicit display name is useful.
-
-Run the native preview host against that crate:
-
-```bash
-cargo run --manifest-path tools/preview/Cargo.toml -- \
-  --manifest-path examples/preview-demo/Cargo.toml
-```
-
-Select a specific preview by generated name or stable ID:
-
-```bash
-cargo run --manifest-path tools/preview/Cargo.toml -- \
-  --manifest-path examples/preview-demo/Cargo.toml \
-  --preview "Button Preview"
-```
-
-Use `--build-only` to verify the preview dylib without opening a window:
-
-```bash
-cargo run --manifest-path tools/preview/Cargo.toml -- \
-  --manifest-path examples/preview-demo/Cargo.toml \
-  --build-only
-```
-
-The host rebuilds and reloads the preview dylib when Rust source or Cargo files
-change. Preview dylibs use Rust ABI and must be built by the same toolchain as
-the host.
-
-## Preview Server (IPC)
-
-For editor and IDE integration, `scarlet-ui-preview` also runs as a long-lived
-process in `serve` mode. The editor drives it over stdio using newline-delimited
-JSON-RPC 2.0: stdout carries protocol messages only, stderr carries
-human-readable logs.
-
-```bash
-cargo run --manifest-path tools/preview/Cargo.toml -- \
-  serve \
-  --manifest-path examples/preview-demo/Cargo.toml \
-  [--source <file.rs>] [--target <triple>] [--features <features>] \
-  [--preview <id-or-name>] [--poll-ms <ms>]
-```
-
-`serve` accepts the same project options as the single-shot CLI except
-`--build-only` (a single-shot-only flag that `serve` rejects).
-
-### Protocol v1
-
-Requests:
-
-| Method | Params | Behavior |
-|---|---|---|
-| `initialize` | `{ client?, protocolVersion? }` | Capability handshake. Does not build. |
-| `preview/list` | `{ source? }` | Build if needed, return available previews. |
-| `preview/open` | `{ source?, preview? }` | Build and open a winit window; reload if already open. |
-| `preview/switchSource` | `{ source, preview? }` | Switch to another file; rebuild and reload preserving the window. |
-| `preview/switchPreview` | `{ preview }` | Switch to another preview in the same source (requires an open window). |
-| `preview/rebuild` | `{}` | Rebuild and reload the current configuration. |
-| `preview/closeWindow` | `{}` | Close the window; keep the server alive. |
-| `shutdown` | `{}` | Respond, then exit. |
-
-Server notifications:
-
-| Method | Params | When |
-|---|---|---|
-| `preview/buildStarted` | `{ source }` | Before a cargo build starts. |
-| `preview/buildFinished` | `{ previews[] }` | After a successful build. |
-| `preview/reloadFinished` | `{ preview }` | After the host applied a reload or switch. |
-| `preview/buildFailed` | `{ message }` | Build/load failed; the previous window is preserved. |
-| `preview/windowClosed` | `{}` | The winit window closed (user close or `preview/closeWindow`). |
-
-Client notification:
-
-| Method | Params | Behavior |
-|---|---|---|
-| `workspace/didChangeActiveFile` | `{ path }` | Record the active editor file. No auto-follow by default. |
-
-Error codes are standard JSON-RPC (`-32700` parse, `-32600` invalid request,
-`-32601` method not found, `-32602` invalid params) plus
-`-32001` build failed, `-32002` preview not found,
-`-32003` preview library load failed, `-32004` preview host/window error.
-On any build failure the server stays alive and the existing preview window is
-preserved.
-
-Minimal stdin example (the server runs until `shutdown` or stdin closes):
-
-```text
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
-{"jsonrpc":"2.0","id":2,"method":"preview/list","params":{}}
-{"jsonrpc":"2.0","id":3,"method":"preview/open","params":{"preview":"Button Preview"}}
-{"jsonrpc":"2.0","id":4,"method":"shutdown","params":{}}
-```
-
-The server-side source/Cargo mtime watch stays active after the first successful
-build, so live reload works with or without an IDE driving the server.
-
-## Platform Features
-
-Applications explicitly select one platform feature per build. The feature pulls
-in the matching backend crate; `scarlet-ui-core` itself never depends on
-`sws-client`, `sws-protocol`, `winit`, or `softbuffer`.
-
-| Feature | Target | Notes |
-|---------|--------|-------|
-| `platform-sws` | Scarlet OS / SWS | Pulls in `scarlet-ui-platform-sws`, which uses `sws-client` and `sws-protocol`. |
-| `platform-winit` | native desktop | Pulls in `scarlet-ui-platform-winit`, which uses `winit` and `softbuffer`; requires `std`. |
-
-The default feature set enables the portable API without selecting a platform:
-
-```toml
-default = ["std"]
-```
-
-For native desktop builds, depend on ScarletUI with `platform-winit`:
-
-```toml
-[target.'cfg(not(target_os = "scarlet"))'.dependencies]
-scarlet-ui = { path = "crates/scarlet-ui", default-features = false, features = ["std", "platform-winit"] }
-```
-
-For Scarlet OS `std`-compatible builds, use `platform-sws`:
-
-```toml
-[target.'cfg(target_os = "scarlet")'.dependencies]
-scarlet-ui = { path = "crates/scarlet-ui", default-features = false, features = ["std", "platform-sws"] }
-```
-
-For no-std user binaries using Scarlet's legacy std shim, use:
-
-```toml
-scarlet-ui = { path = "crates/scarlet-ui", default-features = false, features = ["legacy-scarlet-std", "platform-sws"] }
-```
-
-`platform-sws` and `platform-winit` are mutually exclusive. `std` and
-`legacy-scarlet-std` are also mutually exclusive.
-
-### SGFX dependency
-
-The SGFX renderer and platform backends use the standalone
-[SGFX repository](https://github.com/petitstrawberry/sgfx). Applications that also
-use SGFX directly should depend on that repository:
-
-```toml
-[dependencies]
-sgfx = { git = "https://github.com/petitstrawberry/sgfx" }
-```
-
-`Cargo.lock` records the resolved commits; no `rev` pin or compatibility patch
-for the old Scarlet SGFX source is needed.
-
-When migrating an existing lockfile, also update the external Adreno backend
-so it no longer imports SGFX core from Scarlet:
-
-```bash
-cargo update -p sgfx-backend-scarlet-adreno
-cargo tree --locked --invert sgfx-core
-```
-
-The second command fails if the graph still contains multiple SGFX core
-sources. CI repeats this check for the host and both Scarlet targets.
-
-SGFX is the internal execution IR used by this renderer. Its Rust interfaces
-are updated and rebuilt with the consuming renderer/platform adapters using a
-compatible source and lockfile set; SGFX does not promise a separate 1.x Rust
-API freeze. See the [SGFX execution contract](https://github.com/petitstrawberry/sgfx/blob/main/docs/1.0-contract.md).
-ScarletUI's application-facing API and frame-failure contract remain separate.
-The direct SGFX renderer can remain in use, while a future Vulkan renderer can
-use the application's Vulkan graphics boundary instead.
-
-## Crate Layout
-
-```text
-apps / user bins
-  |
-  v
-scarlet-ui
-  |-- re-exports scarlet-ui-core
-  |-- ApplicationRunExt::run()
-  |-- scarlet-ui-platform-sws    [feature: platform-sws]
-  |   |-- scarlet-ui-core
-  |   |-- sws-client
-  |   `-- sws-protocol
-  `-- scarlet-ui-platform-winit  [feature: platform-winit]
-      |-- scarlet-ui-core
-      |-- winit
-      `-- softbuffer
-
-scarlet-ui-core
-  |-- View / Element / Scene / Pipeline
-  |-- rendering and preview core
-  |-- PlatformBackend trait
-  |-- PlatformWindow trait
-  `-- WindowCreateRequest
-```
-
-Dependency direction is intentionally one-way:
-
-```text
-scarlet-ui-platform-sws  ----.
-                             v
-apps --> scarlet-ui ---> scarlet-ui-core
-                             ^
-scarlet-ui-platform-winit ---'
-```
-
-`scarlet-ui-core` owns the UI implementation and backend traits. Platform crates
-only implement those traits. The `scarlet-ui` facade preserves the app-facing
-`scarlet_ui` crate name and selects the backend crate from features.
-
-## Platform Integration
-
-Platform code lives behind `PlatformBackend` and `PlatformWindow`. These traits
-are public so backend crates can implement them, but they are runner boundaries,
-not normal application APIs. They create windows, poll events, present buffers,
-route text input, and handle window controls.
-
-Most applications should not construct a `PlatformWindow` directly. Use
-`Window`, `WindowGroup`, `open_window`, `dismiss_window`, and `app.run()`.
-
-SWS-specific applications may use lifecycle hooks and downcast the
-`dyn PlatformWindow` only when they intentionally depend on SWS-specific
-capabilities.
-
-## Common Views
-
-- `Text`
-- `Button`
-- `TextField`
-- `Toggle`
-- `Slider`
-- `Select`
-- `CanvasView`
-- `Image`
-- `Rectangle`
-- `Spacer`
-- `Divider`
-- `Window`
-- `VStack`, `HStack`, `ZStack`
-- `NavigationView`, `NavigationLink`
-
-## Development Commands
-
-Run facade tests:
-
-```bash
-cargo test -p scarlet-ui --lib --tests
-```
-
-Run core tests and doctests:
-
-```bash
-cargo test -p scarlet-ui-core
-```
-
-Check native desktop support and preview tooling:
-
-```bash
-cargo check -p scarlet-ui --no-default-features --features std,platform-winit,preview
-cargo check -p scarlet-ui-platform-winit
-cargo check -p scarlet-ui-preview
-```
-
-Run the preview demo:
-
-```bash
-cargo run -p scarlet-ui-preview -- \
-  --manifest-path examples/preview-demo/Cargo.toml \
-  --preview "Counter Preview"
-```
-
-Smoke-test the IPC server without an IDE (initialize, list previews, shut down):
-
-```bash
-printf '%s\n%s\n%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
-  '{"jsonrpc":"2.0","id":2,"method":"preview/list","params":{}}' \
-  '{"jsonrpc":"2.0","id":3,"method":"shutdown","params":{}}' \
-  | cargo run -p scarlet-ui-preview -- serve \
-    --manifest-path examples/preview-demo/Cargo.toml
-```
+Use a Rust toolchain supporting edition 2024. Native Linux builds also need
+`libfontconfig-dev` and `pkg-config`. Follow the [getting started guide](https://ui.scarlet-os.org/getting-started/)
+for build requirements, or [try the browser samples](https://ui.scarlet-os.org/try/)
+with an available WebGPU adapter.
+
+## Documentation
+
+| Topic | Guide |
+| --- | --- |
+| <a id="application-model"></a>Application model | [Scenes, windows, layout, and input](docs/APPLICATION_GUIDE.md#application-model) |
+| <a id="common-views"></a>Views | [Common views](docs/APPLICATION_GUIDE.md#common-views) and [API reference](https://ui.scarlet-os.org/docs/) |
+| <a id="platform-features"></a><a id="sgfx-dependency"></a>Platform features and SGFX | [Build features and dependencies](docs/PLATFORM_GUIDE.md#platform-features) |
+| <a id="crate-layout"></a><a id="platform-integration"></a>Backend development | [Crate layout](docs/PLATFORM_GUIDE.md#crate-layout), [platform integration](docs/PLATFORM_GUIDE.md#platform-integration), [architecture](docs/ARCHITECTURE.md), and [1.0 contract](docs/1.0-contract.md) |
+| <a id="browser-samples"></a>Browser samples | [Build, run, and current limitations](samples/README.md) |
+| <a id="live-preview"></a>Live preview | [Native preview setup and live reload](docs/LIVE_PREVIEW.md) |
+| <a id="preview-server-ipc"></a><a id="protocol-v1"></a>Preview server | [Editor integration and Protocol v1](docs/PREVIEW_PROTOCOL.md) |
+| <a id="development-commands"></a>Contributing | [Tests and development commands](docs/DEVELOPMENT.md) |
+
+See the [documentation index](docs/README.md) for focused guides and implementation studies.
+Documentation is maintained in this repository and imported into the [official site](https://ui.scarlet-os.org/).
