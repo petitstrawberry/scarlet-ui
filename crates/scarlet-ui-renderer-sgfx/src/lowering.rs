@@ -66,6 +66,8 @@ const CANVAS_TARGET_TEX_COORDS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1
 #[derive(Clone, Copy, PartialEq)]
 enum DrawSource {
     Solid,
+    // A degenerate draw only for a damage pass with no visible geometry.
+    ClearOnly,
     Texture(TextureId),
     PixelTexture(TextureId),
     PremultipliedTexture(TextureId),
@@ -561,8 +563,8 @@ impl SgfxPaintEncoder {
         let premultiplied_pipeline = tiles::pipeline(&table)?;
         let sampler = table
             .define_sampler(SamplerDesc::new(
-                // Keep text, icons, and retained surfaces smooth when a
-                // logical frame is sampled at a non-integer output scale.
+                // Keep scaled images and external surfaces smooth. Physical
+                // glyph masks and integer-aligned tiles use pixel_sampler.
                 FilterMode::Linear,
                 FilterMode::Linear,
                 AddressMode::ClampToEdge,
@@ -1592,15 +1594,16 @@ impl SgfxPaintEncoder {
         }
 
         // SGFX requires every render pass to contain at least one draw. Keep a
-        // transparent degenerate draw so a damage rectangle that only clears
-        // removed content still has a valid pass.
+        // separate placeholder for damage that only clears removed content.
+        // Never merge its degenerate triangle into visible geometry: software
+        // Vulkan rasterizers can drop the preceding primitives in that draw.
         let geometry = tessellator.dummy_draw()?;
         push_draw(
             &mut draws,
             &mut tessellator,
             geometry,
             [0.0, 0.0, 0.0, 0.0],
-            DrawSource::Solid,
+            DrawSource::ClearOnly,
         )?;
         let vertex_bytes = encode_paint_vertices(tessellator.vertices())?;
         self.shape_cache = core::mem::take(&mut tessellator.shape_cache);
@@ -2670,6 +2673,10 @@ impl SgfxPaintEncoder {
             let mut draw_index = 0usize;
             let mut first_pass = true;
             while draw_index < frame.draws.len() {
+                if matches!(frame.draws[draw_index].source, DrawSource::ClearOnly) && !first_pass {
+                    draw_index += 1;
+                    continue;
+                }
                 if let DrawSource::Backdrop(filter) = frame.draws[draw_index].source {
                     if stream_commands.saturating_add(64) > MAX_COMMANDS {
                         let commands = encoder
@@ -2735,6 +2742,12 @@ impl SgfxPaintEncoder {
 
                 while draw_index < frame.draws.len() {
                     let draw = frame.draws[draw_index];
+                    if matches!(draw.source, DrawSource::ClearOnly)
+                        && command_count > initial_command_count
+                    {
+                        draw_index += 1;
+                        continue;
+                    }
                     if matches!(draw.source, DrawSource::Backdrop(_)) {
                         break;
                     }
@@ -2747,7 +2760,7 @@ impl SgfxPaintEncoder {
                         break;
                     }
                     let (pipeline, texture) = match draw.source {
-                        DrawSource::Solid => (solid_pipeline, None),
+                        DrawSource::Solid | DrawSource::ClearOnly => (solid_pipeline, None),
                         DrawSource::Backdrop(_) => unreachable!("backdrop is a pass barrier"),
                         DrawSource::Texture(texture) | DrawSource::PixelTexture(texture) => {
                             (texture_pipeline, Some(texture))
@@ -2775,8 +2788,17 @@ impl SgfxPaintEncoder {
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
                         pass.set_texture(texture)
                             .map_err(|_| Error::sgfx(Stage::EncodeCommands))?;
-                        let selected_sampler = if matches!(draw.source, DrawSource::PixelTexture(_))
-                        {
+                        // Glyph masks are rasterized at the physical output
+                        // size; retained tiles are replayed only at integer
+                        // offsets/scale. Preserve those texels exactly instead
+                        // of letting interpolation precision soften them again.
+                        let selected_sampler = if matches!(
+                            draw.source,
+                            DrawSource::PixelTexture(_)
+                                | DrawSource::PremultipliedTexture(_)
+                                | DrawSource::Glyph(_)
+                                | DrawSource::IconGlyph(_)
+                        ) {
                             table
                                 .sampler_ref(self.pixel_sampler)
                                 .map_err(|_| Error::sgfx(Stage::EncodeCommands))?
@@ -3144,7 +3166,7 @@ fn push_draw_phase(
             .geometry
             .first_vertex
             .checked_add(previous.geometry.vertex_count);
-        if !matches!(source, DrawSource::Backdrop(_))
+        if !matches!(source, DrawSource::Backdrop(_) | DrawSource::ClearOnly)
             && previous.source == source
             && previous.snap_phase == snap_phase
             && previous.geometry.scissor == geometry.scissor
@@ -3719,7 +3741,7 @@ mod tests {
                     panic!("A frame with one {height}-pixel image failed: {error:?}")
                 });
             assert!(encoder.buffer_textures.len() <= MAX_BUFFER_TEXTURES);
-            assert_eq!(executor.draw_vertices, [6, 3]);
+            assert_eq!(executor.draw_vertices, [6]);
         }
     }
 
@@ -4067,6 +4089,33 @@ mod tests {
     }
 
     #[test]
+    fn clear_placeholder_is_only_submitted_for_empty_damage() {
+        let mut paint = PaintContext::new();
+        paint.push_clip(Rect::from_xywh(0., 0., 8., 8.));
+        paint.fill_rect(Rect::from_xywh(0., 0., 8., 8.), UiColor::WHITE);
+        paint.pop_clip();
+        let mut encoder = SgfxPaintEncoder::new(16, 8, false).unwrap();
+        let mut executor = RecordingExecutor::default();
+        encoder
+            .encode_frame(
+                &mut executor,
+                0,
+                None,
+                &paint,
+                UiColor::BLACK,
+                1_000,
+                &[(0, 0, 8, 8), (8, 0, 8, 8)],
+            )
+            .unwrap();
+        // The visible quad stays a six-vertex draw. The other damaged region
+        // still gets a valid clear pass, without submitting an extra draw for
+        // the region that already contains paint.
+        assert_eq!(executor.draw_vertices, [6, 3]);
+        assert_eq!(executor.render_areas.len(), 2);
+        assert_eq!(executor.command_kinds.len(), 1);
+    }
+
+    #[test]
     fn frame_vertex_limit_reserves_the_mandatory_clear_draw() {
         let mut paint = PaintContext::new();
         let content_vertices = ((MAX_FRAME_VERTICES - 3) / 6) * 6;
@@ -4086,7 +4135,7 @@ mod tests {
                 &[(0, 0, 8, 8)],
             )
             .unwrap();
-        assert_eq!(executor.draw_vertices, [(content_vertices + 3) as u32]);
+        assert_eq!(executor.draw_vertices, [content_vertices as u32]);
 
         paint.fill_rect(Rect::from_xywh(0., 0., 8., 8.), UiColor::WHITE);
         let mut rejected = RecordingExecutor::default();
@@ -4139,12 +4188,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(frame.draws.len(), 2);
-        assert!(
-            frame
-                .draws
-                .iter()
-                .all(|draw| draw.source == DrawSource::Solid)
-        );
+        assert!(frame.draws[0].source == DrawSource::Solid);
+        assert!(frame.draws[1].source == DrawSource::ClearOnly);
         let colors = encoded_paint_colors(&frame.vertex_bytes);
         let opaque_red = colors
             .iter()
@@ -4179,7 +4224,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(frame.draws.len(), 1);
+        assert_eq!(frame.draws.len(), 2);
+        assert!(frame.draws[0].source == DrawSource::Solid);
+        assert!(frame.draws[1].source == DrawSource::ClearOnly);
         let alphas = encoded_paint_colors(&frame.vertex_bytes)
             .into_iter()
             .map(|color| color[3])
@@ -4441,7 +4488,7 @@ mod tests {
 
         assert!(encoder.canvas_targets.is_empty());
         assert_eq!(executor.command_kinds.len(), 1);
-        assert_eq!(executor.draw_vertices, [6, 3]);
+        assert_eq!(executor.draw_vertices, [6]);
         assert!(
             encoder
                 .prepare_external_textures(&paint)
@@ -4495,7 +4542,7 @@ mod tests {
         assert!(frame.draws[0].source == DrawSource::Solid);
         assert!(matches!(frame.draws[1].source, DrawSource::Glyph(_)));
         assert!(matches!(frame.draws[2].source, DrawSource::Texture(_)));
-        assert!(frame.draws[3].source == DrawSource::Solid);
+        assert!(frame.draws[3].source == DrawSource::ClearOnly);
     }
 
     #[test]

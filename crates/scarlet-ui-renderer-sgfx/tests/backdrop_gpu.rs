@@ -7,7 +7,19 @@ use sgfx_backend_wgpu::{Context, Device};
 use std::time::Instant;
 
 fn context() -> Option<Context> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let context = try_context();
+    if context.is_none() {
+        assert!(
+            std::env::var_os("SCARLET_REQUIRE_GPU_TESTS").is_none(),
+            "GPU comparison requested but no usable WGPU adapter"
+        );
+        eprintln!("SKIP: no usable WGPU adapter; backdrop GPU pixels unverified");
+    }
+    context
+}
+
+fn try_context() -> Option<Context> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         force_fallback_adapter: true,
         ..Default::default()
@@ -62,7 +74,6 @@ fn rgba(bytes: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
 #[test]
 fn real_backdrop_pixels_clips_foreground_updates_and_alpha_at_1x_2x() {
     let Some(context) = context() else {
-        eprintln!("SKIP: no headless WGPU adapter; pixel correctness has not been verified");
         return;
     };
     for scale in [1, 2] {
@@ -278,7 +289,6 @@ fn refractive_edges_bend_live_pixels_keep_centers_and_foreground_stable() {
 #[test]
 fn batched_materials_keep_independent_capture_and_work_buffer_contents() {
     let Some(context) = context() else {
-        eprintln!("SKIP: no headless WGPU adapter");
         return;
     };
     let mut renderer = SgfxPaintEncoder::new(240, 100, false).unwrap();
@@ -333,7 +343,6 @@ fn batched_materials_keep_independent_capture_and_work_buffer_contents() {
     }
 }
 
-/// Run explicitly with --ignored --nocapture. Reports synchronized GPU cost;
 #[test]
 fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
     use scarlet_ui_core::geometry::Point;
@@ -341,7 +350,9 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
         "../../../examples/web-counter/assets/DejaVuSans.ttf"
     ))
     .unwrap();
-    let context = context().expect("GPU tile parity requires an adapter");
+    let Some(context) = context() else {
+        return;
+    };
     for scale in [1, 2] {
         let (width, height) = (240 * scale, 180 * scale);
         let mut cached = SgfxPaintEncoder::new(width, height, false).unwrap();
@@ -444,7 +455,9 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
 #[test]
 fn large_refractive_dock_preserves_detail_without_grid_seams() {
     use std::io::Write;
-    let context = context().expect("GPU glass quality test requires an adapter");
+    let Some(context) = context() else {
+        return;
+    };
     let (width, height) = (960, 600);
     let mut renderer = SgfxPaintEncoder::new(width, height, false).unwrap();
     renderer.set_analytic_glass(true);

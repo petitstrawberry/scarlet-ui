@@ -5,7 +5,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {chromium} from 'playwright';
 import {PNG} from 'pngjs';
-import {browserEnvironment, localRequest, artifactPath, changedPixels, coloredPixels, red, dark, hasTextOnWhite, offscreenScrollTop} from './smoke-helpers.mjs';
+import {browserEnvironment, localRequest, artifactPath, changedPixels, coloredPixels, red, dark, hasTextOnWhite, offscreenScrollTop, togglePixels} from './smoke-helpers.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(process.argv[2] ?? path.join(here, '../../target/web-samples'));
@@ -67,7 +67,30 @@ async function ready(route,module) {
 const titleRegion={x:25,y:20,width:270,height:45};
 const countRegion={x:80,y:70,width:150,height:45};
 const sidebarRegion={x:0,y:28,width:190,height:225};
-const toggleRegion=width=>({x:200,y:120,width:width-210,height:45});
+function factoryContentArea() {
+  const {width,height}=page.viewportSize();
+  const x=width>=550 ? 200 : 16;
+  return {x,y:40,width:width-x-16,height:height-40-(width<550 ? 80 : 8)};
+}
+async function controlsEnd(name) {
+  // The material study precedes the original controls. Use real scrolling,
+  // then wait for the rendered content to settle before locating a control.
+  const area=factoryContentArea();
+  await page.mouse.move(area.x+20,300);
+  await page.mouse.wheel(0,10000);
+  await page.mouse.move(page.viewportSize().width-2,30);
+  let previous=await screenshot(name+'-scrolling');
+  return untilPixels(name,image=>{
+    const settled=changedPixels(previous,image,area)===0;
+    previous=image;
+    return settled;
+  });
+}
+async function visibleToggle(name) {
+  await controlsEnd(name+'-end');
+  const frame=await untilPixels(name,image=>togglePixels(image,factoryContentArea())!==null);
+  return {frame,toggle:togglePixels(frame,factoryContentArea())};
+}
 
 try {
   browser=await chromium.launch({
@@ -468,21 +491,19 @@ try {
   await ready('/widget-factory/','scarlet_ui_widget_factory');
   await untilPixels('factory-overview',img=>hasTextOnWhite(img,sidebarRegion,200));
   await page.mouse.click(70,88);await page.mouse.move(900,600);
-  let controls=await untilPixels('factory-controls',img=>coloredPixels(img,toggleRegion(960),red).count>60);
-  const toggle=coloredPixels(controls,toggleRegion(960),red);
+  const {toggle}=await visibleToggle('factory-controls');
   await page.mouse.click(toggle.x,toggle.y);await page.mouse.move(900,600);
-  const off=await untilPixels('factory-toggle-off',img=>coloredPixels(img,toggleRegion(960),red).count<10);
+  const off=await untilPixels('factory-toggle-off',img=>coloredPixels(img,toggle.area,red).count<10);
   await page.mouse.click(95,14);
   await untilPixels('factory-menu',img=>changedPixels(off,img,{x:65,y:34,width:170,height:32})>150);
   // Vertical path stays under View rather than traversing the adjacent Tools root.
   await page.mouse.move(95,48);await page.mouse.click(95,48);await page.mouse.move(900,600);
-  await untilPixels('factory-menu-action',img=>coloredPixels(img,toggleRegion(960),red).count>60);
+  await untilPixels('factory-menu-action',img=>coloredPixels(img,toggle.area,red).count>60);
   report.checks.push('Factory navigation, rendered toggle and shared menu action');
   await page.setViewportSize({width:800,height:600});
-  controls=await untilPixels('factory-resized',img=>img.width===800 && coloredPixels(img,toggleRegion(800),red).count>60);
-  const resizedToggle=coloredPixels(controls,toggleRegion(800),red);
+  const {toggle:resizedToggle}=await visibleToggle('factory-resized');
   await page.mouse.click(resizedToggle.x,resizedToggle.y);await page.mouse.move(750,550);
-  const final=await untilPixels('factory-resized-toggle',img=>coloredPixels(img,toggleRegion(800),red).count<10);
+  const final=await untilPixels('factory-resized-toggle',img=>coloredPixels(img,resizedToggle.area,red).count<10);
   assert(hasTextOnWhite(final,sidebarRegion,200),'Sidebar disappeared after partial repaint');
   report.checks.push('resize preserves state and correct control hit mapping');
   setPhase('Factory real touch scrolling and gesture recovery');
@@ -530,14 +551,16 @@ try {
     await untilPixels('factory-touch-scroll-again',img=>changedPixels(afterCancel,img,displayLabels)>150);
     assert.deepEqual(await page.evaluate(()=>({x:scrollX,y:scrollY})),documentBefore);
     await factoryGesture([[70,88]]);
-    await untilPixels('factory-touch-controls',img=>changedPixels(final,img,{x:200,y:40,width:590,height:200})<100);
+    await controlsEnd('factory-touch-controls-end');
+    await untilPixels('factory-touch-controls',img=>changedPixels(final,img,resizedToggle.area)<100);
     // Subsequent taps and horizontal Slider gestures must still reach controls.
     await factoryGesture([[resizedToggle.x,resizedToggle.y]]);
-    await untilPixels('factory-touch-toggle-on',img=>coloredPixels(img,toggleRegion(800),red).count>60);
+    await untilPixels('factory-touch-toggle-on',img=>coloredPixels(img,resizedToggle.area,red).count>60);
     await factoryGesture([[resizedToggle.x,resizedToggle.y]]);
-    const touchOff=await untilPixels('factory-touch-toggle-off',img=>coloredPixels(img,toggleRegion(800),red).count<10);
-    const sliderRegion={x:390,y:165,width:385,height:30};
-    await factoryGesture(Array.from({length:13},(_,index)=>[500+240*index/12,180]));
+    const touchOff=await untilPixels('factory-touch-toggle-off',img=>coloredPixels(img,resizedToggle.area,red).count<10);
+    const sliderY=resizedToggle.y+36;
+    const sliderRegion={x:390,y:Math.floor(sliderY)-15,width:310,height:30};
+    await factoryGesture(Array.from({length:13},(_,index)=>[500+180*index/12,sliderY]));
     await untilPixels('factory-touch-slider',img=>changedPixels(touchOff,img,sliderRegion)>100);
     report.checks.push('CDP-simulated Factory touch scrolls internal content, survives cancellation/repeated gestures, and preserves tap/slider input');
   } finally {
@@ -572,7 +595,7 @@ try {
   report.checks.push('toolbar menus retained while right-click remains browser-owned without an application fallback');
 
   setPhase('Factory responsive page matrix');
-  // Geometry comes from the real NavigationView layout: bottom52 below550px,
+  // Geometry comes from the real NavigationView layout: floating bottom bar below550px,
   // sidebar190 otherwise; demo rows stack when content width is below560px.
   for(const viewportWidth of [375,390,562,960]) {
     await page.setViewportSize({width:viewportWidth,height:640});
@@ -609,8 +632,8 @@ try {
       assert.equal(size.backing,viewportWidth);
       assert.ok(size.overflow<=size.client,'No horizontal browser overflow at '+viewportWidth);
       if(name==='controls') {
-        const toggleArea={x:pageX+padding,y:stacked?164:128,width:viewportWidth-pageX-padding*2,height:40};
-        const on=coloredPixels(frame,toggleArea,red);
+        const {toggle:on}=await visibleToggle('factory-'+viewportWidth+'-controls-end');
+        const toggleArea=on.area;
         assert.ok(on.count>60,'Responsive Toggle must be visible at '+viewportWidth);
         await page.mouse.click(on.x,on.y);await page.mouse.move(viewportWidth-2,30);
         await untilPixels('factory-'+viewportWidth+'-toggle-off',img=>coloredPixels(img,toggleArea,red).count<10);
@@ -795,8 +818,9 @@ try {
   report.checks.push('trusted TextView Home/End follow native unwrapped line boundaries and persist to core');
 
   await page.mouse.click(70,88);await assertNoEditor();
-  await page.mouse.move(500,180);await page.mouse.down();
-  await page.mouse.move(690,180,{steps:8});await page.mouse.up();
+  const {toggle:editingToggle}=await visibleToggle('factory-editor-controls');
+  await page.mouse.move(500,editingToggle.y+36);await page.mouse.down();
+  await page.mouse.move(690,editingToggle.y+36,{steps:8});await page.mouse.up();
   await assertNoEditor();
   await page.mouse.click(95,14);await assertNoEditor();await page.keyboard.press('Escape');
   await page.mouse.click(70,168);await page.mouse.move(260,420);

@@ -247,7 +247,7 @@ impl SgfxPaintEncoder {
                                                 ) - truncated_scaled(draw.snap_phase[1], factor),
                                             ]
                                         }
-                                        DrawSource::Solid => offsets.shapes,
+                                        DrawSource::Solid | DrawSource::ClearOnly => offsets.shapes,
                                         DrawSource::PremultipliedTexture(_) => offsets.shapes,
                                         DrawSource::Backdrop(_) => {
                                             unreachable!("backdrops bypass mesh reuse")

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {browserEnvironment, localRequest, artifactPath, changedPixels, coloredPixels, red, hasTextOnWhite, offscreenScrollTop} from './smoke-helpers.mjs';
+import {browserEnvironment, localRequest, artifactPath, changedPixels, coloredPixels, red, hasTextOnWhite, offscreenScrollTop, togglePixels} from './smoke-helpers.mjs';
 
 test('browser environment strips workflow tokens and unknown keys', () => {
   assert.deepEqual(browserEnvironment({PATH:'/bin', HOME:'/tmp/home', DISPLAY:':99', GITHUB_TOKEN:'secret', ACTIONS_RUNTIME_TOKEN:'secret', AWS_SECRET_ACCESS_KEY:'secret', CUSTOM_SECRET:'secret'}), {PATH:'/bin', HOME:'/tmp/home', DISPLAY:':99'});
@@ -20,6 +20,24 @@ test('pixel assertions inspect real RGB changes within the selected area', () =>
   const area={x:0,y:0,width:2,height:1};
   assert.equal(changedPixels(a,b,area),1);
   assert.equal(coloredPixels(b,area,red).count,1);
+});
+
+test('toggle detection excludes thin progress/slider tracks and fails on missing or ambiguous toggles', () => {
+  const image={width:200,height:160,data:new Uint8Array(200*160*4).fill(255)};
+  const area={x:20,y:10,width:170,height:140};
+  const fill=(x,y,width,height)=>{
+    for(let row=y;row<y+height;row++) for(let col=x;col<x+width;col++)
+      image.data.set([200,30,40,255],(row*image.width+col)*4);
+  };
+  fill(30,110,150,4);fill(30,135,120,6);
+  assert.equal(togglePixels(image,area),null);
+  fill(50,72,28,16);
+  const found=togglePixels(image,area);
+  assert.equal(found.count,448);
+  assert.equal(found.x,63.5);assert.equal(found.y,79.5);
+  assert.deepEqual(found.area,{x:20,y:72,width:170,height:16});
+  fill(50,30,28,16);
+  assert.equal(togglePixels(image,area),null);
 });
 
 test('a black unpresented frame never counts as rendered text', () => {
