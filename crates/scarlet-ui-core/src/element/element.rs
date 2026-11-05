@@ -158,6 +158,21 @@ impl LayoutConstraints {
 /// Elements are mutable and handle layout, rendering, and event handling.
 /// They are created by Views and managed by the ElementTree.
 pub trait Element {
+    /// Receive unconsumed safe-area reservations from the parent layout scope.
+    /// Custom elements that create children during layout should retain this
+    /// value and deliver it to those children before laying them out.
+    fn set_safe_area_insets(&mut self, insets: crate::geometry::EdgeInsets) {
+        let child_insets = if let Some(render) = self.render_object_mut() {
+            render.set_safe_area_insets(insets);
+            render.child_safe_area_insets(insets)
+        } else {
+            insets
+        };
+        for child in self.children_mut() {
+            child.set_safe_area_insets(child_insets);
+        }
+    }
+
     /// Get the unique ID of this Element
     fn id(&self) -> ElementId;
 

@@ -1233,10 +1233,12 @@ impl Application for WidgetFactory {
         _: &scarlet_ui::WindowContext,
         window: &mut dyn scarlet_ui::platform::PlatformWindow,
     ) {
-        self.viewport.set(window.size());
-    }
-    fn on_window_resize(&mut self, _: &scarlet_ui::WindowContext, width: u32, height: u32) {
-        self.viewport.set(Size::new(width as f32, height as f32));
+        let size = window.size();
+        let safe = window.safe_area_insets();
+        self.viewport.set(Size::new(
+            (size.width - safe.left - safe.right).max(0.0),
+            (size.height - safe.top - safe.bottom).max(0.0),
+        ));
     }
 
     fn scenes(&self) -> impl Scene {
@@ -1245,6 +1247,7 @@ impl Application for WidgetFactory {
         let controls = self.clone();
         let inputs = self.clone();
         let display = self.clone();
+        let viewport = self.viewport.clone();
 
         WindowGroup::new(
             "main",
@@ -1266,9 +1269,21 @@ impl Application for WidgetFactory {
                 .sidebar_style(NavigationSidebarStyle::Floating)
                 .shows_icons(true)
                 .sidebar_width(Self::SIDEBAR_WIDTH)
-                .minimum_content_size(Size::new(Self::MIN_CONTENT_WIDTH, 0.0)),
+                .minimum_content_size(Size::new(Self::MIN_CONTENT_WIDTH, 0.0))
+                .on_geometry_change(
+                    |geometry| {
+                        let size = geometry.size();
+                        let safe = geometry.safe_area_insets();
+                        Size::new(
+                            (size.width - safe.left - safe.right).max(0.0),
+                            (size.height - safe.top - safe.bottom).max(0.0),
+                        )
+                    },
+                    move |size| viewport.set(size),
+                ),
             )
             .size(Size::new(860.0, 560.0))
+            .content_safe_area(scarlet_ui::SafeAreaEdges::NONE)
             .menu_bar(self.menu_model()),
         )
     }

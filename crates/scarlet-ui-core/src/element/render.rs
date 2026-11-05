@@ -132,6 +132,14 @@ pub enum ScrollOffsetUpdate {
 /// - Rendering to a buffer
 /// - Hit testing
 pub trait RenderObject: Any {
+    /// Receive this scope's unconsumed platform safe-area reservations.
+    fn set_safe_area_insets(&mut self, _insets: EdgeInsets) {}
+
+    /// Reservations forwarded to descendants. Consumers remove handled edges.
+    fn child_safe_area_insets(&self, insets: EdgeInsets) -> EdgeInsets {
+        insets
+    }
+
     /// Layout this RenderObject and return its size
     fn layout(&mut self, constraints: LayoutConstraints) -> Size;
 
@@ -494,6 +502,7 @@ pub struct RenderElement<V: View + Clone, R: RenderObject> {
     children: Vec<Box<dyn Element>>,
     position: Point,
     last_constraints: Option<LayoutConstraints>,
+    safe_area_insets: EdgeInsets,
     pipeline_id: PipelineId,
     subscriptions: Vec<SubscriptionId>,
     mounted: bool,
@@ -531,6 +540,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             children: Vec::new(),
             position: Point::ZERO,
             last_constraints: None,
+            safe_area_insets: EdgeInsets::ZERO,
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
@@ -555,6 +565,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             children: Vec::new(),
             position: Point::ZERO,
             last_constraints: None,
+            safe_area_insets: EdgeInsets::ZERO,
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
@@ -574,6 +585,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             children,
             position: Point::ZERO,
             last_constraints: None,
+            safe_area_insets: EdgeInsets::ZERO,
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
@@ -605,6 +617,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             children,
             position: Point::ZERO,
             last_constraints: None,
+            safe_area_insets: EdgeInsets::ZERO,
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
@@ -649,6 +662,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             children,
             position: Point::ZERO,
             last_constraints: None,
+            safe_area_insets: EdgeInsets::ZERO,
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
@@ -1051,6 +1065,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         self.last_constraints = Some(constraints);
+        self.render_object
+            .set_safe_area_insets(self.safe_area_insets);
+        let child_insets = self
+            .render_object
+            .child_safe_area_insets(self.safe_area_insets);
+        for child in &mut self.children {
+            child.set_safe_area_insets(child_insets);
+        }
         // Delegate layout to the RenderObject (which may layout children)
         let type_name = core::any::type_name_of_val(&self.render_object);
         if crate::debug::is_enabled() {
@@ -1079,6 +1101,11 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
     fn last_layout_constraints(&self) -> Option<LayoutConstraints> {
         self.last_constraints
+    }
+
+    fn set_safe_area_insets(&mut self, insets: EdgeInsets) {
+        self.safe_area_insets = insets;
+        self.render_object.set_safe_area_insets(insets);
     }
 
     fn set_last_layout_constraints(&mut self, constraints: LayoutConstraints) {

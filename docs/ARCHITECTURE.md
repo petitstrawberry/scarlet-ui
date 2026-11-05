@@ -226,3 +226,5 @@ Changes to reconciliation or container layout must cover these contracts:
 Performance tests should warm caches before measuring. Allocation tests are
 separate from identity tests: zero allocation is an optimization goal, while
 correct reconciliation and state preservation are semantic requirements.
+
+Safe-area ownership and edge-to-edge scroll layout are documented in [SAFE_AREA.md](SAFE_AREA.md).

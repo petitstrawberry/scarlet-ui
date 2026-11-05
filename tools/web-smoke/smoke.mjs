@@ -695,36 +695,41 @@ try {
     await page.addStyleTag({content:'* { box-sizing: border-box; }'});
     await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
     const safeHeading=()=>({x:insets.left+16,y:insets.top+44,width:240,height:42});
-    const clearEdges=frame=>[
+    const unsafeEdges=frame=>[
       {x:0,y:0,width:frame.width,height:insets.top},
       {x:0,y:frame.height-insets.bottom,width:frame.width,height:insets.bottom},
       {x:0,y:0,width:insets.left,height:frame.height},
       {x:frame.width-insets.right,y:0,width:insets.right,height:frame.height},
-    ].every(area=>coloredPixels(frame,area,dark).count===0&&coloredPixels(frame,area,red).count===0);
-    await untilPixels('factory-safe-area-start',frame=>hasTextOnWhite(frame,safeHeading(),100)&&clearEdges(frame));
+    ];
+    // Scroll content now paints behind system edges. Keep the fixed top bar
+    // and side reservations clear, but do not require an empty bottom strip.
+    const clearTopAndSides=frame=>unsafeEdges(frame).filter((_,i)=>i!==1).every(area=>coloredPixels(frame,area,dark).count===0&&coloredPixels(frame,area,red).count===0);
+    await untilPixels('factory-safe-area-start',frame=>hasTextOnWhite(frame,safeHeading(),100)&&clearTopAndSides(frame));
     async function safeNavigate(index,name) {
       const before=await screenshot(name+'-before');
       await page.mouse.click(insets.left+(index+0.5)*(safeViewport.width-insets.left-insets.right)/5,safeViewport.height-insets.bottom-36);
       await page.mouse.move(1,1);
-      return untilPixels(name,frame=>hasTextOnWhite(frame,safeHeading(),100)&&changedPixels(before,frame,safeHeading())>20&&clearEdges(frame));
+      return untilPixels(name,frame=>hasTextOnWhite(frame,safeHeading(),100)&&changedPixels(before,frame,safeHeading())>20&&clearTopAndSides(frame));
     }
     await safeNavigate(1,'factory-safe-area-controls');
     await safeNavigate(2,'factory-safe-area-inputs');
     const beforeSelect=await screenshot('factory-safe-area-before-select');
     const selectX=insets.left+16,selectY=insets.top+28+146;
     await page.mouse.click(selectX+80,selectY+14);
-    await untilPixels('factory-safe-area-select',frame=>changedPixels(beforeSelect,frame,{x:selectX,y:selectY,width:230,height:145})>500&&clearEdges(frame));
+    await untilPixels('factory-safe-area-select',frame=>
+      changedPixels(beforeSelect,frame,{x:selectX,y:selectY,width:230,height:145})>500&&
+      unsafeEdges(frame).every(area=>[dark,red].every(ink=>coloredPixels(frame,area,ink).count===coloredPixels(beforeSelect,area,ink).count)));
     await page.keyboard.press('Escape');
     // Keep both inset sums and the viewport size unchanged, so only the
     // individual env() sensors can detect this redistribution of the edges.
     insets={left:0,top:5,right:30,bottom:65};
     await applySafeArea(insets);
-    await untilPixels('factory-safe-area-redistributed',frame=>hasTextOnWhite(frame,safeHeading(),100)&&clearEdges(frame));
+    await untilPixels('factory-safe-area-redistributed',frame=>hasTextOnWhite(frame,safeHeading(),100)&&clearTopAndSides(frame));
     await safeNavigate(1,'factory-safe-area-redistributed-navigation');
     // Safe-area changes must take effect even when the backing size is unchanged.
     insets={left:29,top:83,right:31,bottom:37};
     await applySafeArea(insets);
-    await untilPixels('factory-safe-area-changed',frame=>hasTextOnWhite(frame,safeHeading(),100)&&clearEdges(frame));
+    await untilPixels('factory-safe-area-changed',frame=>hasTextOnWhite(frame,safeHeading(),100)&&clearTopAndSides(frame));
     await safeNavigate(0,'factory-safe-area-updated-navigation');
     report.checks.push('browser safe-area API drives initial layout, same-size/same-sum changes under a CSS reset, floating navigation input and Select popup bounds');
   } finally {
