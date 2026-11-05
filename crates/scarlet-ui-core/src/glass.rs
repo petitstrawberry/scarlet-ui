@@ -118,13 +118,15 @@ pub fn glass_highlight_edge(inward_x: f32, inward_y: f32) -> (f32, f32) {
     )
 }
 
-/// Width and opacity of the compact dark contour, in logical pixels.
-/// Side-facing normals carry a firmer edge; horizontal shoulders stay finer.
+/// Width and shading opacity of the compact contour, in logical pixels.
+/// Side-facing normals carry a wider dark edge; horizontal rims stay finer.
 #[doc(hidden)]
 pub fn glass_contour_edge(inward_x: f32, inward_y: f32) -> (f32, f32) {
     let side = inward_x * inward_x;
+    // Reach the first interior sample even when a 1x edge falls on a pixel
+    // center, while keeping both horizontal rims finer than the side contour.
     (
-        0.55 + 0.25 * side,
+        1.25 + 0.50 * side,
         0.05 + 0.13 * side + 0.025 * (-inward_y).max(0.),
     )
 }
@@ -132,9 +134,10 @@ pub fn glass_contour_edge(inward_x: f32, inward_y: f32) -> (f32, f32) {
 /// A soft directional reflection spread across the curved shoulder.
 /// The normal tilts toward the viewer across the same shoulder as refraction.
 /// This moves and broadens the specular lobe across the surface instead of
-/// painting a bright outline. Horizontal shoulders receive the soft light;
-/// side-facing contours carry compact shading. Negative values shade toward
-/// black; positive values reflect toward white. This screen-space approximation
+/// painting a broad bright outline. Horizontal shoulders receive soft light
+/// and a finer bright rim; side-facing contours carry compact shading.
+/// Negative values shade toward black; positive values reflect toward white.
+/// This screen-space approximation
 /// follows the reference appearance without claiming its optical mechanism.
 #[doc(hidden)]
 pub fn glass_surface_reflection(distance: f32, inward_x: f32, inward_y: f32, bezel: f32) -> f32 {
@@ -162,8 +165,10 @@ pub fn glass_surface_reflection(distance: f32, inward_x: f32, inward_y: f32, bez
     let (width, opacity) = glass_contour_edge(inward_x, inward_y);
     let width = width.min(bezel * 0.10);
     let fade = (1. - distance / width).clamp(0., 1.);
-    let shade = opacity * fade * fade * (3. - 2. * fade);
-    surface - shade
+    // Keep a readable hairline on both horizontal edges, including the weaker
+    // return light at the bottom. Blend continuously into the dark side contour.
+    let rim = (0.34 - 0.06 * (-inward_y).max(0.)) * horizontal - opacity;
+    surface + rim * fade * fade * (3. - 2. * fade)
 }
 
 #[cfg(test)]
@@ -175,12 +180,11 @@ mod tests {
         let reflection = |d, x, y| glass_surface_reflection(d, x, y, bezel);
         assert!(reflection(3., 0.6, 0.8) > reflection(3., -0.8, 0.6));
         assert!(reflection(3., -0.6, -0.8) > 0.01);
-        assert!(reflection(2., 0.6, 0.8) > reflection(0., 0.6, 0.8));
         assert_eq!(reflection(bezel, 0., 1.), 0.);
         assert_eq!(reflection(-1., 0., 1.), 0.);
         for i in 0..100 {
             let value = reflection(i as f32 * bezel / 100., 0., 1.);
-            assert!((-0.18..=0.18).contains(&value));
+            assert!((-0.185..=0.36).contains(&value));
         }
     }
     #[test]
@@ -194,8 +198,23 @@ mod tests {
             let a = angle as f32 * core::f32::consts::TAU / 72.;
             for step in 0..100 {
                 let value = reflection(step as f32 * 0.2, libm::cosf(a), libm::sinf(a));
-                assert!((-0.185..=0.18).contains(&value));
+                assert!((-0.185..=0.36).contains(&value));
             }
+        }
+    }
+    #[test]
+    fn horizontal_rims_remain_visible_and_thinner_than_the_sides() {
+        let (side_width, _) = glass_contour_edge(1., 0.);
+        for y in [-1., 1.] {
+            let (width, _) = glass_contour_edge(0., y);
+            assert!(width < side_width);
+            let reflection = |d| glass_surface_reflection(d, 0., y, 20.);
+            assert!(reflection(0.) > reflection(2.) + 0.18);
+            assert!(reflection(0.5) > reflection(1.5) + 0.05);
+            assert!(
+                reflection(2.) > 0.,
+                "the broad shoulder still carries light"
+            );
         }
     }
     #[test]
