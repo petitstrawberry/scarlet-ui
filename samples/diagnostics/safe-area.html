@@ -11,6 +11,7 @@ h1 { font-size:24px } pre { white-space:pre-wrap; overflow-wrap:anywhere; paddin
 button { font:inherit; padding:8px 16px }
 </style>
 <h1>Safe area API</h1>
+<p id="insets">読み込み中…</p>
 <p>ScarletUIのRust／WebAssembly APIで読み取った、実行中のブラウザの値です。単位はCSS pxです。</p>
 <pre id="values" role="status" aria-live="polite">読み込み中…</pre>
 <button id="refresh" type="button">再取得</button>
@@ -24,6 +25,7 @@ try {
   function measure() {
     try {
       const [left,top,right,bottom]=browser_safe_area_insets();
+      document.querySelector('#insets').textContent=`左 ${left} / 上 ${top} / 右 ${right} / 下 ${bottom} CSS px`;
       output.textContent=JSON.stringify({insets:{left,top,right,bottom},viewport:{width:innerWidth,height:innerHeight},visualViewport:visualViewport?{width:visualViewport.width,height:visualViewport.height,offsetLeft:visualViewport.offsetLeft,offsetTop:visualViewport.offsetTop,scale:visualViewport.scale}:null},null,2);
       document.body.dataset.ready='true';
     } catch(error) {
