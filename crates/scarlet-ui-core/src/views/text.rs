@@ -6,7 +6,7 @@ use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::LayoutConstraints;
 use crate::element::{Element, ElementRenderObject, RenderElement, UpdateResult};
-use crate::geometry::{Point, Size};
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::view::View;
@@ -73,7 +73,10 @@ impl TextTone {
     }
 }
 
-/// Text View - displays a string of text
+/// Text View - displays a string of text.
+///
+/// Text retains its measured line layout and clips overflow to the allocated
+/// size; constraining its width does not introduce automatic line wrapping.
 #[derive(Clone)]
 pub struct Text {
     content: String,
@@ -245,11 +248,11 @@ impl ElementRenderObject for TextRenderObject {
         let mut height = measured_height as f32;
 
         // Apply max constraints (don't exceed maximum)
-        if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
-            width = width.min(constraints.max_width);
+        if constraints.max_width.is_finite() {
+            width = width.min(constraints.max_width.max(0.0));
         }
-        if constraints.max_height.is_finite() && constraints.max_height > 0.0 {
-            height = height.min(constraints.max_height);
+        if constraints.max_height.is_finite() {
+            height = height.min(constraints.max_height.max(0.0));
         }
 
         // Only apply min constraints if measured size is smaller
@@ -338,7 +341,14 @@ impl ElementRenderObject for TextRenderObject {
     }
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        if self.size.width <= 0.0 || self.size.height <= 0.0 {
+            return true;
+        }
+        // Match the bounds of the CPU text buffer. Ancestor clips (including
+        // edge-to-edge scroll viewports) can be wider than this text's layout.
+        ctx.push_clip(Rect::new(origin, self.size));
         ctx.draw_text(origin, self.content.clone(), self.color, self.font_size);
+        ctx.pop_clip();
         true
     }
 
@@ -364,8 +374,79 @@ impl ElementRenderObject for TextRenderObject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::renderer::PaintCommand;
+    use crate::renderer::{CpuPaintRenderer, PaintCommand};
     use crate::state::{State, generate_state_id};
+
+    #[test]
+    fn constrained_text_pixels_stay_inside_layout_and_parent_clip() {
+        let mut text = TextRenderObject::new(
+            String::from("Controls description extends beyond its allocated width"),
+            20.0,
+            Color::BLACK,
+        );
+        let natural = text.layout(LayoutConstraints::loose(f32::INFINITY, f32::INFINITY));
+        assert!(natural.width > 40.0);
+        for (width, height) in [(40.0, natural.height), (40.0, 8.0)] {
+            let size = text.layout(LayoutConstraints::loose(width, height));
+            assert_eq!(size, Size::new(width, height));
+            let origin = Point::new(12.0, 10.0);
+            let mut ctx = PaintContext::new();
+            // The parent clips the left edge; Text must also clip its right
+            // and bottom edges, without leaking or replacing the parent clip.
+            ctx.push_clip(Rect::from_xywh(16.0, 0.0, 144.0, 60.0));
+            text.paint(&mut ctx, origin);
+            ctx.fill_rect(Rect::from_xywh(0.0, 50.0, 160.0, 4.0), Color::BLACK);
+            ctx.pop_clip();
+            for scale in [1000, 2000] {
+                let mut renderer =
+                    CpuPaintRenderer::new(Size::new(160.0, 60.0), scale, Color::WHITE);
+                renderer.execute(&ctx);
+                let factor = scale / 1000;
+                let mut ink = 0;
+                for y in 0..50 * factor {
+                    for x in 0..160 * factor {
+                        let pixel = renderer.buffer().get_pixel(x, y).unwrap();
+                        if x >= 16 * factor
+                            && x < 52 * factor
+                            && y >= 10 * factor
+                            && y < (10 + height as u32) * factor
+                        {
+                            ink += usize::from(pixel != Color::WHITE.to_bgra());
+                        } else {
+                            assert_eq!(pixel, Color::WHITE.to_bgra(), "overflow at {x},{y}");
+                        }
+                    }
+                }
+                assert!(ink > 0, "text must actually render");
+                assert_eq!(
+                    renderer
+                        .buffer()
+                        .get_pixel(80 * factor, 51 * factor)
+                        .unwrap(),
+                    Color::BLACK.to_bgra()
+                );
+                assert_eq!(
+                    renderer
+                        .buffer()
+                        .get_pixel(4 * factor, 51 * factor)
+                        .unwrap(),
+                    Color::WHITE.to_bgra()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_extent_text_does_not_paint() {
+        for (width, height) in [(0.0, 30.0), (80.0, 0.0)] {
+            let mut text = TextRenderObject::new(String::from("Hidden"), 16.0, Color::BLACK);
+            let size = text.layout(LayoutConstraints::loose(width, height));
+            assert!(size.width == 0.0 || size.height == 0.0);
+            let mut ctx = PaintContext::new();
+            assert!(text.paint(&mut ctx, Point::ZERO));
+            assert!(ctx.commands().is_empty());
+        }
+    }
 
     #[test]
     fn default_text_preserves_existing_body_size_and_primary_color() {
@@ -436,18 +517,21 @@ mod tests {
             TextRenderObject::new(text.content_for_render(), text.font_size, text.color);
         content.set(String::from("Second"));
         assert!(matches!(render.update(&text), UpdateResult::Updated));
+        render.layout(LayoutConstraints::loose(200.0, 40.0));
         let mut ctx = PaintContext::new();
         render.paint(&mut ctx, Point::new(8.0, 12.0));
         let [
+            PaintCommand::PushClip { .. },
             PaintCommand::DrawText {
                 text: content,
                 color,
                 font_size_px,
                 ..
             },
+            PaintCommand::PopClip,
         ] = ctx.commands()
         else {
-            panic!("semantic text should use the unchanged text paint command");
+            panic!("semantic text should use a bounded text paint command");
         };
         assert_eq!(content, "Second");
         assert_eq!(*color, ColorPalette::default().text_secondary());
