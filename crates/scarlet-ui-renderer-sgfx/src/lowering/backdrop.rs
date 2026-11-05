@@ -127,6 +127,8 @@ pub(super) fn contains_backdrop(paint: &PaintContext<'_>) -> bool {
 impl SgfxPaintEncoder {
     /// Enable per-pixel glass on backends supporting SGFX WGSL pipelines.
     /// Portable fixed-pipeline backends keep the mesh implementation by default.
+    /// The pinned SGFX WebGPU backend does not support programmable pipelines
+    /// on wasm32; Web callers must keep the default even when WebGPU is available.
     pub fn set_analytic_glass(&mut self, enabled: bool) {
         self.analytic_glass = enabled;
     }
