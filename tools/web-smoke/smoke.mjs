@@ -166,6 +166,29 @@ try {
     }
   });
   page.on('crash',()=>failure('crash','Browser page crashed'));
+  setPhase('GPU-independent safe-area API');
+  const areaApiSession=await context.newCDPSession(page);
+  const deviceCount=()=>report.events.filter(entry=>entry.kind==='gpu-diagnostic'&&entry.detail.kind==='device-created').length;
+  const devicesBefore=deviceCount();
+  try {
+    const insets={left:13,top:41,right:17,bottom:29};
+    await areaApiSession.send('Emulation.setSafeAreaInsetsOverride',{insets});
+    await page.goto(origin+'/diagnostics/safe-area/',{waitUntil:'domcontentloaded'});
+    await page.waitForFunction(()=>document.body.dataset.ready,{timeout:45000});
+    assert.equal(await page.locator('body').getAttribute('data-ready'),'true',await page.locator('#values').textContent());
+    const readArea=async()=>JSON.parse(await page.locator('#values').textContent()).insets;
+    assert.deepEqual(await readArea(),insets);
+    const changed={left:17,top:29,right:13,bottom:41};
+    await areaApiSession.send('Emulation.setSafeAreaInsetsOverride',{insets:changed});
+    await page.getByRole('button',{name:'再取得'}).click();
+    assert.deepEqual(await readArea(),changed,'Raw values must remain readable when viewport and inset sums are unchanged');
+    assert.equal(deviceCount(),devicesBefore,'Reading safe areas must not create a GPU device');
+    await screenshot('safe-area-api-without-gpu');
+    report.checks.push('Rust safe-area API returns browser values before app startup, without a canvas or GPU device');
+  } finally {
+    await areaApiSession.send('Emulation.setSafeAreaInsetsOverride',{insets:{}});
+    await areaApiSession.detach();
+  }
   {
   setPhase('toolkit homepage and live specimen');
   await page.goto(origin+'/',{waitUntil:'domcontentloaded'});
@@ -655,8 +678,62 @@ try {
     }
   }
   report.checks.push('all five GPU-rendered Factory pages and controls reachable at 375/390/562/960px; Select and animated SGFX remain usable');
+
+  setPhase('Factory platform safe-area updates');
+  const safeAreaSession=await context.newCDPSession(page);
+  const safeViewport={width:390,height:640};
+  async function applySafeArea(insets) {
+    // Override the browser API, not application state or padding constants.
+    await safeAreaSession.send('Emulation.setSafeAreaInsetsOverride',{insets});
+  }
+  try {
+    await page.setViewportSize(safeViewport);
+    let insets={left:13,top:41,right:17,bottom:29};
+    await applySafeArea(insets);
+    await ready('/widget-factory/','scarlet_ui_widget_factory');
+    // Common host resets must not collapse the env() content-box sensors.
+    await page.addStyleTag({content:'* { box-sizing: border-box; }'});
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    const safeHeading=()=>({x:insets.left+16,y:insets.top+44,width:240,height:42});
+    const clearEdges=frame=>[
+      {x:0,y:0,width:frame.width,height:insets.top},
+      {x:0,y:frame.height-insets.bottom,width:frame.width,height:insets.bottom},
+      {x:0,y:0,width:insets.left,height:frame.height},
+      {x:frame.width-insets.right,y:0,width:insets.right,height:frame.height},
+    ].every(area=>coloredPixels(frame,area,dark).count===0&&coloredPixels(frame,area,red).count===0);
+    await untilPixels('factory-safe-area-start',frame=>hasTextOnWhite(frame,safeHeading(),100)&&clearEdges(frame));
+    async function safeNavigate(index,name) {
+      const before=await screenshot(name+'-before');
+      await page.mouse.click(insets.left+(index+0.5)*(safeViewport.width-insets.left-insets.right)/5,safeViewport.height-insets.bottom-36);
+      await page.mouse.move(1,1);
+      return untilPixels(name,frame=>hasTextOnWhite(frame,safeHeading(),100)&&changedPixels(before,frame,safeHeading())>20&&clearEdges(frame));
+    }
+    await safeNavigate(1,'factory-safe-area-controls');
+    await safeNavigate(2,'factory-safe-area-inputs');
+    const beforeSelect=await screenshot('factory-safe-area-before-select');
+    const selectX=insets.left+16,selectY=insets.top+28+146;
+    await page.mouse.click(selectX+80,selectY+14);
+    await untilPixels('factory-safe-area-select',frame=>changedPixels(beforeSelect,frame,{x:selectX,y:selectY,width:230,height:145})>500&&clearEdges(frame));
+    await page.keyboard.press('Escape');
+    // Keep both inset sums and the viewport size unchanged, so only the
+    // individual env() sensors can detect this redistribution of the edges.
+    insets={left:0,top:5,right:30,bottom:65};
+    await applySafeArea(insets);
+    await untilPixels('factory-safe-area-redistributed',frame=>hasTextOnWhite(frame,safeHeading(),100)&&clearEdges(frame));
+    await safeNavigate(1,'factory-safe-area-redistributed-navigation');
+    // Safe-area changes must take effect even when the backing size is unchanged.
+    insets={left:29,top:83,right:31,bottom:37};
+    await applySafeArea(insets);
+    await untilPixels('factory-safe-area-changed',frame=>hasTextOnWhite(frame,safeHeading(),100)&&clearEdges(frame));
+    await safeNavigate(0,'factory-safe-area-updated-navigation');
+    report.checks.push('browser safe-area API drives initial layout, same-size/same-sum changes under a CSS reset, floating navigation input and Select popup bounds');
+  } finally {
+    await applySafeArea({});
+    await safeAreaSession.detach();
+  }
   setPhase('Factory textarea-backed editing');
   await page.setViewportSize({width:960,height:640});
+  await ready('/widget-factory/','scarlet_ui_widget_factory');
   await page.mouse.click(70,128);await page.mouse.move(950,30);
   const editor=page.locator('textarea[data-scarlet-text-input]');
   const fieldPixels={x:382,y:92,width:320,height:34};

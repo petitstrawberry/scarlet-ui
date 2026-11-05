@@ -263,6 +263,26 @@ impl RenderingPipeline {
         self.scale_milli
     }
 
+    /// Read this window's system-reserved edges, in logical pixels.
+    pub fn safe_area_insets(&self) -> crate::geometry::EdgeInsets {
+        self.element_tree.safe_area_insets()
+    }
+
+    /// Apply a platform safe-area change without resizing the backing surface.
+    /// Returns whether layout changed. Each pipeline keeps its own snapshot.
+    pub fn set_safe_area_insets(&mut self, insets: crate::geometry::EdgeInsets) -> bool {
+        let insets = crate::geometry::normalized_safe_area_insets(insets);
+        if insets == self.safe_area_insets() {
+            return false;
+        }
+        self.element_tree.set_safe_area_insets(insets);
+        self.paint_needs_full = true;
+        if let Some(root) = self.element_tree.root() {
+            self.pipeline_owner.mark_needs_layout(root.id());
+        }
+        true
+    }
+
     /// Set the root Element
     pub fn set_root(&mut self, root_element: Box<dyn Element>) {
         self.element_tree.set_root(root_element);
@@ -591,7 +611,7 @@ impl RenderingPipeline {
     }
 
     fn sync_select_popup_viewports(&mut self) -> bool {
-        fn visit(element: &mut dyn Element, parent: Point, window: Size, legacy: bool) -> bool {
+        fn visit(element: &mut dyn Element, parent: Point, viewport: Rect, legacy: bool) -> bool {
             let position = element.position();
             let origin = Point::new(parent.x + position.x, parent.y + position.y);
             let mut changed = false;
@@ -600,10 +620,10 @@ impl RenderingPipeline {
                     .downcast_mut::<crate::views::SelectRenderObject>()
             }) {
                 if select.set_popup_viewport(Rect::from_xywh(
-                    -origin.x,
-                    -origin.y,
-                    window.width,
-                    window.height,
+                    viewport.origin.x - origin.x,
+                    viewport.origin.y - origin.y,
+                    viewport.size.width,
+                    viewport.size.height,
                 )) {
                     changed = true;
                     if legacy {
@@ -612,18 +632,15 @@ impl RenderingPipeline {
                 }
             }
             for child in element.children_mut() {
-                changed |= visit(child.as_mut(), origin, window, legacy);
+                changed |= visit(child.as_mut(), origin, viewport, legacy);
             }
             changed
         }
-        let changed = self.element_tree.root_mut().is_some_and(|root| {
-            visit(
-                root.as_mut(),
-                Point::ZERO,
-                self.window_size,
-                !self.paint_enabled,
-            )
-        });
+        let viewport = crate::geometry::safe_area_rect(self.window_size, self.safe_area_insets());
+        let changed = self
+            .element_tree
+            .root_mut()
+            .is_some_and(|root| visit(root.as_mut(), Point::ZERO, viewport, !self.paint_enabled));
         self.paint_needs_full |= changed;
         changed
     }

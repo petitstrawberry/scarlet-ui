@@ -220,6 +220,14 @@ pub trait Application: Clone + 'static {
     /// Handle window resize event.
     fn on_window_resize(&mut self, _ctx: &WindowContext, _width: u32, _height: u32) {}
 
+    /// The platform's reserved edges changed independently of surface size.
+    fn on_window_safe_area_changed(
+        &mut self,
+        _ctx: &WindowContext,
+        _insets: crate::geometry::EdgeInsets,
+    ) {
+    }
+
     /// Handle display size change event.
     fn on_screen_size_changed(&mut self, _width: u32, _height: u32) -> Option<Size> {
         None
@@ -457,6 +465,7 @@ impl ApplicationRunner {
         }
 
         sync_output_scale(&mut pipeline, window.as_ref());
+        pipeline.set_safe_area_insets(window.safe_area_insets());
         let negotiated_size = window.size();
         if negotiated_size != window_info.size {
             pipeline.resize(negotiated_size);
@@ -987,6 +996,13 @@ fn sync_application_window<A: Application>(app: &mut A, slot: &mut WindowSlot<A>
     app.on_window_sync(&slot.context, slot.window.as_mut());
     let size = slot.window.size();
     sync_output_scale(&mut slot.pipeline, slot.window.as_ref());
+    if slot
+        .pipeline
+        .set_safe_area_insets(slot.window.safe_area_insets())
+    {
+        slot.frame_ready = true;
+        app.on_window_safe_area_changed(&slot.context, slot.pipeline.safe_area_insets());
+    }
     if size.width > 0.0 && size.height > 0.0 && size != slot.pipeline.window_size() {
         // Compare with the rendered extent, not two native size reads around
         // the application hook. The native surface may have changed before
@@ -1043,6 +1059,12 @@ fn handle_window_event<A: Application>(
                 slot.frame_ready = true;
                 app.on_window_resize(&slot.context, width, height);
                 sync_text_input(slot.window.as_mut(), &slot.pipeline);
+            }
+        }
+        Event::SafeAreaChanged { insets } => {
+            if slot.pipeline.set_safe_area_insets(insets) {
+                slot.frame_ready = true;
+                app.on_window_safe_area_changed(&slot.context, slot.pipeline.safe_area_insets());
             }
         }
         Event::FullscreenChanged { fullscreen } => {
@@ -1816,6 +1838,7 @@ mod tests {
         presents: [Vec<InputEnvironment>; 2],
         present_sizes: [Vec<(u32, u32)>; 2],
         resize_requests: [Vec<(u32, u32)>; 2],
+        safe_areas: [crate::geometry::EdgeInsets; 2],
         applied_resizes: [Vec<(u32, u32)>; 2],
         native_drive: bool,
         native_ticks: usize,
@@ -2021,6 +2044,10 @@ mod tests {
 
         fn size(&self) -> Size {
             self.size
+        }
+
+        fn safe_area_insets(&self) -> crate::geometry::EdgeInsets {
+            self.probe.borrow().safe_areas[self.index]
         }
 
         fn resize(&mut self, width: u32, height: u32) -> Result<()> {
@@ -2667,6 +2694,40 @@ mod tests {
         // An explicit application request still uses the native request path.
         slot.window.resize(900, 600).unwrap();
         assert_eq!(probe.borrow().resize_requests[0], [(900, 600)]);
+    }
+
+    #[test]
+    fn safe_area_notifications_and_queries_relayout_without_requesting_resize() {
+        use crate::geometry::EdgeInsets;
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        probe.borrow_mut().safe_areas[0] = EdgeInsets::only_top(39.);
+        let mut app = RenderFailureApp(Rc::new(RefCell::new(Vec::new())));
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: probe.clone(),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slot = runner.create_slot(&mut app, declaration, true).unwrap();
+        assert_eq!(slot.pipeline.safe_area_insets(), EdgeInsets::only_top(39.));
+        let original_size = slot.pipeline.window_size();
+        let changed = EdgeInsets::new(47., 0., 49., 21.);
+        probe.borrow_mut().safe_areas[0] = changed;
+        slot.frame_ready = false;
+        handle_window_event(
+            &mut app,
+            &mut slot,
+            Event::SafeAreaChanged { insets: changed },
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(slot.frame_ready);
+        assert_eq!(slot.pipeline.safe_area_insets(), changed);
+        assert_eq!(slot.pipeline.window_size(), original_size);
+        probe.borrow_mut().safe_areas[0] = EdgeInsets::ZERO;
+        sync_application_window(&mut app, &mut slot);
+        assert_eq!(slot.pipeline.safe_area_insets(), EdgeInsets::ZERO);
+        assert!(probe.borrow().resize_requests[0].is_empty());
     }
 
     #[test]

@@ -261,6 +261,36 @@ pub struct EdgeInsets {
     pub right: f32,
 }
 
+pub(crate) fn normalized_safe_area_insets(insets: EdgeInsets) -> EdgeInsets {
+    let edge = |value: f32| {
+        if value.is_finite() {
+            value.max(0.0)
+        } else {
+            0.0
+        }
+    };
+    EdgeInsets::new(
+        edge(insets.left),
+        edge(insets.top),
+        edge(insets.right),
+        edge(insets.bottom),
+    )
+}
+
+pub(crate) fn safe_area_rect(size: Size, insets: EdgeInsets) -> Rect {
+    let insets = normalized_safe_area_insets(insets);
+    let width = size.width.max(0.0);
+    let height = size.height.max(0.0);
+    let left = insets.left.min(width);
+    let top = insets.top.min(height);
+    Rect::from_xywh(
+        left,
+        top,
+        (width - left - insets.right).max(0.0),
+        (height - top - insets.bottom).max(0.0),
+    )
+}
+
 impl EdgeInsets {
     pub const ZERO: Self = Self {
         top: 0.0,

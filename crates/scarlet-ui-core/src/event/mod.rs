@@ -31,6 +31,10 @@ pub enum Event {
     /// Platform notification of a new logical surface size (not a resize request).
     Resize { width: u32, height: u32 },
 
+    /// Reserved edges changed, possibly without a surface resize. The backend
+    /// must update PlatformWindow::safe_area_insets before emitting this event.
+    SafeAreaChanged { insets: crate::geometry::EdgeInsets },
+
     /// Window fullscreen state changed on the platform.
     FullscreenChanged { fullscreen: bool },
 

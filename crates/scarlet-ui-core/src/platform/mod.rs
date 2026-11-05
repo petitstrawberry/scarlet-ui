@@ -424,6 +424,17 @@ pub trait PlatformWindow: Any {
     /// such as client-rendered shadow outsets.
     fn size(&self) -> Size;
 
+    /// System-reserved edges inside this window, in logical pixels.
+    ///
+    /// Backends read the OS/browser safe-area API and report changes with
+    /// [`Event::SafeAreaChanged`]. Return zero when the platform has already
+    /// constrained the surface to its safe area, so it is not inset twice.
+    /// Built-in Window content respects these edges; its background still
+    /// covers the complete surface. Desktop backends default to zero.
+    fn safe_area_insets(&self) -> EdgeInsets {
+        EdgeInsets::ZERO
+    }
+
     /// Get the managed visible window-body size.
     ///
     /// Backends without separate surface and window geometry return

@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::element::{Element, ElementId, TextInputElementState};
-use crate::geometry::{Point, Rect, Size};
+use crate::geometry::{EdgeInsets, Point, Rect, Size};
 use crate::pipeline::{MountContext, PipelineId};
 
 /// Global counter for generating unique Element IDs
@@ -31,6 +31,7 @@ pub fn generate_element_id() -> u32 {
 pub struct ElementTree {
     root: Option<Box<dyn Element>>,
     pipeline_id: PipelineId,
+    safe_area_insets: EdgeInsets,
 }
 
 impl ElementTree {
@@ -44,6 +45,7 @@ impl ElementTree {
         Self {
             root: None,
             pipeline_id,
+            safe_area_insets: EdgeInsets::ZERO,
         }
     }
 
@@ -94,12 +96,44 @@ impl ElementTree {
     ///
     /// This performs a layout pass starting from the root.
     pub fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
+        self.apply_safe_area_insets();
         if let Some(ref mut root) = self.root {
             let size = root.layout(constraints);
             self.flush_layout_notifications();
             size
         } else {
             Size::ZERO
+        }
+    }
+
+    /// The platform safe area owned by this tree's window, in logical pixels.
+    pub fn safe_area_insets(&self) -> EdgeInsets {
+        self.safe_area_insets
+    }
+
+    pub(crate) fn set_safe_area_insets(&mut self, insets: EdgeInsets) {
+        self.safe_area_insets = insets;
+        self.apply_safe_area_insets();
+    }
+
+    // Reapply after rebuilding because reconciliation can replace the Window.
+    // Stop at the top-level Window: descendants share its inset content space.
+    pub(crate) fn apply_safe_area_insets(&mut self) {
+        fn apply(element: &mut dyn Element, insets: EdgeInsets) {
+            if let Some(window) = element.render_object_mut().and_then(|render| {
+                render
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::WindowRenderObject>()
+            }) {
+                window.set_safe_area_insets(insets);
+                return;
+            }
+            for child in element.children_mut() {
+                apply(child.as_mut(), insets);
+            }
+        }
+        if let Some(root) = self.root.as_deref_mut() {
+            apply(root, self.safe_area_insets);
         }
     }
 

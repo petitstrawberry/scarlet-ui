@@ -8,7 +8,7 @@ scarlet-ui-core = { path = "../scarlet-ui-core" }
 scarlet-ui-renderer-sgfx = { path = "../scarlet-ui-renderer-sgfx" }
 sgfx-backend-wgpu = { git = "https://github.com/petitstrawberry/sgfx", rev = "22e3d283046543239d2f3606dea73d9fcac7abad" }
 wasm-bindgen = "0.2"
-web-sys = { version = "0.3", features = ["InputEventInit", "InputEvent", "HtmlTextAreaElement", "CssStyleDeclaration", "Node", "FocusOptions", "FocusEvent", "VisualViewport", "ScrollIntoViewOptions", "ScrollLogicalPosition", "Window", "Document", "HtmlCanvasElement", "HtmlElement", "Element", "DomRect", "PointerEvent", "MouseEvent", "KeyboardEvent", "WheelEvent", "Event", "AddEventListenerOptions", "EventTarget", "console"] }
+web-sys = { version = "0.3", features = ["ResizeObserver", "InputEventInit", "InputEvent", "HtmlTextAreaElement", "CssStyleDeclaration", "Node", "FocusOptions", "FocusEvent", "VisualViewport", "ScrollIntoViewOptions", "ScrollLogicalPosition", "Window", "Document", "HtmlCanvasElement", "HtmlElement", "Element", "DomRect", "PointerEvent", "MouseEvent", "KeyboardEvent", "WheelEvent", "Event", "AddEventListenerOptions", "EventTarget", "console"] }
 gloo-render = "0.2"
 
 [dev-dependencies]

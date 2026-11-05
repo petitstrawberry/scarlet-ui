@@ -60,9 +60,10 @@ pub use scarlet_ui_core::*;
 
 #[cfg(all(feature = "platform-web", target_arch = "wasm32"))]
 pub use scarlet_ui_platform_web::{
-    SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasRenderObject,
-    SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture, SgfxTextureHandle, WebApp,
-    run as run_web,
+    SafeAreaMode, SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle,
+    SgfxCanvasRenderObject, SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
+    SgfxTextureHandle, WebApp, WebOptions, browser_safe_area_insets, run as run_web,
+    run_with_options as run_web_with_options,
 };
 
 #[cfg(all(feature = "platform-sws", target_os = "scarlet"))]
