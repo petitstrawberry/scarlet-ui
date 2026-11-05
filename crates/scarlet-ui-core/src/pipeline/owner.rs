@@ -327,6 +327,7 @@ impl PipelineOwner {
     /// Flush the build phase
     fn flush_build(&mut self, element_tree: &mut ElementTree) {
         let dirty_build = core::mem::take(&mut self.dirty_build);
+        let rebuilt = !dirty_build.is_empty();
 
         for id in dirty_build {
             // Find the element in the tree
@@ -337,6 +338,9 @@ impl PipelineOwner {
                     self.mark_needs_layout(id);
                 }
             }
+        }
+        if rebuilt && element_tree.safe_area_insets() != crate::geometry::EdgeInsets::ZERO {
+            element_tree.apply_safe_area_insets();
         }
     }
 

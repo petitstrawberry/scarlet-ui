@@ -369,6 +369,7 @@ impl EventDispatcher {
                 self.dispatch_lifecycle(element_tree, lifecycle_event)
             }
             Event::Window(_window_event) => false,
+            Event::SafeAreaChanged { .. } => false,
             Event::Input(_) => {
                 // Raw input events are typically handled by higher layers
                 false

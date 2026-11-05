@@ -1217,9 +1217,10 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
     }
 
     fn managed_event_position(&self, x: i32, y: i32) -> (i32, i32) {
+        let origin = self.render_object.safe_window_geometry_rect().origin;
         (
-            x.saturating_sub(self.render_object.window_geometry_insets.left as i32),
-            y.saturating_sub(self.render_object.window_geometry_insets.top as i32),
+            x.saturating_sub(origin.x as i32),
+            y.saturating_sub(origin.y as i32),
         )
     }
 
@@ -1250,7 +1251,7 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
         if y < 0 || y >= titlebar_height() as i32 {
             return None;
         }
-        let width = self.render_object.window_geometry_size().width as u32;
+        let width = self.render_object.safe_window_geometry_rect().size.width as u32;
         let point = Point::new(x as f32, y as f32);
         [
             self.render_object.close_button_rect(width),
@@ -1903,6 +1904,7 @@ pub struct WindowRenderObject {
     corner_radius: f32,
     background_color: Color,
     window_geometry_insets: EdgeInsets,
+    safe_area_insets: EdgeInsets,
     shadow_elevation: ElevationRole,
     deferred_backdrop: bool,
     buffer: Option<Buffer>,
@@ -1922,6 +1924,7 @@ impl WindowRenderObject {
             corner_radius: corner_radius.max(0.0),
             background_color,
             window_geometry_insets: EdgeInsets::ZERO,
+            safe_area_insets: EdgeInsets::ZERO,
             shadow_elevation: ElevationRole::Flat,
             deferred_backdrop: false,
             buffer: None,
@@ -1944,6 +1947,7 @@ impl WindowRenderObject {
             corner_radius: info.corner_radius.max(0.0),
             background_color: info.background_color,
             window_geometry_insets: info.window_geometry_insets,
+            safe_area_insets: EdgeInsets::ZERO,
             shadow_elevation: info.shadow_elevation,
             deferred_backdrop: false,
             buffer: None,
@@ -1954,6 +1958,25 @@ impl WindowRenderObject {
         self.deferred_backdrop = true;
         self.buffer = None;
         self
+    }
+
+    /// Update the platform-reserved edges. The window background and backing
+    /// size stay full-size; only interactive chrome and content are inset.
+    pub fn set_safe_area_insets(&mut self, insets: EdgeInsets) {
+        self.safe_area_insets = crate::geometry::normalized_safe_area_insets(insets);
+    }
+
+    fn safe_window_geometry_rect(&self) -> Rect {
+        let geometry = self.window_geometry_rect(Point::ZERO);
+        let safe = crate::geometry::safe_area_rect(self.size, self.safe_area_insets);
+        let x = geometry.left().max(safe.left());
+        let y = geometry.top().max(safe.top());
+        Rect::from_xywh(
+            x,
+            y,
+            (geometry.right().min(safe.right()) - x).max(0.0),
+            (geometry.bottom().min(safe.bottom()) - y).max(0.0),
+        )
     }
 
     pub(crate) fn deferred_backdrop(&self) -> Option<WindowBackdrop> {
@@ -2399,7 +2422,7 @@ impl ElementRenderObject for WindowRenderObject {
         let content_layout = WindowContentLayout::for_decoration(self.decoration);
         let content_offset = content_layout.offset();
         let decoration_size = content_layout.decoration_size();
-        let window_geometry = self.window_geometry_rect(Point::ZERO);
+        let window_geometry = self.safe_window_geometry_rect();
         let content_x = window_geometry.origin.x + content_offset.x;
         let content_y = window_geometry.origin.y + content_offset.y;
         let content_width =
@@ -2820,6 +2843,57 @@ mod tests {
             Phase::Capture,
         ));
         assert_eq!(element.take_window_action(), None);
+    }
+
+    #[test]
+    fn inset_custom_titlebar_uses_the_same_origin_and_width_for_touch_input() {
+        let window = Window::new("Inset chrome", Text::new("Content"))
+            .size(Size::new(400., 300.))
+            .decoration(WindowDecoration::CUSTOM)
+            .shadow(false);
+        let mut element = window.create_element();
+        element
+            .render_object_mut()
+            .unwrap()
+            .as_any_mut()
+            .downcast_mut::<WindowRenderObject>()
+            .unwrap()
+            .set_safe_area_insets(EdgeInsets::new(13., 47., 17., 29.));
+        element.layout(LayoutConstraints::tight(400., 300.));
+        let render = element
+            .render_object()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<WindowRenderObject>()
+            .unwrap();
+        let geometry = render.safe_window_geometry_rect();
+        let close = render.close_button_rect(geometry.size.width as u32);
+        let x = (geometry.origin.x + close.center().x) as i32;
+        let y = (geometry.origin.y + close.center().y) as i32;
+        let change = TouchChange {
+            seat_id: 1,
+            serial: 1,
+            time_ns: 1,
+            id: 91,
+            phase: TouchPhase::Down,
+            x,
+            y,
+            pressure: None,
+            touch_major: None,
+        };
+        assert!(!element.handle_event(
+            &Event::Touch(TouchChange { y: 10, ..change }),
+            Phase::Capture
+        ));
+        assert!(element.handle_event(&Event::Touch(change), Phase::Capture));
+        assert!(element.handle_event(
+            &Event::TouchGesture(TouchGesture::Tap { id: 91, x, y }),
+            Phase::Capture
+        ));
+        assert_eq!(
+            element.take_window_action(),
+            Some(WindowEvent::CloseRequested)
+        );
     }
 
     #[test]

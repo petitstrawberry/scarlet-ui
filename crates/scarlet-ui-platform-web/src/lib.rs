@@ -4,6 +4,7 @@
 mod damage;
 mod menu;
 mod paint;
+mod safe_area;
 mod text_edit;
 mod text_input;
 mod touch;
@@ -13,7 +14,7 @@ use scarlet_ui_core::{
         Event, FocusEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource,
         WheelPhase,
     },
-    geometry::{Point, Size},
+    geometry::{EdgeInsets, Point, Size},
     platform::{
         PlatformBackend, PlatformWindow, PlatformWindowDefaults, WindowCreateRequest,
         WindowDecoration,
@@ -50,8 +51,28 @@ struct FrameLoop {
 /// even when the browser has suspended animation frames in a background tab.
 pub struct WebApp {
     state: Rc<RefCell<FrameLoop>>,
+    safe_area: Rc<safe_area::SafeArea>,
 }
 impl WebApp {
+    /// Current reserved edges in canvas-local logical pixels, read from the
+    /// browser's CSS env(safe-area-inset-*) API unless a native host overrides it.
+    pub fn safe_area_insets(&self) -> EdgeInsets {
+        self.safe_area.insets()
+    }
+
+    /// Supply a native host's current safe-area API result in canvas logical
+    /// units. Call again from safeAreaInsetsDidChange/rotation notifications.
+    /// A host that already constrains its WebView to the safe area passes zero.
+    pub fn set_safe_area_insets(&self, insets: EdgeInsets) {
+        self.safe_area.set_host_override(Some(insets));
+        tick_now(&self.state);
+    }
+
+    /// Resume automatic CSS env() acquisition after a native host override.
+    pub fn use_browser_safe_area(&self) {
+        self.safe_area.set_host_override(None);
+        tick_now(&self.state);
+    }
     /// Whether the application is still accepting animation frames.
     pub fn is_running(&self) -> bool {
         let state = self.state.borrow();
@@ -139,6 +160,13 @@ fn tick_now(state: &Rc<RefCell<FrameLoop>>) {
 /// Initialize WebGPU asynchronously, then run one application cycle per animation frame.
 /// Supply an explicitly CSS-sized canvas and install an embedded font before calling.
 /// Additional native windows, popups and file dialogs are not supported yet.
+///
+/// Full-screen pages use `viewport-fit=cover` and size the canvas to the current
+/// viewport (for example `100dvh`). CSS `env(safe-area-inset-*)` values then
+/// reserve the interactive content while the backing surface stays full-size.
+/// Insets already provided by an embedding container are not applied twice.
+/// Native WebView hosts can instead forward their OS API result through
+/// [`WebApp::set_safe_area_insets`], including subsequent safe-area changes.
 pub async fn run<A: Application + View>(
     canvas: HtmlCanvasElement,
     app: A,
@@ -150,6 +178,8 @@ pub async fn run<A: Application + View>(
         .await
         .map_err(|e| JsValue::from_str(&format!("WebGPU initialization failed: {e}")))?;
     let menus = Rc::new(RefCell::new(menu::WebMenu::default()));
+    let safe_area = Rc::new(safe_area::SafeArea::new(canvas.clone())?);
+    menus.borrow_mut().set_safe_area_insets(safe_area.insets());
     menus.borrow_mut().resize(size);
     let paint = paint::WebPaint::new(gpu, canvas.width(), canvas.height(), menus.clone())
         .map_err(js_error)?;
@@ -167,6 +197,7 @@ pub async fn run<A: Application + View>(
         Box::new(paint),
         menus,
         Rc::downgrade(&state),
+        safe_area.clone(),
     )?;
     state.borrow_mut().text_input = Rc::downgrade(&window.text_input);
     let tick = ApplicationRunner::new(Box::new(WebBackend(Some(window))))
@@ -174,7 +205,7 @@ pub async fn run<A: Application + View>(
         .map_err(js_error)?;
     state.borrow_mut().tick = Some(Box::new(tick));
     schedule_frame(&state);
-    Ok(WebApp { state })
+    Ok(WebApp { state, safe_area })
 }
 
 fn js_error(error: Error) -> JsValue {
@@ -234,6 +265,8 @@ struct WebWindow {
     hover_handoff: menu::HoverHandoff,
     menu_touch: touch::MenuTouchRouting,
     text_input: Rc<text_input::TextInput>,
+    safe_area: Rc<safe_area::SafeArea>,
+    applied_safe_area: EdgeInsets,
 }
 impl WebWindow {
     fn new_canvas(
@@ -243,6 +276,7 @@ impl WebWindow {
         paint: Box<dyn PaintBackend>,
         menus: Rc<RefCell<menu::WebMenu>>,
         runner: std::rc::Weak<RefCell<FrameLoop>>,
+        safe_area: Rc<safe_area::SafeArea>,
     ) -> std::result::Result<Self, JsValue> {
         let original_tab_index = canvas.get_attribute("tabindex");
         canvas.set_tab_index(0);
@@ -263,6 +297,8 @@ impl WebWindow {
             menus,
             hover_handoff: menu::HoverHandoff::default(),
             menu_touch: touch::MenuTouchRouting::default(),
+            applied_safe_area: safe_area.insets(),
+            safe_area,
         };
         let pressed = Rc::new(Cell::new(None));
         let touches = Rc::new(RefCell::new(touch::TouchContacts::default()));
@@ -418,6 +454,23 @@ impl WebWindow {
             }
         })?;
         if let Some(browser) = web_sys::window() {
+            for kind in ["resize", "orientationchange"] {
+                let safe_area = window.safe_area.clone();
+                window.listen_lifecycle(browser.clone().into(), kind, move |_| {
+                    safe_area.invalidate()
+                })?;
+            }
+            if let Some(viewport) = browser.visual_viewport() {
+                let safe_area = window.safe_area.clone();
+                window
+                    .listen_lifecycle(viewport.into(), "resize", move |_| safe_area.invalidate())?;
+            }
+            if let Some(document) = browser.document() {
+                let safe_area = window.safe_area.clone();
+                window.listen_lifecycle(document.into(), "fullscreenchange", move |_| {
+                    safe_area.invalidate()
+                })?;
+            }
             for kind in ["blur", "pagehide"] {
                 let events = window.events.clone();
                 let contacts = touches.clone();
@@ -728,6 +781,17 @@ impl PlatformWindow for WebWindow {
         let scale = scale_milli();
         let changed = canvas_size != self.size || scale != self.scale;
         if changed {
+            self.safe_area.invalidate();
+        }
+        let insets = self.safe_area.insets();
+        if insets != self.applied_safe_area {
+            self.applied_safe_area = insets;
+            self.menus.borrow_mut().set_safe_area_insets(insets);
+            self.events
+                .borrow_mut()
+                .push_front(Event::SafeAreaChanged { insets });
+        }
+        if changed {
             self.size = canvas_size;
             self.scale = scale;
             update_backing(&self.canvas, canvas_size, scale);
@@ -818,6 +882,9 @@ impl PlatformWindow for WebWindow {
     }
     fn size(&self) -> Size {
         self.menus.borrow().content_size(self.size)
+    }
+    fn safe_area_insets(&self) -> EdgeInsets {
+        self.safe_area.insets()
     }
     fn resize(&mut self, _: u32, _: u32) -> Result<()> {
         Ok(())

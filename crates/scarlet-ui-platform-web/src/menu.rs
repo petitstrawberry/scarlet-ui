@@ -4,7 +4,7 @@ use scarlet_ui_core::{
     color::ColorPalette,
     element::{Element, ElementRenderObject, LayoutConstraints},
     event::{Event, FocusEvent, KeyCode, KeyEvent, MouseButton, MouseEvent},
-    geometry::{Point, Rect, Size},
+    geometry::{EdgeInsets, Point, Rect, Size},
     menu_model::{MenuBarModel, MenuEntry, MenuItemModel},
     renderer::PaintContext,
     views::{Menu, MenuBar, MenuItem, MenuItemContent, menu::MenuRenderObject},
@@ -71,6 +71,8 @@ pub(crate) struct WebMenu {
     hovered_bar: Option<usize>,
     pressed: Option<Hit>,
     size: Size,
+    canvas_size: Size,
+    safe_area: EdgeInsets,
     dirty: bool,
     suppress_text_until_keyup: bool,
     suppressed_release: Option<MouseButton>,
@@ -87,6 +89,8 @@ impl Default for WebMenu {
             hovered_bar: None,
             pressed: None,
             size: Size::ZERO,
+            canvas_size: Size::ZERO,
+            safe_area: EdgeInsets::ZERO,
             dirty: false,
             suppress_text_until_keyup: false,
             suppressed_release: None,
@@ -101,7 +105,8 @@ impl WebMenu {
         !self.popups.is_empty() || self.top.is_some()
     }
     pub fn owns_pointer(&self, y: i32) -> bool {
-        !self.popups.is_empty() || self.top.is_some() || (y as f32) < self.height()
+        let y = y as f32 - self.safe_area.top;
+        !self.popups.is_empty() || self.top.is_some() || (0.0..self.height()).contains(&y)
     }
     pub fn height(&self) -> f32 {
         if self.has_menu() { BAR_HEIGHT } else { 0.0 }
@@ -123,11 +128,24 @@ impl WebMenu {
         }
     }
     pub fn resize(&mut self, size: Size) {
+        self.canvas_size = size;
+        let size = Size::new(
+            (size.width - self.safe_area.left - self.safe_area.right).max(0.),
+            (size.height - self.safe_area.top - self.safe_area.bottom).max(0.),
+        );
         if self.size != size {
             self.size = size;
             self.close();
             self.rebuild_bar();
             self.dirty = self.has_menu();
+        }
+    }
+    pub fn set_safe_area_insets(&mut self, insets: EdgeInsets) {
+        if self.safe_area != insets {
+            self.safe_area = insets;
+            self.resize(self.canvas_size);
+            self.close();
+            self.dirty = true;
         }
     }
     fn rebuild_bar(&mut self) {
@@ -455,9 +473,11 @@ impl WebMenu {
             | MouseEvent::Wheel { x, y, .. } => (*x as f32, *y as f32),
             _ => return (false, None),
         };
+        let x = x - self.safe_area.left;
+        let y = y - self.safe_area.top;
         let point = Point::new(x, y);
         let hit = self.hit(point);
-        let over_menu = y < self.height()
+        let over_menu = (0.0..self.height()).contains(&y)
             || self
                 .popups
                 .iter()
@@ -548,23 +568,35 @@ impl WebMenu {
         if !self.has_menu() {
             return;
         }
+        let offset = Point::new(self.safe_area.left, self.safe_area.top);
         ctx.fill_rect(
-            Rect::from_xywh(0.0, 0.0, self.size.width, self.height()),
+            Rect::from_xywh(offset.x, offset.y, self.size.width, self.height()),
             ColorPalette::default().surface(),
         );
         ctx.fill_rect(
-            Rect::from_xywh(0.0, self.height() - 1.0, self.size.width, 1.0),
+            Rect::from_xywh(
+                offset.x,
+                offset.y + self.height() - 1.0,
+                self.size.width,
+                1.0,
+            ),
             ColorPalette::default().divider(),
         );
         if let Some(bar) = &self.bar {
             for child in bar.children() {
                 if let Some(render) = child.render_object() {
-                    render.paint(ctx, child.position());
+                    render.paint(
+                        ctx,
+                        Point::new(child.position().x + offset.x, child.position().y + offset.y),
+                    );
                 }
             }
         }
         for popup in &self.popups {
-            popup.render.paint(ctx, popup.origin);
+            popup.render.paint(
+                ctx,
+                Point::new(popup.origin.x + offset.x, popup.origin.y + offset.y),
+            );
         }
     }
 }
@@ -621,6 +653,25 @@ mod tests {
             popup.origin.x + 10.0,
             popup.origin.y + rect.origin.y + rect.size.height / 2.0,
         )
+    }
+    #[test]
+    fn safe_area_keeps_menu_paint_and_pointer_mapping_together() {
+        let mut menu = menu();
+        menu.set_safe_area_insets(EdgeInsets::new(41., 57., 43., 27.));
+        assert!(!menu.owns_pointer(12));
+        assert!(menu.owns_pointer(67));
+        assert_eq!(menu.size, Size::new(556., 396.));
+        let first = menu.bar_bounds[0];
+        let point = Point::new(first.origin.x + 41. + 5., first.origin.y + 57. + 5.);
+        assert!(mouse(&mut menu, true, point).0);
+        mouse(&mut menu, false, point);
+        assert!(menu.is_open());
+        let local = row_point(&menu, 0, 1);
+        let row = Point::new(local.x + 41., local.y + 57.);
+        mouse(&mut menu, true, row);
+        assert_eq!(mouse(&mut menu, false, row).1.as_deref(), Some("open"));
+        menu.set_safe_area_insets(EdgeInsets::ZERO);
+        assert_eq!(menu.size, Size::new(640., 480.));
     }
     #[test]
     fn no_menu_preserves_content_and_input() {
