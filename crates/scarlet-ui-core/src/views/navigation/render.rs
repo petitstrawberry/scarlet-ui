@@ -28,6 +28,7 @@ use core::cell::Cell;
 /// hover-path diff generate `Entered` and `Exited` at the sidebar boundary.
 pub struct NavigationViewRenderObject {
     safe_area_insets: EdgeInsets,
+    floating_bar_bottom_overlap: f32,
     sidebar_width: f32,
     header_height: f32,
     presentation: NavigationPresentation,
@@ -234,10 +235,15 @@ impl NavigationViewRenderObject {
             sidebar_width,
             header_height: header_height.max(0.0),
             safe_area_insets: EdgeInsets::ZERO,
+            floating_bar_bottom_overlap: 0.0,
             presentation,
             minimum_content_size,
             size: Size::ZERO,
         }
+    }
+
+    pub(crate) fn set_floating_bar_bottom_overlap(&mut self, overlap: f32) {
+        self.floating_bar_bottom_overlap = overlap;
     }
 
     /// Update navigation layout configuration.
@@ -348,11 +354,24 @@ impl ElementRenderObject for NavigationViewRenderObject {
         } else {
             0.0
         };
+        // Overlap is explicit because a generic safe area may describe an OS
+        // obstruction. Retain a 20px bottom gap, and do not change landscape.
+        let bottom_overlap = if overlay && size.height > size.width {
+            self.floating_bar_bottom_overlap
+                .min((insets.bottom - 20.0).max(0.0))
+                .min(
+                    (geometry.navigation.size.height.min(safe.size.height) - shared_bottom_margin)
+                        .max(0.0),
+                )
+        } else {
+            0.0
+        };
+        let bottom_shift = shared_bottom_margin + bottom_overlap;
         if presentation == NavigationPresentation::BottomBar {
             geometry.navigation.size.height = geometry.navigation.size.height.min(safe.size.height);
             geometry.navigation.origin =
                 Point::new(safe.left(), safe.bottom() - geometry.navigation.size.height);
-            geometry.navigation.origin.y += shared_bottom_margin;
+            geometry.navigation.origin.y += bottom_shift;
             geometry.navigation.size.width = safe.size.width;
             if !overlay {
                 geometry.content.size.height =
@@ -419,7 +438,7 @@ impl ElementRenderObject for NavigationViewRenderObject {
                     geometry.navigation.origin,
                     Size::new(
                         geometry.navigation.size.width,
-                        (geometry.navigation.size.height - shared_bottom_margin).max(0.0),
+                        (geometry.navigation.size.height - bottom_shift).max(0.0),
                     ),
                 ))
             } else {
@@ -451,7 +470,7 @@ impl ElementRenderObject for NavigationViewRenderObject {
                         - content_insets.top
                         - content_insets.bottom
                         - if overlay {
-                            geometry.navigation.size.height - shared_bottom_margin
+                            geometry.navigation.size.height - bottom_shift
                         } else {
                             0.0
                         })
@@ -1826,6 +1845,94 @@ mod tests {
                 let item = bar.glass_bottom_item(children[1].position(), index);
                 assert!(item.bottom() <= size.height - insets.bottom);
             }
+        }
+    }
+
+    #[test]
+    fn opted_in_bottom_overlap_moves_the_whole_bar_and_keeps_last_row_clear() {
+        use crate::view::View;
+        use crate::views::{Rectangle, ScrollView};
+        for (size, insets, expected_gap) in [
+            (Size::new(390., 844.), EdgeInsets::only_bottom(34.), 22.),
+            (Size::new(390., 844.), EdgeInsets::only_bottom(21.), 20.),
+            (Size::new(390., 844.), EdgeInsets::only_bottom(16.), 16.),
+            (Size::new(390., 844.), EdgeInsets::ZERO, 8.),
+            (Size::new(390., 844.), EdgeInsets::only_bottom(65.), 53.),
+            (
+                Size::new(844., 390.),
+                EdgeInsets::new(47., 0., 47., 21.),
+                21.,
+            ),
+        ] {
+            let mut children = vec![
+                ScrollView::new(Rectangle::new())
+                    .vertical()
+                    .content_size(0., 1200.)
+                    .scroll_to_index(Some(59), 20.)
+                    .create_element(),
+                floating_sidebar().create_element(),
+            ];
+            let mut render = NavigationViewRenderObject::new_with_presentation(
+                200.,
+                0.,
+                NavigationPresentation::BottomBar,
+            );
+            render.set_safe_area_insets(insets);
+            render.set_floating_bar_bottom_overlap(12.);
+            render.layout_with_children(
+                LayoutConstraints::tight(size.width, size.height),
+                &mut children,
+            );
+            let bar = children[1]
+                .render_object()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<NavigationSidebarRenderObject>()
+                .unwrap();
+            let panel = bar.glass_bottom_panel(children[1].position());
+            assert_eq!(panel.bottom(), size.height - expected_gap);
+            assert_eq!(panel.size.height, 56., "capsule must not grow or shrink");
+            assert_eq!(children[0].bounds(), Rect::new(Point::ZERO, size));
+            assert_eq!(
+                children[0].children()[0].bounds().bottom(),
+                panel.top() - 8.
+            );
+            for index in 0..bar.labels.len() {
+                let cell = bar.glass_bottom_item(Point::ZERO, index);
+                assert_eq!(
+                    bar.index_at_point(
+                        cell.left() + cell.size.width / 2.,
+                        cell.top() + cell.size.height / 2.
+                    ),
+                    Some(index)
+                );
+                assert_eq!(
+                    bar.index_at_point(cell.left() + cell.size.width / 2., cell.bottom() - 1.),
+                    Some(index)
+                );
+            }
+            assert_eq!(
+                bar.index_at_point(size.width / 2., bar.size.height + 1.),
+                None,
+                "bottom air must not become a navigation target"
+            );
+            // Removing the opt-in during reconciliation restores the original
+            // placement without changing the bar's geometry or leaving padding.
+            render.set_floating_bar_bottom_overlap(0.);
+            render.layout_with_children(
+                LayoutConstraints::tight(size.width, size.height),
+                &mut children,
+            );
+            let bar = children[1]
+                .render_object()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<NavigationSidebarRenderObject>()
+                .unwrap();
+            assert_eq!(
+                bar.glass_bottom_panel(children[1].position()).bottom(),
+                size.height - insets.bottom.max(8.)
+            );
         }
     }
 

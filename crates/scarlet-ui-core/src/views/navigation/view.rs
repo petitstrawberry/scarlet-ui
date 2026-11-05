@@ -188,6 +188,7 @@ where
     /// Width reserved when using sidebar presentation.
     sidebar_width: f32,
     sidebar_style: NavigationSidebarStyle,
+    floating_bar_bottom_overlap: f32,
     /// Requested adaptive presentation policy.
     presentation: NavigationPresentation,
     /// Smallest useful selected-content area for automatic presentation.
@@ -232,6 +233,7 @@ where
             selected_index: State::new(state_id, 0),
             sidebar_width: 200.0,
             sidebar_style: NavigationSidebarStyle::Simple,
+            floating_bar_bottom_overlap: 0.0,
             presentation: NavigationPresentation::Automatic,
             minimum_content_size: Size::new(
                 DEFAULT_MINIMUM_CONTENT_WIDTH,
@@ -265,6 +267,7 @@ where
             selected_index: navigation_selected_state(state_key),
             sidebar_width: 200.0,
             sidebar_style: NavigationSidebarStyle::Simple,
+            floating_bar_bottom_overlap: 0.0,
             presentation: NavigationPresentation::Automatic,
             minimum_content_size: Size::new(
                 DEFAULT_MINIMUM_CONTENT_WIDTH,
@@ -292,6 +295,27 @@ where
     pub fn sidebar_style(mut self, style: NavigationSidebarStyle) -> Self {
         self.sidebar_style = style;
         self
+    }
+
+    /// Allow a floating bottom bar to overlap the bottom safe area by up to
+    /// this many logical pixels in portrait layouts. Defaults to zero.
+    ///
+    /// Opt in only when the host reservation permits floating controls (for
+    /// example a Web home-indicator inset), not for arbitrary OS obstructions.
+    /// Overlap never reduces the capsule's bottom gap below 20 logical pixels;
+    /// smaller existing gaps are unchanged. Landscape, sidebar and non-floating
+    /// presentations keep their existing placement.
+    pub fn floating_bar_bottom_overlap(mut self, overlap: f32) -> Self {
+        self.floating_bar_bottom_overlap = if overlap.is_finite() {
+            overlap.max(0.0)
+        } else {
+            0.0
+        };
+        self
+    }
+
+    pub(crate) fn get_floating_bar_bottom_overlap(&self) -> f32 {
+        self.floating_bar_bottom_overlap
     }
 
     /// Return the configured sidebar treatment (simple by default).
@@ -567,6 +591,7 @@ where
             selected_index: self.selected_index.clone(),
             sidebar_width: self.sidebar_width,
             sidebar_style: self.sidebar_style,
+            floating_bar_bottom_overlap: self.floating_bar_bottom_overlap,
             presentation: self.presentation,
             minimum_content_size: self.minimum_content_size,
             shows_icons: self.shows_icons,
@@ -583,6 +608,27 @@ where
 #[cfg(test)]
 mod tests {
     use super::{NavigationPresentation, NavigationSidebarStyle, NavigationView};
+
+    #[test]
+    fn bottom_overlap_is_opt_in_cloned_and_sanitized() {
+        let view = NavigationView::new((NavigationLink::new("Home", || Text::new("Home")),));
+        assert_eq!(view.get_floating_bar_bottom_overlap(), 0.0);
+        assert_eq!(
+            view.clone()
+                .floating_bar_bottom_overlap(12.0)
+                .clone()
+                .get_floating_bar_bottom_overlap(),
+            12.0
+        );
+        for invalid in [-1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                view.clone()
+                    .floating_bar_bottom_overlap(invalid)
+                    .get_floating_bar_bottom_overlap(),
+                0.0
+            );
+        }
+    }
 
     #[test]
     fn floating_sidebar_is_opt_in_and_survives_clone() {
