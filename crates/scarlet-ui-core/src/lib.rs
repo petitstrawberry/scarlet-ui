@@ -124,7 +124,9 @@ pub use event::{
     Event, EventDispatcher, FocusEvent, GamepadButton, GamepadEvent, InputEvent, KeyCode, KeyEvent,
     LifecycleEvent, MouseButton, MouseEvent, ScrollSource, WheelPhase,
 };
-pub use geometry::{Alignment, EdgeInsets, GeometryProxy, Offset, Point, Rect, Size};
+pub use geometry::{
+    Alignment, EdgeInsets, GeometryProxy, Offset, Point, Rect, SafeAreaEdges, Size,
+};
 pub use graphics::{
     Canvas, FontStack, GlyphRasterKey, RasterizedGlyph, add_default_font_fallback,
     clear_default_font_fallbacks, default_font_stack, measure_text_sized,
@@ -156,7 +158,7 @@ pub use state::{InvalidationKind, Listenable, State, StateId, SubscriptionId, ge
 pub use view::{View, ViewExt, ViewKey};
 pub use views::modifiers::{
     AlignmentFrame, Background, Border, Clip, Focusable, Frame, OnKey, OnMouseButton, OnMouseDelta,
-    Padding, SetSize,
+    Padding, SafeArea, SetSize,
 };
 pub use views::{
     BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, HorizontalSizeClass,
@@ -216,6 +218,7 @@ pub mod prelude {
     };
     pub use crate::state::{InvalidationKind, Listenable, State, StateId, SubscriptionId};
     pub use crate::view::{View, ViewExt, ViewKey};
+    pub use crate::views::modifiers::SafeArea;
     pub use crate::views::modifiers::{
         Background, Border, Clip, Focusable, Frame, OnKey, OnMouseButton, OnMouseDelta,
         OnMouseMove, Padding,

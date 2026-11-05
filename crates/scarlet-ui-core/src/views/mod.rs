@@ -88,7 +88,8 @@ pub use modifiers::{
     AlignmentFrame, AlignmentRenderObject, Background, BackgroundRenderObject, Border,
     BorderRenderObject, Focusable, FocusableRenderObject, Frame, FrameRenderObject,
     OnGeometryChange, OnGeometryChangeRenderObject, OnKey, OnKeyRenderObject, Padding,
-    PaddingRenderObject, RepaintBoundary, RepaintBoundaryRenderObject, SetSize, SizeRenderObject,
+    PaddingRenderObject, RepaintBoundary, RepaintBoundaryRenderObject, SafeArea,
+    SafeAreaRenderObject, SetSize, SizeRenderObject,
 };
 
 // Re-export containers for convenience

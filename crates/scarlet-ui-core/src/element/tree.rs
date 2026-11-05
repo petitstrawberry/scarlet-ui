@@ -116,24 +116,10 @@ impl ElementTree {
         self.apply_safe_area_insets();
     }
 
-    // Reapply after rebuilding because reconciliation can replace the Window.
-    // Stop at the top-level Window: descendants share its inset content space.
+    // Reapply after rebuilding; layout scopes retain their own inherited value.
     pub(crate) fn apply_safe_area_insets(&mut self) {
-        fn apply(element: &mut dyn Element, insets: EdgeInsets) {
-            if let Some(window) = element.render_object_mut().and_then(|render| {
-                render
-                    .as_any_mut()
-                    .downcast_mut::<crate::views::WindowRenderObject>()
-            }) {
-                window.set_safe_area_insets(insets);
-                return;
-            }
-            for child in element.children_mut() {
-                apply(child.as_mut(), insets);
-            }
-        }
         if let Some(root) = self.root.as_deref_mut() {
-            apply(root, self.safe_area_insets);
+            root.set_safe_area_insets(self.safe_area_insets);
         }
     }
 

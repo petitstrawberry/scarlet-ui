@@ -19,7 +19,7 @@ use crate::color::{Color, ColorPalette};
 use crate::element::{
     Element, ElementId, ElementRenderObject, LayoutConstraints, UpdateResult, WindowSizeLimits,
 };
-use crate::geometry::{EdgeInsets, Point, Rect, Size};
+use crate::geometry::{EdgeInsets, Point, Rect, SafeAreaEdges, Size};
 use crate::menu_model::MenuBarModel;
 use crate::pipeline::{MountContext, PipelineId};
 use crate::platform::{WindowDecoration, WindowFrame, WindowPlacement, WindowTitleBar};
@@ -283,6 +283,7 @@ impl WindowContentLayout {
 /// Window provides window-level properties like title, size, and decorations.
 /// The content is a single View (use VStack/HStack for multiple children).
 pub struct Window<V: View> {
+    content_safe_area_edges: SafeAreaEdges,
     app_id: String,
     title: String,
     size: Size,
@@ -307,6 +308,10 @@ pub struct Window<V: View> {
 }
 
 pub trait WindowViewInfo {
+    /// Edges handled by Window before laying out its content.
+    fn content_safe_area_edges(&self) -> SafeAreaEdges {
+        SafeAreaEdges::ALL
+    }
     /// Return window metadata used by the platform window.
     ///
     /// # Returns
@@ -378,6 +383,7 @@ impl<V: View> Window<V> {
     pub fn new(title: impl Into<String>, content: V) -> Self {
         let title_str = title.into();
         Self {
+            content_safe_area_edges: SafeAreaEdges::ALL,
             app_id: String::from("com.example.scarletui"),
             title: title_str,
             size: Size::new(800.0, 600.0),
@@ -460,6 +466,14 @@ impl<V: View> Window<V> {
     /// Select who owns the window titlebar.
     pub fn window_title_bar(mut self, title_bar: WindowTitleBar) -> Self {
         self.decoration.title_bar = title_bar;
+        self
+    }
+
+    /// Choose which platform safe-area edges Window handles for its content.
+    /// Defaults to ALL. Use NONE to let NavigationView, ScrollView or SafeArea
+    /// handle reservations while their backgrounds/viewports extend edge to edge.
+    pub fn content_safe_area(mut self, edges: SafeAreaEdges) -> Self {
+        self.content_safe_area_edges = edges;
         self
     }
 
@@ -738,11 +752,15 @@ impl<V: View + Clone> Clone for Window<V> {
             scene_key: self.scene_key.clone(),
             opens_at_launch: self.opens_at_launch,
             content: self.content.clone(),
+            content_safe_area_edges: self.content_safe_area_edges,
         }
     }
 }
 
 impl<V: View + Clone> WindowViewInfo for Window<V> {
+    fn content_safe_area_edges(&self) -> SafeAreaEdges {
+        self.content_safe_area_edges
+    }
     fn window_info(&self) -> WindowInfo {
         let (surface_size, insets, shadow_elevation, _) = self.resolved_surface_presentation();
         WindowInfo::new(
@@ -805,8 +823,9 @@ impl<V: View + Clone + 'static> View for Window<V> {
     fn create_element(&self) -> Box<dyn Element> {
         // Create WindowRenderObject for the background and border.
         let window_info = self.window_info();
-        let render_object =
+        let mut render_object =
             WindowRenderObject::from_window_info(&window_info).with_deferred_backdrop();
+        render_object.content_safe_area_edges = self.content_safe_area_edges;
 
         // Create child elements. The titlebar is a separate render element so
         // content repaints do not repaint window decorations.
@@ -1459,12 +1478,16 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
         }
 
         self.view = typed_view.clone();
+        let safe_area_changed =
+            self.render_object.content_safe_area_edges != typed_view.content_safe_area_edges();
+        self.render_object.content_safe_area_edges = typed_view.content_safe_area_edges();
         let render_result = self.render_object.update_from_window_info(&window_info);
         let mount_context = self.mounted.then(|| MountContext::new(self.pipeline_id));
         let child_result =
             crate::element::update_children(&mut self.children, child_views, mount_context);
 
-        if matches!(render_result, UpdateResult::Updated)
+        if safe_area_changed
+            || matches!(render_result, UpdateResult::Updated)
             || matches!(child_result, UpdateResult::Updated)
         {
             if self.mounted {
@@ -1899,6 +1922,7 @@ impl WindowBackdrop {
 /// - Window background (WHITE or custom)
 /// - Window border (if decorated)
 pub struct WindowRenderObject {
+    content_safe_area_edges: SafeAreaEdges,
     size: Size,
     decoration: WindowDecoration,
     corner_radius: f32,
@@ -1925,6 +1949,7 @@ impl WindowRenderObject {
             background_color,
             window_geometry_insets: EdgeInsets::ZERO,
             safe_area_insets: EdgeInsets::ZERO,
+            content_safe_area_edges: SafeAreaEdges::ALL,
             shadow_elevation: ElevationRole::Flat,
             deferred_backdrop: false,
             buffer: None,
@@ -1948,6 +1973,7 @@ impl WindowRenderObject {
             background_color: info.background_color,
             window_geometry_insets: info.window_geometry_insets,
             safe_area_insets: EdgeInsets::ZERO,
+            content_safe_area_edges: SafeAreaEdges::ALL,
             shadow_elevation: info.shadow_elevation,
             deferred_backdrop: false,
             buffer: None,
@@ -1967,8 +1993,12 @@ impl WindowRenderObject {
     }
 
     fn safe_window_geometry_rect(&self) -> Rect {
+        self.window_geometry_respecting_safe_area(self.safe_area_insets)
+    }
+
+    fn window_geometry_respecting_safe_area(&self, insets: EdgeInsets) -> Rect {
         let geometry = self.window_geometry_rect(Point::ZERO);
-        let safe = crate::geometry::safe_area_rect(self.size, self.safe_area_insets);
+        let safe = crate::geometry::safe_area_rect(self.size, insets);
         let x = geometry.left().max(safe.left());
         let y = geometry.top().max(safe.top());
         Rect::from_xywh(
@@ -2378,6 +2408,13 @@ impl WindowRenderObject {
 }
 
 impl ElementRenderObject for WindowRenderObject {
+    fn set_safe_area_insets(&mut self, insets: EdgeInsets) {
+        WindowRenderObject::set_safe_area_insets(self, insets);
+    }
+
+    fn child_safe_area_insets(&self, insets: EdgeInsets) -> EdgeInsets {
+        self.content_safe_area_edges.remaining(insets)
+    }
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         let width = if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
             constraints.max_width.max(constraints.min_width)
@@ -2423,12 +2460,15 @@ impl ElementRenderObject for WindowRenderObject {
         let content_offset = content_layout.offset();
         let decoration_size = content_layout.decoration_size();
         let window_geometry = self.safe_window_geometry_rect();
-        let content_x = window_geometry.origin.x + content_offset.x;
-        let content_y = window_geometry.origin.y + content_offset.y;
+        let content_geometry = self.window_geometry_respecting_safe_area(
+            self.content_safe_area_edges.select(self.safe_area_insets),
+        );
+        let content_x = content_geometry.origin.x + content_offset.x;
+        let content_y = content_geometry.origin.y + content_offset.y;
         let content_width =
-            libm::ceilf(window_geometry.size.width - decoration_size.width).max(1.0);
+            libm::ceilf(content_geometry.size.width - decoration_size.width).max(1.0);
         let content_height =
-            libm::ceilf(window_geometry.size.height - decoration_size.height).max(1.0);
+            libm::ceilf(content_geometry.size.height - decoration_size.height).max(1.0);
 
         if crate::debug::is_enabled() {
             crate::logln!(
@@ -2443,6 +2483,7 @@ impl ElementRenderObject for WindowRenderObject {
         if self.decoration.title_bar.is_custom()
             && let Some(titlebar) = children.get_mut(0)
         {
+            titlebar.set_safe_area_insets(EdgeInsets::ZERO);
             titlebar.layout(LayoutConstraints::tight(
                 window_geometry.size.width,
                 titlebar_height() as f32,
@@ -2456,6 +2497,10 @@ impl ElementRenderObject for WindowRenderObject {
             0
         };
         if let Some(child) = children.get_mut(content_index) {
+            child.set_safe_area_insets(
+                self.content_safe_area_edges
+                    .remaining(self.safe_area_insets),
+            );
             let child_constraints = LayoutConstraints::loose(content_width, content_height);
             if crate::debug::is_enabled() {
                 crate::logln!(

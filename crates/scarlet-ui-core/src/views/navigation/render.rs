@@ -27,6 +27,7 @@ use core::cell::Cell;
 /// object. Keeping that region as a real element lets the event dispatcher's
 /// hover-path diff generate `Entered` and `Exited` at the sidebar boundary.
 pub struct NavigationViewRenderObject {
+    safe_area_insets: EdgeInsets,
     sidebar_width: f32,
     header_height: f32,
     presentation: NavigationPresentation,
@@ -232,6 +233,7 @@ impl NavigationViewRenderObject {
         Self {
             sidebar_width,
             header_height: header_height.max(0.0),
+            safe_area_insets: EdgeInsets::ZERO,
             presentation,
             minimum_content_size,
             size: Size::ZERO,
@@ -254,6 +256,14 @@ impl NavigationViewRenderObject {
 }
 
 impl ElementRenderObject for NavigationViewRenderObject {
+    fn set_safe_area_insets(&mut self, insets: EdgeInsets) {
+        self.safe_area_insets = insets;
+    }
+
+    // Navigation assigns separate reservations to content and fixed chrome.
+    fn child_safe_area_insets(&self, _insets: EdgeInsets) -> EdgeInsets {
+        EdgeInsets::ZERO
+    }
     fn update_needs_layout(&self) -> bool {
         true
     }
@@ -298,8 +308,9 @@ impl ElementRenderObject for NavigationViewRenderObject {
                 || bottom_bar_height(style::metrics().navigation_item_height),
                 NavigationSidebarRenderObject::preferred_bottom_bar_height,
             );
+        let safe = crate::geometry::safe_area_rect(size, self.safe_area_insets);
         let presentation = self.presentation.resolve_for_size(
-            size,
+            safe.size,
             self.sidebar_width,
             self.minimum_content_size,
             resolved_bottom_bar_height,
@@ -319,6 +330,40 @@ impl ElementRenderObject for NavigationViewRenderObject {
         );
         if overlay {
             geometry.content.size.height += geometry.navigation.size.height;
+        }
+        let insets = EdgeInsets::new(
+            safe.left(),
+            safe.top(),
+            (size.width - safe.right()).max(0.0),
+            (size.height - safe.bottom()).max(0.0),
+        );
+        let mut content_insets = insets;
+        if presentation == NavigationPresentation::BottomBar {
+            geometry.navigation.size.height = geometry.navigation.size.height.min(safe.size.height);
+            geometry.navigation.origin =
+                Point::new(safe.left(), safe.bottom() - geometry.navigation.size.height);
+            geometry.navigation.size.width = safe.size.width;
+            if !overlay {
+                geometry.content.size.height =
+                    (geometry.navigation.top() - geometry.content.top()).max(0.0);
+                content_insets.bottom = 0.0;
+            }
+        } else {
+            geometry.navigation.origin = Point::new(safe.left(), safe.top());
+            geometry.navigation.size.width = geometry.navigation.size.width.min(safe.size.width);
+            geometry.navigation.size.height = safe.size.height;
+            geometry.content.origin.x = geometry.navigation.right();
+            geometry.content.size.width = (size.width - geometry.content.left()).max(0.0);
+            content_insets.left = 0.0;
+            if let Some(header) = &mut geometry.header {
+                header.origin.x = geometry.content.left();
+            }
+        }
+        if let Some(header) = &mut geometry.header {
+            header.origin.x = header.origin.x.max(safe.left());
+            header.origin.y = safe.top();
+            header.size.width = (safe.right() - header.left()).max(0.0);
+            header.size.height = header.size.height.min(safe.size.height);
         }
         if let Some(navigation) = children.get_mut(navigation_index) {
             if let Some(render_object) = navigation.render_object_mut()
@@ -348,6 +393,7 @@ impl ElementRenderObject for NavigationViewRenderObject {
         }
 
         if let Some(content) = children.get_mut(content_index) {
+            content.set_safe_area_insets(content_insets);
             content.layout(LayoutConstraints::new(
                 geometry.content.size.width,
                 geometry.content.size.width,
@@ -369,13 +415,28 @@ impl ElementRenderObject for NavigationViewRenderObject {
                     geometry.content.size.height,
                 ));
             }
-            if overlay && !accepts {
+            if !accepts {
                 // Static pages still fit above chrome; scrollports extend behind it.
+                content.set_safe_area_insets(EdgeInsets::ZERO);
+                content.set_position(Point::new(
+                    geometry.content.left() + content_insets.left,
+                    geometry.content.top() + content_insets.top,
+                ));
                 content.layout(LayoutConstraints::new(
-                    geometry.content.size.width,
-                    geometry.content.size.width,
+                    (geometry.content.size.width - content_insets.left - content_insets.right)
+                        .max(0.0),
+                    (geometry.content.size.width - content_insets.left - content_insets.right)
+                        .max(0.0),
                     0.0,
-                    geometry.content.size.height - geometry.navigation.size.height,
+                    (geometry.content.size.height
+                        - content_insets.top
+                        - content_insets.bottom
+                        - if overlay {
+                            geometry.navigation.size.height
+                        } else {
+                            0.0
+                        })
+                    .max(0.0),
                 ));
             }
         }
@@ -1696,5 +1757,88 @@ mod tests {
             None
         );
         assert_eq!(render_object.index_at_point(-1.0, 10.0), None);
+    }
+
+    #[test]
+    fn safe_area_keeps_floating_chrome_safe_while_scrollport_remains_full_height() {
+        use crate::view::View;
+        use crate::views::scroll::ScrollViewRenderObject;
+        use crate::views::{Rectangle, ScrollView};
+        let scroll = ScrollView::new(Rectangle::new())
+            .vertical()
+            .content_size(0.0, 1200.0)
+            .scroll_to_index(Some(59), 20.0);
+        let mut children = vec![scroll.create_element(), floating_sidebar().create_element()];
+        let mut render = NavigationViewRenderObject::new_with_presentation(
+            200.,
+            0.,
+            NavigationPresentation::BottomBar,
+        );
+        render.set_safe_area_insets(EdgeInsets::new(13., 47., 17., 29.));
+        render.layout_with_children(LayoutConstraints::tight(400., 800.), &mut children);
+        assert_eq!(children[0].bounds(), Rect::from_xywh(0., 0., 400., 800.));
+        assert_eq!(children[1].bounds().left(), 13.);
+        assert_eq!(children[1].bounds().right(), 383.);
+        assert_eq!(children[1].bounds().bottom(), 771.);
+        assert_eq!(
+            children[0].children()[0].bounds().bottom(),
+            children[1].bounds().top(),
+            "selected final row can stop above floating bar"
+        );
+        let bar_height = children[1].bounds().size.height;
+        let scroll = children[0]
+            .render_object()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ScrollViewRenderObject<Rectangle>>()
+            .unwrap();
+        assert_eq!(scroll.content_size().height, 1200. + 47. + 29. + bar_height);
+        render.update_configuration(
+            200.,
+            0.,
+            NavigationPresentation::Sidebar,
+            Size::new(320., 0.),
+        );
+        render.layout_with_children(LayoutConstraints::tight(800., 400.), &mut children);
+        assert_eq!(children[0].bounds(), Rect::from_xywh(213., 0., 587., 400.));
+        assert_eq!(children[1].bounds(), Rect::from_xywh(13., 47., 200., 324.));
+        let scroll = children[0]
+            .render_object()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ScrollViewRenderObject<Rectangle>>()
+            .unwrap();
+        assert_eq!(
+            scroll.content_size().height,
+            1276.,
+            "old navigation overlay reservation is removed"
+        );
+    }
+
+    #[test]
+    fn static_navigation_content_remains_inside_safe_area() {
+        use crate::view::{View, ViewExt};
+        use crate::views::Rectangle;
+        let content = Rectangle::new().safe_area_padding(crate::geometry::SafeAreaEdges::ALL);
+        let mut children = vec![
+            content.create_element(),
+            floating_sidebar().create_element(),
+        ];
+        let mut render = NavigationViewRenderObject::new_with_presentation(
+            200.,
+            0.,
+            NavigationPresentation::BottomBar,
+        );
+        render.set_safe_area_insets(EdgeInsets::new(13., 47., 17., 29.));
+        render.layout_with_children(LayoutConstraints::tight(400., 800.), &mut children);
+        assert_eq!(children[0].bounds().left(), 13.);
+        assert_eq!(children[0].bounds().top(), 47.);
+        assert_eq!(children[0].bounds().right(), 383.);
+        assert!(children[0].bounds().bottom() <= children[1].bounds().top());
+        assert_eq!(
+            children[0].children()[0].position(),
+            Point::ZERO,
+            "static fallback consumes insets once"
+        );
     }
 }

@@ -8,7 +8,7 @@ use core::marker::PhantomData;
 use crate::element::{
     Element, ElementRenderObject, LayoutConstraints, RenderElement, UpdateResult,
 };
-use crate::geometry::{GeometryProxy, Size};
+use crate::geometry::{EdgeInsets, GeometryProxy, Size};
 use crate::state::Listenable;
 use crate::view::View;
 
@@ -63,6 +63,7 @@ where
 
 /// Render object that records geometry during layout and notifies afterward.
 pub struct OnGeometryChangeRenderObject<T, P, A> {
+    safe_area_insets: EdgeInsets,
     project: P,
     action: A,
     size: Size,
@@ -73,6 +74,7 @@ pub struct OnGeometryChangeRenderObject<T, P, A> {
 impl<T, P, A> OnGeometryChangeRenderObject<T, P, A> {
     fn new(project: P, action: A) -> Self {
         Self {
+            safe_area_insets: EdgeInsets::ZERO,
             project,
             action,
             size: Size::ZERO,
@@ -88,6 +90,9 @@ where
     P: Fn(GeometryProxy) -> T + 'static,
     A: Fn(T) + 'static,
 {
+    fn set_safe_area_insets(&mut self, insets: EdgeInsets) {
+        self.safe_area_insets = insets;
+    }
     fn layout(&mut self, _constraints: LayoutConstraints) -> Size {
         self.size
     }
@@ -100,7 +105,10 @@ where
         self.size = children
             .first_mut()
             .map_or(Size::ZERO, |child| child.layout(constraints));
-        let value = (self.project)(GeometryProxy::new(self.size));
+        let value = (self.project)(GeometryProxy::with_safe_area(
+            self.size,
+            self.safe_area_insets,
+        ));
         self.pending = (self.last_notified.as_ref() != Some(&value)).then_some(value);
         self.size
     }

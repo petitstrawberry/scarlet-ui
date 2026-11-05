@@ -178,6 +178,18 @@ pub trait ViewExt: View {
         crate::views::Padding::with_insets(self, insets)
     }
 
+    /// Apply unconsumed platform safe-area padding on selected edges.
+    /// Descendants receive only reservations this modifier has not handled.
+    fn safe_area_padding(
+        self,
+        edges: crate::geometry::SafeAreaEdges,
+    ) -> crate::views::modifiers::SafeArea<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::SafeArea::new(self).edges(edges)
+    }
+
     /// Add a background color behind this view
     ///
     /// # Arguments
