@@ -1,8 +1,8 @@
-const CONTOUR_LINE_TOP: f32 = 0.08;
-const CONTOUR_LINE_SIDE: f32 = 0.16;
-const CONTOUR_NEAR_TOP: f32 = 2.5;
-const CONTOUR_NEAR_SIDE: f32 = 3.5;
-const CONTOUR_NEAR_STRENGTH: f32 = 0.04;
+const CONTOUR_LINE_TOP: f32 = 0.11;
+const CONTOUR_LINE_SIDE: f32 = 0.20;
+const CONTOUR_NEAR_TOP: f32 = 1.75;
+const CONTOUR_NEAR_SIDE: f32 = 2.5;
+const CONTOUR_NEAR_STRENGTH: f32 = 0.06;
 struct Parameters {
     rect: vec4<f32>,
     extent: vec4<f32>,

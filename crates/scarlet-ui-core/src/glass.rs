@@ -6,12 +6,12 @@
 use crate::geometry::{Point, Rect};
 use core::sync::atomic::{AtomicU8, Ordering};
 
-// Layer review A: retain soft light, a smooth near-edge shadow, and a fine contour.
-const CONTOUR_LINE_TOP: f32 = 0.08;
-const CONTOUR_LINE_SIDE: f32 = 0.16;
-const CONTOUR_NEAR_TOP: f32 = 2.5;
-const CONTOUR_NEAR_SIDE: f32 = 3.5;
-const CONTOUR_NEAR_STRENGTH: f32 = 0.04;
+// Layer review C: tighten the near-edge stage while preserving the outer drop shadow.
+const CONTOUR_LINE_TOP: f32 = 0.11;
+const CONTOUR_LINE_SIDE: f32 = 0.20;
+const CONTOUR_NEAR_TOP: f32 = 1.75;
+const CONTOUR_NEAR_SIDE: f32 = 2.5;
+const CONTOUR_NEAR_STRENGTH: f32 = 0.06;
 
 /// Application-wide quality ceiling for built-in glass materials.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

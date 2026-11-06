@@ -756,7 +756,7 @@ impl Tessellator {
             }
         };
         // Calculate outside mutable borrowing of the tessellator.
-        let mut rings = [[Vertex::solid(Point2::new(0.0, 0.0)); 100]; 11];
+        let mut rings = [[Vertex::solid(Point2::new(0.0, 0.0)); 100]; 13];
         for i in 0..100 {
             let angle =
                 core::f32::consts::PI * (-1. + (i / 25) as f32 * 0.5 + (i % 25) as f32 / 48.);
@@ -790,9 +790,11 @@ impl Tessellator {
             let zero = (lo + hi) * 0.5;
             let mut distances = [
                 (0., 0),
+                (width * 0.25, 0),
                 (width * 0.5, 0),
                 (width, 0),
                 ((line_width - half_pixel).max(0.), 0),
+                (line_width, 0),
                 (zero, 1),
                 (zero, 2),
                 ((line_width + half_pixel).min(bezel), 0),
@@ -811,7 +813,7 @@ impl Tessellator {
                 rings[ring][i] = v;
             }
         }
-        for ring in 0..10 {
+        for ring in 0..12 {
             for i in 0..100 {
                 let next = (i + 1) % 100;
                 self.push_triangle([rings[ring][i], rings[ring][next], rings[ring + 1][next]])?;
