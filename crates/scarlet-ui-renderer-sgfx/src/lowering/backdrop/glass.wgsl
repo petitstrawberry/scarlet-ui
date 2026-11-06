@@ -97,8 +97,8 @@ fn specular_lobe(cosine: f32) -> f32 {
     let fade = clamp(1.0 - max(e.x, 0.0) / width, 0.0, 1.0);
     let line_light = (0.34 - 0.06 * max(-e.z, 0.0)) * e.z * e.z;
     let shoulder = surface + line_light * fade * fade * (3.0 - 2.0 * fade);
-    let top_pixels = max(floor(scale + 0.5), 1.0);
-    let side_pixels = max(floor(2.0 * scale + 0.5), top_pixels + 1.0);
+    let top_pixels = max(floor(scale * 0.5 + 0.5), 1.0);
+    let side_pixels = max(floor(scale + 0.5), top_pixels + 1.0);
     let line_width = min(top_pixels + (side_pixels - top_pixels) * side, bezel);
     let line = clamp(line_width - max(e.x, 0.0) + 0.5, 0.0, 1.0);
     let reflection = (shoulder * (1.0 - line) - opacity * CONTOUR_SHADOW_GAIN * line) * p.optics.y;

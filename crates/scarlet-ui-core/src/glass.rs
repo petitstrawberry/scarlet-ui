@@ -139,8 +139,8 @@ pub fn glass_contour_edge(inward_x: f32, inward_y: f32) -> (f32, f32) {
 #[doc(hidden)]
 pub fn glass_contour_width(inward_x: f32, scale: f32) -> f32 {
     let scale = scale.max(0.001);
-    let top = libm::roundf(scale).max(1.);
-    let side = libm::roundf(2. * scale).max(top + 1.);
+    let top = libm::roundf(scale * 0.5).max(1.);
+    let side = libm::roundf(scale).max(top + 1.);
     (top + (side - top) * inward_x * inward_x) / scale
 }
 
@@ -244,6 +244,16 @@ mod tests {
                 reflection(2.) > 0.,
                 "the broad shoulder still carries light"
             );
+        }
+    }
+    #[test]
+    fn shadow_widths_remain_distinct_in_device_pixels() {
+        for scale in [0.75, 1., 1.25, 1.5, 2., 3.] {
+            let top = glass_contour_width(0., scale) * scale;
+            let side = glass_contour_width(1., scale) * scale;
+            assert_eq!(top, libm::roundf(top));
+            assert_eq!(side, libm::roundf(side));
+            assert!(top >= 1. && side >= top + 1.);
         }
     }
     #[test]
