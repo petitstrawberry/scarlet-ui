@@ -2,12 +2,12 @@
 //!
 //! A standalone widget showcase application built with ScarletUI.
 //! Displays all available widgets across multiple navigation pages
-//! (Overview, Controls, Inputs, Display).
+//! (Overview, Controls, Inputs, Display, SGFX).
 
-use scarlet_ui::NavigationLink;
 use scarlet_ui::hstack;
 use scarlet_ui::prelude::*;
 use scarlet_ui::vstack;
+use scarlet_ui::{NavigationLink, NavigationView};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -977,10 +977,71 @@ impl WidgetFactory {
         .alignment(Alignment::Leading)
     }
 
+    fn page_header(title: &'static str, icon: Icon) -> NavigationHeader {
+        NavigationHeader::new(move || {
+            HeaderBar::new(
+                hstack![
+                    IconView::new(icon).size(IconSize::Medium),
+                    Text::new(title).text_style(TextStyle::Headline),
+                    Spacer::new(),
+                ]
+                .spacing(10.0)
+                .padding(12.0),
+            )
+            .height(48.0)
+            .padding(8.0)
+        })
+        .automatic_height()
+    }
+
+    fn navigation(
+        &self,
+    ) -> NavigationView<(
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+    )> {
+        let overview = self.clone();
+        let sgfx = self.clone();
+        let controls = self.clone();
+        let inputs = self.clone();
+        let display = self.clone();
+        scarlet_ui::navigation! {
+            NavigationLink::new("Overview", move || overview.overview_page())
+                .icon(Icon::Home)
+                .custom_header(Self::page_header("Widget Factory", Icon::Home)),
+            NavigationLink::new("Controls", move || controls.controls_page())
+                .icon(Icon::Adjustments)
+                .custom_header(Self::page_header("Controls", Icon::Adjustments)),
+            NavigationLink::new("Inputs", move || inputs.inputs_page())
+                .icon(Icon::FileText)
+                .custom_header(Self::page_header("Inputs", Icon::FileText)),
+            NavigationLink::new("Display", move || display.display_page())
+                .icon(Icon::Photo)
+                .custom_header(Self::page_header("Display", Icon::Photo)),
+            NavigationLink::new("SGFX", move || sgfx.sgfx_page())
+                .icon(Icon::Package)
+                .custom_header(Self::page_header("SGFX", Icon::Package)),
+        }
+        .presentation(NavigationPresentation::Automatic)
+        .floating_bar_bottom_overlap(if cfg!(target_arch = "wasm32") {
+            12.0
+        } else {
+            0.0
+        })
+        .shows_icons(true)
+        .sidebar_width(Self::SIDEBAR_WIDTH)
+        .minimum_content_size(Size::new(Self::MIN_CONTENT_WIDTH, 0.0))
+        // ScrollView consumes this reservation once; do not add page top insets.
+        .overlay_header(true)
+        .header_leading_overlap(8.0)
+    }
+
     fn overview_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
-            Text::new("Widget Factory").text_style(TextStyle::Title),
-            Text::new("PaintCommand default rendering").text_style(TextStyle::Callout).tone(TextTone::Secondary),
+            Text::new("Native controls and Bubble Glass.").text_style(TextStyle::Callout).tone(TextTone::Secondary),
             self.row("ProgressView", self.progress()),
             self.row("Rectangle", self.rectangle()),
             self.row("Divider", self.divider()),
@@ -995,7 +1056,6 @@ impl WidgetFactory {
 
     fn sgfx_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
-            Text::new("SGFX").text_style(TextStyle::Title),
             Text::new("SGFX retained canvas").text_style(TextStyle::Callout).tone(TextTone::Secondary),
             self.sgfx_cube(),
         }
@@ -1062,7 +1122,6 @@ impl WidgetFactory {
             )
         };
         vstack![
-            Text::new("Control study").text_style(TextStyle::Title),
             Text::new("Buttons, inputs and menus with a shared material.")
                 .text_style(TextStyle::Callout)
                 .tone(TextTone::Secondary),
@@ -1139,7 +1198,6 @@ impl WidgetFactory {
 
     fn inputs_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
-            Text::new("Inputs").text_style(TextStyle::Title),
             self.row("TextField", self.text_field()),
             self.row("Select", self.select()),
             self.row("Slider", self.slider()),
@@ -1179,7 +1237,6 @@ impl WidgetFactory {
 
     fn display_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
-            Text::new("Display").text_style(TextStyle::Title),
             self.row(
                 "Text",
                 vstack![
@@ -1251,39 +1308,13 @@ impl Application for WidgetFactory {
     }
 
     fn scenes(&self) -> impl Scene {
-        let overview = self.clone();
-        let sgfx = self.clone();
-        let controls = self.clone();
-        let inputs = self.clone();
-        let display = self.clone();
         let viewport = self.viewport.clone();
 
         WindowGroup::new(
             "main",
             Window::new(
                 "Widget Factory",
-                scarlet_ui::navigation! {
-                    NavigationLink::new("Overview", move || overview.overview_page())
-                        .icon(Icon::Home),
-                    NavigationLink::new("Controls", move || controls.controls_page())
-                        .icon(Icon::Adjustments),
-                    NavigationLink::new("Inputs", move || inputs.inputs_page())
-                        .icon(Icon::FileText),
-                    NavigationLink::new("Display", move || display.display_page())
-                        .icon(Icon::Photo),
-                    NavigationLink::new("SGFX", move || sgfx.sgfx_page())
-                        .icon(Icon::Package),
-                }
-                .presentation(NavigationPresentation::Automatic)
-                .floating_bar_bottom_overlap(if cfg!(target_arch = "wasm32") {
-                    12.0
-                } else {
-                    0.0
-                })
-                .shows_icons(true)
-                .sidebar_width(Self::SIDEBAR_WIDTH)
-                .minimum_content_size(Size::new(Self::MIN_CONTENT_WIDTH, 0.0))
-                .on_geometry_change(
+                self.navigation().on_geometry_change(
                     |geometry| {
                         let size = geometry.size();
                         let safe = geometry.safe_area_insets();
@@ -1470,6 +1501,110 @@ mod tests {
     use super::*;
     use scarlet_ui::event::Phase;
     use scarlet_ui::views::SplitViewRenderObject;
+
+    #[test]
+    fn navigation_headers_fit_safe_areas_and_stay_fixed_while_pages_scroll() {
+        use scarlet_ui::views::{HeaderBarRenderObject, navigation::NavigationViewRenderObject};
+        fn find<T: 'static>(element: &dyn Element) -> Option<&dyn Element> {
+            if element
+                .render_object()
+                .is_some_and(|r| r.as_any().is::<T>())
+            {
+                return Some(element);
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| find::<T>(child.as_ref()))
+        }
+        fn bounds<T: 'static>(element: &dyn Element, parent: Point) -> Option<Rect> {
+            let origin = Point::new(
+                parent.x + element.position().x,
+                parent.y + element.position().y,
+            );
+            if element
+                .render_object()
+                .is_some_and(|r| r.as_any().is::<T>())
+            {
+                return Some(Rect::new(origin, element.bounds().size));
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| bounds::<T>(child.as_ref(), origin))
+        }
+        let app = WidgetFactory::new();
+        for width in [375., 390., 549., 550., 562., 860., 1200.] {
+            for safe in [EdgeInsets::ZERO, EdgeInsets::new(12., 32., 18., 34.)] {
+                app.viewport.set(Size::new(
+                    width - safe.left - safe.right,
+                    640. - safe.top - safe.bottom,
+                ));
+                for selected in 0..5 {
+                    let navigation = app.navigation();
+                    navigation.selected_index_state().set(selected);
+                    let mut root = navigation.create_element();
+                    root.set_safe_area_insets(safe);
+                    root.layout(LayoutConstraints::tight(width, 640.));
+                    let header =
+                        bounds::<HeaderBarRenderObject>(root.as_ref(), Point::ZERO).unwrap();
+                    assert_eq!(header.top(), safe.top + 8.);
+                    assert_eq!(header.size.height, 48.);
+                    let sidebar = app.viewport.get().width
+                        >= WidgetFactory::SIDEBAR_WIDTH + WidgetFactory::MIN_CONTENT_WIDTH;
+                    let expected_left = safe.left
+                        + if sidebar {
+                            WidgetFactory::SIDEBAR_WIDTH
+                        } else {
+                            8.
+                        };
+                    assert_eq!(header.left(), expected_left);
+                    assert_eq!(header.right(), width - safe.right - 8.);
+                    let page = bounds::<FactoryPageLayout>(root.as_ref(), Point::ZERO).unwrap();
+                    assert_eq!(
+                        page.top(),
+                        safe.top + 64.,
+                        "reserve the measured header exactly once"
+                    );
+                    assert_eq!(page.size.width, app.content_width());
+                    let nav = find::<NavigationViewRenderObject>(root.as_ref()).unwrap();
+                    // Content, header, navigation: chrome stays on a separate plane.
+                    assert_eq!(nav.children().len(), 3);
+                    let nav_id = nav.id();
+                    fn scroll(element: &mut dyn Element, nav_id: scarlet_ui::ElementId) {
+                        if element.id() == nav_id {
+                            element.children_mut()[0].handle_event(
+                                &Event::Mouse(MouseEvent::Wheel {
+                                    delta_x: 0,
+                                    delta_y: -10_000,
+                                    x: 4,
+                                    y: 120,
+                                    phase: scarlet_ui::event::WheelPhase::Started,
+                                    source: scarlet_ui::event::ScrollSource::Trackpad,
+                                }),
+                                Phase::Target,
+                            );
+                        } else {
+                            for child in element.children_mut() {
+                                scroll(child.as_mut(), nav_id);
+                            }
+                        }
+                    }
+                    scroll(root.as_mut(), nav_id);
+                    let after = bounds::<FactoryPageLayout>(root.as_ref(), Point::ZERO).unwrap();
+                    assert!(after.top() <= page.top());
+                    assert!(
+                        after.bottom() <= 640. - safe.bottom + 0.5,
+                        "last row remains reachable"
+                    );
+                    assert_eq!(
+                        bounds::<HeaderBarRenderObject>(root.as_ref(), Point::ZERO),
+                        Some(header)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn layout_gallery_keeps_glass_tabs_without_the_diagnostic_backdrop() {
@@ -2208,6 +2343,14 @@ mod tests {
             editor_id(&pipeline).is_none(),
             "first click must replace Inputs with Display"
         );
+        let document = app.text_document.get().as_str().into_owned();
+        let inputs = sidebar_label(&pipeline, "Inputs");
+        click(&mut pipeline, inputs);
+        assert!(
+            editor_id(&pipeline).is_some(),
+            "return navigation restores Inputs"
+        );
+        assert_eq!(app.text_document.get().as_str().into_owned(), document);
     }
 
     #[test]

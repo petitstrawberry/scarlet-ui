@@ -168,3 +168,19 @@ Idle thumbs deliberately have no fixed gloss line, outline or specular decoratio
 CPU shadows make the white slider thumb visible on white; the earlier preview
 without shadow rendering is obsolete. The material direction remains under
 review rather than accepted as complete.
+
+## Factory navigation headers
+
+Each Widget Factory destination owns a `NavigationHeader` containing a stock
+`HeaderBar`, with an icon and title. The bar uses the default Bubble Glass
+appearance, a 48-point height and an explicit 8-point outer margin; navigation
+measures the resulting 64-point slot. Page bodies contain the demonstrations
+and supporting copy rather than a second page title.
+
+`overlay_header(true)` keeps the title fixed while the page scrolls beneath it.
+The page's `ScrollView` consumes the forwarded safe-area reservation once, so
+its first row starts below the header and its last row stays reachable above
+bottom navigation. The same structure supports narrow bottom navigation and
+wide sidebars. The 8-point leading overlap shares only transparent header and
+sidebar spacing. No extra `ContentShell` or manual header-height subtraction is
+needed.
