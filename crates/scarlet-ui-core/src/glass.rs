@@ -6,8 +6,8 @@
 use crate::geometry::{Point, Rect};
 use core::sync::atomic::{AtomicU8, Ordering};
 
-// Contour review A: keep shadow strength, separate the line from the soft light.
-const CONTOUR_SHADOW_GAIN: f32 = 1.0;
+// Contour review C: strengthen the separated shadow by 50 percent.
+const CONTOUR_SHADOW_GAIN: f32 = 1.5;
 
 /// Application-wide quality ceiling for built-in glass materials.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
