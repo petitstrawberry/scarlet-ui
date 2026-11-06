@@ -510,13 +510,16 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                     self.full_redraw_required = true;
                     return Err(Error::FrameNotPresented(RenderFailure {
                         kind: RenderFailureKind::Busy,
-                        reason: "SWS rejected a queued frame while its presentation queue was full".into(),
+                        reason: "SWS rejected a queued frame while its presentation queue was full"
+                            .into(),
                     }));
                 }
-                Err(source) => return Err(Error::Sink {
-                    stage: Stage::WaitForRelease,
-                    source,
-                }),
+                Err(source) => {
+                    return Err(Error::Sink {
+                        stage: Stage::WaitForRelease,
+                        source,
+                    });
+                }
             }
         }
         #[cfg(feature = "std")]

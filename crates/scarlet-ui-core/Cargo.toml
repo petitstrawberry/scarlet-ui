@@ -28,7 +28,7 @@ unicode-script = { version = "0.5.8", default-features = false, optional = true 
 [target.'cfg(target_os = "scarlet")'.dependencies]
 fontique = { git = "https://github.com/linebender/parley", rev = "dbcdc7d214f28fb7ec16bb17b34bf0aeb85d0fc7", default-features = false, features = ["std"], optional = true }
 
-[target.'cfg(not(target_os = "scarlet"))'.dependencies]
+[target.'cfg(all(not(target_os = "scarlet"), not(target_arch = "wasm32")))'.dependencies]
 fontique = { git = "https://github.com/linebender/parley", rev = "dbcdc7d214f28fb7ec16bb17b34bf0aeb85d0fc7", default-features = false, features = ["system"], optional = true }
 
 [dev-dependencies]
@@ -39,3 +39,7 @@ syn = { version = "2.0", default-features = false, features = ["derive"] }
 [lib]
 name = "scarlet_ui_core"
 path = "src/lib.rs"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+wasm-bindgen-futures = "0.4"

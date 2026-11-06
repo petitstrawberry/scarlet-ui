@@ -11,6 +11,7 @@ mod frame;
 mod geometry;
 mod padding;
 mod repaint_boundary;
+mod safe_area;
 mod size;
 
 pub use alignment::{AlignmentFrame, AlignmentRenderObject};
@@ -27,4 +28,5 @@ pub use frame::{Frame, FrameRenderObject};
 pub use geometry::{OnGeometryChange, OnGeometryChangeRenderObject};
 pub use padding::{Padding, PaddingRenderObject};
 pub use repaint_boundary::{RepaintBoundary, RepaintBoundaryRenderObject};
+pub use safe_area::{SafeArea, SafeAreaRenderObject};
 pub use size::{SetSize, SizeRenderObject};

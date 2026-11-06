@@ -247,6 +247,14 @@ pub trait Application: Clone + 'static {
     /// Handle window resize event.
     fn on_window_resize(&mut self, _ctx: &WindowContext, _width: u32, _height: u32) {}
 
+    /// The platform's reserved edges changed independently of surface size.
+    fn on_window_safe_area_changed(
+        &mut self,
+        _ctx: &WindowContext,
+        _insets: crate::geometry::EdgeInsets,
+    ) {
+    }
+
     /// Handle display size change event.
     fn on_screen_size_changed(&mut self, _width: u32, _height: u32) -> Option<Size> {
         None
@@ -374,6 +382,42 @@ impl ApplicationRunner {
         self.run_loop(app, &mut slots)
     }
 
+    /// Own an application and prepare a non-blocking tick callback.
+    ///
+    /// Event-driven platforms call it once per frame and stop on `None` or error.
+    /// Initialization and scene subscriptions match [`Self::run`], but this path
+    /// never enters the backend's blocking event loop. The callback owns the
+    /// application, windows, and dialog cleanup guard until it is dropped.
+    /// Calls after termination return `None` without invoking application hooks.
+    pub fn into_tick<A: Application + View>(
+        mut self,
+        mut app: A,
+    ) -> Result<impl FnMut() -> Result<Option<Duration>> + 'static> {
+        let guard = crate::file_dialog::RunnerDialogGuard;
+        crate::debug::set_enabled(app.debug_logging());
+        crate::debug::set_wheel_log_enabled(wheel_log_env_enabled());
+        crate::platform::install_platform_window_defaults(self.backend.window_defaults());
+        install_input_environment(self.backend.initial_input_environment());
+        app.init();
+        let declarations = collect_scene_declarations(&app)?
+            .into_iter()
+            .find(|declaration| declaration.opens_at_launch)
+            .into_iter()
+            .collect();
+        let mut slots = self.create_slots(&mut app, declarations)?;
+        let mut state = RunnerLoopState::new();
+        let mut finished = false;
+        Ok(move || {
+            let _ = &guard;
+            if finished {
+                return Ok(None);
+            }
+            let result = Self::run_cycle(self.backend.as_mut(), &mut app, &mut slots, &mut state);
+            finished = !matches!(result, Ok(Some(_)));
+            result
+        })
+    }
+
     fn create_slots<A: Application + View>(
         &mut self,
         app: &mut A,
@@ -443,6 +487,7 @@ impl ApplicationRunner {
 
         let mut window = backend.create_window(request)?;
         sync_output_scale(&mut pipeline, window.as_ref());
+        pipeline.set_safe_area_insets(window.safe_area_insets());
         let negotiated_size = window.size();
         if negotiated_size != window_info.size {
             pipeline.resize(negotiated_size);
@@ -613,6 +658,8 @@ impl ApplicationRunner {
                 && frame_granted
             {
                 let presentation = present_window(app, slot)?;
+                // Layout/scroll during presentation may move the focused caret.
+                sync_text_input(slot.window.as_mut(), &slot.pipeline);
                 match presentation {
                     Presentation::Cpu => {
                         slot.presented_this_cycle = true;
@@ -769,6 +816,7 @@ struct WindowSlot<A: Application> {
 #[derive(Default)]
 struct WindowMenuSync {
     desired_json: String,
+    desired_model: Option<menu_model::MenuBarModel>,
     published_json: Option<String>,
 }
 
@@ -787,6 +835,10 @@ impl WindowMenuSync {
             menu_model::unregister_menu_callbacks(window.surface_id());
             self.desired_json.clear();
         }
+        self.desired_model = menu.cloned();
+        if window.wants_menu_model_updates() {
+            self.published_json = None;
+        }
         self.publish(window);
     }
 
@@ -795,10 +847,16 @@ impl WindowMenuSync {
             // Failure leaves the remote state unknown: it may have applied the
             // update before the reply was lost. Even reverting to the previous
             // model must therefore be published again.
-            self.published_json = window
-                .set_menu_titles(&self.desired_json)
-                .ok()
-                .map(|()| self.desired_json.clone());
+            let result = if window.wants_menu_model_updates() {
+                window.set_menu_model(
+                    self.desired_model
+                        .as_ref()
+                        .unwrap_or(&menu_model::MenuBarModel::default()),
+                )
+            } else {
+                window.set_menu_titles(&self.desired_json)
+            };
+            self.published_json = result.ok().map(|()| self.desired_json.clone());
         }
     }
 }
@@ -1023,6 +1081,13 @@ fn sync_application_window<A: Application>(app: &mut A, slot: &mut WindowSlot<A>
     app.on_window_sync(&slot.context, slot.window.as_mut());
     let size = slot.window.size();
     sync_output_scale(&mut slot.pipeline, slot.window.as_ref());
+    if slot
+        .pipeline
+        .set_safe_area_insets(slot.window.safe_area_insets())
+    {
+        slot.frame_ready = true;
+        app.on_window_safe_area_changed(&slot.context, slot.pipeline.safe_area_insets());
+    }
     if size.width > 0.0 && size.height > 0.0 && size != slot.pipeline.window_size() {
         // Compare with the rendered extent, not two native size reads around
         // the application hook. The native surface may have changed before
@@ -1095,6 +1160,12 @@ fn handle_window_event<A: Application>(
                 sync_text_input(slot.window.as_mut(), &slot.pipeline);
             }
         }
+        Event::SafeAreaChanged { insets } => {
+            if slot.pipeline.set_safe_area_insets(insets) {
+                slot.frame_ready = true;
+                app.on_window_safe_area_changed(&slot.context, slot.pipeline.safe_area_insets());
+            }
+        }
         Event::FullscreenChanged { fullscreen } => {
             app.on_window_fullscreen_changed(&slot.context, fullscreen);
         }
@@ -1142,6 +1213,10 @@ fn handle_window_event<A: Application>(
             menu_item_id,
         } => {
             let _ = menu_model::invoke_menu_callback(window_id, &menu_item_id);
+        }
+        Event::TextInputSelection { .. } => {
+            slot.pipeline.handle_event(&event);
+            sync_after_event(slot)?;
         }
         Event::TextInputCommit {
             context_id,
@@ -1949,6 +2024,7 @@ mod tests {
         presents: [Vec<InputEnvironment>; 2],
         present_sizes: [Vec<(u32, u32)>; 2],
         resize_requests: [Vec<(u32, u32)>; 2],
+        safe_areas: [crate::geometry::EdgeInsets; 2],
         applied_resizes: [Vec<(u32, u32)>; 2],
         native_drive: bool,
         native_ticks: usize,
@@ -1969,6 +2045,8 @@ mod tests {
         dialog_cancels: Vec<usize>,
         dialog_focuses: Vec<usize>,
         menu_updates: [Vec<String>; 2],
+        model_updates: [Vec<String>; 2],
+        use_menu_models: bool,
         menu_failures_remaining: [usize; 2],
         menu_surface_id_offset: u32,
     }
@@ -2159,6 +2237,10 @@ mod tests {
             self.size
         }
 
+        fn safe_area_insets(&self) -> crate::geometry::EdgeInsets {
+            self.probe.borrow().safe_areas[self.index]
+        }
+
         fn resize(&mut self, width: u32, height: u32) -> Result<()> {
             self.probe.borrow_mut().resize_requests[self.index].push((width, height));
             self.size = Size::new(width as f32, height as f32);
@@ -2248,6 +2330,24 @@ mod tests {
             Ok(())
         }
 
+        fn wants_menu_model_updates(&self) -> bool {
+            self.probe.borrow().use_menu_models
+        }
+
+        fn set_menu_model(&mut self, model: &menu_model::MenuBarModel) -> Result<()> {
+            if !self.wants_menu_model_updates() {
+                return self.set_menu_titles(&model.to_json());
+            }
+            let mut probe = self.probe.borrow_mut();
+            probe.model_updates[self.index].push(model.to_json());
+            if probe.menu_failures_remaining[self.index] > 0 {
+                probe.menu_failures_remaining[self.index] -= 1;
+                Err(Error::ConnectionFailed)
+            } else {
+                Ok(())
+            }
+        }
+
         fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()> {
             let mut probe = self.probe.borrow_mut();
             probe.menu_updates[self.index].push(menu_titles.into());
@@ -2258,6 +2358,32 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    #[test]
+    fn web_menu_models_refresh_retry_and_clear_without_the_native_json_bridge() {
+        use crate::menu_model::{MenuBarModel, MenuItemModel};
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        probe.borrow_mut().use_menu_models = true;
+        probe.borrow_mut().menu_failures_remaining[0] = 1;
+        let mut window = EnvironmentTestWindow {
+            index: 0,
+            size: Size::new(120.0, 80.0),
+            probe: probe.clone(),
+        };
+        let model = MenuBarModel::new(vec![MenuItemModel::new("file", "File")]);
+        let mut sync = WindowMenuSync::default();
+        sync.refresh(&mut window, Some(&model));
+        assert!(sync.published_json.is_none());
+        sync.publish(&mut window);
+        assert!(sync.published_json.is_some());
+        // Same JSON still refreshes the backend's retained model, as main requires.
+        sync.refresh(&mut window, Some(&model));
+        sync.refresh(&mut window, None);
+        assert!(probe.borrow().menu_updates[0].is_empty());
+        let updates = &probe.borrow().model_updates[0];
+        assert_eq!(updates.len(), 4);
+        assert_eq!(updates.last().unwrap(), &MenuBarModel::default().to_json());
     }
 
     #[derive(Clone, Default)]
@@ -2427,6 +2553,10 @@ mod tests {
     fn declarative_menu_sync_removes_readds_and_isolates_windows() {
         let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
         let (mut app, received) = menu_runtime_app();
+        // Main deliberately does not register disabled menu commands.
+        for document in &app.documents {
+            document.update(|snapshot| snapshot.can_undo = true);
+        }
         let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
         let mut runner = menu_runtime_runner(probe.clone());
         let declarations = collect_scene_declarations(&app).unwrap();
@@ -2712,6 +2842,49 @@ mod tests {
             );
             assert_eq!(app.shutdowns.get(), 1);
         }
+    }
+
+    #[test]
+    fn owned_tick_selects_launch_scene_and_shuts_down_only_once() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        for (launch, expected) in [
+            ([true, true], Some("one")),
+            ([false, true], Some("two")),
+            ([false, false], None),
+        ] {
+            let app = SceneContractApp::new(launch);
+            let observed = app.clone();
+            let mut tick = scene_contract_runner().into_tick(app).unwrap();
+            assert_eq!(observed.shutdowns.get(), 0);
+            assert_eq!(
+                observed
+                    .created
+                    .borrow()
+                    .first()
+                    .map(|ctx| ctx.scene_key.as_str()),
+                expected
+            );
+            // This application's idle hook dismisses its window; empty scenes
+            // terminate on the same first tick without ever blocking.
+            assert!(tick().unwrap().is_none());
+            assert_eq!(observed.shutdowns.get(), 1);
+            assert!(tick().unwrap().is_none());
+            assert_eq!(observed.shutdowns.get(), 1);
+        }
+    }
+
+    #[test]
+    fn owned_tick_rejects_duplicate_scenes_before_creating_windows() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let mut app = SceneContractApp::new([true, true]);
+        app.keys = ["same", "same"];
+        let observed = app.clone();
+        assert!(matches!(
+            scene_contract_runner().into_tick(app),
+            Err(Error::DuplicateSceneWindowKey)
+        ));
+        assert!(observed.created.borrow().is_empty());
+        assert_eq!(observed.shutdowns.get(), 0);
     }
 
     #[test]
@@ -3153,6 +3326,40 @@ mod tests {
         // An explicit application request still uses the native request path.
         slot.window.resize(900, 600).unwrap();
         assert_eq!(probe.borrow().resize_requests[0], [(900, 600)]);
+    }
+
+    #[test]
+    fn safe_area_notifications_and_queries_relayout_without_requesting_resize() {
+        use crate::geometry::EdgeInsets;
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        probe.borrow_mut().safe_areas[0] = EdgeInsets::only_top(39.);
+        let mut app = RenderFailureApp(Rc::new(RefCell::new(Vec::new())));
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: probe.clone(),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slot = runner.create_slot(&mut app, declaration, true).unwrap();
+        assert_eq!(slot.pipeline.safe_area_insets(), EdgeInsets::only_top(39.));
+        let original_size = slot.pipeline.window_size();
+        let changed = EdgeInsets::new(47., 0., 49., 21.);
+        probe.borrow_mut().safe_areas[0] = changed;
+        slot.frame_ready = false;
+        handle_window_event(
+            &mut app,
+            &mut slot,
+            Event::SafeAreaChanged { insets: changed },
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(slot.frame_ready);
+        assert_eq!(slot.pipeline.safe_area_insets(), changed);
+        assert_eq!(slot.pipeline.window_size(), original_size);
+        probe.borrow_mut().safe_areas[0] = EdgeInsets::ZERO;
+        sync_application_window(&mut app, &mut slot);
+        assert_eq!(slot.pipeline.safe_area_insets(), EdgeInsets::ZERO);
+        assert!(probe.borrow().resize_requests[0].is_empty());
     }
 
     #[test]

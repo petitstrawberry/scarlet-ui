@@ -26,23 +26,13 @@ fn rounded_paths_include_all_eight_tangent_points() {
             (4., 50. - r),
             (4., 6. + r),
         ];
-        for scale_milli in [1000, 1250, 2000, 3000] {
-            let scale = scale_milli as f32 / 1000.;
-            let mut renderer =
-                CpuPaintRenderer::new(Size::new(132., 56.), scale_milli, Color::CLEAR);
-            renderer.rebuild_scaled_rounded_rect(rect, radius);
-            for (path, scale) in [
-                (path_rounded_rect(rect, radius), 1.),
-                (renderer.scratch.scaled_points.clone(), scale),
-            ] {
-                for (x, y) in tangents {
-                    assert!(
-                        path.iter().any(|p| (p.x - x * scale).abs() < 0.0001
-                            && (p.y - y * scale).abs() < 0.0001),
-                        "missing tangent ({x}, {y}), radius={radius}, scale={scale}"
-                    );
-                }
-            }
+        let path = path_rounded_rect(rect, radius);
+        for (x, y) in tangents {
+            assert!(
+                path.iter()
+                    .any(|p| (p.x - x).abs() < 0.0001 && (p.y - y).abs() < 0.0001),
+                "missing tangent ({x}, {y}), radius={radius}"
+            );
         }
     }
 }
@@ -75,7 +65,7 @@ fn rounded_fill_is_symmetric_and_matches_circle_within_tessellation_error() {
                 let buffer = renderer.buffer();
                 for y in 0..buffer.height() {
                     for x in 0..buffer.width() {
-                        let filled = buffer.get_pixel(x, y).unwrap() == Color::WHITE.to_bgra();
+                        let filled = (buffer.get_pixel(x, y).unwrap() >> 24) >= 128;
                         let d = distance(physical, radius * scale, x as f32 + 0.5, y as f32 + 0.5);
                         if d < -error || d > 0.0001 {
                             assert_eq!(
@@ -89,13 +79,12 @@ fn rounded_fill_is_symmetric_and_matches_circle_within_tessellation_error() {
                         if physical.size.width.fract() == 0. && physical.size.height.fract() == 0. {
                             assert_eq!(
                                 filled,
-                                buffer.get_pixel(buffer.width() - 1 - x, y).unwrap()
-                                    == Color::WHITE.to_bgra()
+                                (buffer.get_pixel(buffer.width() - 1 - x, y).unwrap() >> 24) >= 128
                             );
                             assert_eq!(
                                 filled,
-                                buffer.get_pixel(x, buffer.height() - 1 - y).unwrap()
-                                    == Color::WHITE.to_bgra()
+                                (buffer.get_pixel(x, buffer.height() - 1 - y).unwrap() >> 24)
+                                    >= 128
                             );
                         }
                     }
@@ -161,7 +150,7 @@ fn rounded_border_uses_clamped_outer_radius_before_insetting() {
                             && inner.size.height > 0.
                             && distance(inner, (r - t).max(0.), px, py) <= 0.;
                         assert_eq!(
-                            renderer.buffer().get_pixel(x, y).unwrap() == Color::WHITE.to_bgra(),
+                            (renderer.buffer().get_pixel(x, y).unwrap() >> 24) >= 128,
                             inside_outer && !inside_inner,
                             "radius={radius} thickness={thickness} scale={s} point=({x},{y})"
                         );

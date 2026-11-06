@@ -893,7 +893,12 @@ mod tests {
     fn loaded_test_library() -> LoadedPreviewLibrary {
         LoadedPreviewLibrary {
             api: Box::new(TestLibrary::new()),
+            #[cfg(unix)]
             _library: libloading::os::unix::Library::this().into(),
+            #[cfg(windows)]
+            _library: libloading::os::windows::Library::this()
+                .expect("the test executable must be loadable")
+                .into(),
         }
     }
 

@@ -6,7 +6,7 @@ use crate::buffer::Buffer;
 use crate::color::{Color, ColorPalette};
 use crate::element::LayoutConstraints;
 use crate::element::{Element, ElementRenderObject, RenderElement, UpdateResult};
-use crate::geometry::{Point, Size};
+use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::view::View;
@@ -14,7 +14,69 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use core::any::Any;
 
-/// Text View - displays a string of text
+/// Semantic type sizes for titles, content and supporting labels.
+///
+/// These roles only choose a logical size. They do not change the font family,
+/// weight, rasterization, or the current text color. [`Text::font_size`] remains
+/// available for custom sizes, and the last size-setting modifier wins.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextStyle {
+    /// Page or section title, 24 logical pixels.
+    Title,
+    /// A short heading above body content, 18 logical pixels.
+    Headline,
+    /// Ordinary reading text, 16 logical pixels. The default for [`Text`].
+    #[default]
+    Body,
+    /// Compact descriptive text or control-adjacent labels, 14 logical pixels.
+    Callout,
+    /// Short supporting metadata, 12 logical pixels.
+    Caption,
+}
+
+impl TextStyle {
+    /// Return the logical font size associated with this role.
+    pub const fn font_size(self) -> f32 {
+        match self {
+            Self::Title => 24.0,
+            Self::Headline => 18.0,
+            Self::Body => 16.0,
+            Self::Callout => 14.0,
+            Self::Caption => 12.0,
+        }
+    }
+}
+
+/// Semantic emphasis independent from a text view's size.
+///
+/// Use secondary text for supporting explanations. Tertiary text is intended
+/// only for disabled or nonessential content, not primary reading text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextTone {
+    /// The strongest foreground color for essential content.
+    #[default]
+    Primary,
+    /// Supporting information subordinate to the primary content.
+    Secondary,
+    /// Disabled or nonessential information.
+    Tertiary,
+}
+
+impl TextTone {
+    /// Resolve this tone using an explicit light or dark palette.
+    pub fn color(self, palette: &ColorPalette) -> Color {
+        match self {
+            Self::Primary => palette.text_primary(),
+            Self::Secondary => palette.text_secondary(),
+            Self::Tertiary => palette.text_tertiary(),
+        }
+    }
+}
+
+/// Text View - displays a string of text.
+///
+/// Text retains its measured line layout and clips overflow to the allocated
+/// size; constraining its width does not introduce automatic line wrapping.
 #[derive(Clone)]
 pub struct Text {
     content: String,
@@ -31,7 +93,7 @@ impl Text {
         Self {
             content: content_str,
             content_state: None,
-            font_size: super::style::BODY_FONT_SIZE,
+            font_size: TextStyle::Body.font_size(),
             color: palette.text_primary(),
         }
     }
@@ -51,7 +113,25 @@ impl Text {
         text
     }
 
-    /// Set the font size in logical pixels per em.
+    /// Apply a semantic type size without changing the text color or font.
+    ///
+    /// A later [`Self::font_size`] call overrides this size. This method also
+    /// works with [`Self::from_state`] and preserves its reactive content.
+    pub fn text_style(mut self, style: TextStyle) -> Self {
+        self.font_size = style.font_size();
+        self
+    }
+
+    /// Apply a semantic foreground tone from the current default palette.
+    ///
+    /// The text size is unchanged. A later [`Self::color`] call overrides this
+    /// tone. Use [`TextTone::color`] for an explicitly chosen palette.
+    pub fn tone(mut self, tone: TextTone) -> Self {
+        self.color = tone.color(&ColorPalette::default());
+        self
+    }
+
+    /// Set the font size in points
     pub fn font_size(mut self, size: f32) -> Self {
         self.font_size = size;
         self
@@ -168,11 +248,11 @@ impl ElementRenderObject for TextRenderObject {
         let mut height = measured_height as f32;
 
         // Apply max constraints (don't exceed maximum)
-        if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
-            width = width.min(constraints.max_width);
+        if constraints.max_width.is_finite() {
+            width = width.min(constraints.max_width.max(0.0));
         }
-        if constraints.max_height.is_finite() && constraints.max_height > 0.0 {
-            height = height.min(constraints.max_height);
+        if constraints.max_height.is_finite() {
+            height = height.min(constraints.max_height.max(0.0));
         }
 
         // Only apply min constraints if measured size is smaller
@@ -261,7 +341,14 @@ impl ElementRenderObject for TextRenderObject {
     }
 
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
+        if self.size.width <= 0.0 || self.size.height <= 0.0 {
+            return true;
+        }
+        // Match the bounds of the CPU text buffer. Ancestor clips (including
+        // edge-to-edge scroll viewports) can be wider than this text's layout.
+        ctx.push_clip(Rect::new(origin, self.size));
         ctx.draw_text(origin, self.content.clone(), self.color, self.font_size);
+        ctx.pop_clip();
         true
     }
 
@@ -281,5 +368,173 @@ impl ElementRenderObject for TextRenderObject {
 
     fn update_needs_layout(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::{CpuPaintRenderer, PaintCommand};
+    use crate::state::{State, generate_state_id};
+
+    #[test]
+    fn constrained_text_pixels_stay_inside_layout_and_parent_clip() {
+        let mut text = TextRenderObject::new(
+            String::from("Controls description extends beyond its allocated width"),
+            20.0,
+            Color::BLACK,
+        );
+        let natural = text.layout(LayoutConstraints::loose(f32::INFINITY, f32::INFINITY));
+        assert!(natural.width > 40.0);
+        for (width, height) in [(40.0, natural.height), (40.0, 8.0)] {
+            let size = text.layout(LayoutConstraints::loose(width, height));
+            assert_eq!(size, Size::new(width, height));
+            let origin = Point::new(12.0, 10.0);
+            let mut ctx = PaintContext::new();
+            // The parent clips the left edge; Text must also clip its right
+            // and bottom edges, without leaking or replacing the parent clip.
+            ctx.push_clip(Rect::from_xywh(16.0, 0.0, 144.0, 60.0));
+            text.paint(&mut ctx, origin);
+            ctx.fill_rect(Rect::from_xywh(0.0, 50.0, 160.0, 4.0), Color::BLACK);
+            ctx.pop_clip();
+            for scale in [1000, 2000] {
+                let mut renderer =
+                    CpuPaintRenderer::new(Size::new(160.0, 60.0), scale, Color::WHITE);
+                renderer.execute(&ctx);
+                let factor = scale / 1000;
+                let mut ink = 0;
+                for y in 0..50 * factor {
+                    for x in 0..160 * factor {
+                        let pixel = renderer.buffer().get_pixel(x, y).unwrap();
+                        if x >= 16 * factor
+                            && x < 52 * factor
+                            && y >= 10 * factor
+                            && y < (10 + height as u32) * factor
+                        {
+                            ink += usize::from(pixel != Color::WHITE.to_bgra());
+                        } else {
+                            assert_eq!(pixel, Color::WHITE.to_bgra(), "overflow at {x},{y}");
+                        }
+                    }
+                }
+                assert!(ink > 0, "text must actually render");
+                assert_eq!(
+                    renderer
+                        .buffer()
+                        .get_pixel(80 * factor, 51 * factor)
+                        .unwrap(),
+                    Color::BLACK.to_bgra()
+                );
+                assert_eq!(
+                    renderer
+                        .buffer()
+                        .get_pixel(4 * factor, 51 * factor)
+                        .unwrap(),
+                    Color::WHITE.to_bgra()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_extent_text_does_not_paint() {
+        for (width, height) in [(0.0, 30.0), (80.0, 0.0)] {
+            let mut text = TextRenderObject::new(String::from("Hidden"), 16.0, Color::BLACK);
+            let size = text.layout(LayoutConstraints::loose(width, height));
+            assert!(size.width == 0.0 || size.height == 0.0);
+            let mut ctx = PaintContext::new();
+            assert!(text.paint(&mut ctx, Point::ZERO));
+            assert!(ctx.commands().is_empty());
+        }
+    }
+
+    #[test]
+    fn default_text_preserves_existing_body_size_and_primary_color() {
+        let text = Text::new("Body");
+        assert_eq!(text.font_size_value(), 16.0);
+        assert_eq!(text.text_color(), ColorPalette::default().text_primary());
+    }
+
+    #[test]
+    fn semantic_type_scale_is_ordered_and_does_not_recolor_text() {
+        let mut previous = 0.0;
+        for role in [
+            TextStyle::Caption,
+            TextStyle::Callout,
+            TextStyle::Body,
+            TextStyle::Headline,
+            TextStyle::Title,
+        ] {
+            let text = Text::new("Label")
+                .color(Color::rgb(20, 80, 160))
+                .text_style(role);
+            assert!(text.font_size_value() > previous);
+            assert_eq!(text.font_size_value(), role.font_size());
+            assert_eq!(text.text_color(), Color::rgb(20, 80, 160));
+            previous = role.font_size();
+        }
+    }
+
+    #[test]
+    fn tones_follow_both_palettes_without_changing_size() {
+        for palette in [ColorPalette::light(), ColorPalette::dark()] {
+            assert_eq!(TextTone::Primary.color(&palette), palette.text_primary());
+            assert_eq!(
+                TextTone::Secondary.color(&palette),
+                palette.text_secondary()
+            );
+            assert_eq!(TextTone::Tertiary.color(&palette), palette.text_tertiary());
+        }
+        let text = Text::new("Details")
+            .text_style(TextStyle::Callout)
+            .tone(TextTone::Secondary);
+        assert_eq!(text.font_size_value(), 14.0);
+        assert_eq!(text.text_color(), ColorPalette::default().text_secondary());
+    }
+
+    #[test]
+    fn explicit_modifiers_keep_last_call_precedence() {
+        let text = Text::new("Custom")
+            .text_style(TextStyle::Title)
+            .font_size(20.0)
+            .tone(TextTone::Secondary)
+            .color(Color::BLACK);
+        assert_eq!(text.font_size_value(), 20.0);
+        assert_eq!(text.text_color(), Color::BLACK);
+        let text = text.text_style(TextStyle::Caption).tone(TextTone::Tertiary);
+        assert_eq!(text.font_size_value(), 12.0);
+        assert_eq!(text.text_color(), ColorPalette::default().text_tertiary());
+    }
+
+    #[test]
+    fn styled_reactive_text_keeps_content_updates_and_paint_path() {
+        let content = State::new(generate_state_id(), String::from("First"));
+        let text = Text::from_state(content.clone())
+            .text_style(TextStyle::Headline)
+            .tone(TextTone::Secondary);
+        assert_eq!(text.listenables().len(), 1);
+        let mut render =
+            TextRenderObject::new(text.content_for_render(), text.font_size, text.color);
+        content.set(String::from("Second"));
+        assert!(matches!(render.update(&text), UpdateResult::Updated));
+        render.layout(LayoutConstraints::loose(200.0, 40.0));
+        let mut ctx = PaintContext::new();
+        render.paint(&mut ctx, Point::new(8.0, 12.0));
+        let [
+            PaintCommand::PushClip { .. },
+            PaintCommand::DrawText {
+                text: content,
+                color,
+                font_size_px,
+                ..
+            },
+            PaintCommand::PopClip,
+        ] = ctx.commands()
+        else {
+            panic!("semantic text should use a bounded text paint command");
+        };
+        assert_eq!(content, "Second");
+        assert_eq!(*color, ColorPalette::default().text_secondary());
+        assert_eq!(*font_size_px, 18.0);
     }
 }

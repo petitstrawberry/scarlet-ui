@@ -178,6 +178,18 @@ pub trait ViewExt: View {
         crate::views::Padding::with_insets(self, insets)
     }
 
+    /// Apply unconsumed platform safe-area padding on selected edges.
+    /// Descendants receive only reservations this modifier has not handled.
+    fn safe_area_padding(
+        self,
+        edges: crate::geometry::SafeAreaEdges,
+    ) -> crate::views::modifiers::SafeArea<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::modifiers::SafeArea::new(self).edges(edges)
+    }
+
     /// Add a background color behind this view
     ///
     /// # Arguments
@@ -254,7 +266,14 @@ pub trait ViewExt: View {
         crate::views::AlignmentFrame::new(self, alignment)
     }
 
-    /// Add a click handler to this view
+    /// Add a click handler to this view.
+    ///
+    /// Handles unconsumed primary mouse releases and touch taps in target or
+    /// bubble phase. A wrapped `Button` without its own action lets these events
+    /// bubble, including through layout modifiers such as `.frame(...)`.
+    /// A Button action or an inner click handler takes precedence and stops
+    /// propagation. This modifier does not synthesize keyboard activation;
+    /// use `Button::on_click` for a focused Button's Enter/Space action.
     ///
     /// # Arguments
     /// * `callback` - Function to call when clicked

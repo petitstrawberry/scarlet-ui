@@ -19,7 +19,13 @@ fn press(element: &mut dyn Element, keycode: KeyCode) -> bool {
 }
 fn key(element: &mut dyn Element, keycode: KeyCode) -> bool {
     let handled = press(element, keycode);
-    element.handle_event(&Event::Keyboard(KeyEvent::Released { keycode, modifiers: KeyModifiers::default() }), Phase::Target);
+    element.handle_event(
+        &Event::Keyboard(KeyEvent::Released {
+            keycode,
+            modifiers: KeyModifiers::default(),
+        }),
+        Phase::Target,
+    );
     handled
 }
 fn focus(element: &mut dyn Element) {
@@ -369,7 +375,10 @@ fn held_activation_does_not_toggle_twice_or_commit_a_new_select_popup() {
     press(toggle.as_mut(), KeyCode::Space);
     assert!(state.get());
     let index = State::new(generate_state_id(), 0);
-    let select = Select::new(vec![String::from("One"), String::from("Two")], index.clone());
+    let select = Select::new(
+        vec![String::from("One"), String::from("Two")],
+        index.clone(),
+    );
     let mut element = select.create_element();
     focus(element.as_mut());
     press(element.as_mut(), KeyCode::Enter);
@@ -378,8 +387,41 @@ fn held_activation_does_not_toggle_twice_or_commit_a_new_select_popup() {
     key(element.as_mut(), KeyCode::Down);
     press(element.as_mut(), KeyCode::Enter);
     assert_eq!(index.get(), 0);
-    element.handle_event(&Event::Keyboard(KeyEvent::Released { keycode: KeyCode::Enter, modifiers: KeyModifiers::default() }), Phase::Target);
+    element.handle_event(
+        &Event::Keyboard(KeyEvent::Released {
+            keycode: KeyCode::Enter,
+            modifiers: KeyModifiers::default(),
+        }),
+        Phase::Target,
+    );
     key(element.as_mut(), KeyCode::Enter);
     assert_eq!(index.get(), 1);
     assert!(!select.expanded().get());
+}
+
+#[test]
+fn slider_pointer_callback_rollback_updates_the_rendered_value() {
+    let value = State::new(generate_state_id(), 0.5);
+    let state = value.clone();
+    let mut element = Slider::new(value.clone())
+        .on_change(move |_| state.set(0.0))
+        .create_element();
+    element.layout(LayoutConstraints::tight(200.0, 32.0));
+    assert!(element.handle_event(
+        &Event::Mouse(MouseEvent::ButtonPressed {
+            button: MouseButton::Left,
+            x: 150,
+            y: 16,
+            click_count: 1
+        }),
+        Phase::Target
+    ));
+    let object = element
+        .render_object()
+        .unwrap()
+        .as_any()
+        .downcast_ref::<crate::views::SliderRenderObject>()
+        .unwrap();
+    assert_eq!(value.get(), 0.0);
+    assert_eq!(object.get_value(), value.get());
 }

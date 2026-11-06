@@ -67,6 +67,7 @@ where
         content.nav.get_presentation(),
         content.nav.get_minimum_content_size(),
     );
+    render_object.set_floating_bar_bottom_overlap(content.nav.get_floating_bar_bottom_overlap());
     crate::element::UpdateResult::Updated
 }
 
@@ -74,12 +75,14 @@ fn navigation_render_object<T>(content: &NavigationContent<T>) -> NavigationView
 where
     T: NavigationLinkTuple + Clone + 'static,
 {
-    NavigationViewRenderObject::new_with_presentation_and_content_size(
+    let mut render = NavigationViewRenderObject::new_with_presentation_and_content_size(
         content.nav.get_sidebar_width(),
         content.nav.get_header_height(),
         content.nav.get_presentation(),
         content.nav.get_minimum_content_size(),
-    )
+    );
+    render.set_floating_bar_bottom_overlap(content.nav.get_floating_bar_bottom_overlap());
+    render
 }
 
 fn navigation_sidebar<T>(content: &NavigationContent<T>) -> NavigationSidebar
@@ -105,6 +108,7 @@ where
         content.nav.get_icon_color(),
         content.nav.get_presentation(),
     )
+    .sidebar_style(content.nav.get_sidebar_style())
 }
 
 fn navigation_child_views<T>(content: &NavigationContent<T>) -> Vec<Box<dyn View>>
@@ -113,11 +117,12 @@ where
 {
     let selected = content.nav.selected_index_state().get();
     let mut children: Vec<Box<dyn View>> = Vec::new();
-    children.push(Box::new(navigation_sidebar(content)));
+    children.push(content.nav.links().build_content(selected));
     if let Some(header_builder) = content.nav.header_builder() {
         children.push(header_builder());
     }
-    children.push(content.nav.links().build_content(selected));
+    // Chrome paints after the content it samples, and receives hits first.
+    children.push(Box::new(navigation_sidebar(content)));
     children
 }
 

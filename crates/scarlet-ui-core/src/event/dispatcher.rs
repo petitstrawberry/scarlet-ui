@@ -103,6 +103,9 @@ pub struct EventDispatcher {
     touch_routes: Vec<TouchRoute>,
     touch_arena: TouchArena,
     scroll_momentum: Option<MomentumRoute>,
+    text_input_reveal_path: Vec<ElementId>,
+    // Outer Option means queued; inner None is a queued restoration.
+    pending_text_input_reveal: Option<Option<Rect>>,
 }
 
 struct TouchRoute {
@@ -158,6 +161,8 @@ impl EventDispatcher {
             touch_routes: Vec::new(),
             touch_arena: TouchArena::default(),
             scroll_momentum: None,
+            text_input_reveal_path: Vec::new(),
+            pending_text_input_reveal: None,
         }
     }
 
@@ -165,6 +170,8 @@ impl EventDispatcher {
     pub fn set_root(&mut self, id: ElementId) {
         self.root_id = Some(id);
         self.scroll_momentum = None;
+        self.text_input_reveal_path.clear();
+        self.pending_text_input_reveal = None;
         self.touch_routes.clear();
         self.touch_arena = TouchArena::default();
     }
@@ -300,10 +307,10 @@ impl EventDispatcher {
         {
             self.cancel_animations(element_tree);
         }
-        match event {
+        let handled = match event {
             Event::ModifiersChanged(modifiers) => {
                 self.modifiers = *modifiers;
-                false
+                self.dispatch_text_input(element_tree, event)
             }
             Event::Quit => {
                 // Quit event is handled at application level
@@ -315,8 +322,9 @@ impl EventDispatcher {
                 false
             }
             Event::FullscreenConfigure { .. } | Event::FullscreenChanged { .. } => false,
-            Event::TabletPresentationChanged { .. }
-            | Event::InputPanelOcclusionChanged { .. } => false,
+            Event::TabletPresentationChanged { .. } | Event::InputPanelOcclusionChanged { .. } => {
+                false
+            }
             Event::FrameReady { .. } | Event::WindowSuspendedChanged { .. } => false,
             Event::InputEnvironmentChanged(_) => false,
             Event::PointerLockChanged { locked } => {
@@ -394,12 +402,17 @@ impl EventDispatcher {
                 self.dispatch_lifecycle(element_tree, lifecycle_event)
             }
             Event::Window(_window_event) => false,
+            Event::SafeAreaChanged { .. } => false,
             Event::Input(_) => {
                 // Raw input events are typically handled by higher layers
                 false
             }
             Event::MenuItemActivated { .. } => false,
-            Event::TextInputPreedit { .. }
+            Event::TextInputReveal { visible_rect } => {
+                self.reveal_text_input(element_tree, *visible_rect)
+            }
+            Event::TextInputSelection { .. }
+            | Event::TextInputPreedit { .. }
             | Event::TextInputCommit { .. }
             | Event::TextInputDeleteSurroundingText { .. }
             | Event::TextInputDone { .. } => self.dispatch_text_input(element_tree, event),
@@ -407,7 +420,18 @@ impl EventDispatcher {
                 // Custom events can be dispatched similarly
                 false
             }
+        };
+        if !self.left_button_down && self.touch_routes.is_empty() {
+            if let Some(visible) = self.pending_text_input_reveal.take() {
+                return self.reveal_text_input(element_tree, visible) || handled;
+            }
+            if !self.text_input_reveal_path.is_empty()
+                && element_tree.focused_text_input_state().is_none()
+            {
+                return self.reset_text_input_reveal(element_tree) || handled;
+            }
         }
+        handled
     }
 
     /// Handle quit event
@@ -466,7 +490,8 @@ impl EventDispatcher {
                 });
                 let press_bounds = path.last().zip(origins.last()).and_then(|(id, origin)| {
                     let element = element_tree.find_element_mut(*id)?;
-                    element.render_object()?
+                    element
+                        .render_object()?
                         .keeps_touch_press_within_bounds()
                         .then(|| Rect::new(*origin, element.bounds().size))
                 });
@@ -533,10 +558,12 @@ impl EventDispatcher {
                 handled |= activated;
             }
             let mut completed_scroll = false;
-            for gesture in self
-                .touch_arena
-                .process_with_press_bounds(change, scrollable, drag_axis, press_bounds)
-            {
+            for gesture in self.touch_arena.process_with_press_bounds(
+                change,
+                scrollable,
+                drag_axis,
+                press_bounds,
+            ) {
                 let primary_id = gesture.primary_id();
                 if matches!(gesture, TouchGesture::CancelPress { .. })
                     && let Some(route) = self
@@ -606,6 +633,16 @@ impl EventDispatcher {
                 };
                 if route_path.is_empty() {
                     continue;
+                }
+                // A finger resting on or panning a non-editable surface must
+                // not dismiss the editor. Match mouse focus clearing only once
+                // the arena resolves an actual tap, before its action runs.
+                if matches!(gesture, TouchGesture::Tap { .. })
+                    && element_tree
+                        .nearest_focusable_in_path(&route_path)
+                        .is_none()
+                {
+                    self.clear_focused_element(element_tree);
                 }
                 if matches!(
                     gesture,
@@ -1409,6 +1446,106 @@ impl EventDispatcher {
         true
     }
 
+    fn reset_text_input_reveal(&mut self, tree: &mut ElementTree) -> bool {
+        self.pending_text_input_reveal = None;
+        let mut changed = false;
+        for id in core::mem::take(&mut self.text_input_reveal_path) {
+            if let Some(element) = tree.find_element_mut(id) {
+                changed |= element.reveal_text_input(None);
+            }
+        }
+        changed
+    }
+
+    fn reveal_text_input(&mut self, tree: &mut ElementTree, visible: Option<Rect>) -> bool {
+        let visible = visible.filter(|r| {
+            r.size.width > 0.0
+                && r.size.height > 0.0
+                && r.left().is_finite()
+                && r.top().is_finite()
+                && r.right().is_finite()
+                && r.bottom().is_finite()
+        });
+        // Neither reveal nor restoration may move a pressed target before its
+        // release action. A real window FocusLost clears directly instead.
+        if self.left_button_down || !self.touch_routes.is_empty() {
+            self.pending_text_input_reveal = Some(visible);
+            return false;
+        }
+        self.pending_text_input_reveal = None;
+        let Some(visible) = visible else {
+            return self.reset_text_input_reveal(tree);
+        };
+        let Some(path) = tree.find_keyboard_focus_path_ids() else {
+            return self.reset_text_input_reveal(tree);
+        };
+        // Preserve offsets/allowances on shared ancestors. Resetting them before
+        // every request would unnecessarily undo a user's still-visible position.
+        let previous = core::mem::take(&mut self.text_input_reveal_path);
+        let mut changed = false;
+        for id in &previous {
+            if !path.contains(id)
+                && let Some(element) = tree.find_element_mut(*id)
+            {
+                changed |= element.reveal_text_input(None);
+            }
+        }
+        self.scroll_momentum = None;
+        for (index, id) in path.iter().enumerate().rev() {
+            let Some(state) = tree.focused_text_input_state() else {
+                break;
+            };
+            let origins = Self::path_origins(tree, &path);
+            let mut clipped = visible;
+            for (ancestor, origin) in path[..=index].iter().zip(&origins) {
+                if let Some((clip, _)) = tree
+                    .find_element_mut(*ancestor)
+                    .and_then(|e| e.render_object())
+                    .and_then(|r| r.clip_bounds(*origin))
+                {
+                    let left = clipped.left().max(clip.left());
+                    let top = clipped.top().max(clip.top());
+                    clipped = Rect::from_xywh(
+                        left,
+                        top,
+                        (clipped.right().min(clip.right()) - left).max(0.0),
+                        (clipped.bottom().min(clip.bottom()) - top).max(0.0),
+                    );
+                }
+            }
+            let origin = origins[index];
+            let Some(element) = tree.find_element_mut(*id) else {
+                continue;
+            };
+            // An inner viewport can itself be below the keyboard. Reveal into
+            // its own viewport first; an outer scroll ancestor then moves it.
+            if clipped.size.width <= 0.0 || clipped.size.height <= 0.0 {
+                let Some((clip, _)) = element.render_object().and_then(|r| r.clip_bounds(origin))
+                else {
+                    continue;
+                };
+                clipped = clip;
+            }
+            if clipped.size.width <= 0.0 || clipped.size.height <= 0.0 {
+                continue;
+            }
+            let local = |r: Rect| {
+                Rect::from_xywh(
+                    r.left() - origin.x,
+                    r.top() - origin.y,
+                    r.size.width,
+                    r.size.height,
+                )
+            };
+            let moved = element.reveal_text_input(Some((local(state.cursor_rect), local(clipped))));
+            changed |= moved;
+            if moved || previous.contains(id) {
+                self.text_input_reveal_path.push(*id);
+            }
+        }
+        changed
+    }
+
     fn dispatch_text_input(&mut self, element_tree: &mut ElementTree, event: &Event) -> bool {
         self.reconcile_keyboard_focus(element_tree);
         let path = self.current_focus_path(element_tree);
@@ -1430,6 +1567,9 @@ impl EventDispatcher {
         element_tree: &mut ElementTree,
         event: &crate::event::FocusEvent,
     ) -> bool {
+        if *event == crate::event::FocusEvent::Lost {
+            self.reset_text_input_reveal(element_tree);
+        }
         // Focus events are sent to the element gaining or losing focus
         // For now, send to the root with Target phase
         if let Some(root) = element_tree.root_mut() {
@@ -1538,6 +1678,11 @@ impl EventDispatcher {
         let Some(root) = element_tree.root() else {
             return false;
         };
+        if let Some(mut overlay) = self.hit_test_select_overlay_recursive_ids(root, point) {
+            overlay.reverse();
+            path.extend(overlay);
+            return true;
+        }
         self.hit_test_recursive_ids_into(root, point, path)
     }
 
@@ -2055,6 +2200,167 @@ mod tests {
     use core::any::Any;
     use core::cell::Cell;
     use core::cell::RefCell;
+
+    #[test]
+    fn navigation_click_after_text_view_edit_activates_on_first_release() {
+        use crate::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
+        use crate::pipeline::RenderingPipeline;
+        use crate::state::{Listenable, State};
+        use crate::views::{
+            NavigationLink, ScrollView, Text, TextDocument, TextSelection, TextView,
+        };
+        #[derive(Clone)]
+        struct Root {
+            text: State<TextDocument>,
+            selection: State<TextSelection>,
+            builds: Rc<Cell<usize>>,
+        }
+        impl Root {
+            fn body(&self) -> impl View + Clone + use<> {
+                let text = self.text.clone();
+                let selection = self.selection.clone();
+                let nav = crate::navigation! {
+                    NavigationLink::new("Inputs", move || {
+                        ScrollView::new(TextView::with_document(text.clone(), selection.clone()).frame(300.0, 180.0))
+                            .vertical().content_size(300.0, 560.0)
+                    }),
+                    NavigationLink::new("Display", || Text::new("Display page")),
+                };
+                if self.builds.get() == 0 {
+                    nav.selected_index_state().set(0);
+                }
+                self.builds.set(self.builds.get() + 1);
+                nav
+            }
+        }
+        impl View for Root {
+            fn create_element(&self) -> Box<dyn Element> {
+                Box::new(crate::element::ComponentElement::new_with_builder(
+                    self.clone(),
+                    |root| Box::new(root.body()),
+                ))
+            }
+            fn listenables(&self) -> Vec<&dyn Listenable> {
+                alloc::vec![&self.text, &self.selection]
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+        }
+        fn selected_in_tree(element: &dyn Element) -> Option<usize> {
+            if let Some(sidebar) = element.render_object().and_then(|render| {
+                render
+                    .as_any()
+                    .downcast_ref::<crate::views::navigation::NavigationSidebarRenderObject>()
+            }) {
+                return Some(sidebar.selected_index().get());
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| selected_in_tree(child.as_ref()))
+        }
+        fn contains_editor(element: &dyn Element) -> bool {
+            element
+                .render_object()
+                .is_some_and(|render| render.as_any().is::<crate::views::TextViewRenderObject>())
+                || element
+                    .children()
+                    .iter()
+                    .any(|child| contains_editor(child.as_ref()))
+        }
+        let _environment = crate::input_environment::install_test_input_environment(
+            crate::InputEnvironment::desktop(),
+        );
+        for render_between_pointer_events in [false, true] {
+            let text = State::new(
+                crate::state::generate_state_id(),
+                TextDocument::from_str("Type here..."),
+            );
+            let selection = State::new(crate::state::generate_state_id(), TextSelection::default());
+            let builds = Rc::new(Cell::new(0));
+            let root = Root {
+                text: text.clone(),
+                selection,
+                builds: builds.clone(),
+            };
+            let mut pipeline = RenderingPipeline::new();
+            pipeline.set_root(root.create_element());
+            pipeline.layout_initial();
+            pipeline.render_with_damage();
+            for event in [
+                MouseEvent::Moved { x: 240, y: 25 },
+                MouseEvent::ButtonPressed {
+                    button: MouseButton::Left,
+                    x: 240,
+                    y: 25,
+                    click_count: 1,
+                },
+                MouseEvent::ButtonReleased {
+                    button: MouseButton::Left,
+                    x: 240,
+                    y: 25,
+                    click_count: 1,
+                },
+            ] {
+                pipeline.handle_event(&Event::Mouse(event));
+                if render_between_pointer_events {
+                    pipeline.render_with_damage();
+                }
+            }
+            pipeline.render_with_damage();
+            for event in [
+                KeyEvent::Pressed {
+                    keycode: KeyCode::End,
+                    modifiers: KeyModifiers::default(),
+                },
+                KeyEvent::Char { c: 'x' },
+                KeyEvent::Pressed {
+                    keycode: KeyCode::Backspace,
+                    modifiers: KeyModifiers::default(),
+                },
+            ] {
+                assert!(pipeline.handle_event(&Event::Keyboard(event)));
+                pipeline.render_with_damage();
+            }
+
+            for event in [
+                MouseEvent::Moved { x: 10, y: 45 },
+                MouseEvent::ButtonPressed {
+                    button: MouseButton::Left,
+                    x: 10,
+                    y: 45,
+                    click_count: 1,
+                },
+                MouseEvent::ButtonReleased {
+                    button: MouseButton::Left,
+                    x: 10,
+                    y: 45,
+                    click_count: 1,
+                },
+            ] {
+                pipeline.handle_event(&Event::Mouse(event));
+                if render_between_pointer_events {
+                    pipeline.render_with_damage();
+                }
+            }
+            pipeline.render_with_damage();
+            assert!(
+                builds.get() > 1,
+                "editing must rebuild fresh navigation views"
+            );
+            assert!(
+                !contains_editor(pipeline.element_tree().root().unwrap()),
+                "actual page must switch to Display"
+            );
+            assert_eq!(text.get().line_text(0).unwrap().as_ref(), "Type here...");
+            assert_eq!(
+                selected_in_tree(pipeline.element_tree().root().unwrap()),
+                Some(1),
+                "first click should navigate after editing"
+            );
+        }
+    }
 
     struct WheelTestElement {
         id: ElementId,
@@ -2701,7 +3007,13 @@ mod tests {
     fn button_press_policy_rebuilds_preserve_enabled_and_repeat_semantics() {
         let (mut tree, mut dispatcher, activations) = button_fixture(false);
         let target = tree.keyboard_focus_candidates()[0];
-        for (enabled, repeat) in [(true, false), (true, true), (true, false), (false, false), (true, false)] {
+        for (enabled, repeat) in [
+            (true, false),
+            (true, true),
+            (true, false),
+            (false, false),
+            (true, false),
+        ] {
             let count = activations.clone();
             let button = Button::new("delete")
                 .enabled(enabled)
@@ -2771,5 +3083,384 @@ mod tests {
         assert!(!dispatcher.advance_animations(&mut tree, Duration::from_millis(54)));
         assert!(dispatcher.advance_animations(&mut tree, Duration::from_millis(1)));
         assert_eq!(activations.get(), 3);
+    }
+    #[test]
+    fn direct_touch_scroll_cancels_button_tap_and_cancel_allows_fresh_tap() {
+        use crate::views::{ScrollView, ScrollViewRenderObject};
+        let clicks = Rc::new(Cell::new(0));
+        let activated = clicks.clone();
+        let button =
+            Button::new("touch target").on_click(move || activated.set(activated.get() + 1));
+        let root = ScrollView::new(button).content_size(100.0, 500.0);
+        let mut tree = ElementTree::new();
+        tree.set_root(root.create_element());
+        tree.layout(LayoutConstraints::tight(100.0, 100.0));
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.set_root(tree.root().unwrap().id());
+        let mut serial = 0;
+        let mut send = |tree: &mut ElementTree, phase, y| {
+            serial += 1;
+            let mut event = button_touch(phase, serial * 16_000_000);
+            if let Event::TouchFrame(frame) = &mut event {
+                frame.changes[0].y = y;
+            }
+            dispatcher.dispatch(tree, &event);
+        };
+        send(&mut tree, TouchPhase::Down, 10);
+        send(&mut tree, TouchPhase::Move, -30);
+        send(&mut tree, TouchPhase::Up, -30);
+        assert_eq!(clicks.get(), 0, "panning from a button must not click it");
+        let offset = tree
+            .root()
+            .unwrap()
+            .render_object()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ScrollViewRenderObject<Button>>()
+            .unwrap()
+            .offset()
+            .1;
+        assert!(
+            offset > 0.0,
+            "the containing scroll view must actually move"
+        );
+
+        // A separate stationary button proves cancellation is not a release,
+        // and a later contact still activates normally.
+        let activated = clicks.clone();
+        let root = Button::new("touch target").on_click(move || activated.set(activated.get() + 1));
+        tree.set_root(root.create_element());
+        tree.layout(LayoutConstraints::tight(100.0, 100.0));
+        send(&mut tree, TouchPhase::Down, 10);
+        send(&mut tree, TouchPhase::Cancel, 10);
+        send(&mut tree, TouchPhase::Up, 10);
+        assert_eq!(clicks.get(), 0);
+        send(&mut tree, TouchPhase::Down, 10);
+        send(&mut tree, TouchPhase::Up, 10);
+        assert_eq!(clicks.get(), 1);
+    }
+    #[test]
+    fn touch_blurs_editor_only_after_resolved_non_editable_tap() {
+        use crate::state::{State, generate_state_id};
+        use crate::views::{ScrollView, TextField, VStack};
+        let text = State::new(generate_state_id(), "keep editing".into());
+        let root = VStack::new((
+            TextField::new(text.clone())
+                .autofocus(true)
+                .frame(100.0, 30.0),
+            ScrollView::new(Rectangle::new())
+                .vertical()
+                .content_size(100.0, 500.0)
+                .frame(100.0, 100.0),
+        ));
+        let mut tree = ElementTree::new();
+        tree.set_root(root.create_element());
+        tree.layout(LayoutConstraints::tight(100.0, 130.0));
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.set_root(tree.root().unwrap().id());
+        assert!(tree.focused_text_input_state().is_some());
+        let mut serial = 0;
+        let mut send = |tree: &mut ElementTree, dispatcher: &mut EventDispatcher, phase, y| {
+            serial += 1;
+            let mut event = button_touch(phase, serial * 16_000_000);
+            if let Event::TouchFrame(frame) = &mut event {
+                frame.changes[0].y = y;
+            }
+            dispatcher.dispatch(tree, &event);
+        };
+        send(&mut tree, &mut dispatcher, TouchPhase::Down, 80);
+        assert!(
+            tree.focused_text_input_state().is_some(),
+            "pending contact retains focus"
+        );
+        send(&mut tree, &mut dispatcher, TouchPhase::Cancel, 80);
+        assert!(
+            tree.focused_text_input_state().is_some(),
+            "cancel is not a tap"
+        );
+        send(&mut tree, &mut dispatcher, TouchPhase::Down, 80);
+        send(&mut tree, &mut dispatcher, TouchPhase::Move, 40);
+        send(&mut tree, &mut dispatcher, TouchPhase::Up, 40);
+        assert!(
+            tree.focused_text_input_state().is_some(),
+            "scrolling retains focus"
+        );
+        send(&mut tree, &mut dispatcher, TouchPhase::Down, 80);
+        send(&mut tree, &mut dispatcher, TouchPhase::Up, 80);
+        assert!(
+            tree.focused_text_input_state().is_none(),
+            "completed blank tap dismisses editor"
+        );
+        assert!(!dispatcher.dispatch(
+            &mut tree,
+            &Event::TextInputSelection {
+                cursor_byte: 0,
+                anchor_byte: 0
+            }
+        ));
+        send(&mut tree, &mut dispatcher, TouchPhase::Down, 10);
+        send(&mut tree, &mut dispatcher, TouchPhase::Up, 10);
+        assert!(
+            tree.focused_text_input_state().is_some(),
+            "editor can be focused again"
+        );
+        assert_eq!(text.get(), "keep editing");
+    }
+    #[test]
+    fn dismissing_keyboard_does_not_move_button_before_touch_or_mouse_activation() {
+        use crate::state::{State, generate_state_id};
+        use crate::views::{ScrollView, TextField, VStack};
+        fn button_center(e: &dyn Element, origin: Point) -> Option<Point> {
+            let origin = Point::new(origin.x + e.position().x, origin.y + e.position().y);
+            if let Some(render) = e.render_object()
+                && render.as_any().is::<crate::views::ButtonRenderObject>()
+            {
+                return Some(Point::new(
+                    origin.x + render.size().width / 2.0,
+                    origin.y + render.size().height / 2.0,
+                ));
+            }
+            e.children()
+                .iter()
+                .find_map(|child| button_center(child.as_ref(), origin))
+        }
+        for touch in [true, false] {
+            let clicks = Rc::new(Cell::new(0));
+            let clicked = clicks.clone();
+            let root = ScrollView::new(VStack::new((
+                Rectangle::new().frame(100.0, 130.0),
+                Button::new("Done")
+                    .on_click(move || clicked.set(clicked.get() + 1))
+                    .frame(100.0, 30.0),
+                TextField::new(State::new(generate_state_id(), "caret".into()))
+                    .autofocus(true)
+                    .frame(100.0, 40.0),
+            )))
+            .vertical()
+            .content_size(100.0, 200.0)
+            .frame(100.0, 200.0)
+            .padding(10.0);
+            let mut tree = ElementTree::new();
+            tree.set_root(root.create_element());
+            tree.layout(LayoutConstraints::tight(120.0, 220.0));
+            let mut dispatcher = EventDispatcher::new();
+            dispatcher.set_root(tree.root().unwrap().id());
+            dispatcher.dispatch(
+                &mut tree,
+                &Event::TextInputReveal {
+                    visible_rect: Some(Rect::from_xywh(10.0, 10.0, 100.0, 100.0)),
+                },
+            );
+            let point = button_center(tree.root().unwrap(), Point::ZERO).unwrap();
+            assert!(point.y > 10.0 && point.y < 110.0);
+            let x = point.x as i32;
+            let y = point.y as i32;
+            if touch {
+                for phase in [TouchPhase::Down, TouchPhase::Up] {
+                    let mut event = button_touch(phase, 1);
+                    if let Event::TouchFrame(frame) = &mut event {
+                        frame.changes[0].x = x;
+                        frame.changes[0].y = y;
+                    }
+                    dispatcher.dispatch(&mut tree, &event);
+                }
+            } else {
+                dispatcher.dispatch(
+                    &mut tree,
+                    &Event::Mouse(MouseEvent::ButtonPressed {
+                        button: crate::event::MouseButton::Left,
+                        x,
+                        y,
+                        click_count: 1,
+                    }),
+                );
+                // The DOM bridge notices focus loss immediately after Down.
+                dispatcher.dispatch(&mut tree, &Event::TextInputReveal { visible_rect: None });
+                dispatcher.dispatch(
+                    &mut tree,
+                    &Event::Mouse(MouseEvent::ButtonReleased {
+                        button: crate::event::MouseButton::Left,
+                        x,
+                        y,
+                        click_count: 1,
+                    }),
+                );
+            }
+            assert_eq!(
+                clicks.get(),
+                1,
+                "touch={touch}: restore only after the action"
+            );
+            assert!(dispatcher.text_input_reveal_path.is_empty());
+        }
+    }
+
+    #[test]
+    fn caret_reveal_handles_fitting_content_restoration_and_active_touch() {
+        use crate::state::{State, generate_state_id};
+        use crate::views::{ScrollView, TextField, VStack};
+        let root = ScrollView::new(VStack::new((
+            Rectangle::new().frame(100.0, 160.0),
+            TextField::new(State::new(generate_state_id(), "caret".into()))
+                .autofocus(true)
+                .frame(100.0, 40.0),
+        )))
+        .vertical()
+        .content_size(100.0, 200.0)
+        .frame(100.0, 200.0)
+        .padding(10.0);
+        let mut tree = ElementTree::new();
+        tree.set_root(root.create_element());
+        tree.layout(LayoutConstraints::tight(120.0, 220.0));
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.set_root(tree.root().unwrap().id());
+        let original = tree.focused_text_input_state().unwrap().cursor_rect;
+        assert!(original.bottom() > 110.0);
+        let reveal = Event::TextInputReveal {
+            visible_rect: Some(Rect::from_xywh(10.0, 10.0, 100.0, 100.0)),
+        };
+        let mut down = button_touch(TouchPhase::Down, 1);
+        if let Event::TouchFrame(frame) = &mut down {
+            frame.changes[0].y = 185;
+        }
+        dispatcher.dispatch(&mut tree, &down);
+        assert!(
+            !dispatcher.dispatch(&mut tree, &reveal),
+            "do not fight a live contact"
+        );
+        assert_eq!(
+            tree.focused_text_input_state()
+                .unwrap()
+                .cursor_rect
+                .origin
+                .y,
+            original.origin.y
+        );
+        if let Event::TouchFrame(frame) = &mut down {
+            frame.changes[0].phase = TouchPhase::Cancel;
+        }
+        dispatcher.dispatch(&mut tree, &down);
+        assert!(
+            !dispatcher.dispatch(&mut tree, &reveal),
+            "pending reveal already ran after cancel"
+        );
+        let revealed = tree.focused_text_input_state().unwrap().cursor_rect;
+        assert!(
+            !dispatcher.dispatch(&mut tree, &reveal),
+            "unchanged reveal is idempotent"
+        );
+        assert_eq!(
+            tree.focused_text_input_state().unwrap().cursor_rect,
+            revealed
+        );
+        assert!(
+            revealed.top() >= 10.0 && revealed.bottom() <= 110.01,
+            "{revealed:?}"
+        );
+        assert!(dispatcher.dispatch(
+            &mut tree,
+            &Event::TextInputReveal {
+                visible_rect: Some(Rect::from_xywh(10.0, 10.0, 100.0, 200.0)),
+            }
+        ));
+        assert_eq!(
+            tree.focused_text_input_state()
+                .unwrap()
+                .cursor_rect
+                .origin
+                .y,
+            original.origin.y
+        );
+        dispatcher.dispatch(&mut tree, &reveal);
+        assert!(dispatcher.dispatch(&mut tree, &Event::TextInputReveal { visible_rect: None }));
+        assert_eq!(
+            tree.focused_text_input_state()
+                .unwrap()
+                .cursor_rect
+                .origin
+                .y,
+            original.origin.y
+        );
+        assert!(dispatcher.text_input_reveal_path.is_empty());
+        if let Event::TouchFrame(frame) = &mut down {
+            frame.changes[0].phase = TouchPhase::Down;
+        }
+        dispatcher.dispatch(&mut tree, &down);
+        dispatcher.dispatch(&mut tree, &reveal);
+        assert!(dispatcher.pending_text_input_reveal.is_some());
+        dispatcher.dispatch(&mut tree, &Event::TextInputReveal { visible_rect: None });
+        if let Event::TouchFrame(frame) = &mut down {
+            frame.changes[0].phase = TouchPhase::Cancel;
+        }
+        dispatcher.dispatch(&mut tree, &down);
+        assert_eq!(
+            tree.focused_text_input_state()
+                .unwrap()
+                .cursor_rect
+                .origin
+                .y,
+            original.origin.y
+        );
+        assert!(dispatcher.pending_text_input_reveal.is_none());
+    }
+
+    #[test]
+    fn caret_reveal_walks_nested_scrolls_and_restores_allowances_on_blur() {
+        use crate::state::{State, generate_state_id};
+        use crate::views::{ScrollView, TextField, VStack};
+        let inner = ScrollView::new(VStack::new((
+            Rectangle::new().frame(100.0, 160.0),
+            TextField::new(State::new(generate_state_id(), "nested".into()))
+                .autofocus(true)
+                .frame(100.0, 30.0),
+        )))
+        .vertical()
+        .content_size(100.0, 190.0)
+        .frame(100.0, 100.0);
+        let outer = ScrollView::new(VStack::new((Rectangle::new().frame(100.0, 120.0), inner)))
+            .vertical()
+            .content_size(100.0, 220.0)
+            .frame(100.0, 200.0)
+            .padding(10.0);
+        let mut tree = ElementTree::new();
+        tree.set_root(outer.create_element());
+        tree.layout(LayoutConstraints::tight(120.0, 220.0));
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.set_root(tree.root().unwrap().id());
+        let editor_id = tree.focused_text_input_state().unwrap().editor_id;
+        assert!(dispatcher.dispatch(
+            &mut tree,
+            &Event::TextInputReveal {
+                visible_rect: Some(Rect::from_xywh(10.0, 10.0, 100.0, 100.0)),
+            }
+        ));
+        let state = tree.focused_text_input_state().unwrap();
+        assert_eq!(state.editor_id, editor_id);
+        assert!(
+            state.cursor_rect.top() >= 10.0 && state.cursor_rect.bottom() <= 110.01,
+            "{:?}",
+            state.cursor_rect
+        );
+        assert_eq!(
+            dispatcher.text_input_reveal_path.len(),
+            2,
+            "both scroll ancestors participate"
+        );
+        dispatcher.dispatch(&mut tree, &Event::Focus(crate::event::FocusEvent::Lost));
+        assert!(dispatcher.text_input_reveal_path.is_empty());
+        // The outer view returns to its authored maximum20, not keyboard-only120.
+        fn offsets(e: &dyn Element, out: &mut Vec<f32>) {
+            if e.type_name_debug().contains("ScrollViewRenderObject") {
+                out.push(-e.children()[0].position().y);
+            }
+            for child in e.children() {
+                offsets(child.as_ref(), out);
+            }
+        }
+        let mut remaining = Vec::new();
+        offsets(tree.root().unwrap(), &mut remaining);
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining[0] <= 20.01);
+        assert!(remaining[1] <= 90.01);
     }
 }

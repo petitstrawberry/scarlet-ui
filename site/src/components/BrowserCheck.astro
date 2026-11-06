@@ -1,0 +1,13 @@
+<section aria-labelledby="browser-heading">
+  <h2 id="browser-heading">Browser support</h2>
+  <p>The examples need JavaScript and WebGPU.</p>
+  <button id="check-gpu" type="button">Check this browser</button>
+  <p id="gpu-status" role="status" aria-live="polite">The check runs only when you ask.</p>
+  <noscript><p>Enable JavaScript to run the examples.</p></noscript>
+</section>
+<script is:inline type="module" src="/capability.js"></script>
+<style>
+button { font: inherit; padding: .5rem .875rem; color: var(--sl-color-text); background: var(--sl-color-bg); border: 1px solid var(--sl-color-gray-4); border-radius: .25rem; cursor: pointer; min-height: 44px; }
+button:focus-visible { outline: 2px solid var(--sl-color-text-accent); outline-offset: 3px; }
+button:disabled { cursor: wait; }
+</style>

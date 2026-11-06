@@ -45,11 +45,23 @@ impl Size {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeometryProxy {
     size: Size,
+    safe_area_insets: EdgeInsets,
 }
 
 impl GeometryProxy {
-    pub(crate) const fn new(size: Size) -> Self {
-        Self { size }
+    pub(crate) const fn with_safe_area(size: Size, safe_area_insets: EdgeInsets) -> Self {
+        Self {
+            size,
+            safe_area_insets,
+        }
+    }
+
+    /// Unconsumed safe-area reservations inherited by this layout scope.
+    /// Ancestors such as Window, SafeArea and ScrollView remove handled edges.
+    /// These are logical layout insets, not a measurement of the view's distance
+    /// from a physical screen edge.
+    pub const fn safe_area_insets(self) -> EdgeInsets {
+        self.safe_area_insets
     }
 
     /// Return the view's laid-out size in logical units.
@@ -259,6 +271,74 @@ pub struct EdgeInsets {
     pub left: f32,
     pub bottom: f32,
     pub right: f32,
+}
+
+/// Edges of a platform safe area handled by a layout container.
+/// Combine edges with `|`. Already-constrained platform surfaces report zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SafeAreaEdges(u8);
+
+impl SafeAreaEdges {
+    pub const NONE: Self = Self(0);
+    pub const LEFT: Self = Self(1);
+    pub const TOP: Self = Self(2);
+    pub const RIGHT: Self = Self(4);
+    pub const BOTTOM: Self = Self(8);
+    pub const HORIZONTAL: Self = Self(5);
+    pub const VERTICAL: Self = Self(10);
+    pub const ALL: Self = Self(15);
+
+    /// Select the reservations on these edges.
+    pub fn select(self, insets: EdgeInsets) -> EdgeInsets {
+        EdgeInsets::new(
+            if self.0 & 1 != 0 { insets.left } else { 0.0 },
+            if self.0 & 2 != 0 { insets.top } else { 0.0 },
+            if self.0 & 4 != 0 { insets.right } else { 0.0 },
+            if self.0 & 8 != 0 { insets.bottom } else { 0.0 },
+        )
+    }
+
+    /// Reservations left for descendants after this container handles its edges.
+    pub fn remaining(self, insets: EdgeInsets) -> EdgeInsets {
+        Self(self.0 ^ Self::ALL.0).select(insets)
+    }
+}
+
+impl core::ops::BitOr for SafeAreaEdges {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+pub(crate) fn normalized_safe_area_insets(insets: EdgeInsets) -> EdgeInsets {
+    let edge = |value: f32| {
+        if value.is_finite() {
+            value.max(0.0)
+        } else {
+            0.0
+        }
+    };
+    EdgeInsets::new(
+        edge(insets.left),
+        edge(insets.top),
+        edge(insets.right),
+        edge(insets.bottom),
+    )
+}
+
+pub(crate) fn safe_area_rect(size: Size, insets: EdgeInsets) -> Rect {
+    let insets = normalized_safe_area_insets(insets);
+    let width = size.width.max(0.0);
+    let height = size.height.max(0.0);
+    let left = insets.left.min(width);
+    let top = insets.top.min(height);
+    Rect::from_xywh(
+        left,
+        top,
+        (width - left - insets.right).max(0.0),
+        (height - top - insets.bottom).max(0.0),
+    )
 }
 
 impl EdgeInsets {

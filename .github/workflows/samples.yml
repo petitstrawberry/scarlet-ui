@@ -1,0 +1,168 @@
+name: Web samples
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    env:
+      ASTRO_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install pinned Starlight dependencies
+        run: npm ci --ignore-scripts --prefix site
+      - name: Install Rust and WebAssembly target
+        run: rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+      - name: Install native API documentation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libfontconfig-dev pkg-config
+      - name: Install matching JavaScript binding generator
+        run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
+      - name: Test package validation and capability states
+        run: |
+          python3 tools/test_web_samples.py
+          python3 tools/test_pages_destination.py
+          node --test samples/capability.test.cjs
+          node --test samples/diagnostics/*.test.cjs
+          node --test site/scripts/*.test.mjs
+      - name: Build and validate guides, API reference and samples
+        run: python3 tools/build-web-samples.py
+      - name: Save reviewable static output
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-samples
+          path: target/web-samples
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Prepare Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: target/web-samples
+
+  browser-smoke:
+    name: Isolated software WebGPU smoke
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-samples
+          path: target/web-samples
+      - name: Install pinned smoke dependencies
+        working-directory: tools/web-smoke
+        run: npm ci --ignore-scripts
+      - name: Verify the runner's sandbox-supported Chrome
+        # Ubuntu supplies an AppArmor profile for this installed browser. Do not
+        # disable user namespace policy or retry a failed sandbox without it.
+        run: |
+          test -x /opt/google/chrome/chrome
+          /opt/google/chrome/chrome --version
+          command -v xvfb-run
+      - name: Test routing, environment and pixel helpers
+        working-directory: tools/web-smoke
+        run: npm test
+      - name: Render and interact with localhost samples
+        # Explicitly approved ephemeral software-GPU test. Renderer sandbox must
+        # stay enabled; GPU-process isolation may be absent. No secrets or writes.
+        working-directory: tools/web-smoke
+        env:
+          DEBUG: pw:browser
+        run: xvfb-run --auto-servernum npm run smoke
+      - name: Save screenshots, sandbox diagnostics and failure report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: software-webgpu-smoke
+          path: tools/web-smoke/artifacts
+          if-no-files-found: warn
+
+  deploy:
+    # Publish only after merge; PRs build/test but never deploy.
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.repository == 'petitstrawberry/scarlet-ui' &&
+      github.ref == 'refs/heads/main'
+    needs: [package, browser-smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.destination.outputs.page_url }}
+    steps:
+      - name: Read the configured Pages site
+        id: pages
+        uses: actions/configure-pages@v5
+      - name: Verify the approved custom site destination
+        id: destination
+        env:
+          PAGE_ORIGIN: ${{ steps.pages.outputs.origin }}
+          PAGE_BASE: ${{ steps.pages.outputs.base_path }}
+          PAGE_URL: ${{ steps.pages.outputs.base_url }}
+        run: |
+          python3 - <<'PYTHON'
+          # BEGIN TESTED DESTINATION GUARD
+          import os
+          from urllib.parse import urlsplit
+
+          origin = os.environ["PAGE_ORIGIN"]
+          base = os.environ["PAGE_BASE"]
+          url = os.environ["PAGE_URL"]
+          allowed_origins = {"https://ui.scarlet-os.org", "http://ui.scarlet-os.org"}
+          # GitHub's API can report http metadata even when TLS is available.
+          # Accept only this exact hostname, and never publish an HTTP link.
+          if origin not in allowed_origins or base not in ("", "/"):
+              raise ValueError("Unexpected Pages destination; expected ui.scarlet-os.org at site root")
+          if url not in (origin, origin + "/"):
+              raise ValueError("Pages URL does not match the approved root destination")
+          if urlsplit(url).netloc != "ui.scarlet-os.org":
+              raise ValueError("Unexpected Pages authority")
+          canonical_url = "https://ui.scarlet-os.org/"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"page_url={canonical_url}\n")
+          print("Verified Pages destination:", canonical_url)
+          # END TESTED DESTINATION GUARD
+          PYTHON
+      - name: Verify HTTPS is available before publishing
+        # A first deployment can return 404. TLS/DNS must still succeed. Do not
+        # follow redirects to another host or bypass certificate verification.
+        env:
+          PAGE_URL: ${{ steps.destination.outputs.page_url }}
+        run: curl --proto '=https' --tlsv1.2 --head --silent --show-error --max-time 30 --output /dev/null "$PAGE_URL"
+      - name: Deploy the verified artifact
+        id: deployment
+        uses: actions/deploy-pages@v4

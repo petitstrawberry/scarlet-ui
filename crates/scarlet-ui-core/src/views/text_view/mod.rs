@@ -75,6 +75,7 @@ pub struct TextView {
     line_numbers: bool,
     current_line_highlight: bool,
     background_color: Color,
+    material: Option<style::GlassMaterial>,
     text_color: Color,
     decorations: TextDecorations,
     placeholder_color: Color,
@@ -92,6 +93,23 @@ pub struct TextView {
 }
 
 impl TextView {
+    pub fn text_spans(mut self, spans: Vec<TextStyleSpan>) -> Self {
+        self.decorations.foreground =
+            DecorationIndex::new(spans.into_iter().map(|span| (span.range, span.color)));
+        self
+    }
+
+    pub fn diagnostic_spans(mut self, spans: Vec<TextDiagnosticSpan>) -> Self {
+        self.decorations.diagnostics =
+            DecorationIndex::new(spans.into_iter().map(|span| (span.range, span.color)));
+        self
+    }
+
+    pub fn borderless(mut self) -> Self {
+        self.borderless = true;
+        self
+    }
+
     /// Create a text view bound to a string state.
     ///
     /// # Arguments
@@ -139,6 +157,7 @@ impl TextView {
             line_numbers: false,
             current_line_highlight: false,
             background_color: style::surface_color(&palette, style::SurfaceRole::Canvas),
+            material: Some(style::GlassMaterial::editing()),
             text_color: palette.text(),
             decorations: TextDecorations::default(),
             placeholder_color: palette.text_secondary(),
@@ -322,7 +341,13 @@ impl TextView {
         self
     }
 
-    /// Set the text view background color.
+    /// Override the editing backdrop material without changing editing or layout.
+    pub fn material(mut self, material: style::GlassMaterial) -> Self {
+        self.material = Some(material);
+        self
+    }
+
+    /// Set a uniform background color, opting out of the default glass material.
     ///
     /// # Arguments
     ///
@@ -333,6 +358,7 @@ impl TextView {
     /// The updated text view.
     pub fn background(mut self, color: Color) -> Self {
         self.background_color = color;
+        self.material = None;
         self
     }
 
@@ -350,26 +376,7 @@ impl TextView {
         self
     }
 
-    /// Replace document foreground decorations. See [`TextStyleSpan`] for range
-    /// handling and overlap precedence. Uncovered text uses `text_color`.
-    ///
-    /// Decorations affect painting only. Callers should replace them after
-    /// edits; ranges are not automatically rebased onto a new document revision.
-    pub fn text_spans(mut self, spans: Vec<TextStyleSpan>) -> Self {
-        self.decorations.foreground =
-            DecorationIndex::new(spans.into_iter().map(|span| (span.range, span.color)));
-        self
-    }
-
-    /// Replace document diagnostic underlines. See [`TextDiagnosticSpan`].
-    /// As with foreground spans, callers supply ranges for the current document.
-    pub fn diagnostic_spans(mut self, spans: Vec<TextDiagnosticSpan>) -> Self {
-        self.decorations.diagnostics =
-            DecorationIndex::new(spans.into_iter().map(|span| (span.range, span.color)));
-        self
-    }
-
-    /// Set the unfocused border color.
+    /// Set the unfocused border color, opting out of the default glass material.
     ///
     /// # Arguments
     ///
@@ -380,17 +387,11 @@ impl TextView {
     /// The updated text view.
     pub fn border_color(mut self, color: Color) -> Self {
         self.border_color = color;
+        self.material = None;
         self
     }
 
-    /// Render a flat document surface without a form-control outline or rounded corners.
-    /// Text metrics, padding and selection geometry are unchanged.
-    pub fn borderless(mut self) -> Self {
-        self.borderless = true;
-        self
-    }
-
-    /// Set the focused border color.
+    /// Set the focused border color, opting out of the default glass material.
     ///
     /// # Arguments
     ///
@@ -401,6 +402,7 @@ impl TextView {
     /// The updated text view.
     pub fn focused_border_color(mut self, color: Color) -> Self {
         self.focused_border_color = color;
+        self.material = None;
         self
     }
 
@@ -605,6 +607,7 @@ pub struct TextViewRenderObject {
     line_numbers: bool,
     current_line_highlight: bool,
     background_color: Color,
+    material: Option<style::GlassMaterial>,
     text_color: Color,
     decorations: TextDecorations,
     placeholder_color: Color,
@@ -688,6 +691,7 @@ impl TextViewRenderObject {
             line_numbers: view.line_numbers,
             current_line_highlight: view.current_line_highlight,
             background_color: view.background_color,
+            material: view.material,
             text_color: view.text_color,
             decorations: view.decorations.clone(),
             placeholder_color: view.placeholder_color,
@@ -741,7 +745,9 @@ impl TextViewRenderObject {
     }
 
     pub(super) fn visible_bottom(&self) -> f32 {
-        self.keyboard_bottom.unwrap_or(self.size.height).min(self.size.height)
+        self.keyboard_bottom
+            .unwrap_or(self.size.height)
+            .min(self.size.height)
     }
 
     fn publish_caret_rect(&self) {
@@ -880,6 +886,8 @@ impl TextViewRenderObject {
     /// Cursor rectangle, surrounding text, and selection byte offsets.
     pub(crate) fn text_input_state(&self) -> TextInputElementState {
         TextInputElementState {
+            editor_id: None,
+            input_rect: Rect::new(Point::ZERO, self.size),
             cursor_rect: self.text_input_cursor_rect(),
             surrounding_text: self.text_document.as_str().into_owned(),
             cursor_byte: self.selection.caret.byte as u32,
@@ -895,14 +903,24 @@ impl ElementRenderObject for TextViewRenderObject {
             || self.layout.content_height > self.layout.viewport_height
     }
 
-    fn avoid_input_occlusion(&mut self, occlusion: Option<Rect>, _caret: Option<Rect>, reveal: bool) -> bool {
+    fn avoid_input_occlusion(
+        &mut self,
+        occlusion: Option<Rect>,
+        _caret: Option<Rect>,
+        reveal: bool,
+    ) -> bool {
         let before = (self.keyboard_bottom, self.scroll);
-        self.keyboard_bottom = occlusion.filter(|area| {
-            self.focused && area.size.width > 0. && area.size.height > 0.
-                && area.origin.x < self.size.width && area.origin.x + area.size.width > 0.
-                && area.origin.y >= self.padding * 2. + self.layout.line_height
-                && area.origin.y < self.size.height
-        }).map(|area| area.origin.y);
+        self.keyboard_bottom = occlusion
+            .filter(|area| {
+                self.focused
+                    && area.size.width > 0.
+                    && area.size.height > 0.
+                    && area.origin.x < self.size.width
+                    && area.origin.x + area.size.width > 0.
+                    && area.origin.y >= self.padding * 2. + self.layout.line_height
+                    && area.origin.y < self.size.height
+            })
+            .map(|area| area.origin.y);
         self.compute_layout();
         if self.keyboard_bottom.is_some() && (reveal || before.0 != self.keyboard_bottom) {
             let caret = self.text_input_cursor_rect();
@@ -917,7 +935,9 @@ impl ElementRenderObject for TextViewRenderObject {
         }
         self.requested_scroll = self.scroll;
         if before.1 != self.scroll {
-            if let Some(state) = &self.scroll_state { state.set(self.scroll); }
+            if let Some(state) = &self.scroll_state {
+                state.set(self.scroll);
+            }
             self.publish_caret_rect();
         }
         before != (self.keyboard_bottom, self.scroll)
@@ -962,8 +982,26 @@ impl ElementRenderObject for TextViewRenderObject {
         Rect::new(Point::ZERO, self.size).contains(point)
     }
 
+    fn reads_backdrop(&self) -> bool {
+        self.material.is_some() && !self.borderless
+    }
+
     fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
-        paint::paint_text_view_with_decorations(
+        let paint_content = if let Some(material) = self.material.filter(|_| !self.borderless) {
+            style::paint_glass_material(
+                ctx,
+                Rect::new(origin, self.size),
+                style::metrics().control_radius,
+                material,
+            );
+            if self.focused {
+                style::glass_control_focus(ctx, Rect::new(origin, self.size), material);
+            }
+            paint::paint_text_view_content_with_decorations
+        } else {
+            paint::paint_text_view_with_decorations
+        };
+        paint_content(
             ctx,
             origin,
             self.size,
@@ -973,7 +1011,11 @@ impl ElementRenderObject for TextViewRenderObject {
             self.focused,
             self.font_size,
             self.padding,
-            self.background_color,
+            if self.material.is_some() && !self.borderless {
+                Color::CLEAR
+            } else {
+                self.background_color
+            },
             self.text_color,
             self.placeholder_color,
             self.selection_color,
@@ -1053,6 +1095,7 @@ impl ElementRenderObject for TextViewRenderObject {
         self.line_numbers = view.line_numbers;
         self.current_line_highlight = view.current_line_highlight;
         self.background_color = view.background_color;
+        self.material = view.material;
         self.text_color = view.text_color;
         self.decorations = view.decorations.clone();
         self.placeholder_color = view.placeholder_color;
@@ -1094,4 +1137,74 @@ fn clamp_byte_boundary(text: &str, byte: u32) -> u32 {
 fn preedit_prefix(preedit: &str, byte: u32) -> &str {
     let byte = clamp_byte_boundary(preedit, byte) as usize;
     &preedit[..byte]
+}
+
+#[cfg(test)]
+mod material_tests {
+    use super::*;
+    use crate::renderer::PaintCommand;
+
+    fn view() -> TextView {
+        TextView::new(
+            State::new(crate::state::generate_state_id(), String::from("one\ntwo")),
+            State::new(
+                crate::state::generate_state_id(),
+                TextSelection::collapsed(0),
+            ),
+        )
+    }
+
+    #[test]
+    fn editable_view_filters_before_content_and_preserves_focus_state() {
+        let view = view().line_numbers(true);
+        let mut object = TextViewRenderObject::from_view(&view);
+        object.layout(LayoutConstraints::tight(240.0, 120.0));
+        assert!(object.reads_backdrop());
+        let mut context = PaintContext::new();
+        object.paint(&mut context, Point::ZERO);
+        assert!(matches!(context.commands().first(), Some(
+            PaintCommand::BackdropFilterRoundedRect { tint, .. }
+        ) if *tint == style::GlassMaterial::editing().tint));
+        assert!(!context.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillVerticalGradientRoundedRect { .. }
+                | PaintCommand::StrokeRoundedRect { .. }
+        )));
+        assert!(context.commands().iter().any(|command| matches!(command,
+            PaintCommand::DrawText { text, .. } if text == "one"
+        )));
+        object.focused = true;
+        let mut focused = PaintContext::new();
+        object.paint(&mut focused, Point::ZERO);
+        assert!(matches!(focused.commands().first(), Some(
+            PaintCommand::BackdropFilterRoundedRect { tint, .. }
+        ) if *tint == style::GlassMaterial::editing().focused_editor().tint));
+        object.update(&view.background(Color::CLEAR));
+        assert!(!object.reads_backdrop());
+        assert!(object.focused);
+        assert_eq!(object.size, Size::new(240.0, 120.0));
+    }
+
+    #[test]
+    fn explicit_editor_colors_are_flat_and_material_can_be_restored() {
+        let color = Color::rgb(30u8, 50u8, 70u8);
+        let view = view().background(color).border_color(Color::CLEAR);
+        let mut object = TextViewRenderObject::from_view(&view);
+        object.layout(LayoutConstraints::tight(240.0, 120.0));
+        assert!(!object.reads_backdrop());
+        let mut context = PaintContext::new();
+        object.paint(&mut context, Point::ZERO);
+        assert!(matches!(context.commands().first(), Some(
+            PaintCommand::FillRoundedRect { color: face, .. }
+        ) if *face == color));
+        object.focused = true;
+        let mut focused = PaintContext::new();
+        object.paint(&mut focused, Point::ZERO);
+        assert!(!focused.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillVerticalGradientRoundedRect { .. }
+        )));
+        object.update(&view.material(style::GlassMaterial::editing()));
+        assert!(object.reads_backdrop());
+    }
 }

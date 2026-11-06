@@ -10,6 +10,7 @@ legacy-scarlet-std = [
     "scarlet-ui-platform-sws?/legacy-scarlet-std",
 ]
 std = ["scarlet-ui-core/std", "scarlet-ui-platform-sws?/std", "scarlet-ui-platform-winit?/std"]
+platform-web = ["std", "dep:scarlet-ui-platform-web"]
 platform-sws = ["dep:scarlet-ui-platform-sws"]
 platform-winit = [
     "std",
@@ -26,6 +27,9 @@ scarlet-ui-platform-sws = { path = "../scarlet-ui-platform-sws", default-feature
 
 [target.'cfg(not(target_os = "scarlet"))'.dependencies]
 scarlet-ui-platform-winit = { path = "../scarlet-ui-platform-winit", default-features = false, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+scarlet-ui-platform-web = { path = "../scarlet-ui-platform-web", optional = true }
 
 [dev-dependencies]
 # For additional testing

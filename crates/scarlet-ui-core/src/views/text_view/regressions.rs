@@ -480,7 +480,10 @@ fn selection_drag_keeps_scrolled_editor_geometry_without_ancestor_layout() {
     .wrap_mode(WrapMode::None)
     .scroll_state(scroll.clone())
     .reveal_selection_on_change(true);
-    let text_x = render_object_with_size(&view, 320., 180.).layout.text_origin_x as i32 + 5;
+    let text_x = render_object_with_size(&view, 320., 180.)
+        .layout
+        .text_origin_x as i32
+        + 5;
     let view = view.on_geometry_change(
         move |geometry| {
             count.fetch_add(1, Ordering::Relaxed);

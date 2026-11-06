@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 
 use crate::element::{Element, ElementId, LayoutConstraints, UpdateResult};
-use crate::geometry::{Point, Size};
+use crate::geometry::{EdgeInsets, Point, Size};
 use crate::pipeline::{MountContext, PipelineId};
 use crate::state::{InvalidationKind, SubscriptionId};
 use crate::view::View;
@@ -28,6 +28,7 @@ pub struct ComponentElement<V: View + Clone> {
     size: Size,
     position: Point,
     last_constraints: Option<LayoutConstraints>,
+    safe_area_insets: EdgeInsets,
     subscriptions: Vec<SubscriptionId>,
     pipeline_id: PipelineId,
     mounted: bool,
@@ -62,6 +63,7 @@ impl<V: View + Clone> ComponentElement<V> {
             size: Size::ZERO,
             position: Point::ZERO,
             last_constraints: None,
+            safe_area_insets: EdgeInsets::ZERO,
             subscriptions: Vec::new(),
             pipeline_id: PipelineId::default(),
             mounted: false,
@@ -211,7 +213,14 @@ impl<V: View + Clone> Element for ComponentElement<V> {
         self.mounted = false;
     }
 
+    fn set_safe_area_insets(&mut self, insets: EdgeInsets) {
+        self.safe_area_insets = insets;
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        if let Some(child) = &mut self.child {
+            child.set_safe_area_insets(self.safe_area_insets);
+        }
         self.last_constraints = Some(constraints);
         // Delegate layout to the child
         if let Some(ref mut child) = self.child {

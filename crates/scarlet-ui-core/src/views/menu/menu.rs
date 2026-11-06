@@ -16,12 +16,41 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 
-const MENU_EDGE_PADDING: f32 = 2.0;
-const MENU_SEPARATOR_HEIGHT: f32 = 1.0;
-const MENU_TEXT_INSET: f32 = 8.0;
+const MENU_EDGE_PADDING: f32 = 6.0;
+const MENU_SEPARATOR_ROW_HEIGHT: f32 = 9.0;
+const MENU_TEXT_INSET: f32 = 12.0;
+const MENU_CHECK_GUTTER: f32 = 16.0;
+const MENU_FONT_SIZE: f32 = 13.0;
+const MENU_SHORTCUT_GAP: f32 = 24.0;
+
+fn preferred_menu_width(items: &[MenuItemContent]) -> f32 {
+    let submenu_gutter = if items
+        .iter()
+        .any(|item| matches!(item.action, MenuAction::Submenu))
+    {
+        MENU_CHECK_GUTTER
+    } else {
+        0.0
+    };
+    items
+        .iter()
+        .filter(|item| !matches!(item.action, MenuAction::Separator))
+        .map(|item| {
+            let label_width = graphics::measure_text_sized(&item.label, MENU_FONT_SIZE).0 as f32;
+            let shortcut_width = item.shortcut.as_ref().map_or(0.0, |shortcut| {
+                MENU_SHORTCUT_GAP + graphics::measure_text_sized(shortcut, MENU_FONT_SIZE).0 as f32
+            });
+            MENU_TEXT_INSET * 2.0
+                + MENU_CHECK_GUTTER
+                + label_width
+                + shortcut_width
+                + submenu_gutter
+        })
+        .fold(160.0, f32::max)
+}
 
 /// Menu item action
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuAction {
     /// Regular menu command.
     Item,
@@ -36,6 +65,7 @@ pub struct MenuItemContent {
     label: String,
     action: MenuAction,
     enabled: bool,
+    checked: bool,
     shortcut: Option<String>,
     callback: Option<Arc<dyn Fn() + 'static>>,
 }
@@ -46,8 +76,9 @@ impl Clone for MenuItemContent {
             label: self.label.clone(),
             action: self.action,
             enabled: self.enabled,
+            checked: self.checked,
             shortcut: self.shortcut.clone(),
-            callback: None, // Callbacks cannot be cloned
+            callback: self.callback.clone(),
         }
     }
 }
@@ -67,6 +98,7 @@ impl MenuItemContent {
             label: label.into(),
             action: MenuAction::Item,
             enabled: true,
+            checked: false,
             shortcut: None,
             callback: Some(Arc::new(|| {})),
         }
@@ -90,6 +122,28 @@ impl MenuItemContent {
         self
     }
 
+    /// Set whether this command displays a checkmark.
+    pub fn checked(mut self, checked: bool) -> Self {
+        self.checked = checked;
+        self
+    }
+
+    pub fn checked_value(&self) -> bool {
+        self.checked
+    }
+    pub fn enabled_value(&self) -> bool {
+        self.enabled
+    }
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+    pub fn shortcut_value(&self) -> Option<&str> {
+        self.shortcut.as_deref()
+    }
+    pub fn action_value(&self) -> MenuAction {
+        self.action
+    }
+
     /// Set the keyboard shortcut
     pub fn shortcut(mut self, shortcut: impl Into<String>) -> Self {
         self.shortcut = Some(shortcut.into());
@@ -102,6 +156,7 @@ impl MenuItemContent {
             label: String::new(),
             action: MenuAction::Separator,
             enabled: true,
+            checked: false,
             shortcut: None,
             callback: None,
         }
@@ -153,7 +208,7 @@ impl Menu {
     ///
     /// The current compact menu row height.
     pub fn adaptive_item_height() -> f32 {
-        style::metrics().minimum_control_height
+        style::metrics().minimum_control_height + 4.0
     }
 
     /// Request a custom item height.
@@ -182,6 +237,12 @@ impl Menu {
     /// Get the menu items
     pub fn items(&self) -> &[MenuItemContent] {
         &self.items
+    }
+
+    /// Width needed by shared check, label, shortcut, and submenu columns.
+    /// Hosts may clamp this to their available viewport; explicit width is unchanged.
+    pub fn preferred_width(&self) -> f32 {
+        preferred_menu_width(&self.items)
     }
 }
 
@@ -264,7 +325,7 @@ impl MenuRenderObject {
             .iter()
             .map(|item| {
                 if matches!(item.action, MenuAction::Separator) {
-                    MENU_SEPARATOR_HEIGHT
+                    MENU_SEPARATOR_ROW_HEIGHT
                 } else {
                     requested_item_height
                         .unwrap_or_else(Menu::adaptive_item_height)
@@ -294,6 +355,26 @@ impl MenuRenderObject {
         self.hovered_index
     }
 
+    /// Return the measured shared-menu column width before host viewport clamping.
+    pub fn preferred_width(&self) -> f32 {
+        preferred_menu_width(&self.items)
+    }
+
+    /// Return a row's local bounds, using the same layout as hit testing.
+    /// Popup controllers can position submenus without duplicating row metrics.
+    pub fn item_rect(&self, index: usize) -> Option<Rect> {
+        let item = self.items.get(index)?;
+        let height = |item: &MenuItemContent| {
+            if matches!(item.action, MenuAction::Separator) {
+                MENU_SEPARATOR_ROW_HEIGHT
+            } else {
+                self.effective_item_height()
+            }
+        };
+        let y = MENU_EDGE_PADDING + self.items[..index].iter().map(height).sum::<f32>();
+        Some(Rect::from_xywh(0.0, y, self.width, height(item)))
+    }
+
     /// Hit test - returns the item index at the given position
     pub fn hit_test(&self, x: f32, y: f32) -> Option<usize> {
         if x < 0.0 || x > self.width || y < 0.0 || y > self.size.height {
@@ -305,7 +386,7 @@ impl MenuRenderObject {
 
         for (i, item) in self.items.iter().enumerate() {
             let item_h = if matches!(item.action, MenuAction::Separator) {
-                MENU_SEPARATOR_HEIGHT
+                MENU_SEPARATOR_ROW_HEIGHT
             } else {
                 item_height
             };
@@ -324,7 +405,7 @@ impl MenuRenderObject {
     pub fn invoke_item(&self, index: usize) {
         if let Some(item) = self.items.get(index) {
             if let Some(callback) = item.get_callback() {
-                if item.enabled {
+                if item.enabled && !matches!(item.action, MenuAction::Separator) {
                     callback();
                 }
             }
@@ -338,7 +419,7 @@ impl MenuRenderObject {
             .iter()
             .map(|item| {
                 if matches!(item.action, MenuAction::Separator) {
-                    MENU_SEPARATOR_HEIGHT
+                    MENU_SEPARATOR_ROW_HEIGHT
                 } else {
                     item_height
                 }
@@ -402,8 +483,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
         }
 
         let palette = ColorPalette::default();
-        let bg_color = style::surface_color(&palette, style::SurfaceRole::Floating);
-        let border_color = palette.border();
+        let bg_color = style::GlassMaterial::menu().tint.with_opacity(1.0);
         let text_color = palette.text_primary();
         let hover_color = palette.menu_hover();
         let separator_color = palette.divider();
@@ -417,27 +497,26 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
             // Legacy popup windows are opaque. Keep their full rectangular
             // background so transparent rounded corners cannot appear black.
             canvas.fill_rect(0, 0, width, height, bg_color);
-            canvas.draw_rect(0, 0, width, height, border_color);
 
             // Draw items
             let mut current_y = MENU_EDGE_PADDING;
-            let font_size = style::BODY_FONT_SIZE;
+            let font_size = MENU_FONT_SIZE;
 
             for (i, item) in self.items.iter().enumerate() {
                 if matches!(item.action, MenuAction::Separator) {
                     // Draw separator line
-                    let sep_y = current_y as i32;
+                    let sep_y = (current_y + MENU_SEPARATOR_ROW_HEIGHT / 2.0).floor() as i32;
                     canvas.fill_rect(
-                        MENU_EDGE_PADDING as i32,
+                        MENU_TEXT_INSET as i32,
                         sep_y,
-                        width.saturating_sub((MENU_EDGE_PADDING * 2.0) as u32),
-                        MENU_SEPARATOR_HEIGHT as u32,
+                        width.saturating_sub((MENU_TEXT_INSET * 2.0) as u32),
+                        1,
                         separator_color,
                     );
-                    current_y += MENU_SEPARATOR_HEIGHT;
+                    current_y += MENU_SEPARATOR_ROW_HEIGHT;
                 } else {
                     // Draw hover background
-                    if self.hovered_index == Some(i) {
+                    if self.hovered_index == Some(i) && item.enabled {
                         canvas.fill_rect(
                             MENU_EDGE_PADDING as i32,
                             current_y as i32,
@@ -448,10 +527,8 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
                     }
 
                     // Draw text
-                    let text_x = MENU_TEXT_INSET as i32;
-                    let text_height = graphics::measure_text_sized(&item.label, font_size).1;
-                    let text_y =
-                        current_y as i32 + ((item_height as i32 - text_height as i32) / 2).max(0);
+                    let text_x = (MENU_TEXT_INSET + MENU_CHECK_GUTTER) as i32;
+                    let text_y = current_y as i32 + ((item_height as i32 - 16) / 2).max(0);
 
                     let text_color = if item.enabled {
                         text_color
@@ -459,16 +536,48 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
                         palette.text_tertiary()
                     };
 
+                    if item.checked {
+                        let x = MENU_TEXT_INSET as i32;
+                        let y = (current_y + item_height / 2.0) as i32;
+                        canvas.draw_line(x, y, x + 3, y + 3, text_color);
+                        canvas.draw_line(x + 3, y + 3, x + 9, y - 4, text_color);
+                    }
                     canvas.draw_text_sized(text_x, text_y, &item.label, text_color, font_size);
 
                     // Draw shortcut if present
                     if let Some(ref shortcut) = item.shortcut {
                         let (shortcut_w, _) = graphics::measure_text_sized(shortcut, font_size);
-                        let shortcut_x =
-                            (width as i32) - shortcut_w as i32 - MENU_TEXT_INSET as i32;
-                        canvas.draw_text_sized(shortcut_x, text_y, shortcut, text_color, font_size);
+                        let shortcut_x = (width as i32)
+                            - shortcut_w as i32
+                            - MENU_TEXT_INSET as i32
+                            - if self
+                                .items
+                                .iter()
+                                .any(|item| matches!(item.action, MenuAction::Submenu))
+                            {
+                                MENU_CHECK_GUTTER as i32
+                            } else {
+                                0
+                            };
+                        canvas.draw_text_sized(
+                            shortcut_x,
+                            text_y,
+                            shortcut,
+                            if item.enabled {
+                                palette.text_secondary()
+                            } else {
+                                palette.text_tertiary()
+                            },
+                            font_size,
+                        );
                     }
 
+                    if matches!(item.action, MenuAction::Submenu) {
+                        let x = width as i32 - MENU_TEXT_INSET as i32 - 4;
+                        let y = (current_y + item_height / 2.0) as i32;
+                        canvas.draw_line(x - 2, y - 4, x + 2, y, text_color);
+                        canvas.draw_line(x + 2, y, x - 2, y + 4, text_color);
+                    }
                     current_y += item_height;
                 }
             }
@@ -483,38 +592,52 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
         self.buffer = None;
     }
 
+    fn reads_backdrop(&self) -> bool {
+        true
+    }
+
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
         let palette = ColorPalette::default();
-        let bg_color = style::surface_color(&palette, style::SurfaceRole::Floating);
-        let border_color = palette.border();
         let text_color = palette.text_primary();
         let hover_color = palette.menu_hover();
         let separator_color = palette.divider();
         let item_height = self.effective_item_height();
 
         let rect = Rect::new(origin, self.size);
-        style::popover_surface(ctx, rect, bg_color, border_color, palette.shadow());
+        let radius = style::surface_radius(style::SurfaceRole::Floating);
+        style::elevation_shadow(
+            ctx,
+            rect,
+            radius,
+            palette.shadow(),
+            style::ElevationRole::Floating,
+        );
+        style::paint_menu_material(ctx, rect, radius);
 
         let mut current_y = MENU_EDGE_PADDING;
-        let font_size = style::BODY_FONT_SIZE;
+        let font_size = MENU_FONT_SIZE;
         let width = self.size.width.max(0.0);
+        let has_submenus = self
+            .items
+            .iter()
+            .any(|item| matches!(item.action, MenuAction::Submenu));
 
         for (i, item) in self.items.iter().enumerate() {
             if matches!(item.action, MenuAction::Separator) {
                 ctx.fill_rect(
                     Rect::from_xywh(
-                        origin.x + 2.0,
-                        origin.y + current_y,
-                        (width - MENU_EDGE_PADDING * 2.0).max(0.0),
-                        MENU_SEPARATOR_HEIGHT,
+                        origin.x + MENU_TEXT_INSET,
+                        origin.y + current_y + (MENU_SEPARATOR_ROW_HEIGHT / 2.0).floor(),
+                        (width - MENU_TEXT_INSET * 2.0).max(0.0),
+                        1.0,
                     ),
                     separator_color,
                 );
-                current_y += MENU_SEPARATOR_HEIGHT;
+                current_y += MENU_SEPARATOR_ROW_HEIGHT;
                 continue;
             }
 
-            if self.hovered_index == Some(i) {
+            if self.hovered_index == Some(i) && item.enabled {
                 style::item_highlight(
                     ctx,
                     Rect::from_xywh(
@@ -532,10 +655,25 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
             } else {
                 palette.text_tertiary()
             };
-            let text_height = graphics::measure_text_sized(&item.label, font_size).1 as f32;
-            let text_y = origin.y + current_y + ((item_height - text_height) / 2.0).max(0.0);
+            let text_y = origin.y + current_y + ((item_height - 16.0) / 2.0).max(0.0);
+            if item.checked {
+                let x = origin.x + MENU_TEXT_INSET;
+                let y = origin.y + current_y + item_height / 2.0;
+                ctx.draw_line(
+                    Point::new(x, y),
+                    Point::new(x + 3.0, y + 3.0),
+                    1.5,
+                    item_text_color,
+                );
+                ctx.draw_line(
+                    Point::new(x + 3.0, y + 3.0),
+                    Point::new(x + 9.0, y - 4.0),
+                    1.5,
+                    item_text_color,
+                );
+            }
             ctx.draw_text(
-                Point::new(origin.x + MENU_TEXT_INSET, text_y),
+                Point::new(origin.x + MENU_TEXT_INSET + MENU_CHECK_GUTTER, text_y),
                 item.label.clone(),
                 item_text_color,
                 font_size,
@@ -543,15 +681,43 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
 
             if let Some(ref shortcut) = item.shortcut {
                 let (shortcut_w, _) = graphics::measure_text_sized(shortcut, font_size);
-                let shortcut_x = origin.x + width - shortcut_w as f32 - MENU_TEXT_INSET;
+                let shortcut_x = origin.x + width
+                    - shortcut_w as f32
+                    - MENU_TEXT_INSET
+                    - if has_submenus { MENU_CHECK_GUTTER } else { 0.0 };
                 ctx.draw_text(
                     Point::new(shortcut_x, text_y),
                     shortcut.clone(),
-                    item_text_color,
+                    if item.enabled {
+                        palette.text_secondary()
+                    } else {
+                        palette.text_tertiary()
+                    },
                     font_size,
                 );
             }
 
+            if matches!(item.action, MenuAction::Submenu) {
+                let x = origin.x + width - MENU_TEXT_INSET - 4.0;
+                let y = origin.y + current_y + item_height / 2.0;
+                let color = if item.enabled {
+                    palette.text_secondary()
+                } else {
+                    palette.text_tertiary()
+                };
+                ctx.draw_line(
+                    Point::new(x - 2.0, y - 4.0),
+                    Point::new(x + 2.0, y),
+                    1.5,
+                    color,
+                );
+                ctx.draw_line(
+                    Point::new(x + 2.0, y),
+                    Point::new(x - 2.0, y + 4.0),
+                    1.5,
+                    color,
+                );
+            }
             current_y += item_height;
         }
 
@@ -572,7 +738,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
                 .iter()
                 .map(|item| {
                     if matches!(item.action, MenuAction::Separator) {
-                        MENU_SEPARATOR_HEIGHT
+                        MENU_SEPARATOR_ROW_HEIGHT
                     } else {
                         self.effective_item_height()
                     }
@@ -606,6 +772,133 @@ mod tests {
     }
 
     #[test]
+    fn cloned_menu_keeps_callbacks_but_disabled_and_separator_rows_do_not_activate() {
+        use alloc::rc::Rc;
+        use core::cell::Cell;
+        let calls = Rc::new(Cell::new(0));
+        let calls_for_callback = calls.clone();
+        let command = MenuItemContent::new("Run")
+            .callback(move || calls_for_callback.set(calls_for_callback.get() + 1));
+        let menu = Menu::new(alloc::vec![
+            command.clone(),
+            command.clone().enabled(false),
+            command.clone().action(MenuAction::Separator),
+        ])
+        .clone();
+        let renderer = MenuRenderObject::new(menu.items.clone(), 24.0, 120.0);
+        renderer.invoke_item(0);
+        renderer.invoke_item(1);
+        renderer.invoke_item(2);
+        renderer.invoke_item(99);
+        assert_eq!(calls.get(), 1);
+        assert!(Arc::ptr_eq(
+            command.get_callback().unwrap(),
+            menu.items[0].get_callback().unwrap()
+        ));
+    }
+
+    #[test]
+    fn row_rects_match_hit_testing_across_separators() {
+        let menu = MenuRenderObject::new(
+            alloc::vec![
+                MenuItemContent::new("One"),
+                MenuItemContent::separator(),
+                MenuItemContent::new("Two"),
+            ],
+            24.0,
+            160.0,
+        );
+        for (index, y, height) in [(0, 6.0, 24.0), (1, 30.0, 9.0), (2, 39.0, 24.0)] {
+            let rect = menu.item_rect(index).unwrap();
+            assert_eq!(rect, Rect::from_xywh(0.0, y, 160.0, height));
+            assert_eq!(menu.hit_test(4.0, y + height / 2.0), Some(index));
+        }
+        assert!(menu.item_rect(3).is_none());
+    }
+
+    #[test]
+    fn submenu_columns_reserve_shortcut_space_and_draw_direction_indicator() {
+        let items = alloc::vec![
+            MenuItemContent::new("Settings").action(MenuAction::Submenu),
+            MenuItemContent::new("Command").shortcut("Ctrl+Shift+K"),
+        ];
+        let width = Menu::new(items.clone()).preferred_width();
+        let menu = MenuRenderObject::new_adaptive(items, width);
+        assert_eq!(menu.preferred_width(), width);
+        assert!(width >= 160.0);
+        let mut paint = PaintContext::new();
+        menu.paint(&mut paint, Point::ZERO);
+        assert_eq!(
+            paint
+                .commands()
+                .iter()
+                .filter(|command| matches!(command,
+                    PaintCommand::StrokePath { stroke_width, .. } if *stroke_width == 1.5
+                ))
+                .count(),
+            2,
+            "submenu has a two-stroke chevron"
+        );
+        let shortcut_width = graphics::measure_text_sized("Ctrl+Shift+K", MENU_FONT_SIZE).0 as f32;
+        assert!(paint.commands().iter().any(|command| matches!(command,
+            PaintCommand::DrawText { text, position, color, .. }
+                if text == "Ctrl+Shift+K" && position.x + shortcut_width == width - MENU_TEXT_INSET - MENU_CHECK_GUTTER
+                    && *color == ColorPalette::default().text_secondary()
+        )));
+    }
+
+    #[test]
+    fn disabled_row_has_muted_text_without_active_hover_highlight() {
+        let mut menu = MenuRenderObject::new_adaptive(
+            alloc::vec![MenuItemContent::new("Unavailable").enabled(false)],
+            180.0,
+        );
+        menu.set_hovered(Some(0));
+        let mut paint = PaintContext::new();
+        menu.paint(&mut paint, Point::ZERO);
+        assert!(!paint.commands().iter().any(|command| matches!(command,
+            PaintCommand::FillRoundedRect { color, .. } if *color == ColorPalette::default().menu_hover()
+        )));
+        assert!(paint.commands().iter().any(|command| matches!(command,
+            PaintCommand::DrawText { text, color, .. } if text == "Unavailable" && *color == ColorPalette::default().text_tertiary()
+        )));
+    }
+
+    #[test]
+    fn checked_rows_paint_shared_checkmarks_and_align_labels() {
+        let _environment = install_test_input_environment(pointer_environment());
+        let mut menu = MenuRenderObject::new(
+            alloc::vec![
+                MenuItemContent::new("Checked").checked(true),
+                MenuItemContent::separator().checked(true),
+                MenuItemContent::new("Other"),
+            ],
+            24.0,
+            160.0,
+        );
+        menu.layout(LayoutConstraints::unconstrained());
+        let mut paint = PaintContext::new();
+        menu.paint(&mut paint, Point::ZERO);
+        let check_strokes = paint
+            .commands()
+            .iter()
+            .filter(|command| {
+                matches!(command,
+                    PaintCommand::StrokePath { stroke_width, .. } if *stroke_width == 1.5
+                )
+            })
+            .count();
+        assert_eq!(check_strokes, 2, "separator must not paint a checkmark");
+        for label in ["Checked", "Other"] {
+            assert!(paint.commands().iter().any(|command| matches!(command,
+                PaintCommand::DrawText { text, position, .. }
+                    if text == label && position.x == MENU_TEXT_INSET + MENU_CHECK_GUTTER
+            )));
+        }
+        assert_eq!(menu.size.height, 69.0, "separator reserves breathing room");
+    }
+
+    #[test]
     fn adaptive_rows_keep_visual_density_across_posture_changes() {
         let _environment = install_test_input_environment(pointer_environment());
         let mut menu = MenuRenderObject::new_adaptive(
@@ -613,14 +906,14 @@ mod tests {
             120.0,
         );
 
-        assert_eq!(menu.layout(LayoutConstraints::unconstrained()).height, 52.0);
-        assert_eq!(menu.hit_test(8.0, 25.0), Some(0));
-        assert_eq!(menu.hit_test(8.0, 26.0), Some(1));
+        assert_eq!(menu.layout(LayoutConstraints::unconstrained()).height, 68.0);
+        assert_eq!(menu.hit_test(8.0, 33.0), Some(0));
+        assert_eq!(menu.hit_test(8.0, 34.0), Some(1));
 
         install_input_environment(touch_environment());
-        assert_eq!(menu.layout(LayoutConstraints::unconstrained()).height, 52.0);
-        assert_eq!(menu.hit_test(8.0, 25.0), Some(0));
-        assert_eq!(menu.hit_test(8.0, 26.0), Some(1));
+        assert_eq!(menu.layout(LayoutConstraints::unconstrained()).height, 68.0);
+        assert_eq!(menu.hit_test(8.0, 33.0), Some(0));
+        assert_eq!(menu.hit_test(8.0, 34.0), Some(1));
     }
 
     #[test]
@@ -629,12 +922,12 @@ mod tests {
         let mut menu =
             MenuRenderObject::new(alloc::vec![MenuItemContent::new("Open")], 28.0, 120.0);
 
-        assert_eq!(menu.layout(LayoutConstraints::unconstrained()).height, 32.0);
+        assert_eq!(menu.layout(LayoutConstraints::unconstrained()).height, 40.0);
     }
 
     #[test]
     #[allow(deprecated)]
-    fn legacy_buffer_matches_retained_menu_semantics() {
+    fn legacy_popup_is_readable_opaque_fallback_and_retained_menu_reads_backdrop() {
         let _environment = install_test_input_environment(pointer_environment());
         let palette = ColorPalette::default();
         let mut menu = MenuRenderObject::new_adaptive(
@@ -647,32 +940,55 @@ mod tests {
         );
         menu.set_hovered(Some(0));
         menu.layout(LayoutConstraints::unconstrained());
+        // These assertions inspect physical 1x pixels. Other pipeline tests
+        // change the process-wide UI scale, so pin this fixture explicitly.
+        menu.buffer = Some(Buffer::from_logical_dimensions_with_scale(
+            menu.size.width as u32,
+            menu.size.height as u32,
+            1000,
+        ));
         menu.render();
 
         let buffer = menu
             .get_buffer()
             .expect("layout creates a legacy popup buffer");
-        assert_eq!(buffer.get_pixel(0, 0), Some(palette.border().to_bgra()));
-        assert_eq!(buffer.get_pixel(60, 0), Some(palette.border().to_bgra()));
+        assert_eq!(
+            buffer.get_pixel(0, 0),
+            Some(
+                style::GlassMaterial::menu()
+                    .tint
+                    .with_opacity(1.0)
+                    .to_bgra()
+            )
+        );
+        assert_eq!(
+            buffer.get_pixel(60, 0),
+            Some(
+                style::GlassMaterial::menu()
+                    .tint
+                    .with_opacity(1.0)
+                    .to_bgra()
+            )
+        );
         assert_eq!(
             buffer.get_pixel(50, 10),
             Some(palette.menu_hover().to_bgra())
         );
-        assert_eq!(buffer.get_pixel(10, 26), Some(palette.divider().to_bgra()));
+        assert_eq!(buffer.get_pixel(16, 38), Some(palette.divider().to_bgra()));
 
         let mut paint = PaintContext::new();
         assert!(menu.paint(&mut paint, Point::ZERO));
+        assert!(menu.reads_backdrop());
         assert!(paint.commands().iter().any(|command| matches!(
             command,
-            PaintCommand::FillRoundedRect { corner_radius, color, .. }
+            PaintCommand::BackdropFilterRoundedRect { corner_radius, tint, .. }
                 if *corner_radius == style::surface_radius(style::SurfaceRole::Floating)
-                    && *color == style::surface_color(&palette, style::SurfaceRole::Floating)
+                    && *tint == style::GlassMaterial::menu().tint
         )));
-        assert!(paint.commands().iter().any(|command| matches!(
+        assert!(!paint.commands().iter().any(|command| matches!(
             command,
-            PaintCommand::StrokeRoundedRect { corner_radius, color, .. }
-                if *corner_radius == style::surface_radius(style::SurfaceRole::Floating)
-                    && *color == palette.border()
+            PaintCommand::StrokeRoundedRect { .. }
+                | PaintCommand::FillVerticalGradientRoundedRect { .. }
         )));
         assert!(paint.commands().iter().any(|command| matches!(
             command,

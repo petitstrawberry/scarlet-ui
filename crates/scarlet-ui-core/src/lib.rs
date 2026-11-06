@@ -4,7 +4,7 @@
 //! `scarlet-ui` facade crate. It provides:
 //!
 //! - **Declarative Views**: Describe your UI with composable Views
-//! - **State Management**: Reactive State<T> with automatic updates
+//! - **State Management**: Reactive `State<T>` with automatic updates
 //! - **Element System**: Efficient runtime representation with reconciliation
 //! - **Layout Engine**: Constraint-based layout system
 //! - **Event Handling**: Pointer and keyboard event routing
@@ -59,7 +59,9 @@ pub mod error;
 pub mod event;
 pub mod file_dialog;
 pub mod geometry;
+pub mod glass;
 pub mod graphics;
+pub use glass::{GlassQuality, glass_quality, set_glass_quality};
 pub mod icon;
 mod id;
 pub mod input_environment;
@@ -124,7 +126,9 @@ pub use event::{
     Event, EventDispatcher, FocusEvent, GamepadButton, GamepadEvent, InputEvent, KeyCode, KeyEvent,
     LifecycleEvent, MouseButton, MouseEvent, ScrollSource, WheelPhase,
 };
-pub use geometry::{Alignment, EdgeInsets, GeometryProxy, Offset, Point, Rect, Size};
+pub use geometry::{
+    Alignment, EdgeInsets, GeometryProxy, Offset, Point, Rect, SafeAreaEdges, Size,
+};
 pub use graphics::{
     Canvas, FontStack, GlyphRasterKey, RasterizedGlyph, add_default_font_fallback,
     clear_default_font_fallbacks, default_font_stack, measure_text_sized,
@@ -156,25 +160,25 @@ pub use state::{InvalidationKind, Listenable, State, StateId, SubscriptionId, ge
 pub use view::{View, ViewExt, ViewKey};
 pub use views::modifiers::{
     AlignmentFrame, Background, Border, Clip, Focusable, Frame, OnKey, OnMouseButton, OnMouseDelta,
-    Padding, SetSize,
+    Padding, SafeArea, SetSize,
 };
 pub use views::{
     BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, HorizontalSizeClass,
     IconView, Image, ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView,
-    ScrollWheelDirection, ScrollbarVisibility, Select, Slider, TabBarPlacement, TabBarPosition,
-    TabItem, TabStyle, TabView, Toggle, VectorImageData, VectorTriangle, VerticalSizeClass,
-    WindowSizeClass,
+    ScrollWheelDirection, ScrollbarVisibility, Select, SelectStyle, Slider, TabBarPlacement,
+    TabBarPosition, TabItem, TabStyle, TabView, Toggle, VectorImageData, VectorTriangle,
+    VerticalSizeClass, WindowSizeClass,
 };
 pub use views::{
-    Button, ElevationRole, HStack, LazyVStack, Rectangle, Spacer, SplitAxis, SplitAxisPolicy,
-    SplitView, Surface, SurfaceRole, Text, TextField, VStack, Window, WindowContentLayout,
-    WindowShadow, ZStack,
+    Button, ElevationRole, GlassMaterial, HStack, LazyVStack, Rectangle, Spacer, SplitAxis,
+    SplitAxisPolicy, SplitView, Surface, SurfaceRole, Text, TextField, TextStyle, TextTone, VStack,
+    Window, WindowContentLayout, WindowShadow, ZStack,
 };
 pub use views::{
     EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,
     TextStyleSpan, TextView, TextViewHit, TextViewRenderObject, TextViewScroll, WrapMode,
 };
-pub use views::{NavigationLink, NavigationPresentation, NavigationView};
+pub use views::{NavigationLink, NavigationPresentation, NavigationSidebarStyle, NavigationView};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
 
 pub use scarlet_ui_macros::preview;
@@ -196,6 +200,7 @@ pub mod prelude {
         MouseEvent, ScrollSource, WheelPhase,
     };
     pub use crate::geometry::*;
+    pub use crate::glass::{GlassQuality, glass_quality, set_glass_quality};
     pub use crate::graphics::{
         FontStack, GlyphRasterKey, RasterizedGlyph, add_default_font_fallback,
         clear_default_font_fallbacks, default_font_stack, measure_text_sized_with_font_stack,
@@ -215,6 +220,7 @@ pub mod prelude {
     };
     pub use crate::state::{InvalidationKind, Listenable, State, StateId, SubscriptionId};
     pub use crate::view::{View, ViewExt, ViewKey};
+    pub use crate::views::modifiers::SafeArea;
     pub use crate::views::modifiers::{
         Background, Border, Clip, Focusable, Frame, OnKey, OnMouseButton, OnMouseDelta,
         OnMouseMove, Padding,
@@ -222,14 +228,15 @@ pub mod prelude {
     pub use crate::views::{
         BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar,
         HorizontalSizeClass, IconView, Image, ImageFit, ImageSource, ListView, ProgressView,
-        ScrollAxis, ScrollView, ScrollWheelDirection, ScrollbarVisibility, Select, Slider,
-        TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, Toggle, VectorImageData,
-        VectorTriangle, VerticalSizeClass, WindowSizeClass,
+        ScrollAxis, ScrollView, ScrollWheelDirection, ScrollbarVisibility, Select, SelectStyle,
+        Slider, TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, Toggle,
+        VectorImageData, VectorTriangle, VerticalSizeClass, WindowSizeClass,
     };
     pub use crate::views::{
-        Button, Either, Either3, Either4, Either5, Either6, ElevationRole, HStack, LazyVStack,
-        NavigationPresentation, Rectangle, Spacer, SplitAxis, SplitAxisPolicy, SplitView, Surface,
-        SurfaceRole, Text, TextField, VStack, Window, WindowContentLayout, WindowShadow, ZStack,
+        Button, Either, Either3, Either4, Either5, Either6, ElevationRole, GlassMaterial, HStack,
+        LazyVStack, NavigationPresentation, NavigationSidebarStyle, Rectangle, Spacer, SplitAxis,
+        SplitAxisPolicy, SplitView, Surface, SurfaceRole, Text, TextField, TextStyle, TextTone,
+        VStack, Window, WindowContentLayout, WindowShadow, ZStack,
     };
     pub use crate::views::{
         EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,

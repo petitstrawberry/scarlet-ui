@@ -1,12 +1,46 @@
 //! Paint geometry tessellation and rounded-clip processing.
 
-use alloc::vec::Vec;
+use alloc::{rc::Rc, vec::Vec};
 
 use scarlet_ui_core::geometry::{Point, Rect};
 
 use crate::error::{Error, Result};
 
 pub(crate) const MAX_FRAME_VERTICES: usize = 196_608;
+
+/// A point on an inset rounded contour; 13 points per quarter include both
+/// tangent endpoints, so the straight sides never cut across a rounded corner.
+fn glass_contour(rect: Rect, radius: f32, inset: f32, index: usize) -> Point {
+    glass_contour_with_steps(rect, radius, inset, index, 12)
+}
+
+fn glass_contour_with_steps(
+    rect: Rect,
+    radius: f32,
+    inset: f32,
+    index: usize,
+    steps: usize,
+) -> Point {
+    let radius = radius
+        .max(0.)
+        .min(rect.size.width.min(rect.size.height) * 0.5);
+    let r = (radius - inset).max(0.);
+    let corner = (index / (steps + 1)) % 4;
+    let step = index % (steps + 1);
+    let angle =
+        core::f32::consts::PI * (-1. + corner as f32 * 0.5 + step as f32 / (2 * steps) as f32);
+    let cx = if corner == 0 || corner == 3 {
+        rect.left() + inset + r
+    } else {
+        rect.right() - inset - r
+    };
+    let cy = if corner < 2 {
+        rect.top() + inset + r
+    } else {
+        rect.bottom() - inset - r
+    };
+    Point::new(cx + libm::cosf(angle) * r, cy + libm::sinf(angle) * r)
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Vertex {
@@ -72,7 +106,7 @@ impl Point2 {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct FloatRect {
     pub(crate) x: f32,
     pub(crate) y: f32,
@@ -209,6 +243,43 @@ struct FillEdge {
 }
 
 /// Stateful tessellator for one paint list.
+// Local meshes survive frame lowering. Translation, color and clip are applied
+// on replay, so scrolling/hover does not rebuild identical shadow layers.
+const MAX_SHAPE_CACHE_VERTICES: usize = 65_536;
+#[derive(Default)]
+pub(crate) struct ShapeCache {
+    entries: Vec<([u32; 6], Rc<Vec<Vertex>>)>,
+    vertices: usize,
+    #[cfg(test)]
+    hits: usize,
+}
+impl ShapeCache {
+    fn get(&mut self, key: [u32; 6]) -> Option<Rc<Vec<Vertex>>> {
+        let index = self.entries.iter().position(|(k, _)| *k == key)?;
+        let entry = self.entries.remove(index);
+        let result = Rc::clone(&entry.1);
+        self.entries.push(entry);
+        #[cfg(test)]
+        {
+            self.hits += 1;
+        }
+        Some(result)
+    }
+    fn insert(&mut self, key: [u32; 6], vertices: Rc<Vec<Vertex>>) {
+        if vertices.len() > MAX_SHAPE_CACHE_VERTICES {
+            return;
+        }
+        while !self.entries.is_empty()
+            && (self.entries.len() >= 64
+                || self.vertices + vertices.len() > MAX_SHAPE_CACHE_VERTICES)
+        {
+            self.vertices -= self.entries.remove(0).1.len();
+        }
+        self.vertices += vertices.len();
+        self.entries.push((key, vertices));
+    }
+}
+
 pub(crate) struct Tessellator {
     scale: f32,
     frame_width: u32,
@@ -216,6 +287,7 @@ pub(crate) struct Tessellator {
     render_bounds: FloatRect,
     clip_stack: Vec<ClipShape>,
     vertices: Vec<Vertex>,
+    pub(crate) shape_cache: ShapeCache,
 }
 
 impl Tessellator {
@@ -235,6 +307,7 @@ impl Tessellator {
             render_bounds,
             clip_stack: Vec::new(),
             vertices: Vec::new(),
+            shape_cache: ShapeCache::default(),
         })
     }
 
@@ -316,7 +389,136 @@ impl Tessellator {
         self.finish_range(start)
     }
 
+    fn shape(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        kind: u32,
+        strength: f32,
+    ) -> Result<Rc<Vec<Vertex>>> {
+        if ![rect.size.width, rect.size.height, radius, strength]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err(Error::InvalidFrame);
+        }
+        let key = [
+            kind,
+            rect.size.width.to_bits(),
+            rect.size.height.to_bits(),
+            radius.to_bits(),
+            strength.to_bits(),
+            self.scale.to_bits(),
+        ];
+        if let Some(vertices) = self.shape_cache.get(key) {
+            return Ok(vertices);
+        }
+        let w = rect.size.width.max(0.0) * self.scale;
+        let h = rect.size.height.max(0.0) * self.scale;
+        let mut local = Tessellator::new(
+            (self.scale * 1000.0) as u32,
+            libm::ceilf(w).max(1.0) as u32,
+            libm::ceilf(h).max(1.0) as u32,
+            FloatRect::new(0.0, 0.0, w.max(1.0), h.max(1.0)),
+        )?;
+        let rect = Rect::from_xywh(0.0, 0.0, rect.size.width, rect.size.height);
+        if kind != 0 {
+            local.push_clip(rect, radius)?;
+        }
+        match kind {
+            0 => {
+                local.fill_rounded_rect_raw(rect, radius)?;
+            }
+            1 => {
+                local.refractive_rect_raw(
+                    rect,
+                    radius,
+                    FloatRect::new(0.0, 0.0, w, h),
+                    strength,
+                )?;
+            }
+            _ => {
+                local.glass_rim_raw(rect, radius, 1.0)?;
+            }
+        }
+        let vertices = Rc::new(local.vertices);
+        self.shape_cache.insert(key, Rc::clone(&vertices));
+        Ok(vertices)
+    }
+
+    fn replay_shape(
+        &mut self,
+        rect: Rect,
+        vertices: &[Vertex],
+        radius: f32,
+        source: Option<FloatRect>,
+        opacity: f32,
+    ) -> Result<Option<GeometryRange>> {
+        let start = self.vertices.len();
+        let x = rect.left() * self.scale;
+        let y = rect.top() * self.scale;
+        for triangle in vertices.chunks_exact(3) {
+            let mut transformed = [triangle[0], triangle[1], triangle[2]];
+            for v in &mut transformed {
+                v.position[0] += x;
+                v.position[1] += y;
+                v.color[3] *= opacity;
+                if let Some(source) = source {
+                    v.tex_coord[0] = (v.tex_coord[0] * rect.size.width * self.scale + x - source.x)
+                        / source.width;
+                    v.tex_coord[1] = (v.tex_coord[1] * rect.size.height * self.scale + y
+                        - source.y)
+                        / source.height;
+                }
+            }
+            // Cached geometry already includes its own rounded clipping. Do
+            // not clip every triangle against that same polygon again.
+            self.push_triangle_clipped(
+                transformed,
+                Some((
+                    FloatRect::from_logical(rect, self.scale),
+                    (radius * self.scale)
+                        .max(0.0)
+                        .min(rect.size.width * self.scale * 0.5)
+                        .min(rect.size.height * self.scale * 0.5),
+                )),
+            )?;
+        }
+        self.finish_range(start)
+    }
+
     pub(crate) fn fill_rounded_rect(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+    ) -> Result<Option<GeometryRange>> {
+        if FloatRect::from_logical(rect, self.scale).is_empty() {
+            return Ok(None);
+        }
+        let vertices = self.shape(rect, radius, 0, 0.0)?;
+        self.replay_shape(rect, &vertices, radius, None, 1.0)
+    }
+    pub(crate) fn refractive_rect(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        source: FloatRect,
+        strength: f32,
+    ) -> Result<Option<GeometryRange>> {
+        let vertices = self.shape(rect, radius, 1, strength)?;
+        self.replay_shape(rect, &vertices, radius, Some(source), 1.0)
+    }
+    pub(crate) fn glass_rim(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        opacity: f32,
+    ) -> Result<Option<GeometryRange>> {
+        let vertices = self.shape(rect, radius, 2, 0.0)?;
+        self.replay_shape(rect, &vertices, radius, None, opacity)
+    }
+
+    fn fill_rounded_rect_raw(
         &mut self,
         rect: Rect,
         corner_radius: f32,
@@ -470,6 +672,179 @@ impl Tessellator {
         self.finish_range(start)
     }
 
+    /// Follow the curved boundary with concentric contours. A rectangular UV
+    /// grid interpolates across the outside of rounded corners (where there is
+    /// no refraction), creating diagonal kinks on thin background lines.
+    /// This fixed-size mesh is cached, including its optical samples.
+    fn refractive_rect_raw(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        source: FloatRect,
+        strength: f32,
+    ) -> Result<Option<GeometryRange>> {
+        let start = self.vertices.len();
+        let edge = scarlet_ui_core::glass::glass_bezel(rect, radius);
+        let vertex = |p: Point| {
+            let sample = scarlet_ui_core::glass::glass_sample(rect, radius, p, strength);
+            Vertex::textured(
+                Point2::new(p.x * self.scale, p.y * self.scale),
+                [
+                    (sample.x * self.scale - source.x) / source.width,
+                    (sample.y * self.scale - source.y) / source.height,
+                ],
+            )
+        };
+        let mut rings = [[Vertex::solid(Point2::new(0., 0.)); 52]; 7];
+        for (ring, fraction) in [0., 0.04, 0.12, 0.28, 0.50, 0.75, 1.]
+            .into_iter()
+            .enumerate()
+        {
+            for i in 0..52 {
+                rings[ring][i] = vertex(glass_contour(rect, radius, edge * fraction, i));
+            }
+        }
+        let center = vertex(Point::new(
+            rect.left() + rect.size.width * 0.5,
+            rect.top() + rect.size.height * 0.5,
+        ));
+        for ring in 0..6 {
+            for i in 0..52 {
+                let next = (i + 1) % 52;
+                self.push_triangle([rings[ring][i], rings[ring][next], rings[ring + 1][next]])?;
+                self.push_triangle([rings[ring][i], rings[ring + 1][next], rings[ring + 1][i]])?;
+            }
+        }
+        for i in 0..52 {
+            self.push_triangle([rings[6][i], rings[6][(i + 1) % 52], center])?;
+        }
+        self.finish_range(start)
+    }
+
+    /// Contour reflection, 24 segments per corner. Colors are already
+    /// assigned per vertex and must not be replaced by color_geometry.
+    fn glass_rim_raw(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        opacity: f32,
+    ) -> Result<Option<GeometryRange>> {
+        let start = self.vertices.len();
+        let r = radius
+            .max(0.0)
+            .min(rect.size.width * 0.5)
+            .min(rect.size.height * 0.5);
+        if r < 1.25 {
+            return Ok(None);
+        }
+        let bezel = scarlet_ui_core::glass::glass_bezel(rect, radius);
+        let vertex = |i: usize, d: f32| {
+            let corner = (i / 25) % 4;
+            let step = i % 25;
+            let angle = core::f32::consts::PI * (-1.0 + corner as f32 * 0.5 + step as f32 / 48.0);
+            let nx = libm::cosf(angle);
+            let ny = libm::sinf(angle);
+            let p = glass_contour_with_steps(rect, radius, d, i, 24);
+            let reflection = scarlet_ui_core::glass::glass_surface_reflection_at_scale(
+                d, -nx, -ny, bezel, self.scale,
+            );
+            let rgb = if reflection >= 0.0 { 1.0 } else { 0.0 };
+            Vertex {
+                position: [p.x * self.scale, p.y * self.scale],
+                tex_coord: [0.0, 0.0],
+                color: [rgb, rgb, rgb, reflection.abs() * opacity],
+            }
+        };
+        // Calculate outside mutable borrowing of the tessellator.
+        // The inset light needs extra radial samples; keep this bounded cache-
+        // build scratch off the native host's stack.
+        let mut rings = Vec::new();
+        rings
+            .try_reserve_exact(17)
+            .map_err(|_| Error::FrameTooComplex)?;
+        rings.resize(17, [Vertex::solid(Point2::new(0.0, 0.0)); 100]);
+        for i in 0..100 {
+            let angle =
+                core::f32::consts::PI * (-1. + (i / 25) as f32 * 0.5 + (i % 25) as f32 / 48.);
+            let (width, _) =
+                scarlet_ui_core::glass::glass_contour_edge(-libm::cosf(angle), -libm::sinf(angle));
+            let width = width.min(bezel);
+            let line_width =
+                scarlet_ui_core::glass::glass_contour_width(-libm::cosf(angle), self.scale)
+                    .min(bezel);
+            let half_pixel = 0.5 / self.scale;
+            // Keep black and white vertex colors on separate sides of the
+            // zero crossing. Interpolating their RGB together would darken a
+            // pale backdrop independently of the intended shadow strength.
+            let reflection_at = |d| {
+                scarlet_ui_core::glass::glass_surface_reflection_at_scale(
+                    d,
+                    -libm::cosf(angle),
+                    -libm::sinf(angle),
+                    bezel,
+                    self.scale,
+                )
+            };
+            let all_light = reflection_at(0.) >= 0. && reflection_at(line_width) >= 0.;
+            let mut lo = 0.;
+            let mut hi = bezel;
+            for _ in 0..8 {
+                let mid = (lo + hi) * 0.5;
+                let reflection = scarlet_ui_core::glass::glass_surface_reflection_at_scale(
+                    mid,
+                    -libm::cosf(angle),
+                    -libm::sinf(angle),
+                    bezel,
+                    self.scale,
+                );
+                if reflection < 0. {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            let zero = if all_light { bezel } else { (lo + hi) * 0.5 };
+            let inset = 1. / self.scale;
+            let rim_width = (1.25 + 0.50 * libm::cosf(angle) * libm::cosf(angle)).min(bezel * 0.10);
+            let mut distances = [
+                (0., 0),
+                (width * 0.25, 0),
+                (width * 0.5, 0),
+                (width, 0),
+                ((inset - half_pixel).max(0.), 0),
+                ((inset + half_pixel).min(bezel), 0),
+                ((inset + rim_width * 0.5).min(bezel), 0),
+                ((inset + rim_width).min(bezel), 0),
+                ((line_width - half_pixel).max(0.), 0),
+                (line_width, 0),
+                (zero, 1),
+                (zero, 2),
+                ((line_width + half_pixel).min(bezel), 0),
+                (bezel * 0.16, 0),
+                (bezel * 0.4, 0),
+                (bezel * 0.7, 0),
+                (bezel, 0),
+            ];
+            distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            for (ring, (d, crossing)) in distances.into_iter().enumerate() {
+                let mut v = vertex(i, d);
+                if crossing != 0 {
+                    let rgb = if crossing == 1 && !all_light { 0. } else { 1. };
+                    v.color = [rgb, rgb, rgb, 0.];
+                }
+                rings[ring][i] = v;
+            }
+        }
+        for ring in 0..16 {
+            for i in 0..100 {
+                let next = (i + 1) % 100;
+                self.push_triangle([rings[ring][i], rings[ring][next], rings[ring + 1][next]])?;
+                self.push_triangle([rings[ring][i], rings[ring + 1][next], rings[ring + 1][i]])?;
+            }
+        }
+        self.finish_range(start)
+    }
+
     pub(crate) fn dummy_draw(&mut self) -> Result<GeometryRange> {
         let Some(scissor) = self.effective_scissor() else {
             return Err(Error::InvalidFrame);
@@ -618,8 +993,21 @@ impl Tessellator {
     }
 
     fn push_triangle(&mut self, triangle: [Vertex; 3]) -> Result<()> {
+        self.push_triangle_clipped(triangle, None)
+    }
+
+    fn push_triangle_clipped(
+        &mut self,
+        triangle: [Vertex; 3],
+        already_clipped: Option<(FloatRect, f32)>,
+    ) -> Result<()> {
         let mut polygon: Option<Vec<Vertex>> = None;
         for clip in &self.clip_stack {
+            if already_clipped
+                .is_some_and(|(rect, radius)| rect == clip.bounds && radius == clip.corner_radius)
+            {
+                continue;
+            }
             let Some(rounded) = clip.rounded_polygon.as_ref() else {
                 continue;
             };
@@ -672,7 +1060,7 @@ impl Tessellator {
         }))
     }
 
-    fn effective_scissor(&self) -> Option<PixelBounds> {
+    pub(crate) fn effective_scissor(&self) -> Option<PixelBounds> {
         let mut bounds = self.render_bounds;
         for clip in &self.clip_stack {
             bounds = bounds.intersect(clip.bounds)?;
@@ -760,6 +1148,11 @@ fn clip_to_convex_polygon(vertices: &[Vertex], clip: &[Point2]) -> Result<Vec<Ve
     for edge_index in 0..clip.len() {
         let edge_start = clip[edge_index];
         let edge_end = clip[(edge_index + 1) % clip.len()];
+        // Capsule arcs meet at the same point. Floating-point trig can leave
+        // a tiny reversed edge which otherwise clips away half the capsule.
+        if points_near(edge_start, edge_end) {
+            continue;
+        }
         if input.is_empty() {
             break;
         }
@@ -877,6 +1270,50 @@ fn cosine(angle: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translated_capsule_clip_preserves_both_halves() {
+        let mut tess =
+            Tessellator::new(1000, 400, 120, FloatRect::new(0.0, 0.0, 400.0, 120.0)).unwrap();
+        tess.push_clip(Rect::from_xywh(123.25, 24.0, 122.0, 36.0), 18.0)
+            .unwrap();
+        for x in [130.0, 180.0, 230.0] {
+            let range = tess
+                .fill_rounded_rect(Rect::from_xywh(x, 35.0, 3.0, 3.0), 0.0)
+                .unwrap()
+                .unwrap();
+            assert!(
+                range.vertex_count >= 6,
+                "capsule must retain interior at {x}"
+            );
+        }
+    }
+
+    #[test]
+    fn shadow_and_optical_meshes_reuse_local_geometry_and_bound_resize_cache() {
+        let mut tess =
+            Tessellator::new(2000, 800, 600, FloatRect::new(0.0, 0.0, 800.0, 600.0)).unwrap();
+        for kind in 0..3 {
+            let a = tess
+                .shape(Rect::from_xywh(0.0, 0.0, 100.0, 36.0), 12.0, kind, 1.0)
+                .unwrap();
+            let b = tess
+                .shape(Rect::from_xywh(83.5, 102.25, 100.0, 36.0), 12.0, kind, 1.0)
+                .unwrap();
+            assert!(
+                Rc::ptr_eq(&a, &b),
+                "translation must not rebuild shadow/optics"
+            );
+            assert!(!a.is_empty());
+        }
+        assert_eq!(tess.shape_cache.hits, 3);
+        for width in 1..100 {
+            tess.shape(Rect::from_xywh(0.0, 0.0, width as f32, 36.0), 12.0, 0, 0.0)
+                .unwrap();
+        }
+        assert!(tess.shape_cache.entries.len() <= 64);
+        assert!(tess.shape_cache.vertices <= MAX_SHAPE_CACHE_VERTICES);
+    }
 
     #[test]
     fn rounded_clip_keeps_a_centered_textured_rect() {

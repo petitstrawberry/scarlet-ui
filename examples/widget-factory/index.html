@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="description" content="Explore ScarletUI controls, text editing, menus, and a 3D canvas in the browser with WebGPU.">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ScarletUI Widget Factory / WebGPU</title>
+<style>:root { --factory-surface:#fff; color-scheme:light } html,body { margin:0; width:100%; height:100%; overflow:hidden; background:var(--factory-surface) } body { height:100dvh } canvas { position:fixed; inset:0; display:block; width:100%; height:100%; border:0; outline:none; touch-action:none } #status { position:absolute; inset:0; display:grid; place-content:center; padding:24px; box-sizing:border-box; background:var(--factory-surface); color:#333; font:15px/1.6 system-ui,sans-serif } #status[hidden] { display:none } #message { max-width:560px; white-space:pre-wrap } #status.error { color:#9b1822 } #status h1 { font-size:20px; font-weight:600; margin:0 0 12px } #status p { margin:0 } </style>
+<canvas id="ui" aria-label="ScarletUI Widget Factory / WebGPU"></canvas>
+<!-- WebKit's fixed-container color detection uses CSS background color, not
+     our GPU pixels. Keep this empty: text clipping leaves the canvas untouched.
+     11px exceeds WebKit's 10px thin-border path; it is not layout padding.
+     See docs/SAFE_AREA.md for source references and device verification. -->
+<div id="ios-status-background" aria-hidden="true"></div>
+<style>
+#ios-status-background { display:none }
+:root[data-standalone] #ios-status-background {
+  display:block;
+  position:fixed;
+  inset:0 0 auto;
+  height:11px;
+  z-index:2147483647;
+  pointer-events:none;
+  background-color:var(--factory-surface);
+  -webkit-background-clip:text;
+  background-clip:text;
+}
+</style>
+<script>
+// Detect the launch mode, not an iOS version token (installed-app UAs vary).
+const standaloneMode = matchMedia('(display-mode: standalone)');
+const fullscreenMode = matchMedia('(display-mode: fullscreen)');
+function updateStandaloneMode() {
+  document.documentElement.toggleAttribute('data-standalone',
+    navigator.standalone === true || standaloneMode.matches || fullscreenMode.matches);
+}
+updateStandaloneMode();
+standaloneMode.addEventListener('change', updateStandaloneMode);
+fullscreenMode.addEventListener('change', updateStandaloneMode);
+addEventListener('pageshow', updateStandaloneMode);
+</script>
+<section id="status" role="status" aria-live="polite"><div><h1>ScarletUI Widget Factory / WebGPU</h1><p id="message">Loading the WebGPU sample…</p><noscript><p>JavaScript is required to run this sample.</p></noscript></div></section>
+<script type="module">
+const status = document.querySelector('#status');
+const message = document.querySelector('#message');
+function showError(error) {
+  status.hidden = false;
+  status.classList.add('error');
+  message.textContent = `ScarletUI could not start or continue: ${error}
+
+An available WebGPU adapter and a secure context (HTTPS or localhost) are required. You can return to the samples with your browser’s Back button.`;
+  console.error(error);
+}
+try {
+  if (!globalThis.isSecureContext) throw new Error('This page is not a secure context. Open it using HTTPS or localhost.');
+  if (!navigator.gpu) throw new Error('This browser does not expose WebGPU. Browser, device or administrator settings may limit support.');
+  const { default: init, start, runtime_error } = await import('./pkg/scarlet_ui_widget_factory.js');
+  await init();
+  await start();
+  status.hidden = true;
+  const check = setInterval(() => {
+    const error = runtime_error();
+    if (error) { showError(error); clearInterval(check); }
+  }, 250);
+} catch (error) {
+  showError(error);
+}
+</script>
+</html>

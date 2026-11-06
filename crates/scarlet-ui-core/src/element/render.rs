@@ -34,6 +34,7 @@ fn update_slider_value(
         slider.get_value().set(new_value);
         slider.invoke_on_change(new_value);
         render_object.set_value(slider.get_value().get());
+        crate::pipeline::mark_element_needs_paint(pipeline_id, id);
     }
 }
 
@@ -58,6 +59,7 @@ fn activate_toggle(
 ) {
     let state = toggle.get_is_on().clone();
     let next = !state.get();
+    render_object.set_is_on(next);
     state.set(next);
     toggle.invoke_on_change(next);
     render_object.set_is_on(state.get());
@@ -67,13 +69,13 @@ fn activate_toggle(
 fn activate_select(
     select: &crate::views::Select,
     render_object: &mut crate::views::SelectRenderObject,
-    y: i32,
+    point: Point,
     highlight_selection_on_open: bool,
     pipeline_id: PipelineId,
     id: ElementId,
 ) {
     if render_object.is_expanded() {
-        if let Some(index) = render_object.option_index_at_y(y as f32) {
+        if let Some(index) = render_object.option_index_at_point(point) {
             let selected_state = select.selected_index().clone();
             if selected_state.get() != index {
                 selected_state.set(index);
@@ -134,16 +136,19 @@ pub enum ScrollOffsetUpdate {
 /// - Rendering to a buffer
 /// - Hit testing
 pub trait RenderObject: Any {
+    /// Receive this scope's unconsumed platform safe-area reservations.
+    fn set_safe_area_insets(&mut self, _insets: EdgeInsets) {}
+
+    /// Reservations forwarded to descendants. Consumers remove handled edges.
+    fn child_safe_area_insets(&self, insets: EdgeInsets) -> EdgeInsets {
+        insets
+    }
+
     /// Layout this RenderObject and return its size
     fn layout(&mut self, constraints: LayoutConstraints) -> Size;
 
     /// Get the current size
     fn size(&self) -> Size;
-
-    /// Adjust only internal scrolling for a local keyboard-covered rectangle.
-    fn avoid_input_occlusion(&mut self, _occlusion: Option<Rect>, _caret: Option<Rect>, _reveal: bool) -> bool {
-        false
-    }
 
     /// Deliver notifications collected during the most recent layout pass.
     ///
@@ -181,6 +186,16 @@ pub trait RenderObject: Any {
     ///
     /// `true` when [`Self::paint`] may append a renderer-specific extension.
     fn emits_paint_extension(&self) -> bool {
+        false
+    }
+
+    /// Return whether this object reads the previously painted scene.
+    ///
+    /// Implementations emitting `BackdropFilterRoundedRect`, including through
+    /// a nested display list or popup, must return true while that effect is
+    /// present. Such content cannot be rasterized into an isolated picture
+    /// cache. This query must not paint or mutate damage-tracking state.
+    fn reads_backdrop(&self) -> bool {
         false
     }
 
@@ -260,6 +275,15 @@ pub trait RenderObject: Any {
     )]
     fn get_buffer(&self) -> Option<&crate::buffer::Buffer> {
         None
+    }
+
+    /// Local position of the legacy buffer's top-left pixel.
+    ///
+    /// Renderers with paint outside layout bounds can allocate a larger buffer,
+    /// paint at the inverse of this offset, and preserve negative coordinates
+    /// during composition. This offset never changes layout or event coordinates.
+    fn buffer_origin(&self) -> Point {
+        Point::ZERO
     }
 
     /// Clear any cached buffers owned by this RenderObject.
@@ -373,13 +397,6 @@ pub trait RenderObject: Any {
         false
     }
 
-    /// Retain an ordinary release activation while the contact stays within
-    /// this target's bounds, regardless of hold duration or in-bounds drift.
-    /// Scrolling, dragging, multitouch and leaving the bounds still cancel it.
-    fn keeps_touch_press_within_bounds(&self) -> bool {
-        false
-    }
-
     /// Direction in which this control can claim a drag from `local_point`.
     fn touch_drag_axis(&self, _local_point: Point) -> Option<crate::event::TouchDragAxis> {
         None
@@ -396,6 +413,21 @@ pub trait RenderObject: Any {
     ///
     /// `true` when the event was handled.
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
+        false
+    }
+
+    /// Adjust internal scrolling for a native keyboard overlay.
+    fn avoid_input_occlusion(
+        &mut self,
+        _occlusion: Option<Rect>,
+        _caret: Option<Rect>,
+        _reveal: bool,
+    ) -> bool {
+        false
+    }
+
+    /// Keep release activation valid while a touch stays within this control.
+    fn keeps_touch_press_within_bounds(&self) -> bool {
         false
     }
 
@@ -423,6 +455,12 @@ pub trait RenderObject: Any {
         size
     }
 
+    /// Opt-in caret reveal. Rectangles are local to this render object.
+    /// `None` removes temporary platform occlusion allowances.
+    fn reveal_text_input(&mut self, _request: Option<(Rect, Rect)>) -> bool {
+        false
+    }
+
     /// Sync child positions after an input event without a full re-layout.
     ///
     /// Scroll-like containers override this to translate their children by the
@@ -440,7 +478,7 @@ pub trait RenderObject: Any {
     /// [`ScrollOffsetUpdate::NeedsComposite`] when retained layers only need
     /// recomposition. The default implementation does nothing and returns
     /// [`ScrollOffsetUpdate::None`], leaving the layout/paint decision to
-    /// [`ElementRenderObject::update_needs_layout`].
+    /// [`crate::element::ElementRenderObject::update_needs_layout`].
     fn apply_scroll_offset(&mut self, _children: &mut [Box<dyn Element>]) -> ScrollOffsetUpdate {
         ScrollOffsetUpdate::None
     }
@@ -459,6 +497,13 @@ pub trait RenderObject: Any {
     fn owns_child_viewport(&self) -> bool {
         false
     }
+
+    /// Accept the bottom portion of this viewport covered by container chrome.
+    /// Scroll containers add travel so their last item can clear the overlay.
+    /// `None` means unsupported; `Some` reports whether layout changed.
+    fn set_bottom_overlay_inset(&mut self, _inset: f32) -> Option<bool> {
+        None
+    }
 }
 
 /// Element that wraps a RenderObject
@@ -476,15 +521,45 @@ pub struct RenderElement<V: View + Clone, R: RenderObject> {
     children: Vec<Box<dyn Element>>,
     position: Point,
     last_constraints: Option<LayoutConstraints>,
+    safe_area_insets: EdgeInsets,
     pipeline_id: PipelineId,
     subscriptions: Vec<SubscriptionId>,
     mounted: bool,
+    activation_key: Option<crate::event::KeyCode>,
     render_object_builder: Option<fn(&V) -> R>,
     render_object_updater: Option<fn(&mut R, &V) -> UpdateResult>,
     child_views_builder: Option<fn(&V) -> Vec<Box<dyn View>>>,
 }
 
 impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
+    // Check the view, not just hit testing: captured input can outlive enabled state.
+    fn control_is_disabled(&self) -> bool {
+        self.view
+            .as_any()
+            .downcast_ref::<crate::views::Button>()
+            .is_some_and(|view| !view.is_enabled())
+            || self
+                .view
+                .as_any()
+                .downcast_ref::<crate::views::TextField>()
+                .is_some_and(|view| !view.is_enabled())
+            || self
+                .view
+                .as_any()
+                .downcast_ref::<crate::views::Select>()
+                .is_some_and(|view| !view.is_enabled() || view.option_count() == 0)
+            || self
+                .view
+                .as_any()
+                .downcast_ref::<crate::views::Toggle>()
+                .is_some_and(|view| !view.is_enabled())
+            || self
+                .view
+                .as_any()
+                .downcast_ref::<crate::views::Slider>()
+                .is_some_and(|view| !view.is_enabled())
+    }
+
     /// Create a new RenderElement with a View and RenderObject
     pub fn new(view: V, render_object: R) -> Self {
         Self {
@@ -494,9 +569,11 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             children: Vec::new(),
             position: Point::ZERO,
             last_constraints: None,
+            safe_area_insets: EdgeInsets::ZERO,
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
+            activation_key: None,
             render_object_builder: None,
             render_object_updater: None,
             child_views_builder: None,
@@ -517,9 +594,11 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             children: Vec::new(),
             position: Point::ZERO,
             last_constraints: None,
+            safe_area_insets: EdgeInsets::ZERO,
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
+            activation_key: None,
             render_object_builder: Some(render_object_builder),
             render_object_updater: None,
             child_views_builder: None,
@@ -535,9 +614,11 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             children,
             position: Point::ZERO,
             last_constraints: None,
+            safe_area_insets: EdgeInsets::ZERO,
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
+            activation_key: None,
             render_object_builder: None,
             render_object_updater: None,
             child_views_builder: None,
@@ -565,9 +646,11 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             children,
             position: Point::ZERO,
             last_constraints: None,
+            safe_area_insets: EdgeInsets::ZERO,
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
+            activation_key: None,
             render_object_builder: Some(render_object_builder),
             render_object_updater: None,
             child_views_builder: Some(child_views_builder),
@@ -608,9 +691,11 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             children,
             position: Point::ZERO,
             last_constraints: None,
+            safe_area_insets: EdgeInsets::ZERO,
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
+            activation_key: None,
             render_object_builder: Some(render_object_builder),
             render_object_updater: Some(render_object_updater),
             child_views_builder: Some(child_views_builder),
@@ -763,6 +848,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             self.unsubscribe_view_listenables();
         }
         self.view = typed_view.clone();
+        if self.control_is_disabled() {
+            self.activation_key = None;
+        }
         let (render_result, render_needs_layout) = self.update_render_object_from_view();
         if matches!(render_result, UpdateResult::Replaced) {
             if self.mounted {
@@ -935,13 +1023,8 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn wants_keyboard_focus(&self) -> bool {
-        if self
-            .render_object
-            .as_any()
-            .downcast_ref::<crate::views::ButtonRenderObject>()
-            .is_some_and(|object| object.is_focused())
-        {
-            return true;
+        if self.control_is_disabled() {
+            return false;
         }
         if self
             .render_object
@@ -953,14 +1036,18 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 .as_any()
                 .downcast_ref::<crate::views::SliderRenderObject>()
                 .is_some_and(|object| object.is_focused())
-            || self
-                .render_object
-                .as_any()
-                .downcast_ref::<crate::views::SelectRenderObject>()
-                .is_some_and(|object| object.is_focused())
         {
             return true;
         }
+        if self
+            .render_object
+            .as_any()
+            .downcast_ref::<crate::views::ButtonRenderObject>()
+            .is_some_and(|button| button.is_focused())
+        {
+            return true;
+        }
+
         if self
             .render_object
             .as_any()
@@ -981,7 +1068,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             .render_object
             .as_any()
             .downcast_ref::<crate::views::SelectRenderObject>()
-            .is_some_and(|select| select.is_expanded())
+            .is_some_and(|select| select.is_focused())
         {
             return true;
         }
@@ -992,26 +1079,26 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn accepts_keyboard_focus(&self) -> bool {
-        if let Some(button) = self.view.as_any().downcast_ref::<crate::views::Button>() {
-            return button.is_enabled();
+        if self.control_is_disabled() {
+            return false;
         }
-        if let Some(toggle) = self.view.as_any().downcast_ref::<crate::views::Toggle>() {
-            return toggle.is_enabled();
-        }
-        if let Some(slider) = self.view.as_any().downcast_ref::<crate::views::Slider>() {
-            return slider.is_enabled();
-        }
-        if let Some(select) = self.view.as_any().downcast_ref::<crate::views::Select>() {
-            return select.is_enabled() && select.option_count() > 0;
-        }
-        self.view
-            .as_any()
-            .downcast_ref::<crate::views::TextField>()
-            .is_some()
+        self.view.as_any().is::<crate::views::Button>()
+            || self.view.as_any().is::<crate::views::Toggle>()
+            || self.view.as_any().is::<crate::views::Slider>()
+            || self
+                .view
+                .as_any()
+                .downcast_ref::<crate::views::TextField>()
+                .is_some()
             || self
                 .view
                 .as_any()
                 .downcast_ref::<crate::views::TextView>()
+                .is_some()
+            || self
+                .view
+                .as_any()
+                .downcast_ref::<crate::views::Select>()
                 .is_some()
             || self
                 .render_object
@@ -1022,6 +1109,14 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         self.last_constraints = Some(constraints);
+        self.render_object
+            .set_safe_area_insets(self.safe_area_insets);
+        let child_insets = self
+            .render_object
+            .child_safe_area_insets(self.safe_area_insets);
+        for child in &mut self.children {
+            child.set_safe_area_insets(child_insets);
+        }
         // Delegate layout to the RenderObject (which may layout children)
         let type_name = core::any::type_name_of_val(&self.render_object);
         if crate::debug::is_enabled() {
@@ -1050,6 +1145,11 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
     fn last_layout_constraints(&self) -> Option<LayoutConstraints> {
         self.last_constraints
+    }
+
+    fn set_safe_area_insets(&mut self, insets: EdgeInsets) {
+        self.safe_area_insets = insets;
+        self.render_object.set_safe_area_insets(insets);
     }
 
     fn set_last_layout_constraints(&mut self, constraints: LayoutConstraints) {
@@ -1132,7 +1232,52 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         Some(&mut self.render_object)
     }
 
+    fn avoid_input_occlusion(
+        &mut self,
+        occlusion: Option<Rect>,
+        caret: Option<Rect>,
+        reveal: bool,
+    ) -> bool {
+        if !self
+            .render_object
+            .avoid_input_occlusion(occlusion, caret, reveal)
+        {
+            return false;
+        }
+        match self.render_object.apply_scroll_offset(&mut self.children) {
+            ScrollOffsetUpdate::ChildrenChanged => {
+                crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id)
+            }
+            ScrollOffsetUpdate::NeedsComposite => {
+                crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id)
+            }
+            _ => crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id),
+        }
+        true
+    }
+
+    fn reveal_text_input(&mut self, request: Option<(Rect, Rect)>) -> bool {
+        if !self.render_object.reveal_text_input(request) {
+            return false;
+        }
+        match self.render_object.apply_scroll_offset(&mut self.children) {
+            ScrollOffsetUpdate::ChildrenChanged => {
+                crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id)
+            }
+            ScrollOffsetUpdate::NeedsComposite => {
+                crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id)
+            }
+            ScrollOffsetUpdate::NeedsPaint | ScrollOffsetUpdate::None => {
+                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id)
+            }
+        }
+        true
+    }
+
     fn text_input_state(&self) -> Option<crate::element::TextInputElementState> {
+        if self.control_is_disabled() {
+            return None;
+        }
         if let Some(focusable) = self
             .render_object
             .as_any()
@@ -1164,18 +1309,6 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             .then(|| render_object.text_input_state())
     }
 
-    fn avoid_input_occlusion(&mut self, occlusion: Option<Rect>, caret: Option<Rect>, reveal: bool) -> bool {
-        if !self.render_object.avoid_input_occlusion(occlusion, caret, reveal) {
-            return false;
-        }
-        match self.render_object.apply_scroll_offset(&mut self.children) {
-            ScrollOffsetUpdate::ChildrenChanged => crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id),
-            ScrollOffsetUpdate::NeedsComposite => crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id),
-            _ => crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id),
-        }
-        true
-    }
-
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
         use crate::event::{Event, MouseButton, MouseEvent, Phase};
 
@@ -1190,46 +1323,13 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             return false;
         }
 
-        let disabled_button = self
-            .view
-            .as_any()
-            .downcast_ref::<crate::views::Button>()
-            .is_some_and(|view| !view.is_enabled());
-        let disabled_control = disabled_button
-            || self
-                .view
-                .as_any()
-                .downcast_ref::<crate::views::Toggle>()
-                .is_some_and(|view| !view.is_enabled())
-            || self
-                .view
-                .as_any()
-                .downcast_ref::<crate::views::Slider>()
-                .is_some_and(|view| !view.is_enabled())
-            || self
-                .view
-                .as_any()
-                .downcast_ref::<crate::views::Select>()
-                .is_some_and(|view| !view.is_enabled() || view.option_count() == 0);
-        if disabled_control && !matches!(_event, Event::Focus(_)) {
+        if self.control_is_disabled() {
+            self.activation_key = None;
             return false;
         }
 
         if let Event::Keyboard(key_event) = _event {
             if _phase == Phase::Target {
-                if let Some(button) = self.view.as_any().downcast_ref::<crate::views::Button>()
-                    && let Some(object) = self
-                        .render_object
-                        .as_any_mut()
-                        .downcast_mut::<crate::views::ButtonRenderObject>()
-                    && let Some(activate) = object.handle_keyboard(*key_event)
-                {
-                    if activate {
-                        button.invoke_on_click();
-                    }
-                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
-                    return true;
-                }
                 if let Some(toggle) = self.view.as_any().downcast_ref::<crate::views::Toggle>()
                     && let Some(object) = self
                         .render_object
@@ -1275,6 +1375,21 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     }
                 }
             }
+            if _phase == Phase::Target
+                && let Some(button) = self.view.as_any().downcast_ref::<crate::views::Button>()
+                && let Some(object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::ButtonRenderObject>()
+                && let Some(activate) = object.handle_keyboard(*key_event)
+            {
+                if activate {
+                    button.invoke_on_click();
+                }
+                crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                return true;
+            }
+
             if self
                 .render_object
                 .as_any()
@@ -1327,85 +1442,120 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 return render_object.invoke_on_key(*key_event);
             }
             if _phase == Phase::Target
-                && let Some(select) = self.view.as_any().downcast_ref::<crate::views::Select>()
-                && let Some(object) = self
+                && let Some(select_view) = self.view.as_any().downcast_ref::<crate::views::Select>()
+                && let Some(select_ro) = self
                     .render_object
                     .as_any_mut()
                     .downcast_mut::<crate::views::SelectRenderObject>()
-                && (object.is_focused() || object.is_expanded())
+                && select_ro.is_focused()
             {
-                use crate::event::{KeyCode, KeyEvent};
-                if object.activation_key(*key_event) == Some(false) {
-                    return true;
+                if let crate::event::KeyEvent::Released { keycode, .. } = key_event {
+                    if self.activation_key == Some(*keycode) {
+                        self.activation_key = None;
+                        return true;
+                    }
                 }
                 let handled = match key_event {
-                    KeyEvent::Pressed {
-                        modifiers,
-                        keycode: KeyCode::Enter | KeyCode::Space,
-                    } if modifiers.control || modifiers.alt || modifiers.super_key => false,
-                    KeyEvent::Pressed { keycode, .. } => match keycode {
-                        KeyCode::Enter | KeyCode::Space if object.is_expanded() => {
-                            if let Some(index) = object
-                                .hovered_index()
-                                .filter(|index| *index < select.option_count())
-                            {
-                                if select.selected_index().get() != index {
-                                    select.selected_index().set(index);
-                                    select.invoke_on_change(index);
-                                }
+                    crate::event::KeyEvent::Pressed { keycode, .. } => {
+                        if matches!(
+                            keycode,
+                            crate::event::KeyCode::Enter | crate::event::KeyCode::Space
+                        ) {
+                            if self.activation_key.is_some() {
+                                return true;
                             }
-                            select.expanded().set(false);
-                            object.set_expanded(false);
-                            true
+                            self.activation_key = Some(*keycode);
                         }
-                        KeyCode::Escape if object.is_expanded() => {
-                            select.expanded().set(false);
-                            object.set_expanded(false);
-                            true
+                        if !select_ro.is_expanded() {
+                            if matches!(
+                                keycode,
+                                crate::event::KeyCode::Enter
+                                    | crate::event::KeyCode::Space
+                                    | crate::event::KeyCode::Down
+                                    | crate::event::KeyCode::Up
+                                    | crate::event::KeyCode::Home
+                                    | crate::event::KeyCode::End
+                            ) {
+                                activate_select(
+                                    select_view,
+                                    select_ro,
+                                    Point::ZERO,
+                                    true,
+                                    self.pipeline_id,
+                                    self.id,
+                                );
+                                return true;
+                            }
+                            return false;
                         }
-                        KeyCode::PageUp | KeyCode::PageDown if object.is_expanded() => {
-                            let last = select.option_count().saturating_sub(1);
-                            let current = object
-                                .hovered_index()
-                                .unwrap_or_else(|| select.selected_index().get())
-                                .min(last);
-                            let next = if *keycode == KeyCode::PageUp {
-                                current.saturating_sub(object.page_step())
-                            } else {
-                                current.saturating_add(object.page_step()).min(last)
-                            };
-                            object.set_hovered_index(Some(next));
-                            object.adjust_scroll();
-                            true
+                        match keycode {
+                            crate::event::KeyCode::Home | crate::event::KeyCode::End => {
+                                let index = if *keycode == crate::event::KeyCode::Home {
+                                    0
+                                } else {
+                                    select_view.option_count().saturating_sub(1)
+                                };
+                                select_ro.set_hovered_index(Some(index));
+                                select_ro.adjust_scroll();
+                                true
+                            }
+                            crate::event::KeyCode::PageUp | crate::event::KeyCode::PageDown => {
+                                let last = select_view.option_count().saturating_sub(1);
+                                let current = select_ro
+                                    .hovered_index()
+                                    .unwrap_or_else(|| select_view.selected_index().get())
+                                    .min(last);
+                                let index = if *keycode == crate::event::KeyCode::PageUp {
+                                    current.saturating_sub(select_ro.page_step())
+                                } else {
+                                    current.saturating_add(select_ro.page_step()).min(last)
+                                };
+                                select_ro.set_hovered_index(Some(index));
+                                select_ro.adjust_scroll();
+                                true
+                            }
+                            crate::event::KeyCode::Up => {
+                                let current = select_ro
+                                    .hovered_index()
+                                    .unwrap_or_else(|| select_view.selected_index().get());
+                                select_ro.set_hovered_index(Some(current.saturating_sub(1)));
+                                select_ro.adjust_scroll();
+                                true
+                            }
+                            crate::event::KeyCode::Down => {
+                                let current = select_ro
+                                    .hovered_index()
+                                    .unwrap_or_else(|| select_view.selected_index().get());
+                                let new =
+                                    (current + 1).min(select_view.option_count().saturating_sub(1));
+                                select_ro.set_hovered_index(Some(new));
+                                select_ro.adjust_scroll();
+                                true
+                            }
+                            crate::event::KeyCode::Enter | crate::event::KeyCode::Space => {
+                                if let Some(hovered) = select_ro.hovered_index() {
+                                    if select_view.selected_index().get() != hovered {
+                                        select_view.selected_index().set(hovered);
+                                        select_view.invoke_on_change(hovered);
+                                    }
+                                }
+                                select_view.expanded().set(false);
+                                select_ro.set_expanded(false);
+                                select_ro.set_hovered_index(None);
+                                true
+                            }
+                            crate::event::KeyCode::Escape => {
+                                select_view.expanded().set(false);
+                                select_ro.set_expanded(false);
+                                select_ro.set_hovered_index(None);
+                                true
+                            }
+                            _ => false,
                         }
-                        KeyCode::Enter
-                        | KeyCode::Space
-                        | KeyCode::Up
-                        | KeyCode::Down
-                        | KeyCode::Home
-                        | KeyCode::End => {
-                            let was_expanded = object.is_expanded();
-                            let last = select.option_count().saturating_sub(1);
-                            let current = object
-                                .hovered_index()
-                                .unwrap_or_else(|| select.selected_index().get())
-                                .min(last);
-                            let next = match keycode {
-                                KeyCode::Home => 0,
-                                KeyCode::End => last,
-                                KeyCode::Up if was_expanded => current.saturating_sub(1),
-                                KeyCode::Down if was_expanded => (current + 1).min(last),
-                                _ => select.selected_index().get().min(last),
-                            };
-                            select.expanded().set(true);
-                            object.set_expanded(true);
-                            object.set_hovered_index(Some(next));
-                            object.adjust_scroll();
-                            true
-                        }
-                        _ => false,
-                    },
-                    KeyEvent::Char { c } if object.is_expanded() => object.typeahead(*c),
+                    }
+                    crate::event::KeyEvent::Char { c } if select_ro.is_expanded() => {
+                        select_ro.typeahead(*c)
+                    }
                     _ => false,
                 };
                 if handled {
@@ -1450,7 +1600,8 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
 
         if matches!(
             _event,
-            Event::TextInputPreedit { .. }
+            Event::TextInputSelection { .. }
+                | Event::TextInputPreedit { .. }
                 | Event::TextInputCommit { .. }
                 | Event::TextInputDeleteSurroundingText { .. }
                 | Event::TextInputDone { .. }
@@ -1512,14 +1663,8 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         if let Event::Focus(focus_event) = _event {
             if _phase == Phase::Target {
                 let focused = *focus_event == crate::event::FocusEvent::Gained;
-                let mut control = false;
-                if let Some(object) = self
-                    .render_object
-                    .as_any_mut()
-                    .downcast_mut::<crate::views::ButtonRenderObject>()
-                {
-                    object.set_focused(focused);
-                    control = true;
+                if !focused {
+                    self.activation_key = None;
                 }
                 if let Some(object) = self
                     .render_object
@@ -1527,7 +1672,8 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     .downcast_mut::<crate::views::ToggleRenderObject>()
                 {
                     object.set_focused(focused);
-                    control = true;
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                    return true;
                 }
                 if let Some(object) = self
                     .render_object
@@ -1535,30 +1681,40 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     .downcast_mut::<crate::views::SliderRenderObject>()
                 {
                     object.set_focused(focused);
-                    control = true;
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                    return true;
                 }
-                if let Some(object) = self
+                if let Some(button) = self
                     .render_object
                     .as_any_mut()
-                    .downcast_mut::<crate::views::SelectRenderObject>()
+                    .downcast_mut::<crate::views::ButtonRenderObject>()
                 {
-                    object.set_focused(focused);
+                    button.set_focused(focused);
                     if !focused {
-                        object.set_expanded(false);
-                        object.set_hovered_index(None);
-                        if let Some(select) =
-                            self.view.as_any().downcast_ref::<crate::views::Select>()
-                        {
-                            select.expanded().set(false);
-                        }
+                        button.set_keyboard_pressed(false);
+                        button.set_pressed(false);
                     }
-                    control = true;
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                    return true;
                 }
-                if control {
+                if let Some(select) = self.view.as_any().downcast_ref::<crate::views::Select>()
+                    && let Some(render_object) = self
+                        .render_object
+                        .as_any_mut()
+                        .downcast_mut::<crate::views::SelectRenderObject>()
+                {
+                    render_object.set_focused(focused);
+                    if !focused {
+                        select.expanded().set(false);
+                        render_object.set_expanded(false);
+                        render_object.set_hovered_index(None);
+                        render_object.set_pressed(false);
+                    }
                     crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                     return true;
                 }
             }
+
             if _phase == Phase::Target
                 && self
                     .view
@@ -1620,13 +1776,16 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     .downcast_mut::<crate::views::TextViewRenderObject>()
             {
                 let handled = crate::views::text_view::handle_text_view_scroll_gesture(
-                    view, render_object, gesture,
+                    view,
+                    render_object,
+                    gesture,
                 );
                 if handled {
                     crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                 }
                 return handled;
             }
+
             if matches!(_phase, Phase::Target | Phase::Bubble)
                 && let crate::event::TouchGesture::Tap { x, y, .. } = gesture
                 && self
@@ -1647,7 +1806,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                     {
                         button.invoke_on_click();
                         crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
-                        return true;
+                        return button.has_click_callback();
                     }
                     if let Some(item) = self.view.as_any().downcast_ref::<crate::views::MenuItem>()
                     {
@@ -1673,7 +1832,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         activate_select(
                             select,
                             render_object,
-                            *y,
+                            Point::new(*x as f32, *y as f32),
                             false,
                             self.pipeline_id,
                             self.id,
@@ -1930,11 +2089,22 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 .as_any_mut()
                 .downcast_mut::<crate::views::TextFieldRenderObject>()
         {
+            match mouse_event {
+                MouseEvent::Entered { .. } | MouseEvent::Moved { .. } => {
+                    render_object.set_hovered(true)
+                }
+                MouseEvent::Exited { .. } => render_object.set_hovered(false),
+                _ => {}
+            }
+            let hover_changed = matches!(
+                mouse_event,
+                MouseEvent::Entered { .. } | MouseEvent::Exited { .. }
+            );
             let handled = crate::views::text_field::handle_text_field_mouse(
                 text_field,
                 render_object,
                 mouse_event,
-            );
+            ) || hover_changed;
             if handled {
                 crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
             }
@@ -1968,8 +2138,13 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         {
             if let MouseEvent::ButtonReleased {
                 button: MouseButton::Left,
+                x,
+                y,
                 ..
             } = mouse_event
+                && self
+                    .render_object
+                    .hit_test(Point::new(*x as f32, *y as f32))
             {
                 if let Some(render_object) =
                     self.render_object
@@ -2062,7 +2237,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         }
                         render_object.set_pressed(false);
                         crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
-                        return true;
+                        // Preserve the visual transition while allowing a wrapping
+                        // click modifier to supply the action for this button.
+                        return button.has_click_callback();
                     }
                     _ => {}
                 }
@@ -2222,23 +2399,65 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 .downcast_mut::<crate::views::SelectRenderObject>()
             {
                 match mouse_event {
-                    MouseEvent::Entered { x: _, y } | MouseEvent::Moved { x: _, y } => {
-                        let hovered = render_object.option_index_at_y(*y as f32);
+                    MouseEvent::Entered { x, y } | MouseEvent::Moved { x, y } => {
+                        render_object.set_hovered(true);
+                        let hovered =
+                            render_object.option_index_at_point(Point::new(*x as f32, *y as f32));
                         render_object.set_hovered_index(hovered);
                         crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
+                    MouseEvent::Wheel { delta_y, .. } if render_object.is_expanded() => {
+                        if *delta_y != 0 {
+                            render_object.scroll_rows(delta_y.signum());
+                        }
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
                     MouseEvent::Exited { .. } => {
+                        render_object.set_hovered(false);
+                        render_object.set_pressed(false);
                         render_object.set_hovered_index(None);
                         crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                         return true;
                     }
+                    MouseEvent::ButtonPressed {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        render_object.set_pressed(true);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
+                    MouseEvent::ButtonCancelled {
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        render_object.set_pressed(false);
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        // Preserve cancellation propagation while clearing visual state.
+                        return false;
+                    }
                     MouseEvent::ButtonReleased {
                         button: MouseButton::Left,
+                        x,
                         y,
                         ..
                     } => {
-                        activate_select(select, render_object, *y, true, self.pipeline_id, self.id);
+                        let activate = render_object.is_pressed();
+                        render_object.set_pressed(false);
+                        if activate {
+                            activate_select(
+                                select,
+                                render_object,
+                                Point::new(*x as f32, *y as f32),
+                                false,
+                                self.pipeline_id,
+                                self.id,
+                            );
+                        } else {
+                            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        }
                         return true;
                     }
                     _ => {}
@@ -2386,6 +2605,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         self.view
             .as_any()
             .downcast_ref::<crate::views::Button>()
+            .filter(|button| button.is_enabled())
             .and_then(crate::views::Button::press_repeat_timing)
     }
 
@@ -2393,10 +2613,351 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         let Some(button) = self.view.as_any().downcast_ref::<crate::views::Button>() else {
             return false;
         };
-        if button.press_repeat_timing().is_none() {
+        if !button.is_enabled() || button.press_repeat_timing().is_none() {
             return false;
         }
         button.invoke_on_click();
         true
+    }
+}
+
+#[cfg(test)]
+mod control_state_tests {
+    use super::*;
+    use crate::event::{
+        Event, FocusEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, Phase,
+        TouchGesture,
+    };
+    use crate::state::{State, generate_state_id};
+    use crate::views::{Button, ButtonRenderObject, Select, SelectRenderObject, TextField};
+    use alloc::{rc::Rc, string::String, vec};
+    use core::cell::Cell;
+
+    fn key(code: KeyCode, pressed: bool) -> Event {
+        Event::Keyboard(if pressed {
+            KeyEvent::Pressed {
+                keycode: code,
+                modifiers: KeyModifiers::empty(),
+            }
+        } else {
+            KeyEvent::Released {
+                keycode: code,
+                modifiers: KeyModifiers::empty(),
+            }
+        })
+    }
+
+    fn send(element: &mut dyn Element, event: Event) -> bool {
+        element.handle_event(&event, Phase::Target)
+    }
+
+    fn mouse(pressed: bool) -> Event {
+        Event::Mouse(if pressed {
+            MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: 5,
+                y: 5,
+                click_count: 1,
+            }
+        } else {
+            MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 5,
+                y: 5,
+                click_count: 1,
+            }
+        })
+    }
+
+    #[test]
+    fn button_keyboard_activation_is_focused_repeat_safe_and_cancelled_by_blur() {
+        let count = Rc::new(Cell::new(0));
+        let captured = count.clone();
+        let mut element = Button::new("Save")
+            .on_click(move || captured.set(captured.get() + 1))
+            .create_element();
+        assert!(element.accepts_keyboard_focus());
+        assert!(!send(element.as_mut(), key(KeyCode::Enter, true)));
+        send(element.as_mut(), Event::Focus(FocusEvent::Gained));
+        assert!(element.wants_keyboard_focus());
+        for code in [KeyCode::Enter, KeyCode::Space] {
+            let before = count.get();
+            assert!(send(element.as_mut(), key(code, true)));
+            assert!(send(element.as_mut(), key(code, true)));
+            assert_eq!(count.get(), before);
+            assert!(
+                element
+                    .render_object()
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<ButtonRenderObject>()
+                    .unwrap()
+                    .is_keyboard_pressed()
+            );
+            assert!(send(element.as_mut(), key(code, false)));
+            assert_eq!(count.get(), before + 1);
+        }
+        send(element.as_mut(), key(KeyCode::Space, true));
+        send(element.as_mut(), Event::Focus(FocusEvent::Lost));
+        assert!(!element.wants_keyboard_focus());
+        send(element.as_mut(), key(KeyCode::Space, false));
+        assert_eq!(count.get(), 2);
+        assert!(
+            !element
+                .render_object()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<ButtonRenderObject>()
+                .unwrap()
+                .is_pressed()
+        );
+    }
+
+    #[test]
+    fn button_pointer_cancel_does_not_cancel_keyboard_press_or_activate() {
+        let count = Rc::new(Cell::new(0));
+        let captured = count.clone();
+        let mut element = Button::new("Save")
+            .on_click(move || captured.set(captured.get() + 1))
+            .create_element();
+        send(element.as_mut(), Event::Focus(FocusEvent::Gained));
+        send(element.as_mut(), key(KeyCode::Space, true));
+        send(element.as_mut(), mouse(true));
+        send(
+            element.as_mut(),
+            Event::Mouse(MouseEvent::ButtonCancelled {
+                button: MouseButton::Left,
+                x: 5,
+                y: 5,
+            }),
+        );
+        send(element.as_mut(), mouse(false));
+        assert_eq!(count.get(), 0);
+        assert!(
+            element
+                .render_object()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<ButtonRenderObject>()
+                .unwrap()
+                .is_keyboard_pressed()
+        );
+        send(element.as_mut(), key(KeyCode::Space, false));
+        assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn disabled_button_rejects_captured_pointer_keyboard_touch_and_repeat() {
+        let count = Rc::new(Cell::new(0));
+        let captured = count.clone();
+        let button = Button::new("Save").on_click(move || captured.set(captured.get() + 1));
+        let mut element = button.create_element();
+        element.layout(LayoutConstraints::tight(100.0, 40.0));
+        send(element.as_mut(), Event::Focus(FocusEvent::Gained));
+        send(element.as_mut(), key(KeyCode::Space, true));
+        send(element.as_mut(), mouse(true));
+        element.update(&button.enabled(false));
+        assert!(!element.accepts_keyboard_focus());
+        assert!(!element.wants_keyboard_focus());
+        for event in [
+            mouse(false),
+            key(KeyCode::Space, false),
+            Event::TouchGesture(TouchGesture::Tap { id: 1, x: 5, y: 5 }),
+            Event::Focus(FocusEvent::Gained),
+        ] {
+            assert!(!send(element.as_mut(), event));
+        }
+        assert!(!element.invoke_press_repeat());
+        assert_eq!(count.get(), 0);
+    }
+
+    #[test]
+    fn select_focus_is_separate_from_expansion_and_keyboard_repeat_does_not_commit() {
+        let selected = State::new(generate_state_id(), 0);
+        let select = Select::new(
+            vec![String::from("One"), String::from("Two")],
+            selected.clone(),
+        );
+        let mut element = select.create_element();
+        send(element.as_mut(), Event::Focus(FocusEvent::Gained));
+        assert!(element.wants_keyboard_focus());
+        assert!(!select.expanded().get());
+        send(element.as_mut(), key(KeyCode::Enter, true));
+        send(element.as_mut(), key(KeyCode::Enter, true));
+        assert!(select.expanded().get());
+        send(element.as_mut(), key(KeyCode::Enter, false));
+        send(element.as_mut(), key(KeyCode::Down, true));
+        send(element.as_mut(), key(KeyCode::Enter, true));
+        send(element.as_mut(), key(KeyCode::Enter, false));
+        assert_eq!(selected.get(), 1);
+        assert!(!select.expanded().get());
+        assert!(element.wants_keyboard_focus());
+        send(element.as_mut(), key(KeyCode::Space, true));
+        send(element.as_mut(), key(KeyCode::Space, false));
+        assert!(select.expanded().get());
+        send(element.as_mut(), Event::Focus(FocusEvent::Lost));
+        assert!(!select.expanded().get());
+        assert!(!element.wants_keyboard_focus());
+        assert!(
+            !element
+                .render_object()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<SelectRenderObject>()
+                .unwrap()
+                .is_expanded()
+        );
+    }
+
+    #[test]
+    fn select_menu_pointer_hover_and_selection_use_overlay_bounds() {
+        let selected = State::new(generate_state_id(), 0);
+        let changes = Rc::new(Cell::new(0));
+        let captured = changes.clone();
+        let select = Select::new(
+            vec![String::from("One"), String::from("Two")],
+            selected.clone(),
+        )
+        .style(crate::views::SelectStyle::Menu)
+        .on_change(move |_| captured.set(captured.get() + 1));
+        let mut element = select.create_element();
+        element.layout(LayoutConstraints::loose(260.0, 100.0));
+        send(element.as_mut(), Event::Focus(FocusEvent::Gained));
+        send(element.as_mut(), mouse(true));
+        send(element.as_mut(), mouse(false));
+        let hovered = |element: &dyn Element| {
+            element
+                .render_object()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<SelectRenderObject>()
+                .unwrap()
+                .hovered_index()
+        };
+        assert!(select.expanded().get());
+        assert_eq!(hovered(element.as_ref()), None);
+        send(
+            element.as_mut(),
+            Event::Mouse(MouseEvent::Moved { x: 250, y: 42 }),
+        );
+        assert_eq!(hovered(element.as_ref()), Some(1));
+        send(
+            element.as_mut(),
+            Event::Mouse(MouseEvent::Moved { x: 20, y: 42 }),
+        );
+        assert_eq!(hovered(element.as_ref()), None);
+        assert_eq!(selected.get(), 0);
+        // Captured release outside the compact popup must not choose a row.
+        send(
+            element.as_mut(),
+            Event::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: 250,
+                y: 42,
+                click_count: 1,
+            }),
+        );
+        send(
+            element.as_mut(),
+            Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 20,
+                y: 42,
+                click_count: 1,
+            }),
+        );
+        assert_eq!(selected.get(), 0);
+        assert_eq!(changes.get(), 0);
+        assert!(!select.expanded().get());
+        send(element.as_mut(), mouse(true));
+        send(element.as_mut(), mouse(false));
+        send(
+            element.as_mut(),
+            Event::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: 250,
+                y: 42,
+                click_count: 1,
+            }),
+        );
+        send(
+            element.as_mut(),
+            Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 250,
+                y: 42,
+                click_count: 1,
+            }),
+        );
+        assert_eq!(selected.get(), 1);
+        assert_eq!(changes.get(), 1);
+        assert!(!select.expanded().get());
+    }
+
+    #[test]
+    fn select_pointer_cancel_and_disabled_capture_cannot_open_menu() {
+        let select = Select::new(
+            vec![String::from("One")],
+            State::new(generate_state_id(), 0),
+        );
+        let mut element = select.create_element();
+        send(element.as_mut(), mouse(true));
+        assert!(
+            element
+                .render_object()
+                .unwrap()
+                .as_any()
+                .downcast_ref::<SelectRenderObject>()
+                .unwrap()
+                .is_pressed()
+        );
+        send(
+            element.as_mut(),
+            Event::Mouse(MouseEvent::ButtonCancelled {
+                button: MouseButton::Left,
+                x: 5,
+                y: 5,
+            }),
+        );
+        send(element.as_mut(), mouse(false));
+        assert!(!select.expanded().get());
+        send(element.as_mut(), mouse(true));
+        send(element.as_mut(), mouse(false));
+        assert!(select.expanded().get());
+        send(element.as_mut(), mouse(true));
+        element.update(&select.clone().enabled(false));
+        send(element.as_mut(), mouse(false));
+        assert!(!select.expanded().get());
+        assert!(!element.wants_keyboard_focus());
+    }
+
+    #[test]
+    fn disabled_select_and_text_field_reject_focus_and_input() {
+        let selected = State::new(generate_state_id(), 0);
+        let select = Select::new(
+            vec![String::from("One"), String::from("Two")],
+            selected.clone(),
+        )
+        .enabled(false);
+        let mut element = select.create_element();
+        assert!(!element.accepts_keyboard_focus());
+        assert!(!send(element.as_mut(), Event::Focus(FocusEvent::Gained)));
+        assert!(!send(element.as_mut(), mouse(false)));
+        assert!(!send(element.as_mut(), key(KeyCode::Down, true)));
+        assert!(!select.expanded().get());
+        let text = State::new(generate_state_id(), String::from("Original"));
+        let field = TextField::new(text.clone());
+        let mut element = field.create_element();
+        send(element.as_mut(), Event::Focus(FocusEvent::Gained));
+        element.update(&field.enabled(false));
+        assert!(!element.accepts_keyboard_focus());
+        assert!(!element.wants_keyboard_focus());
+        assert!(element.text_input_state().is_none());
+        assert!(!send(
+            element.as_mut(),
+            Event::Keyboard(KeyEvent::Char { c: 'x' })
+        ));
+        assert!(!send(element.as_mut(), mouse(true)));
+        assert_eq!(text.get(), "Original");
     }
 }

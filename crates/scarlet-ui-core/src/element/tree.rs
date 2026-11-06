@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::element::{Element, ElementId, TextInputElementState};
-use crate::geometry::{Point, Rect, Size};
+use crate::geometry::{EdgeInsets, Point, Rect, Size};
 use crate::pipeline::{MountContext, PipelineId};
 
 /// Global counter for generating unique Element IDs
@@ -31,6 +31,7 @@ pub fn generate_element_id() -> u32 {
 pub struct ElementTree {
     root: Option<Box<dyn Element>>,
     pipeline_id: PipelineId,
+    safe_area_insets: EdgeInsets,
 }
 
 impl ElementTree {
@@ -44,6 +45,7 @@ impl ElementTree {
         Self {
             root: None,
             pipeline_id,
+            safe_area_insets: EdgeInsets::ZERO,
         }
     }
 
@@ -94,12 +96,30 @@ impl ElementTree {
     ///
     /// This performs a layout pass starting from the root.
     pub fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
+        self.apply_safe_area_insets();
         if let Some(ref mut root) = self.root {
             let size = root.layout(constraints);
             self.flush_layout_notifications();
             size
         } else {
             Size::ZERO
+        }
+    }
+
+    /// The platform safe area owned by this tree's window, in logical pixels.
+    pub fn safe_area_insets(&self) -> EdgeInsets {
+        self.safe_area_insets
+    }
+
+    pub(crate) fn set_safe_area_insets(&mut self, insets: EdgeInsets) {
+        self.safe_area_insets = insets;
+        self.apply_safe_area_insets();
+    }
+
+    // Reapply after rebuilding; layout scopes retain their own inherited value.
+    pub(crate) fn apply_safe_area_insets(&mut self) {
+        if let Some(root) = self.root.as_deref_mut() {
+            root.set_safe_area_insets(self.safe_area_insets);
         }
     }
 
@@ -295,7 +315,7 @@ impl ElementTree {
     /// Return text-input state for the focused editable element, if any.
     pub fn focused_text_input_state(&self) -> Option<TextInputElementState> {
         let root = self.root.as_deref()?;
-        Self::focused_text_input_state_recursive(root, Point::ZERO)
+        Self::focused_text_input_state_recursive(root, Point::ZERO, None)
     }
 
     /// Perform a hit test to find the element at a point
@@ -472,6 +492,7 @@ impl ElementTree {
     fn focused_text_input_state_recursive(
         element: &dyn Element,
         parent_origin: Point,
+        ancestor_clip: Option<Rect>,
     ) -> Option<TextInputElementState> {
         let bounds = element.bounds();
         let absolute_origin = Point {
@@ -479,9 +500,35 @@ impl ElementTree {
             y: parent_origin.y + bounds.origin.y,
         };
 
+        let intersect = |a: Rect, b: Rect| {
+            let left = a.left().max(b.left());
+            let top = a.top().max(b.top());
+            Rect::from_xywh(
+                left,
+                top,
+                (a.right().min(b.right()) - left).max(0.0),
+                (a.bottom().min(b.bottom()) - top).max(0.0),
+            )
+        };
+        let local_clip = element
+            .render_object()
+            .and_then(|render| render.clip_bounds(absolute_origin))
+            .map(|(rect, _)| rect);
+        let clip = match (ancestor_clip, local_clip) {
+            (Some(a), Some(b)) => Some(intersect(a, b)),
+            (a, b) => a.or(b),
+        };
         if element.wants_keyboard_focus()
             && let Some(mut state) = element.text_input_state()
         {
+            state.editor_id = Some(element.id());
+            state.input_rect.origin.x += absolute_origin.x;
+            state.input_rect.origin.y += absolute_origin.y;
+            if let Some(clip) = clip {
+                state.input_rect = intersect(state.input_rect, clip);
+            }
+            // Keep the caret un-clipped so platform keyboard avoidance can
+            // still reveal an editor that has moved outside its viewport.
             state.cursor_rect.origin.x += absolute_origin.x;
             state.cursor_rect.origin.y += absolute_origin.y;
             return Some(state);
@@ -489,7 +536,7 @@ impl ElementTree {
 
         for child in element.children() {
             if let Some(state) =
-                Self::focused_text_input_state_recursive(child.as_ref(), absolute_origin)
+                Self::focused_text_input_state_recursive(child.as_ref(), absolute_origin, clip)
             {
                 return Some(state);
             }
@@ -542,5 +589,70 @@ impl ElementTree {
 impl Default for ElementTree {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod text_input_tests {
+    use super::*;
+    use crate::element::LayoutConstraints;
+    use crate::event::{Event, EventDispatcher, MouseEvent, ScrollSource, WheelPhase};
+    use crate::state::{State, generate_state_id};
+    use crate::view::{View, ViewExt};
+    use crate::views::{ScrollView, TextField};
+
+    #[test]
+    fn input_bounds_respect_scroll_clip_without_clipping_caret_or_losing_identity() {
+        let text = State::new(generate_state_id(), "long text beyond viewport ".repeat(8));
+        let root = ScrollView::new(
+            TextField::new(text.clone())
+                .autofocus(true)
+                .frame(200.0, 60.0),
+        )
+        .both_axes()
+        .content_size(200.0, 200.0)
+        .frame(100.0, 40.0)
+        .padding(10.0);
+        let mut tree = ElementTree::new();
+        tree.set_root(root.create_element());
+        tree.layout(LayoutConstraints::tight(120.0, 60.0));
+        let initial = tree.focused_text_input_state().unwrap();
+        assert_eq!(initial.input_rect, Rect::from_xywh(10.0, 10.0, 100.0, 40.0));
+        assert!(initial.cursor_rect.right() > initial.input_rect.right());
+        assert_eq!(
+            initial.editor_id,
+            tree.find_keyboard_focus_path_ids().unwrap().last().copied()
+        );
+        tree.layout(LayoutConstraints::tight(120.0, 60.0));
+        assert_eq!(
+            tree.focused_text_input_state().unwrap().editor_id,
+            initial.editor_id
+        );
+
+        let mut dispatcher = EventDispatcher::new();
+        dispatcher.set_root(tree.root().unwrap().id());
+        dispatcher.dispatch(
+            &mut tree,
+            &Event::Mouse(MouseEvent::Wheel {
+                delta_x: 0,
+                delta_y: -1000,
+                x: 20,
+                y: 20,
+                phase: WheelPhase::Started,
+                source: ScrollSource::Trackpad,
+            }),
+        );
+        let scrolled = tree.focused_text_input_state().unwrap();
+        assert_eq!(scrolled.editor_id, initial.editor_id);
+        assert_eq!(scrolled.input_rect.size.height, 0.0);
+        assert!(!scrolled.input_rect.contains(Point::new(20.0, 20.0)));
+        assert!(scrolled.cursor_rect.origin.y < initial.cursor_rect.origin.y);
+
+        tree.set_root(TextField::new(text).autofocus(true).create_element());
+        tree.layout(LayoutConstraints::tight(120.0, 60.0));
+        assert_ne!(
+            tree.focused_text_input_state().unwrap().editor_id,
+            initial.editor_id
+        );
     }
 }

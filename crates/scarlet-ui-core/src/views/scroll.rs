@@ -125,6 +125,7 @@ impl Default for ScrollbarVisibility {
 /// own navigation. At an edge, an unconsumed key can scroll an outer viewport.
 #[derive(Clone)]
 pub struct ScrollView<V: View> {
+    content_safe_area_edges: crate::geometry::SafeAreaEdges,
     inner: V,
     axes: ScrollAxis,
     content_size: Option<Size>,
@@ -156,6 +157,7 @@ impl<V: View> ScrollView<V> {
     /// A vertically scrollable `ScrollView`.
     pub fn new(inner: V) -> Self {
         Self {
+            content_safe_area_edges: crate::geometry::SafeAreaEdges::ALL,
             inner,
             axes: ScrollAxis::Vertical,
             content_size: None,
@@ -236,6 +238,14 @@ impl<V: View> ScrollView<V> {
     /// Updated scroll view.
     pub fn content_size(mut self, width: f32, height: f32) -> Self {
         self.content_size = Some(Size::new(width.max(0.0), height.max(0.0)));
+        self
+    }
+
+    /// Choose safe-area edges added to scrollable content, without shrinking
+    /// the viewport. Defaults to ALL unconsumed edges. NONE permits artwork
+    /// to start at the edge; unhandled reservations remain available to children.
+    pub fn content_safe_area(mut self, edges: crate::geometry::SafeAreaEdges) -> Self {
+        self.content_safe_area_edges = edges;
         self
     }
 
@@ -640,9 +650,12 @@ impl<V: View + Clone + 'static> View for ScrollView<V> {
 
 /// Render object for [`ScrollView`].
 pub struct ScrollViewRenderObject<V: View> {
+    content_safe_area_edges: crate::geometry::SafeAreaEdges,
+    safe_area_insets: crate::geometry::EdgeInsets,
     axes: ScrollAxis,
     configured_content_size: Option<Size>,
     content_bottom_inset: f32,
+    overlay_bottom_inset: f32,
     keyboard_bottom_inset: f32,
     wheel_scale: f32,
     horizontal_wheel_direction: ScrollWheelDirection,
@@ -655,6 +668,8 @@ pub struct ScrollViewRenderObject<V: View> {
     scrollbar_color: Option<Color>,
     viewport_size: Size,
     content_size: Size,
+    // Temporary platform occlusion; authored content/insets remain unchanged.
+    text_input_allowance: Size,
     offset_x: f32,
     offset_y: f32,
     scrollbar_active: bool,
@@ -680,9 +695,12 @@ impl<V: View> ScrollViewRenderObject<V> {
     /// New render object with zero scroll offset.
     pub fn new(axes: ScrollAxis, content_size: Option<Size>, wheel_scale: f32) -> Self {
         Self {
+            content_safe_area_edges: crate::geometry::SafeAreaEdges::ALL,
+            safe_area_insets: crate::geometry::EdgeInsets::ZERO,
             axes,
             configured_content_size: content_size,
             content_bottom_inset: 0.0,
+            overlay_bottom_inset: 0.0,
             keyboard_bottom_inset: 0.0,
             wheel_scale,
             horizontal_wheel_direction: ScrollWheelDirection::Normal,
@@ -695,6 +713,7 @@ impl<V: View> ScrollViewRenderObject<V> {
             scrollbar_color: None,
             viewport_size: Size::ZERO,
             content_size: Size::ZERO,
+            text_input_allowance: Size::ZERO,
             offset_x: 0.0,
             offset_y: 0.0,
             scrollbar_active: false,
@@ -735,6 +754,7 @@ impl<V: View> ScrollViewRenderObject<V> {
             render_object.exclusive_axis_lock_min_delta,
         ) = view.exclusive_wheel_axis_lock_values();
         render_object.content_bottom_inset = view.content_bottom_inset;
+        render_object.content_safe_area_edges = view.content_safe_area_edges;
         render_object.scrollbar_visibility = view.scrollbar_visibility_value();
         render_object.scrollbar_color = view.scrollbar_color_value();
         render_object.selection_range_resolver = view.selection_range_resolver.clone();
@@ -771,11 +791,22 @@ impl<V: View> ScrollViewRenderObject<V> {
     }
 
     fn max_offset_x(&self) -> f32 {
-        (self.content_size.width - self.viewport_size.width).max(0.0)
+        (self.content_size.width + self.text_input_allowance.width - self.viewport_size.width)
+            .max(0.0)
+    }
+
+    fn bottom_overlay_inset(&self) -> f32 {
+        self.overlay_bottom_inset.max(self.keyboard_bottom_inset)
     }
 
     fn max_offset_y(&self) -> f32 {
-        (self.content_size.height + self.keyboard_bottom_inset - self.viewport_size.height).max(0.0)
+        (self.content_size.height
+            + self
+                .text_input_allowance
+                .height
+                .max((self.keyboard_bottom_inset - self.overlay_bottom_inset).max(0.0))
+            - self.viewport_size.height)
+            .max(0.0)
     }
 
     fn clamp_offsets(&mut self) {
@@ -807,9 +838,15 @@ impl<V: View> ScrollViewRenderObject<V> {
             self.offset_y
         };
         let viewport_extent = if horizontal {
-            self.viewport_size.width
+            (self.viewport_size.width - self.safe_area_insets.left - self.safe_area_insets.right)
+                .max(1.0)
         } else {
-            (self.viewport_size.height - self.content_bottom_inset - self.keyboard_bottom_inset).max(1.0)
+            (self.viewport_size.height
+                - self.safe_area_insets.top
+                - self.safe_area_insets.bottom
+                - self.content_bottom_inset
+                - self.bottom_overlay_inset())
+            .max(1.0)
         };
         let viewport_bottom = viewport_top + viewport_extent;
         let next_offset = if item_top < viewport_top {
@@ -997,19 +1034,28 @@ impl<V: View> ScrollViewRenderObject<V> {
         } else {
             0.0
         };
-        let track_x = origin.x + metrics.scrollbar_inset;
+        let track_x = origin.x + self.safe_area_insets.left + metrics.scrollbar_inset;
         let track_y = origin.y + self.viewport_size.height
+            - self.safe_area_insets.bottom
             - metrics.scrollbar_inset
             - metrics.scrollbar_thickness;
-        let track_w =
-            (self.viewport_size.width - metrics.scrollbar_inset * 2.0 - reserved).max(0.0);
+        let track_w = (self.viewport_size.width
+            - self.safe_area_insets.left
+            - self.safe_area_insets.right
+            - metrics.scrollbar_inset * 2.0
+            - reserved)
+            .max(0.0);
         if track_w <= 0.0 || track_y < origin.y {
             return None;
         }
 
-        let thumb_w = (self.viewport_size.width / self.content_size.width * track_w)
-            .max(metrics.scrollbar_min_thumb_length.min(track_w))
-            .min(track_w);
+        let thumb_w =
+            ((self.viewport_size.width - self.safe_area_insets.left - self.safe_area_insets.right)
+                .max(0.0)
+                / (self.content_size.width + self.text_input_allowance.width)
+                * track_w)
+                .max(metrics.scrollbar_min_thumb_length.min(track_w))
+                .min(track_w);
         let travel = (track_w - thumb_w).max(0.0);
         let progress = if max_offset > 0.0 {
             self.offset_x / max_offset
@@ -1038,16 +1084,27 @@ impl<V: View> ScrollViewRenderObject<V> {
             0.0
         };
         let track_x = origin.x + self.viewport_size.width
+            - self.safe_area_insets.right
             - metrics.scrollbar_inset
             - metrics.scrollbar_thickness;
-        let track_y = origin.y + metrics.scrollbar_inset;
-        let track_h =
-            (self.viewport_size.height - metrics.scrollbar_inset * 2.0 - reserved).max(0.0);
+        let track_y = origin.y + self.safe_area_insets.top + metrics.scrollbar_inset;
+        let track_h = (self.viewport_size.height
+            - self.safe_area_insets.top
+            - self.safe_area_insets.bottom
+            - self.bottom_overlay_inset()
+            - metrics.scrollbar_inset * 2.0
+            - reserved)
+            .max(0.0);
         if track_h <= 0.0 || track_x < origin.x {
             return None;
         }
 
-        let thumb_h = (self.viewport_size.height / self.content_size.height * track_h)
+        let thumb_h = ((self.viewport_size.height
+            - self.safe_area_insets.top
+            - self.safe_area_insets.bottom)
+            .max(0.0)
+            / (self.content_size.height + self.text_input_allowance.height)
+            * track_h)
             .max(metrics.scrollbar_min_thumb_length.min(track_h))
             .min(track_h);
         let travel = (track_h - thumb_h).max(0.0);
@@ -1066,19 +1123,44 @@ impl<V: View> ScrollViewRenderObject<V> {
 }
 
 impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V> {
-    fn avoid_input_occlusion(&mut self, occlusion: Option<Rect>, caret: Option<Rect>, reveal: bool) -> bool {
+    fn set_safe_area_insets(&mut self, insets: crate::geometry::EdgeInsets) {
+        self.safe_area_insets = self.content_safe_area_edges.select(insets);
+    }
+
+    fn child_safe_area_insets(
+        &self,
+        insets: crate::geometry::EdgeInsets,
+    ) -> crate::geometry::EdgeInsets {
+        self.content_safe_area_edges.remaining(insets)
+    }
+    fn avoid_input_occlusion(
+        &mut self,
+        occlusion: Option<Rect>,
+        caret: Option<Rect>,
+        reveal: bool,
+    ) -> bool {
         let before = (self.keyboard_bottom_inset, self.offset());
-        self.keyboard_bottom_inset = occlusion.filter(|area| {
-            caret.is_some() && self.axes.allows_y() && area.size.height > 0. && area.size.width > 0.
-                && area.origin.x < self.viewport_size.width && area.origin.x + area.size.width > 0.
-                && area.origin.y > 0. && area.origin.y < self.viewport_size.height
-        }).map_or(0., |area| self.viewport_size.height - area.origin.y);
+        self.keyboard_bottom_inset = occlusion
+            .filter(|area| {
+                caret.is_some()
+                    && self.axes.allows_y()
+                    && area.size.height > 0.
+                    && area.size.width > 0.
+                    && area.origin.x < self.viewport_size.width
+                    && area.origin.x + area.size.width > 0.
+                    && area.origin.y > 0.
+                    && area.origin.y < self.viewport_size.height
+            })
+            .map_or(0., |area| self.viewport_size.height - area.origin.y);
         self.clamp_offsets();
         if self.keyboard_bottom_inset > 0. && (reveal || before.0 != self.keyboard_bottom_inset) {
             if let Some(caret) = caret {
                 let bottom = self.viewport_size.height - self.keyboard_bottom_inset;
                 if caret.origin.y + caret.size.height > bottom {
-                    self.set_offset(self.offset_x, self.offset_y + caret.origin.y + caret.size.height - bottom);
+                    self.set_offset(
+                        self.offset_x,
+                        self.offset_y + caret.origin.y + caret.size.height - bottom,
+                    );
                 } else if caret.origin.y < 0. {
                     self.set_offset(self.offset_x, self.offset_y + caret.origin.y);
                 }
@@ -1095,8 +1177,15 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let width = finite_viewport_axis(constraints.min_width, constraints.max_width);
         let height = finite_viewport_axis(constraints.min_height, constraints.max_height);
         self.viewport_size = Size::new(width, height);
-        self.content_size = self.configured_content_size.unwrap_or(self.viewport_size);
-        self.content_size.height += self.content_bottom_inset;
+        self.content_size = self.configured_content_size.unwrap_or(Size::new(
+            (width - self.safe_area_insets.left - self.safe_area_insets.right).max(0.0),
+            (height - self.safe_area_insets.top - self.safe_area_insets.bottom).max(0.0),
+        ));
+        self.content_size.width += self.safe_area_insets.left + self.safe_area_insets.right;
+        self.content_size.height += self.safe_area_insets.top
+            + self.safe_area_insets.bottom
+            + self.content_bottom_inset
+            + self.overlay_bottom_inset;
         self.clamp_offsets();
         self.viewport_size
     }
@@ -1117,16 +1206,21 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
             }
         }
 
-        let base_content = self.configured_content_size.unwrap_or(self.viewport_size);
-        let content_width = base_content.width.max(viewport_width);
-        let content_height = base_content.height.max(viewport_height);
+        let insets = self.safe_area_insets;
+        let inner = Size::new(
+            (viewport_width - insets.left - insets.right).max(0.0),
+            (viewport_height - insets.top - insets.bottom).max(0.0),
+        );
+        let base_content = self.configured_content_size.unwrap_or(inner);
+        let content_width = base_content.width.max(inner.width);
+        let content_height = base_content.height.max(inner.height);
 
         if let Some(child) = children.first_mut() {
             let child_constraints =
                 LayoutConstraints::tight(content_width.max(0.0), content_height.max(0.0));
             child.set_viewport_hint(Rect::from_xywh(
-                self.offset_x,
-                self.offset_y,
+                self.offset_x - self.safe_area_insets.left,
+                self.offset_y - self.safe_area_insets.top,
                 self.viewport_size.width,
                 self.viewport_size.height,
             ));
@@ -1135,7 +1229,10 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
                 self.configured_content_size
                     .map(|size| size.height)
                     .unwrap_or(0.0),
-            ) + self.content_bottom_inset;
+            ) + self.content_bottom_inset
+                + self.overlay_bottom_inset
+                + insets.top
+                + insets.bottom;
             if !self.selection_scroll_pending {
                 if let Some(anchor) = &self.anchor {
                     if let Some(position) = child.resolve_scroll_anchor(&anchor.key) {
@@ -1148,32 +1245,36 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
                     }
                 }
             }
-            self.content_size.width = self.content_size.width.max(content_width);
-            self.content_size.height = self.content_size.height.max(content_height);
+            self.content_size.width =
+                self.content_size.width.max(content_width) + insets.left + insets.right;
+            self.content_size.height = self.content_size.height.max(viewport_height);
             self.clamp_offsets();
             if self.selection_scroll_pending {
                 self.ensure_selection_visible();
                 self.selection_scroll_pending = false;
                 child.set_viewport_hint(Rect::from_xywh(
-                    self.offset_x,
-                    self.offset_y,
+                    self.offset_x - self.safe_area_insets.left,
+                    self.offset_y - self.safe_area_insets.top,
                     self.viewport_size.width,
                     self.viewport_size.height,
                 ));
             }
             child.set_viewport_hint(Rect::from_xywh(
-                self.offset_x,
-                self.offset_y,
+                self.offset_x - self.safe_area_insets.left,
+                self.offset_y - self.safe_area_insets.top,
                 self.viewport_size.width,
                 self.viewport_size.height,
             ));
             self.anchor = child.scroll_anchor(Rect::from_xywh(
-                self.offset_x,
-                self.offset_y,
+                self.offset_x - self.safe_area_insets.left,
+                self.offset_y - self.safe_area_insets.top,
                 self.viewport_size.width,
                 self.viewport_size.height,
             ));
-            child.set_position(Point::new(-self.offset_x, -self.offset_y));
+            child.set_position(Point::new(
+                self.safe_area_insets.left - self.offset_x,
+                self.safe_area_insets.top - self.offset_y,
+            ));
         } else {
             self.content_size = Size::ZERO;
             self.anchor = None;
@@ -1197,6 +1298,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         };
 
         let old_axes = self.axes;
+        let old_safe_area_edges = self.content_safe_area_edges;
         let old_content_size = self.configured_content_size;
         let old_bottom_inset = self.content_bottom_inset;
         let old_wheel_scale = self.wheel_scale;
@@ -1212,6 +1314,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let old_offset = self.offset();
 
         self.axes = scroll_view.scroll_axes();
+        self.content_safe_area_edges = scroll_view.content_safe_area_edges;
         self.configured_content_size = scroll_view.configured_content_size();
         self.content_bottom_inset = scroll_view.content_bottom_inset;
         self.wheel_scale = scroll_view.wheel_scale_value();
@@ -1240,6 +1343,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         self.clamp_offsets();
 
         if self.axes != old_axes
+            || self.content_safe_area_edges != old_safe_area_edges
             || self.configured_content_size != old_content_size
             || self.content_bottom_inset != old_bottom_inset
             || (self.wheel_scale - old_wheel_scale).abs() > 0.001
@@ -1272,6 +1376,49 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let (scaled_x, scaled_y) = self.normalized_wheel_event(event);
         (scaled_x.abs() > 0.01 && self.max_offset_x() > 0.0)
             || (scaled_y.abs() > 0.01 && self.max_offset_y() > 0.0)
+    }
+
+    fn reveal_text_input(&mut self, request: Option<(Rect, Rect)>) -> bool {
+        let old_allowance = self.text_input_allowance;
+        let (mut x, mut y) = self.offset();
+        self.text_input_allowance = Size::ZERO;
+        if let Some((caret, mut visible)) = request {
+            let safe = crate::geometry::safe_area_rect(self.viewport_size, self.safe_area_insets);
+            let left = visible.left().max(safe.left());
+            let top = visible.top().max(safe.top());
+            visible = Rect::from_xywh(
+                left,
+                top,
+                (visible.right().min(safe.right()) - left).max(0.0),
+                (visible.bottom().min(safe.bottom()) - top).max(0.0),
+            );
+            visible.size.height = visible.size.height.min(
+                (self.viewport_size.height - self.bottom_overlay_inset() - visible.top()).max(0.0),
+            );
+            self.selection_scroll_pending = false;
+            // Additional travel is needed even when content fits the original
+            // viewport: its bottom may now be covered by a software keyboard.
+            if self.axes.allows_x() {
+                self.text_input_allowance.width = (self.viewport_size.width - visible.right())
+                    .clamp(0.0, self.viewport_size.width);
+                x += if caret.left() < visible.left() {
+                    caret.left() - visible.left()
+                } else {
+                    (caret.right() - visible.right()).max(0.0)
+                };
+            }
+            if self.axes.allows_y() {
+                self.text_input_allowance.height = (self.viewport_size.height - visible.bottom())
+                    .clamp(0.0, self.viewport_size.height);
+                y += if caret.top() < visible.top() {
+                    caret.top() - visible.top()
+                } else {
+                    (caret.bottom() - visible.bottom()).max(0.0)
+                };
+            }
+        }
+        let moved = self.set_offset(x, y);
+        moved || old_allowance != self.text_input_allowance
     }
 
     fn accepts_touch_scroll(&self) -> bool {
@@ -1452,16 +1599,19 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
 
     fn apply_scroll_offset(&mut self, children: &mut [Box<dyn Element>]) -> ScrollOffsetUpdate {
         if let Some(child) = children.first_mut() {
-            child.set_position(Point::new(-self.offset_x, -self.offset_y));
+            child.set_position(Point::new(
+                self.safe_area_insets.left - self.offset_x,
+                self.safe_area_insets.top - self.offset_y,
+            ));
             let materialized = child.set_viewport_hint(Rect::from_xywh(
-                self.offset_x,
-                self.offset_y,
+                self.offset_x - self.safe_area_insets.left,
+                self.offset_y - self.safe_area_insets.top,
                 self.viewport_size.width,
                 self.viewport_size.height,
             ));
             self.anchor = child.scroll_anchor(Rect::from_xywh(
-                self.offset_x,
-                self.offset_y,
+                self.offset_x - self.safe_area_insets.left,
+                self.offset_y - self.safe_area_insets.top,
                 self.viewport_size.width,
                 self.viewport_size.height,
             ));
@@ -1490,6 +1640,19 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
             return ScrollOffsetUpdate::None;
         }
         self.apply_scroll_offset(children)
+    }
+
+    fn set_bottom_overlay_inset(&mut self, inset: f32) -> Option<bool> {
+        if !self.axes.allows_y() {
+            return None;
+        }
+        let inset = sanitize_non_negative(inset, 0.0);
+        let changed = self.overlay_bottom_inset != inset;
+        self.overlay_bottom_inset = inset;
+        if changed && self.selection_target.is_some() {
+            self.selection_scroll_pending = true;
+        }
+        Some(changed)
     }
 
     fn owns_child_viewport(&self) -> bool {
@@ -1987,6 +2150,50 @@ mod tests {
     }
 
     #[test]
+    fn native_keyboard_and_floating_overlay_do_not_double_count_bottom_space() {
+        let view = ScrollView::new(Text::new("content"))
+            .vertical()
+            .content_size(100.0, 2000.0);
+        let mut render = ScrollViewRenderObject::<Text>::from_view(&view);
+        let mut children = alloc::vec![Text::new("content").create_element()];
+        render.set_bottom_overlay_inset(72.0);
+        render.layout_with_children(LayoutConstraints::tight(100.0, 200.0), &mut children);
+        assert_eq!(render.max_offset_y(), 1872.0);
+        render.avoid_input_occlusion(
+            Some(Rect::from_xywh(0.0, 100.0, 100.0, 100.0)),
+            Some(Rect::from_xywh(0.0, 180.0, 1.0, 15.0)),
+            true,
+        );
+        assert_eq!(render.bottom_overlay_inset(), 100.0);
+        assert_eq!(render.max_offset_y(), 1900.0);
+        assert_eq!(render.viewport_size(), Size::new(100.0, 200.0));
+        render.avoid_input_occlusion(None, None, false);
+        assert_eq!(render.bottom_overlay_inset(), 72.0);
+        assert_eq!(render.max_offset_y(), 1872.0);
+    }
+
+    #[test]
+    fn container_overlay_inset_preserves_authored_padding_and_reveals_last_item() {
+        let view = ScrollView::new(Text::new("content"))
+            .vertical()
+            .content_size(100.0, 2000.0)
+            .content_bottom_inset(10.0)
+            .scroll_to_index(Some(99), 20.0);
+        let mut render = ScrollViewRenderObject::<Text>::from_view(&view);
+        let mut children = alloc::vec![Text::new("content").create_element()];
+        render.layout_with_children(LayoutConstraints::tight(100.0, 200.0), &mut children);
+        assert_eq!(render.set_bottom_overlay_inset(72.0), Some(true));
+        render.layout_with_children(LayoutConstraints::tight(100.0, 200.0), &mut children);
+        assert_eq!(render.content_size().height, 2082.0);
+        assert_eq!(render.offset().1, 1882.0);
+        assert_eq!(render.set_bottom_overlay_inset(72.0), Some(false));
+        assert_eq!(render.set_bottom_overlay_inset(0.0), Some(true));
+        render.layout_with_children(LayoutConstraints::tight(100.0, 200.0), &mut children);
+        assert_eq!(render.content_size().height, 2010.0);
+        assert_eq!(render.offset().1, 1810.0);
+    }
+
+    #[test]
     fn selected_item_is_revealed_above_floating_overlay_with_explicit_content_size() {
         let view = ScrollView::new(Text::new("content"))
             .content_size(100., 2000.)
@@ -2292,5 +2499,67 @@ mod tests {
         ));
         let mut ended_ctx = PaintContext::new();
         assert!(!render_object.paint_overlay(&mut ended_ctx, Point::ZERO));
+    }
+    #[test]
+    fn text_input_reveal_preserves_authored_inset_and_leading_scroll_limit() {
+        let view = ScrollView::new(crate::views::Rectangle::new())
+            .vertical()
+            .content_size(100.0, 100.0)
+            .content_bottom_inset(20.0);
+        let mut object = ScrollViewRenderObject::from_view(&view);
+        object.layout(LayoutConstraints::tight(100.0, 100.0));
+        // No negative scrolling is introduced for leading-edge occlusion.
+        assert!(!object.reveal_text_input(Some((
+            Rect::from_xywh(2.0, 2.0, 1.0, 12.0),
+            Rect::from_xywh(20.0, 20.0, 80.0, 80.0),
+        ))));
+        assert_eq!(object.offset(), (0.0, 0.0));
+        assert!(object.reveal_text_input(Some((
+            Rect::from_xywh(2.0, 90.0, 1.0, 10.0),
+            Rect::from_xywh(0.0, 0.0, 100.0, 50.0),
+        ))));
+        assert_eq!(object.offset().1, 50.0);
+        assert_eq!(object.content_bottom_inset, 20.0);
+        assert_eq!(object.content_size.height, 120.0);
+        object.selection_scroll_pending = true;
+        assert!(object.reveal_text_input(None));
+        assert_eq!(object.offset().1, 20.0);
+        assert!(
+            object.selection_scroll_pending,
+            "restoration must not discard an authored pending target"
+        );
+        assert_eq!(object.text_input_allowance, Size::ZERO);
+    }
+
+    #[test]
+    fn caret_and_scroll_indicators_respect_unconsumed_system_edges() {
+        use crate::geometry::EdgeInsets;
+        let mut render = ScrollViewRenderObject::<crate::views::Rectangle>::new(
+            ScrollAxis::Both,
+            Some(Size::new(1200., 1200.)),
+            1.,
+        );
+        render.set_safe_area_insets(EdgeInsets::new(13., 47., 17., 29.));
+        render.layout(LayoutConstraints::tight(400., 800.));
+        assert!(render.reveal_text_input(Some((
+            Rect::from_xywh(390., 775., 1., 20.),
+            Rect::from_xywh(0., 0., 400., 800.)
+        ))));
+        assert_eq!(render.offset(), (8., 24.));
+        let safe = Rect::from_xywh(13., 47., 370., 724.);
+        for indicator in [
+            render.horizontal_scrollbar_rect(Point::ZERO, true),
+            render.vertical_scrollbar_rect(Point::ZERO, true),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(
+                indicator.left() >= safe.left()
+                    && indicator.top() >= safe.top()
+                    && indicator.right() <= safe.right()
+                    && indicator.bottom() <= safe.bottom()
+            );
+        }
     }
 }

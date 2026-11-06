@@ -31,6 +31,10 @@ pub enum Event {
     /// Platform notification of a new logical surface size (not a resize request).
     Resize { width: u32, height: u32 },
 
+    /// Reserved edges changed, possibly without a surface resize. The backend
+    /// must update PlatformWindow::safe_area_insets before emitting this event.
+    SafeAreaChanged { insets: crate::geometry::EdgeInsets },
+
     /// Apply a confirmed fullscreen state and its logical backing size together.
     /// No frame may be painted between the decoration callback and resize.
     FullscreenConfigure {
@@ -48,7 +52,9 @@ pub enum Event {
 
     /// Keyboard-covered rectangle in window-local logical coordinates.
     /// The backing surface and app layout keep their full size.
-    InputPanelOcclusionChanged { occlusion: Option<crate::geometry::Rect> },
+    InputPanelOcclusionChanged {
+        occlusion: Option<crate::geometry::Rect>,
+    },
 
     /// One compositor-paced frame opportunity is ready for this window.
     FrameReady {
@@ -116,6 +122,17 @@ pub enum Event {
         text: String,
         spans: Vec<u8>,
     },
+
+    /// Reveal the focused caret within platform-visible window coordinates.
+    /// `None` restores temporary keyboard occlusion scroll allowances.
+    /// ScrollViews can extend trailing travel for bottom/right occlusion;
+    /// leading-edge reveal remains bounded by the authored scroll origin.
+    TextInputReveal {
+        visible_rect: Option<crate::geometry::Rect>,
+    },
+
+    /// Platform selection in UTF-8 bytes of the surrounding text.
+    TextInputSelection { cursor_byte: u32, anchor_byte: u32 },
 
     /// IME committed text for a text-input context.
     TextInputCommit {

@@ -19,7 +19,7 @@ use crate::color::{Color, ColorPalette};
 use crate::element::{
     Element, ElementId, ElementRenderObject, LayoutConstraints, UpdateResult, WindowSizeLimits,
 };
-use crate::geometry::{EdgeInsets, Point, Rect, Size};
+use crate::geometry::{EdgeInsets, Point, Rect, SafeAreaEdges, Size};
 use crate::menu_model::MenuBarModel;
 use crate::pipeline::{MountContext, PipelineId};
 use crate::platform::{WindowDecoration, WindowFrame, WindowPlacement, WindowTitleBar};
@@ -283,6 +283,7 @@ impl WindowContentLayout {
 /// Window provides window-level properties like title, size, and decorations.
 /// The content is a single View (use VStack/HStack for multiple children).
 pub struct Window<V: View> {
+    content_safe_area_edges: SafeAreaEdges,
     app_id: String,
     title: String,
     size: Size,
@@ -307,6 +308,10 @@ pub struct Window<V: View> {
 }
 
 pub trait WindowViewInfo {
+    /// Edges handled by Window before laying out its content.
+    fn content_safe_area_edges(&self) -> SafeAreaEdges {
+        SafeAreaEdges::ALL
+    }
     /// Return window metadata used by the platform window.
     ///
     /// # Returns
@@ -378,6 +383,7 @@ impl<V: View> Window<V> {
     pub fn new(title: impl Into<String>, content: V) -> Self {
         let title_str = title.into();
         Self {
+            content_safe_area_edges: SafeAreaEdges::ALL,
             app_id: String::from("com.example.scarletui"),
             title: title_str,
             size: Size::new(800.0, 600.0),
@@ -460,6 +466,14 @@ impl<V: View> Window<V> {
     /// Select who owns the window titlebar.
     pub fn window_title_bar(mut self, title_bar: WindowTitleBar) -> Self {
         self.decoration.title_bar = title_bar;
+        self
+    }
+
+    /// Choose which platform safe-area edges Window handles for its content.
+    /// Defaults to ALL. Use NONE to let NavigationView, ScrollView or SafeArea
+    /// handle reservations while their backgrounds/viewports extend edge to edge.
+    pub fn content_safe_area(mut self, edges: SafeAreaEdges) -> Self {
+        self.content_safe_area_edges = edges;
         self
     }
 
@@ -738,11 +752,15 @@ impl<V: View + Clone> Clone for Window<V> {
             scene_key: self.scene_key.clone(),
             opens_at_launch: self.opens_at_launch,
             content: self.content.clone(),
+            content_safe_area_edges: self.content_safe_area_edges,
         }
     }
 }
 
 impl<V: View + Clone> WindowViewInfo for Window<V> {
+    fn content_safe_area_edges(&self) -> SafeAreaEdges {
+        self.content_safe_area_edges
+    }
     fn window_info(&self) -> WindowInfo {
         let (surface_size, insets, shadow_elevation, _) = self.resolved_surface_presentation();
         WindowInfo::new(
@@ -805,8 +823,9 @@ impl<V: View + Clone + 'static> View for Window<V> {
     fn create_element(&self) -> Box<dyn Element> {
         // Create WindowRenderObject for the background and border.
         let window_info = self.window_info();
-        let render_object =
+        let mut render_object =
             WindowRenderObject::from_window_info(&window_info).with_deferred_backdrop();
+        render_object.content_safe_area_edges = self.content_safe_area_edges;
 
         // Create child elements. The titlebar is a separate render element so
         // content repaints do not repaint window decorations.
@@ -1239,11 +1258,9 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
                 titlebar.unmount();
             }
         } else {
-            let mut titlebar = WindowTitleBarView::new(
-                info.title.clone(),
-                info.decoration.frame.is_custom(),
-            )
-            .create_element();
+            let mut titlebar =
+                WindowTitleBarView::new(info.title.clone(), info.decoration.frame.is_custom())
+                    .create_element();
             if self.mounted {
                 titlebar.mount(&MountContext::new(self.pipeline_id));
             }
@@ -1318,9 +1335,10 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
     }
 
     fn managed_event_position(&self, x: i32, y: i32) -> (i32, i32) {
+        let origin = self.render_object.safe_window_geometry_rect().origin;
         (
-            x.saturating_sub(self.render_object.window_geometry_insets.left as i32),
-            y.saturating_sub(self.render_object.window_geometry_insets.top as i32),
+            x.saturating_sub(origin.x as i32),
+            y.saturating_sub(origin.y as i32),
         )
     }
 
@@ -1354,7 +1372,7 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
         {
             return None;
         }
-        let width = self.render_object.window_geometry_size().width as u32;
+        let width = self.render_object.safe_window_geometry_rect().size.width as u32;
         let point = Point::new(x as f32, y as f32);
         [
             self.render_object.close_button_rect(width),
@@ -1559,12 +1577,17 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
             child_views.push(content.clone_view());
         }
 
+        self.view = typed_view.clone();
+        let safe_area_changed =
+            self.render_object.content_safe_area_edges != typed_view.content_safe_area_edges();
+        self.render_object.content_safe_area_edges = typed_view.content_safe_area_edges();
         let render_result = self.render_object.update_from_window_info(&window_info);
         let mount_context = self.mounted.then(|| MountContext::new(self.pipeline_id));
         let child_result =
             crate::element::update_children(&mut self.children, child_views, mount_context);
 
-        if chrome_changed
+        if safe_area_changed
+            || chrome_changed
             || matches!(render_result, UpdateResult::Updated)
             || matches!(child_result, UpdateResult::Updated)
         {
@@ -1979,33 +2002,54 @@ impl WindowBackdrop {
     }
 
     pub(crate) fn shadow_visible_regions(self) -> [Rect; 8] {
-        let body = self.window_geometry_rect(Point::ZERO);
-        let radius = self.effective_corner_radius(body);
+        let outer_body = self.window_geometry_rect(Point::ZERO);
+        // The body's AA edge is not fully opaque. Keep a conservative logical
+        // pixel of shadow underneath it, including at fractional window origins.
+        let inset = 1.0f32
+            .min(outer_body.size.width * 0.5)
+            .min(outer_body.size.height * 0.5);
+        let body = Rect::from_xywh(
+            outer_body.left() + inset,
+            outer_body.top() + inset,
+            (outer_body.size.width - 2.0 * inset).max(0.0),
+            (outer_body.size.height - 2.0 * inset).max(0.0),
+        );
+        let radius = (self.effective_corner_radius(outer_body) - inset).max(0.0);
         let corner = radius
             .min(body.size.width * 0.5)
             .min(body.size.height * 0.5);
         let right = body.right();
         let bottom = body.bottom();
+        let outsets = style::elevation_outsets(self.shadow_elevation);
+        let outer_left = (outer_body.left() - outsets.left).min(0.0);
+        let outer_top = (outer_body.top() - outsets.top).min(0.0);
+        let outer_right = (outer_body.right() + outsets.right).max(self.size.width);
+        let outer_bottom = (outer_body.bottom() + outsets.bottom).max(self.size.height);
+        let outer_width = outer_right - outer_left;
         [
-            Rect::from_xywh(0.0, 0.0, self.size.width, body.top().max(0.0)),
+            Rect::from_xywh(outer_left, outer_top, outer_width, body.top() - outer_top),
+            Rect::from_xywh(outer_left, bottom, outer_width, outer_bottom - bottom),
             Rect::from_xywh(
-                0.0,
-                bottom,
-                self.size.width,
-                (self.size.height - bottom).max(0.0),
-            ),
-            Rect::from_xywh(0.0, body.top(), body.left().max(0.0), body.size.height),
-            Rect::from_xywh(
-                right,
+                outer_left,
                 body.top(),
-                (self.size.width - right).max(0.0),
+                body.left() - outer_left,
                 body.size.height,
             ),
+            Rect::from_xywh(right, body.top(), outer_right - right, body.size.height),
             Rect::from_xywh(body.left(), body.top(), corner, corner),
             Rect::from_xywh(right - corner, body.top(), corner, corner),
             Rect::from_xywh(body.left(), bottom - corner, corner, corner),
             Rect::from_xywh(right - corner, bottom - corner, corner, corner),
         ]
+    }
+
+    pub(crate) fn shadow_fits_cache_bounds(self) -> bool {
+        self.shadow_visible_regions().iter().all(|rect| {
+            rect.left() >= 0.0
+                && rect.top() >= 0.0
+                && rect.right() <= self.size.width
+                && rect.bottom() <= self.size.height
+        })
     }
 
     fn effective_corner_radius(self, rect: Rect) -> f32 {
@@ -2022,11 +2066,13 @@ impl WindowBackdrop {
 /// - Window background (WHITE or custom)
 /// - Window border (if decorated)
 pub struct WindowRenderObject {
+    content_safe_area_edges: SafeAreaEdges,
     size: Size,
     decoration: WindowDecoration,
     corner_radius: f32,
     background_color: Color,
     window_geometry_insets: EdgeInsets,
+    safe_area_insets: EdgeInsets,
     shadow_elevation: ElevationRole,
     deferred_backdrop: bool,
     buffer: Option<Buffer>,
@@ -2046,6 +2092,8 @@ impl WindowRenderObject {
             corner_radius: corner_radius.max(0.0),
             background_color,
             window_geometry_insets: EdgeInsets::ZERO,
+            safe_area_insets: EdgeInsets::ZERO,
+            content_safe_area_edges: SafeAreaEdges::ALL,
             shadow_elevation: ElevationRole::Flat,
             deferred_backdrop: false,
             buffer: None,
@@ -2068,6 +2116,8 @@ impl WindowRenderObject {
             corner_radius: info.corner_radius.max(0.0),
             background_color: info.background_color,
             window_geometry_insets: info.window_geometry_insets,
+            safe_area_insets: EdgeInsets::ZERO,
+            content_safe_area_edges: SafeAreaEdges::ALL,
             shadow_elevation: info.shadow_elevation,
             deferred_backdrop: false,
             buffer: None,
@@ -2078,6 +2128,29 @@ impl WindowRenderObject {
         self.deferred_backdrop = true;
         self.buffer = None;
         self
+    }
+
+    /// Update the platform-reserved edges. The window background and backing
+    /// size stay full-size; only interactive chrome and content are inset.
+    pub fn set_safe_area_insets(&mut self, insets: EdgeInsets) {
+        self.safe_area_insets = crate::geometry::normalized_safe_area_insets(insets);
+    }
+
+    fn safe_window_geometry_rect(&self) -> Rect {
+        self.window_geometry_respecting_safe_area(self.safe_area_insets)
+    }
+
+    fn window_geometry_respecting_safe_area(&self, insets: EdgeInsets) -> Rect {
+        let geometry = self.window_geometry_rect(Point::ZERO);
+        let safe = crate::geometry::safe_area_rect(self.size, insets);
+        let x = geometry.left().max(safe.left());
+        let y = geometry.top().max(safe.top());
+        Rect::from_xywh(
+            x,
+            y,
+            (geometry.right().min(safe.right()) - x).max(0.0),
+            (geometry.bottom().min(safe.bottom()) - y).max(0.0),
+        )
     }
 
     pub(crate) fn deferred_backdrop(&self) -> Option<WindowBackdrop> {
@@ -2479,6 +2552,13 @@ impl WindowRenderObject {
 }
 
 impl ElementRenderObject for WindowRenderObject {
+    fn set_safe_area_insets(&mut self, insets: EdgeInsets) {
+        WindowRenderObject::set_safe_area_insets(self, insets);
+    }
+
+    fn child_safe_area_insets(&self, insets: EdgeInsets) -> EdgeInsets {
+        self.content_safe_area_edges.remaining(insets)
+    }
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         let width = if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
             constraints.max_width.max(constraints.min_width)
@@ -2523,13 +2603,16 @@ impl ElementRenderObject for WindowRenderObject {
         let content_layout = WindowContentLayout::for_decoration(self.decoration);
         let content_offset = content_layout.offset();
         let decoration_size = content_layout.decoration_size();
-        let window_geometry = self.window_geometry_rect(Point::ZERO);
-        let content_x = window_geometry.origin.x + content_offset.x;
-        let content_y = window_geometry.origin.y + content_offset.y;
+        let window_geometry = self.safe_window_geometry_rect();
+        let content_geometry = self.window_geometry_respecting_safe_area(
+            self.content_safe_area_edges.select(self.safe_area_insets),
+        );
+        let content_x = content_geometry.origin.x + content_offset.x;
+        let content_y = content_geometry.origin.y + content_offset.y;
         let content_width =
-            libm::ceilf(window_geometry.size.width - decoration_size.width).max(1.0);
+            libm::ceilf(content_geometry.size.width - decoration_size.width).max(1.0);
         let content_height =
-            libm::ceilf(window_geometry.size.height - decoration_size.height).max(1.0);
+            libm::ceilf(content_geometry.size.height - decoration_size.height).max(1.0);
 
         if crate::debug::is_enabled() {
             crate::logln!(
@@ -2544,6 +2627,7 @@ impl ElementRenderObject for WindowRenderObject {
         if self.decoration.title_bar.is_custom()
             && let Some(titlebar) = children.get_mut(0)
         {
+            titlebar.set_safe_area_insets(EdgeInsets::ZERO);
             titlebar.layout(LayoutConstraints::tight(
                 window_geometry.size.width,
                 titlebar_height() as f32,
@@ -2557,6 +2641,10 @@ impl ElementRenderObject for WindowRenderObject {
             0
         };
         if let Some(child) = children.get_mut(content_index) {
+            child.set_safe_area_insets(
+                self.content_safe_area_edges
+                    .remaining(self.safe_area_insets),
+            );
             let child_constraints = LayoutConstraints::loose(content_width, content_height);
             if crate::debug::is_enabled() {
                 crate::logln!(
@@ -2948,6 +3036,57 @@ mod tests {
             Phase::Capture,
         ));
         assert_eq!(element.take_window_action(), None);
+    }
+
+    #[test]
+    fn inset_custom_titlebar_uses_the_same_origin_and_width_for_touch_input() {
+        let window = Window::new("Inset chrome", Text::new("Content"))
+            .size(Size::new(400., 300.))
+            .decoration(WindowDecoration::CUSTOM)
+            .shadow(false);
+        let mut element = window.create_element();
+        element
+            .render_object_mut()
+            .unwrap()
+            .as_any_mut()
+            .downcast_mut::<WindowRenderObject>()
+            .unwrap()
+            .set_safe_area_insets(EdgeInsets::new(13., 47., 17., 29.));
+        element.layout(LayoutConstraints::tight(400., 300.));
+        let render = element
+            .render_object()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<WindowRenderObject>()
+            .unwrap();
+        let geometry = render.safe_window_geometry_rect();
+        let close = render.close_button_rect(geometry.size.width as u32);
+        let x = (geometry.origin.x + close.center().x) as i32;
+        let y = (geometry.origin.y + close.center().y) as i32;
+        let change = TouchChange {
+            seat_id: 1,
+            serial: 1,
+            time_ns: 1,
+            id: 91,
+            phase: TouchPhase::Down,
+            x,
+            y,
+            pressure: None,
+            touch_major: None,
+        };
+        assert!(!element.handle_event(
+            &Event::Touch(TouchChange { y: 10, ..change }),
+            Phase::Capture
+        ));
+        assert!(element.handle_event(&Event::Touch(change), Phase::Capture));
+        assert!(element.handle_event(
+            &Event::TouchGesture(TouchGesture::Tap { id: 91, x, y }),
+            Phase::Capture
+        ));
+        assert_eq!(
+            element.take_window_action(),
+            Some(WindowEvent::CloseRequested)
+        );
     }
 
     #[test]

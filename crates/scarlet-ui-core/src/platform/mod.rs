@@ -318,7 +318,10 @@ pub trait PlatformBackend {
 pub trait PlatformWindow: Any {
     /// Return a window-bound asynchronous service for the real platform clipboard.
     /// Unsupported backends never substitute a private app-local buffer.
-    fn text_clipboard(&self) -> core::result::Result<crate::clipboard::TextClipboard, crate::clipboard::ClipboardError> {
+    fn text_clipboard(
+        &self,
+    ) -> core::result::Result<crate::clipboard::TextClipboard, crate::clipboard::ClipboardError>
+    {
         Err(crate::clipboard::ClipboardError::Unsupported)
     }
     /// Begin owner-bound selection on the UI thread without blocking the event loop.
@@ -428,6 +431,17 @@ pub trait PlatformWindow: Any {
     /// The logical backing-surface size, including non-interactive decoration
     /// such as client-rendered shadow outsets.
     fn size(&self) -> Size;
+
+    /// System-reserved edges inside this window, in logical pixels.
+    ///
+    /// Backends read the OS/browser safe-area API and report changes with
+    /// [`Event::SafeAreaChanged`]. Return zero when the platform has already
+    /// constrained the surface to its safe area, so it is not inset twice.
+    /// Built-in Window content respects these edges; its background still
+    /// covers the complete surface. Desktop backends default to zero.
+    fn safe_area_insets(&self) -> EdgeInsets {
+        EdgeInsets::ZERO
+    }
 
     /// Get the managed visible window-body size.
     ///
@@ -630,6 +644,16 @@ pub trait PlatformWindow: Any {
 
     /// Update menu titles for the window (format: "menu1|menu2|menu3")
     fn set_menu_titles(&mut self, menu_titles: &str) -> Result<()>;
+
+    /// Install a shared menu model. Native backends retain their existing JSON bridge.
+    fn set_menu_model(&mut self, model: &crate::menu_model::MenuBarModel) -> Result<()> {
+        self.set_menu_titles(&model.to_json())
+    }
+
+    /// Opt in to refreshed menu models after scene presentation (for in-canvas menus).
+    fn wants_menu_model_updates(&self) -> bool {
+        false
+    }
 
     /// Synchronize focused text-input state with the backend.
     fn sync_text_input(&mut self, _state: Option<&TextInputElementState>) {}

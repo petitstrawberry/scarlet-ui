@@ -25,11 +25,11 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use backing_refresh::BackingRefresh;
 pub use backend::{
     DEFAULT_GPU_DEVICE, Error as SgfxPaintError, Result as SgfxPaintResult, SgfxPaintBackend,
     Stage as SgfxPaintStage,
 };
+use backing_refresh::BackingRefresh;
 use core::sync::atomic::{AtomicBool, Ordering};
 use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::color::Color;
@@ -1061,7 +1061,11 @@ impl SWSPlatformWindow {
     }
 
     fn effective_geometry_insets(&self) -> EdgeInsets {
-        if self.tablet_managed || self.fullscreen { EdgeInsets::ZERO } else { self.window_geometry_insets }
+        if self.tablet_managed || self.fullscreen {
+            EdgeInsets::ZERO
+        } else {
+            self.window_geometry_insets
+        }
     }
 
     fn physical_to_logical_pos(&self, value: i32) -> i32 {
@@ -1912,7 +1916,11 @@ impl PlatformWindow for SWSPlatformWindow {
                 if let Some(fullscreen) = configure.fullscreen {
                     // Fullscreen can change CSD without changing the extent.
                     self.backing_refresh.decoration_changed();
-                    self.push_event(Event::FullscreenConfigure { width, height, fullscreen });
+                    self.push_event(Event::FullscreenConfigure {
+                        width,
+                        height,
+                        fullscreen,
+                    });
                 } else {
                     self.push_event(Event::Resize { width, height });
                 }
@@ -2788,12 +2796,19 @@ impl SWSPlatformWindow {
                     self.tablet_managed = tablet_managed;
                     self.backing_refresh.decoration_changed();
                     if scarlet_ui_core::debug::frame_log_enabled() {
-                        logln!("[Tablet] surface={} managed={} size={:?}", self.surface_id, tablet_managed, self.current_size);
+                        logln!(
+                            "[Tablet] surface={} managed={} size={:?}",
+                            self.surface_id,
+                            tablet_managed,
+                            self.current_size
+                        );
                     }
                     self.surface_regions_cache = None;
                     self.needs_full_present = true;
                     self.text_input_sync.invalidate();
-                    self.push_event(Event::TabletPresentationChanged { active: tablet_managed });
+                    self.push_event(Event::TabletPresentationChanged {
+                        active: tablet_managed,
+                    });
                 }
                 let fullscreen = state_flags & sws::window_state::FULLSCREEN != 0;
                 if fullscreen != self.fullscreen {
@@ -2848,14 +2863,21 @@ impl SWSPlatformWindow {
                 });
             }
             SwsEvent::InputPanelOcclusion(area) if area.window_id == self.surface_id => {
-                let occlusion = (area.width > 0 && area.height > 0).then(|| Rect::from_xywh(
-                    self.physical_to_logical_pos(area.x) as f32,
-                    self.physical_to_logical_pos(area.y) as f32,
-                    self.physical_to_logical_len(area.width) as f32,
-                    self.physical_to_logical_len(area.height) as f32,
-                ));
+                let occlusion = (area.width > 0 && area.height > 0).then(|| {
+                    Rect::from_xywh(
+                        self.physical_to_logical_pos(area.x) as f32,
+                        self.physical_to_logical_pos(area.y) as f32,
+                        self.physical_to_logical_len(area.width) as f32,
+                        self.physical_to_logical_len(area.height) as f32,
+                    )
+                });
                 if scarlet_ui_core::debug::frame_log_enabled() {
-                    logln!("[InputPanel] surface={} occlusion={:?} size={:?}", self.surface_id, occlusion, self.current_size);
+                    logln!(
+                        "[InputPanel] surface={} occlusion={:?} size={:?}",
+                        self.surface_id,
+                        occlusion,
+                        self.current_size
+                    );
                 }
                 self.push_event(Event::InputPanelOcclusionChanged { occlusion });
             }

@@ -54,6 +54,11 @@ pub struct WindowSizeLimits {
 /// Text-input state exposed by focused editable elements.
 #[derive(Clone, Debug)]
 pub struct TextInputElementState {
+    /// Retained editor identity, assigned by the element tree at the platform boundary.
+    pub editor_id: Option<ElementId>,
+    /// Editable bounds: local in elements; window-relative and intersected with
+    /// ancestor clips at the platform boundary. Empty when fully clipped.
+    pub input_rect: Rect,
     /// Caret rectangle in element-local coordinates.
     pub cursor_rect: Rect,
     /// Text surrounding the caret that is exposed to the platform IME.
@@ -156,6 +161,21 @@ impl LayoutConstraints {
 /// Elements are mutable and handle layout, rendering, and event handling.
 /// They are created by Views and managed by the ElementTree.
 pub trait Element {
+    /// Receive unconsumed safe-area reservations from the parent layout scope.
+    /// Custom elements that create children during layout should retain this
+    /// value and deliver it to those children before laying them out.
+    fn set_safe_area_insets(&mut self, insets: crate::geometry::EdgeInsets) {
+        let child_insets = if let Some(render) = self.render_object_mut() {
+            render.set_safe_area_insets(insets);
+            render.child_safe_area_insets(insets)
+        } else {
+            insets
+        };
+        for child in self.children_mut() {
+            child.set_safe_area_insets(child_insets);
+        }
+    }
+
     /// Get the unique ID of this Element
     fn id(&self) -> ElementId;
 
@@ -424,6 +444,11 @@ pub trait Element {
         None
     }
 
+    /// Reveal a caret inside a visible local viewport, or restore with `None`.
+    fn reveal_text_input(&mut self, _request: Option<(Rect, Rect)>) -> bool {
+        false
+    }
+
     /// Get text-input state if this element is the focused editable control.
     fn text_input_state(&self) -> Option<TextInputElementState> {
         None
@@ -432,7 +457,12 @@ pub trait Element {
     /// Adjust scrolling for a keyboard overlay without changing layout size.
     /// Both rectangles use this element's local coordinates. `reveal` is false
     /// during manual scrolling, so the keyboard never pulls the caret back.
-    fn avoid_input_occlusion(&mut self, _occlusion: Option<Rect>, _caret: Option<Rect>, _reveal: bool) -> bool {
+    fn avoid_input_occlusion(
+        &mut self,
+        _occlusion: Option<Rect>,
+        _caret: Option<Rect>,
+        _reveal: bool,
+    ) -> bool {
         false
     }
 

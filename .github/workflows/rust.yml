@@ -12,6 +12,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Use system Git for pinned dependencies; libgit2 TLS is unreliable on runners.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # Match SGFX CI: adjacent Scarlet TLS-ownership fix, unchanged public ABI.
   SCARLET_TOOLCHAIN: github:petitstrawberry/scarlet-rust-nix/79f356924d1a93b55904c6b2733d0b3da5ce0de5#scarlet-rust-toolchain
 
 jobs:
@@ -27,10 +30,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Install Linux font discovery dependencies
+    - name: Install Linux font discovery and software GPU dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install --yes --no-install-recommends libfontconfig-dev pkg-config
+        sudo apt-get install --yes --no-install-recommends libfontconfig-dev pkg-config libvulkan1 mesa-vulkan-drivers
         pkg-config --modversion fontconfig
     - uses: cachix/install-nix-action@v31
       if: matrix.toolchain == 'scarlet'
@@ -62,10 +65,55 @@ jobs:
     - name: Run tests
       # Include the warm-scroll allocation regression under both compilers.
       # Only the target-specific SWS platform package is excluded on the host.
-      run: cargo test --locked --verbose --workspace --exclude scarlet-ui-platform-sws
+      env:
+        # Lavapipe runs the real pixel comparisons even on GPU-less runners.
+        WGPU_BACKEND: vulkan
+        SCARLET_REQUIRE_GPU_TESTS: "1"
+      run: |
+        cargo test --locked --verbose --workspace --exclude scarlet-ui-platform-sws --exclude scarlet-ui-renderer-sgfx
+        # Each GPU fixture creates its own device and LLVM-backed software
+        # renderer. Keep those fixtures sequential on the shared CPU runner.
+        cargo test --locked --verbose -p scarlet-ui-renderer-sgfx -- --test-threads=1
     - name: Test preview macro registration examples
       # The destination crate's preview cfg must be enabled to test registration.
       run: cargo test --locked -p scarlet-ui-macros --features preview --doc
+
+  native:
+    name: Native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2025-12-31
+      CARGO_TARGET_DIR: target/native
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install upstream Rust for native portability checks
+        # Pass the pinned name directly so the command works in bash and pwsh.
+        run: rustup toolchain install nightly-2025-12-31 --profile minimal
+      - name: Show the selected compiler
+        run: |
+          rustc -vV
+          rustc --print sysroot
+      - name: Check SGFX core source identity
+        run: cargo tree --locked -p scarlet-ui --no-default-features --features std,platform-winit --invert sgfx-core
+      - name: Build native winit integration
+        run: cargo build --locked --verbose -p scarlet-ui --no-default-features --features std,platform-winit
+      - name: Run shared host tests
+        # Explicit native/common coverage, not every workspace member. Web-only
+        # logic belongs to the Web job; preview tooling remains covered on Linux.
+        # Uses each OS's font discovery backend, not an interactive GPU smoke.
+        run: >-
+          cargo test --locked --verbose
+          -p scarlet-ui-core -p scarlet-scroll-motion
+          -p scarlet-ui-icons-tabler -p scarlet-ui-macros -p scarlet-ui
+          -p scarlet-ui-platform-winit -p scarlet-ui-renderer-sgfx
+          -p scarlet-ui-renderer-wgpu -p scarlet-ui-widget-factory
+          --features scarlet-ui/preview
+      - name: Test preview macro registration examples
+        run: cargo test --locked -p scarlet-ui-macros --features preview --doc
 
   scarlet:
     runs-on: ubuntu-latest
@@ -92,6 +140,34 @@ jobs:
         run: cargo tree --locked -p scarlet-ui --no-default-features --features std,platform-sws --target '${{ matrix.target }}' --invert sgfx-core
       - name: Check std-enabled SWS integration
         run: cargo check --locked -p scarlet-ui --no-default-features --features std,platform-sws --target '${{ matrix.target }}'
+
       - name: Build native window C ABI
         if: matrix.target == 'aarch64-unknown-scarlet'
         run: cargo build --locked -p scarlet-ui-window-c --release --target '${{ matrix.target }}'
+
+  wasm:
+    name: Web logic and wasm
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      CARGO_TARGET_DIR: target/wasm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install upstream Rust with the WebAssembly target
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
+      - name: Show the selected compiler
+        run: |
+          rustc -vV
+          rustc --print sysroot
+      - name: Install host dependencies for pure Web-platform tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libfontconfig-dev pkg-config
+      - name: Test Web menu routing and damage logic on the host
+        # These pure tests do not execute WebAssembly or start a browser.
+        run: cargo test --locked -p scarlet-ui-platform-web
+      - name: Build the WebGPU counter for WebAssembly
+        # Compile coverage only; this job does not run a browser or GPU adapter.
+        run: cargo build --locked --verbose --target wasm32-unknown-unknown --lib -p scarlet-ui-web-counter
+      - name: Build Widget Factory for WebAssembly
+        run: cargo build --locked --verbose --target wasm32-unknown-unknown --lib -p scarlet-ui-widget-factory

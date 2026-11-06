@@ -75,6 +75,9 @@ pub struct PaddingRenderObject {
 }
 
 impl PaddingRenderObject {
+    pub(crate) fn set_insets(&mut self, insets: EdgeInsets) {
+        self.insets = insets;
+    }
     /// Create a new PaddingRenderObject
     pub fn new(insets: EdgeInsets) -> Self {
         Self {

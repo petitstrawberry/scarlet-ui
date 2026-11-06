@@ -5,6 +5,17 @@
 //! API and selects the requested backend at the target-specific composition
 //! root.
 //!
+//! # Documentation
+//!
+//! Start with the [Getting started guide](https://ui.scarlet-os.org/getting-started/)
+//! for application setup and the [guides](https://ui.scarlet-os.org/reference/project/)
+//! for usage and architecture. This reference describes the Rust API.
+//!
+//! The website's API reference is built with `std`, `platform-winit` and `preview`.
+//! Web and Scarlet backend items are target-specific and are not included in that
+//! native build. Platform features are mutually exclusive; do not use
+//! `--all-features` to build this crate's documentation.
+//!
 //! Dependency direction:
 //!
 //! ```text
@@ -36,7 +47,24 @@ compile_error!("scarlet-ui feature `platform-winit` is unavailable on target_os 
 #[cfg(not(any(feature = "std", feature = "legacy-scarlet-std")))]
 compile_error!("scarlet-ui requires either the `std` or `legacy-scarlet-std` feature");
 
+#[cfg(all(feature = "platform-web", not(target_arch = "wasm32")))]
+compile_error!("scarlet-ui feature `platform-web` requires target_arch = \"wasm32\"");
+
+#[cfg(all(
+    feature = "platform-web",
+    any(feature = "platform-sws", feature = "platform-winit")
+))]
+compile_error!("scarlet-ui platform features are mutually exclusive");
+
 pub use scarlet_ui_core::*;
+
+#[cfg(all(feature = "platform-web", target_arch = "wasm32"))]
+pub use scarlet_ui_platform_web::{
+    SafeAreaMode, SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle,
+    SgfxCanvasRenderObject, SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture,
+    SgfxTextureHandle, WebApp, WebOptions, browser_safe_area_insets, run as run_web,
+    run_with_options as run_web_with_options,
+};
 
 #[cfg(all(feature = "platform-sws", target_os = "scarlet"))]
 pub use scarlet_ui_platform_sws::{
@@ -116,5 +144,10 @@ pub mod prelude {
         ExternalGpuSurface, SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle,
         SgfxCanvasVertex, SgfxMesh, SgfxMeshHandle, SgfxTexture, SgfxTextureHandle,
         SharedImageError, shared_bgra8_texture, shared_bgra8_texture_from_raw,
+    };
+    #[cfg(all(feature = "platform-web", target_arch = "wasm32"))]
+    pub use crate::{
+        SgfxCanvas, SgfxCanvasDraw, SgfxCanvasFrame, SgfxCanvasHandle, SgfxCanvasVertex, SgfxMesh,
+        SgfxMeshHandle, SgfxTexture, SgfxTextureHandle,
     };
 }

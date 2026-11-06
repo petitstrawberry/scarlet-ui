@@ -68,12 +68,12 @@ impl Probe {
                         .enabled(false)
                         .on_activate(action.clone()),
                 ),
-                MenuEntry::Item(
-                    MenuItemModel::new("nested", "Nested").children(vec![MenuEntry::Item(
+                MenuEntry::Item(MenuItemModel::new("nested", "Nested").children(
+                    vec![MenuEntry::Item(
                         MenuItemModel::new("nested-action", "Nested Action")
                             .on_activate(action.clone()),
-                    )]),
-                ),
+                    )],
+                )),
             ]),
             MenuItemModel::new("edit", "Edit").children(
                 [

@@ -199,6 +199,26 @@ pub(crate) fn handle_text_view_text_input(
     }
 
     match event {
+        Event::TextInputSelection {
+            cursor_byte,
+            anchor_byte,
+        } => {
+            let text = render_object.text_document.as_str();
+            let boundary = |byte: u32| {
+                let mut byte = (byte as usize).min(text.len());
+                while !text.is_char_boundary(byte) {
+                    byte -= 1;
+                }
+                byte
+            };
+            render_object.selection = TextSelection {
+                caret: TextPosition::new(boundary(*cursor_byte)),
+                anchor: TextPosition::new(boundary(*anchor_byte)),
+            };
+            drop(text);
+            finish_caret_change(view, render_object);
+            true
+        }
         Event::TextInputCommit { text, .. } => {
             render_object.clear_preedit();
             insert_text(view, render_object, text);
@@ -439,10 +459,16 @@ pub(crate) fn handle_text_view_scroll_gesture(
 ) -> bool {
     let (phase, delta_x, delta_y) = match *gesture {
         TouchGesture::Scroll {
-            phase, delta_x, delta_y, ..
+            phase,
+            delta_x,
+            delta_y,
+            ..
         }
         | TouchGesture::ScrollMomentum {
-            phase, delta_x, delta_y, ..
+            phase,
+            delta_x,
+            delta_y,
+            ..
         } => (phase, delta_x, delta_y),
         _ => return false,
     };
@@ -454,7 +480,8 @@ pub(crate) fn handle_text_view_scroll_gesture(
     let momentum_start = matches!(
         gesture,
         TouchGesture::ScrollMomentum {
-            phase: GesturePhase::Started, ..
+            phase: GesturePhase::Started,
+            ..
         }
     ) && render_object.accepts_touch_scroll();
     scroll_view(view, render_object, delta_x, delta_y) || momentum_start

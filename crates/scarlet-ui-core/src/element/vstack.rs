@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 
 use crate::element::{Element, ElementId, LayoutConstraints};
-use crate::geometry::{Alignment, Point, Rect, Size};
+use crate::geometry::{Alignment, EdgeInsets, Point, Rect, Size};
 
 /// VStackElement - arranges children vertically
 pub struct VStackElement {
@@ -20,6 +20,7 @@ pub struct VStackElement {
     position: Point,
     size: Size,
     last_constraints: Option<LayoutConstraints>,
+    safe_area_insets: EdgeInsets,
 }
 
 impl VStackElement {
@@ -33,6 +34,7 @@ impl VStackElement {
             position: Point::ZERO,
             size: Size::ZERO,
             last_constraints: None,
+            safe_area_insets: EdgeInsets::ZERO,
         }
     }
 
@@ -81,7 +83,15 @@ impl Element for VStackElement {
         crate::element::UpdateResult::NoChange
     }
 
+    fn set_safe_area_insets(&mut self, insets: EdgeInsets) {
+        self.safe_area_insets = insets;
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        let insets = self.safe_area_insets;
+        for child in self.children_mut() {
+            child.set_safe_area_insets(insets);
+        }
         self.last_constraints = Some(constraints);
         if crate::debug::is_enabled() {
             crate::logln!(

@@ -40,12 +40,14 @@ pub struct TextField {
     autofocus: bool,
     automatic_software_keyboard: bool,
     background_color: Color,
+    material: Option<style::GlassMaterial>,
     border_color: Color,
     focused_border_color: Color,
     text_color: Color,
     placeholder_color: Color,
     font_size: f32,
     padding: f32,
+    enabled: bool,
 }
 
 impl TextField {
@@ -63,13 +65,37 @@ impl TextField {
             autofocus: false,
             automatic_software_keyboard: true,
             background_color: style::surface_color(&palette, style::SurfaceRole::Canvas),
-            border_color: palette.divider(),
+            material: Some(style::GlassMaterial::editing()),
+            border_color: palette.border(),
             focused_border_color: style::focus_highlight(&palette),
             text_color: palette.text(),
             placeholder_color: palette.text_secondary(),
-            font_size: style::BODY_FONT_SIZE,
-            padding: 8.0,
+            font_size: style::CONTROL_FONT_SIZE,
+            padding: style::CONTROL_PADDING,
+            enabled: true,
         }
+    }
+
+    /// Override the default editing backdrop material without changing input or layout.
+    pub fn material(mut self, material: style::GlassMaterial) -> Self {
+        self.material = Some(material);
+        self
+    }
+
+    /// Enable editing, or display a non-interactive disabled field.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Control automatic software keyboard presentation while preserving editing and IME.
+    pub fn automatic_software_keyboard(mut self, automatic: bool) -> Self {
+        self.automatic_software_keyboard = automatic;
+        self
     }
 
     /// Set placeholder text shown while the value is empty.
@@ -131,16 +157,6 @@ impl TextField {
         self
     }
 
-    /// Allow focus to automatically show a software keyboard (default: `true`).
-    ///
-    /// Setting this to `false` preserves editing, selection, hardware keyboard
-    /// input and IME composition. Platforms may still honor explicit requests
-    /// to show the keyboard. Rebuilding with a new value updates a focused editor.
-    pub fn automatic_software_keyboard(mut self, allow: bool) -> Self {
-        self.automatic_software_keyboard = allow;
-        self
-    }
-
     /// Set the font size.
     pub fn font_size(mut self, size: f32) -> Self {
         self.font_size = size;
@@ -153,7 +169,7 @@ impl TextField {
         self
     }
 
-    /// Set the text field background color.
+    /// Set the text field background color, opting out of default glass.
     ///
     /// # Arguments
     ///
@@ -164,10 +180,11 @@ impl TextField {
     /// The updated text field.
     pub fn background_color(mut self, color: Color) -> Self {
         self.background_color = color;
+        self.material = None;
         self
     }
 
-    /// Set the unfocused border color.
+    /// Set the unfocused border color, opting out of default glass.
     ///
     /// # Arguments
     ///
@@ -178,10 +195,11 @@ impl TextField {
     /// The updated text field.
     pub fn border_color(mut self, color: Color) -> Self {
         self.border_color = color;
+        self.material = None;
         self
     }
 
-    /// Set the focused border color.
+    /// Set the focused border color, opting out of default glass.
     ///
     /// # Arguments
     ///
@@ -192,6 +210,7 @@ impl TextField {
     /// The updated text field.
     pub fn focused_border_color(mut self, color: Color) -> Self {
         self.focused_border_color = color;
+        self.material = None;
         self
     }
 
@@ -206,12 +225,6 @@ impl TextField {
     /// The updated text field.
     pub fn text_color(mut self, color: Color) -> Self {
         self.text_color = color;
-        self
-    }
-
-    /// Set the placeholder color without changing the entered text color.
-    pub fn placeholder_color(mut self, color: Color) -> Self {
-        self.placeholder_color = color;
         self
     }
 
@@ -264,7 +277,6 @@ pub struct TextFieldRenderObject {
     text_document: TextDocument,
     selection: TextSelection,
     layout: TextViewLayout,
-    scroll: TextViewScroll,
     preedit: String,
     preedit_cursor_byte: u32,
     preedit_anchor_byte: u32,
@@ -275,12 +287,15 @@ pub struct TextFieldRenderObject {
     dragging: bool,
     placeholder: String,
     background_color: Color,
+    material: Option<style::GlassMaterial>,
     border_color: Color,
     focused_border_color: Color,
     text_color: Color,
     placeholder_color: Color,
     font_size: f32,
     padding: f32,
+    enabled: bool,
+    hovered: bool,
     size: Size,
 }
 
@@ -289,95 +304,37 @@ impl TextFieldRenderObject {
     pub fn from_view(view: &TextField) -> Self {
         let text_document = TextDocument::from_str(&view.text.get());
         let selection = TextSelection::collapsed(text_document.len());
-        let layout = text_field_layout(
-            &TextDocument::new(),
-            view.font_size,
-            view.padding,
-            Size::ZERO,
-        );
+        let layout = text_field_layout(&text_document, view.font_size, view.padding, Size::ZERO);
         Self {
             text_document,
             selection,
             layout,
-            scroll: TextViewScroll::default(),
             preedit: String::new(),
             preedit_cursor_byte: 0,
             preedit_anchor_byte: 0,
             preedit_spans: alloc::vec::Vec::new(),
-            focused: view.autofocus,
+            focused: view.autofocus && view.enabled,
             autofocus: view.autofocus,
             automatic_software_keyboard: view.automatic_software_keyboard,
             dragging: false,
             placeholder: view.placeholder.clone(),
             background_color: view.background_color,
+            material: view.material,
             border_color: view.border_color,
             focused_border_color: view.focused_border_color,
             text_color: view.text_color,
             placeholder_color: view.placeholder_color,
             font_size: view.font_size,
             padding: view.padding,
+            enabled: view.enabled,
+            hovered: false,
             size: Size::ZERO,
         }
     }
 
     fn compute_layout(&mut self) {
-        if !self.layout.matches(
-            &self.text_document,
-            self.font_size,
-            self.padding,
-            WrapMode::None,
-            self.size,
-            false,
-        ) {
-            self.layout =
-                text_field_layout(&self.text_document, self.font_size, self.padding, self.size);
-        }
-        let preedit_width = if self.preedit.is_empty() {
-            0.0
-        } else {
-            graphics::measure_text_sized(&self.preedit, self.font_size).0 as f32
-        };
-        self.layout.set_viewport(self.size);
-        self.layout.content_width = self.layout.max_line_width + preedit_width + 1.0;
-        self.scroll = self.layout.set_scroll(self.scroll);
-        self.center_lines();
-    }
-
-    fn center_lines(&mut self) {
-        let top = if self.size.height > 0.0 {
-            ((self.size.height - self.layout.line_height) * 0.5).max(0.0)
-        } else {
-            self.padding
-        };
-        for (index, line) in self.layout.visual_lines.iter_mut().enumerate() {
-            line.y = top + index as f32 * self.layout.line_height;
-        }
-    }
-
-    fn ensure_caret_visible(&mut self) {
-        if !self.focused {
-            return;
-        }
-        let mut caret = self
-            .layout
-            .cursor_rect(self.selection.caret, &self.text_document);
-        if !self.preedit.is_empty() {
-            caret.origin.x += graphics::measure_text_sized(
-                preedit_prefix(&self.preedit, self.preedit_cursor_byte),
-                self.font_size,
-            )
-            .0 as f32;
-        }
-        let left = self.padding;
-        let right = (self.size.width - self.padding).max(left);
-        let mut scroll = self.scroll;
-        if caret.origin.x < left {
-            scroll.x -= left - caret.origin.x;
-        } else if caret.origin.x + caret.size.width > right {
-            scroll.x += caret.origin.x + caret.size.width - right;
-        }
-        self.scroll = self.layout.set_scroll(scroll);
-        self.center_lines();
+        self.layout =
+            text_field_layout(&self.text_document, self.font_size, self.padding, self.size);
     }
 }
 
@@ -394,19 +351,19 @@ impl ElementRenderObject for TextFieldRenderObject {
         } else {
             graphics::measure_text_sized(&self.preedit, self.font_size).0 as f32
         };
-        let measured_width = if constraints.min_width == constraints.max_width {
-            0
-        } else {
-            graphics::measure_text_sized(&visible_text, self.font_size).0
-        };
+        let (measured_width, _) = graphics::measure_text_sized(&visible_text, self.font_size);
         let line_height = graphics::line_height_sized(self.font_size).max(1) as f32;
         let intrinsic = Size::new(
             measured_width as f32 + preedit_width + self.padding * 2.0,
-            (line_height + self.padding * 2.0).max(style::metrics().minimum_control_height),
+            if self.font_size == style::CONTROL_FONT_SIZE && self.padding == style::CONTROL_PADDING
+            {
+                style::CONTROL_HEIGHT
+            } else {
+                (line_height + self.padding * 2.0).max(style::CONTROL_HEIGHT)
+            },
         );
         self.size = constraints.constrain(intrinsic);
         self.compute_layout();
-        self.ensure_caret_visible();
         self.size
     }
 
@@ -449,31 +406,32 @@ impl ElementRenderObject for TextFieldRenderObject {
         let text_changed = self.text_document.as_str().as_ref() != new_text.as_str();
         let selection_followed_old_end =
             selection.anchor.byte == old_len && selection.caret.byte == old_len;
-        if text_changed {
-            self.text_document = TextDocument::from_str(&new_text);
-        }
+        let preedit = self.preedit.clone();
+        let preedit_cursor_byte = self.preedit_cursor_byte;
+        let preedit_anchor_byte = self.preedit_anchor_byte;
+        let preedit_spans = self.preedit_spans.clone();
+        let size = self.size;
+        *self = TextFieldRenderObject::from_view(view);
         let len = self.text_document.len();
         self.selection = if text_changed && selection_followed_old_end {
             TextSelection::collapsed(len)
         } else {
             TextSelection {
-                anchor: self.text_document.clamp_position(selection.anchor),
-                caret: self.text_document.clamp_position(selection.caret),
+                anchor: TextPosition::new(selection.anchor.byte.min(len)),
+                caret: TextPosition::new(selection.caret.byte.min(len)),
             }
         };
-        self.focused = focused;
-        self.autofocus = view.autofocus;
-        self.automatic_software_keyboard = view.automatic_software_keyboard;
-        self.placeholder.clone_from(&view.placeholder);
-        self.background_color = view.background_color;
-        self.border_color = view.border_color;
-        self.focused_border_color = view.focused_border_color;
-        self.text_color = view.text_color;
-        self.placeholder_color = view.placeholder_color;
-        self.font_size = view.font_size;
-        self.padding = view.padding;
+        self.focused = focused && view.enabled;
+        self.preedit = if view.enabled { preedit } else { String::new() };
+        self.preedit_cursor_byte = preedit_cursor_byte;
+        self.preedit_anchor_byte = preedit_anchor_byte;
+        self.preedit_spans = if view.enabled {
+            preedit_spans
+        } else {
+            alloc::vec::Vec::new()
+        };
+        self.size = size;
         self.compute_layout();
-        self.ensure_caret_visible();
         crate::element::UpdateResult::Updated
     }
 
@@ -481,8 +439,55 @@ impl ElementRenderObject for TextFieldRenderObject {
         true
     }
 
+    fn reads_backdrop(&self) -> bool {
+        self.material.is_some()
+    }
+
     fn paint(&self, ctx: &mut PaintContext, origin: Point) -> bool {
-        paint::paint_text_view(
+        let palette = ColorPalette::default();
+        let background = if self.enabled {
+            self.background_color
+        } else {
+            palette.background_secondary()
+        };
+        let text = if self.enabled {
+            self.text_color
+        } else {
+            palette.text_tertiary()
+        };
+        let border = if !self.enabled {
+            palette.divider()
+        } else if self.hovered {
+            self.border_color.darken(0.04)
+        } else {
+            self.border_color
+        };
+        let paint_content = if let Some(mut material) = self.material {
+            if !self.enabled {
+                material.tint = palette.background_secondary().with_opacity(0.86);
+            } else if self.hovered {
+                material.tint = material
+                    .tint
+                    .with_opacity((material.tint.a + 0.06).min(1.0));
+            }
+            style::paint_glass_material(
+                ctx,
+                crate::geometry::Rect::new(origin, self.size),
+                style::metrics().control_radius,
+                material,
+            );
+            if self.focused && self.enabled {
+                style::glass_control_focus(
+                    ctx,
+                    crate::geometry::Rect::new(origin, self.size),
+                    material,
+                );
+            }
+            paint::paint_text_view_content
+        } else {
+            paint::paint_text_view
+        };
+        paint_content(
             ctx,
             origin,
             self.size,
@@ -492,12 +497,16 @@ impl ElementRenderObject for TextFieldRenderObject {
             self.focused,
             self.font_size,
             self.padding,
-            self.background_color,
-            self.text_color,
-            self.placeholder_color,
+            background,
+            text,
+            if self.enabled {
+                self.placeholder_color
+            } else {
+                text
+            },
             self.selection_color(),
             Color::TRANSPARENT,
-            self.border_color,
+            border,
             self.focused_border_color,
             &self.placeholder,
             &self.preedit,
@@ -511,6 +520,10 @@ impl ElementRenderObject for TextFieldRenderObject {
 }
 
 impl TextFieldRenderObject {
+    pub(crate) fn set_hovered(&mut self, hovered: bool) {
+        self.hovered = hovered && self.enabled;
+    }
+
     pub(crate) fn is_focused(&self) -> bool {
         self.focused
     }
@@ -535,20 +548,13 @@ impl TextFieldRenderObject {
         self.preedit_anchor_byte = clamp_byte_boundary(&self.preedit, anchor_byte);
         self.preedit_spans.clear();
         self.preedit_spans.extend_from_slice(spans);
-        self.compute_layout();
-        self.ensure_caret_visible();
     }
 
     pub(crate) fn clear_preedit(&mut self) {
-        let had_preedit = !self.preedit.is_empty();
         self.preedit.clear();
         self.preedit_cursor_byte = 0;
         self.preedit_anchor_byte = 0;
         self.preedit_spans.clear();
-        if had_preedit {
-            self.compute_layout();
-            self.ensure_caret_visible();
-        }
     }
 
     pub(crate) fn text_input_state(&self) -> TextInputElementState {
@@ -560,6 +566,8 @@ impl TextFieldRenderObject {
             cursor_rect.origin.x += graphics::measure_text_sized(prefix, self.font_size).0 as f32;
         }
         TextInputElementState {
+            editor_id: None,
+            input_rect: crate::geometry::Rect::new(Point::ZERO, self.size),
             cursor_rect,
             surrounding_text: self.text_document.as_str().into_owned(),
             cursor_byte: self.selection.caret.byte as u32,
@@ -709,6 +717,25 @@ pub(crate) fn handle_text_field_text_input(
     }
 
     match event {
+        crate::event::Event::TextInputSelection {
+            cursor_byte,
+            anchor_byte,
+        } => {
+            let text = render_object.text_document.as_str();
+            let boundary = |byte: u32| {
+                let mut byte = (byte as usize).min(text.len());
+                while !text.is_char_boundary(byte) {
+                    byte -= 1;
+                }
+                byte
+            };
+            render_object.selection = TextSelection {
+                caret: TextPosition::new(boundary(*cursor_byte)),
+                anchor: TextPosition::new(boundary(*anchor_byte)),
+            };
+            drop(text);
+            true
+        }
         crate::event::Event::TextInputCommit { text, .. } => {
             render_object.clear_preedit();
             insert_text(field, render_object, &single_line_text(text));
@@ -810,7 +837,6 @@ fn insert_text(field: &TextField, render_object: &mut TextFieldRenderObject, tex
     render_object.text_document = document;
     render_object.selection = TextSelection::collapsed(caret);
     render_object.compute_layout();
-    render_object.ensure_caret_visible();
     field
         .text
         .set(render_object.text_document.as_str().into_owned());
@@ -875,7 +901,6 @@ fn delete_range(
     render_object.text_document = document;
     render_object.selection = TextSelection::collapsed(start);
     render_object.compute_layout();
-    render_object.ensure_caret_visible();
     field
         .text
         .set(render_object.text_document.as_str().into_owned());
@@ -894,10 +919,7 @@ fn move_caret(
         CaretMove::Start => 0,
         CaretMove::End => text.len(),
     };
-    let position = render_object
-        .text_document
-        .clamp_position(TextPosition::new(byte));
-    drop(text);
+    let position = TextPosition::new(byte).clamp_to_grapheme(&text);
     if modifiers.shift {
         render_object.selection.caret = position;
     } else {
@@ -906,7 +928,6 @@ fn move_caret(
             caret: position,
         };
     }
-    render_object.ensure_caret_visible();
 }
 
 fn handle_primary_click(
@@ -951,7 +972,6 @@ fn handle_drag_selection(render_object: &mut TextFieldRenderObject, x: i32, y: i
     }
     if let Some(position) = hit_test_mouse(render_object, x, y) {
         render_object.selection.caret = position;
-        render_object.ensure_caret_visible();
     }
     true
 }
@@ -962,7 +982,7 @@ fn hit_test_mouse(render_object: &TextFieldRenderObject, x: i32, _y: i32) -> Opt
     render_object
         .layout
         .hit_test(Point::new(x, y))
-        .map(|position| render_object.text_document.clamp_position(position))
+        .map(|position| position.clamp_to_grapheme(&render_object.text_document.as_str()))
 }
 
 fn word_selection(render_object: &TextFieldRenderObject, byte: usize) -> TextSelection {
@@ -1074,7 +1094,7 @@ fn previous_grapheme_boundary(text: &str, byte: usize) -> Option<usize> {
     text[..byte]
         .grapheme_indices(true)
         .map(|(offset, _)| offset)
-        .next_back()
+        .last()
 }
 
 fn next_grapheme_boundary(text: &str, byte: usize) -> Option<usize> {
@@ -1091,7 +1111,7 @@ fn previous_grapheme(byte: usize, text: &str) -> Option<(usize, &str)> {
     text[..byte]
         .grapheme_indices(true)
         .map(|(offset, grapheme)| (offset, grapheme))
-        .next_back()
+        .last()
 }
 
 fn next_grapheme(byte: usize, text: &str) -> Option<(usize, &str)> {
@@ -1114,87 +1134,155 @@ mod tests {
     use crate::renderer::PaintCommand;
     use crate::state::StateId;
 
-    #[test]
-    fn placeholder_color_updates_without_changing_entered_text_color() {
-        let text = State::new(crate::state::generate_state_id(), String::new());
-        let foreground = Color::rgb(210u8, 212u8, 216u8);
-        let placeholder = Color::rgb(148u8, 152u8, 160u8);
-        let field = TextField::new(text).placeholder("Find").text_color(foreground);
-        let mut object = TextFieldRenderObject::from_view(&field);
-        let updated = field.placeholder_color(placeholder);
-        object.update(&updated);
-        object.layout(LayoutConstraints::tight(160.0, 32.0));
-        let mut ctx = PaintContext::new();
-        object.paint(&mut ctx, Point::ZERO);
-        assert!(ctx.commands().iter().any(|command| matches!(command,
-            PaintCommand::DrawText { text, color, .. } if text == "Find" && *color == placeholder
+    fn glass_tint(render_object: &TextFieldRenderObject) -> Color {
+        let mut context = PaintContext::new();
+        render_object.paint(&mut context, Point::ZERO);
+        assert!(!context.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillVerticalGradientRoundedRect { .. }
         )));
-        assert_eq!(object.text_color, foreground);
+        if !render_object.text_document.is_empty() || !render_object.placeholder.is_empty() {
+            assert!(
+                context
+                    .commands()
+                    .iter()
+                    .skip(1)
+                    .any(|command| matches!(command, PaintCommand::DrawText { .. }))
+            );
+        }
+        match context.commands().first().expect("field surface") {
+            PaintCommand::BackdropFilterRoundedRect { tint, .. } => *tint,
+            _ => panic!("filter backdrop before crisp editable content"),
+        }
     }
 
     #[test]
-    fn long_field_reveals_caret_and_ime_without_losing_vertical_centering() {
-        let text = State::new(StateId::new(7200), "日本 e\u{301} 👩‍💻 abc ".repeat(20));
-        let field = TextField::new(text.clone()).autofocus(true);
-        let mut object = TextFieldRenderObject::from_view(&field);
-        object.layout(LayoutConstraints::tight(170.0, 48.0));
-        assert!(object.scroll.x > 0.0);
-        let caret = object.text_input_state().cursor_rect;
-        assert!(caret.origin.x + caret.size.width <= 162.0);
-        assert_eq!(caret.origin.y, (48.0 - object.layout.line_height) * 0.5);
-        move_caret(&mut object, CaretMove::Start, KeyModifiers::default());
-        assert_eq!(object.scroll.x, 0.0);
-        move_caret(&mut object, CaretMove::End, KeyModifiers::default());
-        object.set_preedit_state("入力中の文字", 18, 18, &[]);
-        assert_eq!(text.get(), object.text_document.as_str());
-        let caret = object.text_input_state().cursor_rect;
-        assert!(caret.origin.x + caret.size.width <= 162.0);
-        object.clear_preedit();
-        assert!(
-            object.scroll.x
-                <= (object.layout.content_width - object.layout.viewport_width).max(0.0)
-        );
-        assert!(object.text_input_state().cursor_rect.origin.x >= 8.0);
+    fn default_field_uses_editing_material_and_uniform_state_faces() {
+        let text = State::new(crate::state::generate_state_id(), String::from("Name"));
+        let mut field = TextFieldRenderObject::from_view(&TextField::new(text.clone()));
+        field.layout(LayoutConstraints::tight(160.0, 36.0));
+        assert!(field.reads_backdrop());
+        let rest = glass_tint(&field);
+        assert_eq!(rest, style::GlassMaterial::editing().tint);
+        field.set_hovered(true);
+        assert_ne!(rest, glass_tint(&field));
+        let hovered = glass_tint(&field);
+        field.set_focused(true);
+        assert_eq!(hovered, glass_tint(&field));
+        field.set_hovered(false);
+        assert_eq!(rest, glass_tint(&field));
+        field.update(&TextField::new(text).enabled(false));
+        assert!(!field.is_focused());
+        assert!(field.reads_backdrop());
+        assert_ne!(rest, glass_tint(&field));
+        assert_eq!(field.size(), Size::new(160.0, 36.0));
     }
 
     #[test]
-    fn field_update_preserves_drag_selection_preedit_and_measured_lines() {
-        let text = State::new(StateId::new(7201), String::from("abcd 日本 e\u{301}"));
-        let field = TextField::new(text).autofocus(true);
-        let mut object = TextFieldRenderObject::from_view(&field);
-        object.layout(LayoutConstraints::tight(240.0, 48.0));
-        object.selection = TextSelection {
-            anchor: TextPosition::new(1),
-            caret: TextPosition::new(3),
-        };
-        object.dragging = true;
-        object.set_preedit_state("入力", 6, 3, &[]);
-        let lines = object.layout.visual_lines.as_ptr();
-        object.update(&field);
-        object.layout(LayoutConstraints::tight(240.0, 48.0));
-        assert_eq!(object.layout.visual_lines.as_ptr(), lines);
-        assert_eq!(object.selection.anchor.byte, 1);
-        assert_eq!(object.selection.caret.byte, 3);
-        assert!(object.dragging);
-        assert_eq!(object.preedit, "入力");
-        assert_eq!(object.preedit_anchor_byte, 3);
+    #[allow(deprecated)]
+    fn focus_ring_is_visible_without_darkening_light_or_dark_glass() {
+        for palette in [ColorPalette::light(), ColorPalette::dark()] {
+            let material =
+                style::GlassMaterial::new(18.0, palette.button_background().with_opacity(0.78));
+            let view = TextField::new(State::new(crate::state::generate_state_id(), String::new()))
+                .material(material);
+            let mut object = TextFieldRenderObject::from_view(&view);
+            object.layout(LayoutConstraints::tight(160.0, 36.0));
+            let mut face_samples = [0u32; 2];
+            let mut ring_samples = [0u32; 2];
+            for (index, focused) in [false, true].into_iter().enumerate() {
+                object.set_focused(focused);
+                let mut context = PaintContext::new();
+                object.paint(&mut context, Point::ZERO);
+                let mut buffer =
+                    crate::buffer::Buffer::from_logical_dimensions_with_scale(160, 36, 1000);
+                crate::renderer::CpuPaintRenderer::execute_into_buffer(
+                    &mut buffer,
+                    palette.background(),
+                    &context,
+                    None,
+                );
+                face_samples[index] = buffer.as_slice()[18 * 160 + 80];
+                ring_samples[index] = buffer.as_slice()[160 + 80];
+                assert!(
+                    matches!(context.commands()[0], PaintCommand::BackdropFilterRoundedRect { tint, .. } if tint == material.tint)
+                );
+                assert_eq!(
+                    context
+                        .commands()
+                        .iter()
+                        .filter(|command| matches!(command, PaintCommand::StrokeRoundedRect { .. }))
+                        .count(),
+                    usize::from(focused)
+                );
+            }
+            assert_eq!(
+                face_samples[0], face_samples[1],
+                "focus must not recolor the face"
+            );
+            let luminance = |pixel: u32| {
+                let channels = [16, 8, 0].map(|shift| ((pixel >> shift) & 255) as f32 / 255.0);
+                let linear = channels.map(|v| {
+                    if v <= 0.04045 {
+                        v / 12.92
+                    } else {
+                        ((v + 0.055) / 1.055).powf(2.4)
+                    }
+                });
+                linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722
+            };
+            let rest = luminance(ring_samples[0]);
+            let focus = luminance(ring_samples[1]);
+            let contrast = (rest.max(focus) + 0.05) / (rest.min(focus) + 0.05);
+            assert!(
+                contrast >= 1.2,
+                "focus ring contrast on {:?}: {contrast}",
+                palette.scheme()
+            );
+            object.set_focused(false);
+            assert_eq!(glass_tint(&object), material.tint);
+            assert_eq!(object.size(), Size::new(160.0, 36.0));
+        }
     }
 
     #[test]
-    fn scrolled_field_hit_testing_maps_to_visible_unicode_text() {
-        let field = TextField::new(State::new(
-            StateId::new(7202),
-            "日本 e\u{301} text ".repeat(20),
-        ))
-        .autofocus(true);
+    fn custom_field_face_is_uniform_and_preserves_requested_color() {
+        let color = Color::rgb(30u8, 50u8, 70u8);
+        let field = TextField::new(State::new(crate::state::generate_state_id(), String::new()))
+            .background_color(color)
+            .border_color(Color::CLEAR);
         let mut object = TextFieldRenderObject::from_view(&field);
-        object.layout(LayoutConstraints::tight(150.0, 32.0));
-        let caret = object.text_input_state().cursor_rect;
-        let position = hit_test_mouse(&object, caret.origin.x as i32, 10).unwrap();
-        assert_eq!(position.byte, object.text_document.len());
-        let middle = hit_test_mouse(&object, 80, 10).unwrap();
-        assert!(middle.byte > 0);
-        assert_eq!(object.text_document.clamp_position(middle), middle);
+        object.layout(LayoutConstraints::tight(160.0, 36.0));
+        assert!(!object.reads_backdrop());
+        let mut context = PaintContext::new();
+        object.paint(&mut context, Point::ZERO);
+        assert!(matches!(context.commands().first(), Some(
+            PaintCommand::FillRoundedRect { color: face, .. }
+        ) if *face == color));
+        object.set_focused(true);
+        object.set_hovered(true);
+        let mut focused = PaintContext::new();
+        object.paint(&mut focused, Point::ZERO);
+        assert!(matches!(focused.commands().first(), Some(
+            PaintCommand::FillRoundedRect { color: face, .. }
+        ) if *face == color));
+        assert!(matches!(focused.commands().get(1), Some(
+            PaintCommand::StrokeRoundedRect { color, .. }
+        ) if *color == ColorPalette::default().primary().with_opacity(0.40)));
+        assert!(!focused.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillVerticalGradientRoundedRect { .. }
+        )));
+    }
+
+    #[test]
+    fn explicit_field_chrome_preserves_custom_colors_and_readback_updates() {
+        let text = State::new(crate::state::generate_state_id(), String::new());
+        let view = TextField::new(text).background_color(Color::CLEAR);
+        let mut field = TextFieldRenderObject::from_view(&view);
+        assert!(!field.reads_backdrop());
+        field.update(&view.material(style::GlassMaterial::editing()));
+        assert!(field.reads_backdrop());
     }
 
     #[test]
@@ -1397,18 +1485,18 @@ mod tests {
         assert!(
             ctx.commands()
                 .iter()
-                .any(|command| matches!(command, PaintCommand::FillRoundedRect { .. }))
+                .any(|command| matches!(command, PaintCommand::BackdropFilterRoundedRect { .. }))
         );
         assert!(
             ctx.commands()
                 .iter()
-                .any(|command| matches!(command, PaintCommand::FillPath { .. }))
+                .any(|command| matches!(command,
+                    PaintCommand::FillPath { color, .. } if *color == Color::rgb(150u8, 158u8, 170u8)))
         );
-        assert!(
-            ctx.commands()
-                .iter()
-                .any(|command| matches!(command, PaintCommand::StrokeRoundedRect { .. }))
-        );
+        assert!(!ctx.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::FillVerticalGradientRoundedRect { .. }
+        )));
     }
 
     #[test]

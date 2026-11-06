@@ -46,7 +46,7 @@ impl MenuItem {
             icon_size: IconSize::Small,
             on_click: None,
             on_hover: None,
-            font_size: style::BODY_FONT_SIZE,
+            font_size: style::CONTROL_FONT_SIZE,
             padding: 6.0,
             selected: false,
             foreground_color: None,
