@@ -770,6 +770,16 @@ impl Tessellator {
             // Keep black and white vertex colors on separate sides of the
             // zero crossing. Interpolating their RGB together would darken a
             // pale backdrop independently of the intended shadow strength.
+            let reflection_at = |d| {
+                scarlet_ui_core::glass::glass_surface_reflection_at_scale(
+                    d,
+                    -libm::cosf(angle),
+                    -libm::sinf(angle),
+                    bezel,
+                    self.scale,
+                )
+            };
+            let all_light = reflection_at(0.) >= 0. && reflection_at(line_width) >= 0.;
             let mut lo = 0.;
             let mut hi = bezel;
             for _ in 0..8 {
@@ -787,7 +797,7 @@ impl Tessellator {
                     hi = mid;
                 }
             }
-            let zero = (lo + hi) * 0.5;
+            let zero = if all_light { bezel } else { (lo + hi) * 0.5 };
             let mut distances = [
                 (0., 0),
                 (width * 0.25, 0),
@@ -807,7 +817,7 @@ impl Tessellator {
             for (ring, (d, crossing)) in distances.into_iter().enumerate() {
                 let mut v = vertex(i, d);
                 if crossing != 0 {
-                    let rgb = if crossing == 1 { 0. } else { 1. };
+                    let rgb = if crossing == 1 && !all_light { 0. } else { 1. };
                     v.color = [rgb, rgb, rgb, 0.];
                 }
                 rings[ring][i] = v;

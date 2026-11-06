@@ -590,20 +590,9 @@ fn shoulder_reflection_stays_soft_and_matches_cpu() {
                         );
                     }
                     let label = format!("shoulder-{shape}-{name}-{scale}-{analytic}");
-                    if name == "light" {
-                        let factor = scale as f32 / 1000.;
-                        for (edge, inward) in [(rect.top(), 1.), (rect.bottom(), -1.)] {
-                            let boundary = edge * factor;
-                            let shadow = (boundary.floor() as u32..=boundary.ceil() as u32 + 1)
-                                .map(|y| gpu[((y * width + width / 2) * 4) as usize])
-                                .min()
-                                .unwrap();
-                            assert!(
-                                shadow + 2 < gpu[center],
-                                "{label}: faint shadow at {edge}, inward={inward}"
-                            );
-                        }
-                    }
+                    // Core tests verify both shadow stages and the restored
+                    // narrow light independently. Here compare their combined
+                    // pixels; a lit top edge need not be darker than its center.
                     eprintln!("{label}: CPU/GPU delta {max_delta}, reflection lift {max_lift}");
                     if let Some(dir) = &output {
                         save(&dir.join(format!("{label}-gpu.ppm")), width, height, &gpu).unwrap();

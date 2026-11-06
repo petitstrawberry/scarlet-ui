@@ -193,7 +193,17 @@ pub fn glass_surface_reflection_at_scale(
         glass_shadow_layers(distance, inward_x, inward_y, bezel, scale);
     // Keep the soft reflection; add distinct shadow stages instead of erasing
     // it underneath a solid outline. Elevation's outer shadow is independent.
-    surface - near_shadow - line_shadow
+    surface + glass_rim_light(distance, inward_x, inward_y, bezel) - near_shadow - line_shadow
+}
+
+// Original narrow light component, retained independently of the C shadow stages.
+fn glass_rim_light(distance: f32, inward_x: f32, inward_y: f32, bezel: f32) -> f32 {
+    if distance < 0. || bezel <= 0. {
+        return 0.;
+    }
+    let width = (1.25 + 0.50 * inward_x * inward_x).min(bezel * 0.10);
+    let fade = (1. - distance / width).clamp(0., 1.);
+    (0.34 - 0.06 * (-inward_y).max(0.)) * inward_y * inward_y * fade * fade * (3. - 2. * fade)
 }
 
 fn glass_shadow_layers(
@@ -245,19 +255,15 @@ mod tests {
         }
     }
     #[test]
-    fn horizontal_rims_remain_visible_and_thinner_than_the_sides() {
-        let side_width = glass_contour_width(1., 1.);
+    fn horizontal_rim_light_keeps_its_original_width_and_strength() {
+        assert!((glass_rim_light(0., 0., 1., 20.) - 0.34).abs() < 0.0001);
+        assert!((glass_rim_light(0., 0., -1., 20.) - 0.28).abs() < 0.0001);
+        assert!((glass_rim_light(0.625, 0., 1., 20.) - 0.17).abs() < 0.0001);
         for y in [-1., 1.] {
-            let width = glass_contour_width(0., 1.);
-            assert!(width < side_width);
-            let reflection = |d| glass_surface_reflection(d, 0., y, 20.);
-            assert!(reflection(0.) < reflection(2.) - 0.03);
-            assert!(reflection(0.5) < reflection(2.) - 0.03);
-            assert!(
-                reflection(2.) > 0.,
-                "the broad shoulder still carries light"
-            );
+            assert_eq!(glass_rim_light(1.25, 0., y, 20.), 0.);
+            assert!(glass_surface_reflection_at_scale(0., 0., y, 20., 2.) > 0.05);
         }
+        assert_eq!(glass_rim_light(0., 1., 0., 20.), 0.);
     }
     #[test]
     fn fine_shadow_near_shadow_and_soft_light_coexist() {
