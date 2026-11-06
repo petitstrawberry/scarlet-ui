@@ -623,3 +623,143 @@ fn shoulder_reflection_stays_soft_and_matches_cpu() {
         }
     }
 }
+
+/// Manual proof for comparing contour treatments on identical colored content.
+#[test]
+#[ignore = "manual GPU readback for contour review"]
+fn contour_review_scene() {
+    let context = context().expect("contour review requires a GPU adapter");
+    let output = std::path::PathBuf::from(
+        std::env::var_os("SCARLET_TAB_PARITY_DIR").expect("set SCARLET_TAB_PARITY_DIR"),
+    );
+    fs::create_dir_all(&output).unwrap();
+    scarlet_ui_core::graphics::set_default_font(include_bytes!(
+        "../../../examples/web-counter/assets/DejaVuSans.ttf"
+    ))
+    .unwrap();
+    let mut paint = PaintContext::new();
+    paint.fill_vertical_gradient_rounded_rect(
+        Rect::from_xywh(0., 0., 353., 300.),
+        0.,
+        Color::rgb(124, 211, 244),
+        Color::rgb(149, 160, 204),
+    );
+    paint.fill_rounded_rect(
+        Rect::from_xywh(-25., 100., 110., 220.),
+        48.,
+        Color::rgb(226, 236, 246),
+    );
+    paint.fill_rounded_rect(
+        Rect::from_xywh(150., 90., 145., 240.),
+        64.,
+        Color::rgb(57, 64, 91),
+    );
+    paint.fill_rounded_rect(
+        Rect::from_xywh(235., 187., 160., 138.),
+        48.,
+        Color::rgb(206, 161, 181),
+    );
+    for y in [51., 159., 240., 270.] {
+        paint.fill_rect(
+            Rect::from_xywh(0., y, 353., 1.),
+            Color::WHITE.with_opacity(0.4),
+        );
+    }
+    for (rect, radius, tint) in [
+        (
+            Rect::from_xywh(23., 16., 307., 42.),
+            21.,
+            Color::WHITE.with_opacity(0.18),
+        ),
+        (
+            Rect::from_xywh(23., 78., 142., 142.),
+            24.,
+            Color::WHITE.with_opacity(0.18),
+        ),
+        (
+            Rect::from_xywh(188., 78., 142., 142.),
+            24.,
+            Color::WHITE.with_opacity(0.18),
+        ),
+        (
+            Rect::from_xywh(15., 236., 323., 52.),
+            26.,
+            GlassMaterial::regular().tint,
+        ),
+    ] {
+        paint.refractive_glass_rounded_rect(rect, radius, 2.52, tint, 1.);
+    }
+    paint.draw_text(Point::new(147., 28.), "Search", Color::WHITE, 16.);
+    for origin in [Point::new(36., 91.), Point::new(201., 91.)] {
+        for (i, color) in [
+            Color::rgb(233, 238, 245),
+            Color::rgb(52, 126, 232),
+            Color::rgb(45, 181, 109),
+            Color::rgb(36, 41, 51),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let rect = Rect::from_xywh(
+                origin.x + (i % 2) as f32 * 63.,
+                origin.y + (i / 2) as f32 * 63.,
+                53.,
+                53.,
+            );
+            paint.fill_rounded_rect(rect, 12., color);
+        }
+    }
+    for (i, color) in [
+        Color::rgb(230, 139, 190),
+        Color::rgb(222, 226, 234),
+        Color::rgb(22, 25, 31),
+        Color::rgb(57, 160, 232),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        paint.fill_rounded_rect(
+            Rect::from_xywh(39. + i as f32 * 80., 244., 36., 36.),
+            10.,
+            color,
+        );
+    }
+    for scale in [1000, 1500, 2000] {
+        let (width, height) = (353 * scale / 1000, 300 * scale / 1000);
+        for analytic in [false, true] {
+            let mut encoder = SgfxPaintEncoder::new(width, height, false).unwrap();
+            encoder.set_analytic_glass(analytic);
+            let target = encoder.target_texture(0).unwrap();
+            let mut resources = context.create_resources(encoder.resource_table());
+            resources
+                .map_image(
+                    target,
+                    context
+                        .create_image(width, height, TextureFormat::Bgra8Unorm)
+                        .unwrap(),
+                )
+                .unwrap();
+            let queue = context.create_queue();
+            encoder
+                .encode_frame(
+                    &mut queue.executor(&mut resources),
+                    0,
+                    None,
+                    &paint,
+                    Color::WHITE,
+                    scale,
+                    &[(0, 0, width, height)],
+                )
+                .unwrap();
+            assert_eq!(encoder.backdrop_fallback_count(), 0);
+            let gpu = resources.read_texture(target).unwrap();
+            save(
+                &output.join(format!("review-{scale}-{analytic}.ppm")),
+                width,
+                height,
+                &gpu,
+            )
+            .unwrap();
+        }
+    }
+}
