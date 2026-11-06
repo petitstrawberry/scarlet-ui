@@ -2523,4 +2523,97 @@ mod tests {
             "a changed backdrop must replace the cached recording"
         );
     }
+    #[test]
+    fn slider_notifications_preserve_unrelated_scroll_recordings_and_cache_lineage() {
+        use scarlet_ui::renderer::{
+            BackendFrame, DisplayList, PaintBackend, PaintCommand, PaintContext,
+        };
+        use scarlet_ui::{ComponentElement, RenderingPipeline};
+        use std::{cell::RefCell, rc::Rc, sync::Arc};
+        struct Capture(Rc<RefCell<Option<Arc<DisplayList>>>>);
+        impl PaintBackend for Capture {
+            fn supports_retained_display_lists(&self) -> bool {
+                true
+            }
+            fn resize(&mut self, _: Size, _: u32) {}
+            fn render<'a>(
+                &'a mut self,
+                ctx: &PaintContext<'_>,
+                _: Color,
+                _: Option<&[Rect]>,
+                _: Option<&[scarlet_ui::compositor::DamageRect]>,
+            ) -> scarlet_ui::Result<BackendFrame<'a>> {
+                for command in ctx.commands() {
+                    if let PaintCommand::DrawDisplayList { list, .. } = command {
+                        if list
+                            .raster_cache_bounds()
+                            .is_some_and(|r| r.size.height > 800.)
+                        {
+                            *self.0.borrow_mut() = Some(list.clone());
+                        }
+                    }
+                }
+                Ok(BackendFrame::External)
+            }
+        }
+        let app = WidgetFactory::new();
+        app.viewport.set(Size::new(500., 800.));
+        let capture = Rc::new(RefCell::new(None));
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(Box::new(ComponentElement::new_with_builder(
+            app.clone(),
+            |app| {
+                // Intentionally keep the broad subscription: recording reuse must
+                // not depend on changing the application's State ownership model.
+                let _ = app.slider_value.get();
+                Box::new(app.controls_page().frame(500., 800.))
+            },
+        )));
+        pipeline.set_paint_backend(Box::new(Capture(capture.clone())));
+        pipeline.resize(Size::new(500., 800.));
+        pipeline.layout_initial();
+        pipeline.render_for_present().unwrap();
+        let original = capture.borrow().as_ref().unwrap().clone();
+        let static_ids = original
+            .context()
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                PaintCommand::DrawDisplayList { origin, list } if origin.y < 500. => {
+                    Some(list.identity())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            static_ids.len() > 10,
+            "the page preserves separate child recordings"
+        );
+        for value in [0.1, 0.3, 0.6, 0.9, 0.42] {
+            app.slider_value.set(value);
+            pipeline.render_for_present().unwrap();
+            let next = capture.borrow().as_ref().unwrap().clone();
+            assert_eq!(next.cache_identity(), original.cache_identity());
+            let ids = next
+                .context()
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    PaintCommand::DrawDisplayList { list, .. } => Some(list.identity()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                static_ids.iter().all(|id| ids.contains(id)),
+                "slider changes must not recreate unrelated records"
+            );
+            let damage = next
+                .damage_since(&original, 1000)
+                .expect("ordinary controls have bounded paint");
+            assert!(
+                damage.iter().all(|r| r.top() > 500.),
+                "slider updates must not invalidate the static material study: {damage:?}"
+            );
+        }
+    }
 }

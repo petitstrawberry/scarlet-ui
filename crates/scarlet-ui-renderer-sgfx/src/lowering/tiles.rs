@@ -17,8 +17,12 @@ const MAX_TILES: usize = 128;
 
 pub(super) struct Tile {
     list: u64,
-    source: Weak<DisplayList>,
+    cache_identity: u64,
+    // Snapshot of exactly the pixels in this tile; no chain to older revisions.
+    // Released with this bounded LRU slot, even if its element was removed.
+    recording: Option<Arc<DisplayList>>,
     scale: u32,
+    padding: u32,
     snap: [usize; 2],
     snap_dependencies: Vec<(Point, f32)>,
     phase: [u32; 2],
@@ -40,7 +44,7 @@ fn snap_dependencies(list: &DisplayList, tile: FloatRect, scale: u32) -> Vec<(Po
             .intersect(tile)
             .is_some()
     };
-    list.context()
+    list.flat_context()
         .commands()
         .iter()
         .filter_map(|command| match command {
@@ -123,7 +127,7 @@ pub(super) fn pipeline(table: &ResourceTable) -> Result<RenderPipelineId> {
 
 fn eligible(list: &DisplayList) -> bool {
     list.is_self_contained()
-        && list.context().commands().iter().all(|command| {
+        && list.flat_context().commands().iter().all(|command| {
             matches!(
                 command,
                 PaintCommand::FillRoundedRect { .. }
@@ -164,7 +168,7 @@ fn live_boundary(
     full: PixelBounds,
 ) -> Vec<PixelBounds> {
     let filters = list
-        .context()
+        .flat_context()
         .commands()
         .iter()
         .filter_map(|command| {
@@ -374,7 +378,7 @@ impl SgfxPaintEncoder {
         let phase = phase_values.map(f32::to_bits);
         let mut halo = 0_f32;
         if list.reads_backdrop() {
-            for command in list.context().commands() {
+            for command in list.flat_context().commands() {
                 if let PaintCommand::BackdropFilterRoundedRect {
                     blur_radius,
                     refraction,
@@ -442,8 +446,10 @@ impl SgfxPaintEncoder {
         let pool_limit = (visible_tiles as usize * 4).clamp(BASE_TILES, MAX_TILES);
         // Reserve visible warm tiles before allocating cold exposed tiles.
         for tile in &mut self.raster_tiles {
-            if tile.list == list.identity()
+            if tile.cache_identity == list.cache_identity()
+                && tile.list != 0
                 && tile.scale == scale
+                && tile.padding == padding
                 && tile.snap == snap_signature(&tile.snap_dependencies, origin, phase_values)
                 && tile.phase == phase
                 && tile.x >= x0
@@ -469,6 +475,7 @@ impl SgfxPaintEncoder {
             tessellator.push_clip(*clip, *radius)?;
         }
         let mut draws = Vec::new();
+        let mut revisions: Vec<(u64, Option<Vec<Rect>>)> = Vec::new();
         for y in y0..y1 {
             for x in x0..x1 {
                 let tile_rect = FloatRect::new(
@@ -486,15 +493,19 @@ impl SgfxPaintEncoder {
                 }
 
                 let existing = self.raster_tiles.iter().position(|tile| {
-                    tile.list == list.identity()
+                    tile.cache_identity == list.cache_identity()
+                        && tile.list != 0
                         && tile.scale == scale
+                        && tile.padding == padding
                         && tile.snap
                             == snap_signature(&tile.snap_dependencies, origin, phase_values)
                         && tile.phase == phase
                         && tile.x == x
                         && tile.y == y
                 });
-                let slot = if let Some(slot) = existing {
+                let slot = if let Some(slot) =
+                    existing.filter(|slot| self.raster_tiles[*slot].list == list.identity())
+                {
                     slot
                 } else {
                     let candidate = self
@@ -502,11 +513,11 @@ impl SgfxPaintEncoder {
                         .iter()
                         .enumerate()
                         .filter(|(_, tile)| tile.used != self.frame_serial)
-                        .min_by_key(|(_, tile)| (tile.source.strong_count() != 0, tile.used))
+                        .min_by_key(|(_, tile)| tile.used)
                         .map(|(slot, _)| slot);
-                    let slot = if self.raster_tiles.len() < pool_limit
-                        && candidate.is_none_or(|i| self.raster_tiles[i].source.strong_count() != 0)
-                    {
+                    let slot = if let Some(slot) = existing {
+                        slot
+                    } else if self.raster_tiles.len() < pool_limit {
                         let stage = |_| Error::sgfx(Stage::DefineResources);
                         let texture = self
                             .table
@@ -524,8 +535,10 @@ impl SgfxPaintEncoder {
                             .id();
                         self.raster_tiles.push(Tile {
                             list: 0,
-                            source: Weak::new(),
+                            cache_identity: list.cache_identity(),
+                            recording: None,
                             scale,
+                            padding,
                             snap: [0; 2],
                             snap_dependencies: Vec::new(),
                             phase,
@@ -540,11 +553,28 @@ impl SgfxPaintEncoder {
                     } else {
                         return Ok(None);
                     };
+                    let changes = if let Some(previous) = self.raster_tiles[slot]
+                        .recording
+                        .as_ref()
+                        .filter(|_| existing.is_some())
+                    {
+                        if let Some((_, changes)) =
+                            revisions.iter().find(|(id, _)| *id == previous.identity())
+                        {
+                            changes.clone()
+                        } else {
+                            let changes = list.damage_since(previous, scale);
+                            revisions.push((previous.identity(), changes.clone()));
+                            changes
+                        }
+                    } else {
+                        None
+                    };
                     // Commit identity only after successful rendering. Rejected
                     // submissions must never turn a partially drawn tile into a hit.
                     self.raster_tiles[slot].list = 0;
                     let texture = self.raster_tiles[slot].texture;
-                    let flat = list.context().raster_tile_context(
+                    let flat = list.flat_context().raster_tile_context(
                         origin,
                         Point::new(
                             (padding as f32 - x as f32 * side as f32) / factor,
@@ -552,6 +582,32 @@ impl SgfxPaintEncoder {
                         ),
                         scale,
                     );
+                    let tile_bounds =
+                        Rect::from_xywh(0., 0., SIDE as f32 / factor, SIDE as f32 / factor);
+                    let regions = match changes {
+                        None => alloc::vec![tile_bounds],
+                        Some(changes) => {
+                            let translation = Point::new(
+                                (padding as f32 - x as f32 * side as f32) / factor
+                                    + phase_values[0],
+                                (padding as f32 - y as f32 * side as f32) / factor
+                                    + phase_values[1],
+                            );
+                            let damage = changes
+                                .iter()
+                                .map(|r| {
+                                    Rect::new(
+                                        Point::new(
+                                            r.left() + translation.x,
+                                            r.top() + translation.y,
+                                        ),
+                                        r.size,
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            flat.reconstruction_regions(&damage, tile_bounds, scale)
+                        }
+                    };
                     let dimensions = (self.width, self.height);
                     self.width = SIDE;
                     self.height = SIDE;
@@ -565,14 +621,24 @@ impl SgfxPaintEncoder {
                     self.backdrop_filters = 0;
                     self.backdrop_fallbacks = 0;
                     let rendered = (|| {
-                        let area = PixelBounds {
-                            x: 0,
-                            y: 0,
-                            width: SIDE,
-                            height: SIDE,
-                        };
-                        let frame = self.lower_once(&flat, scale, area)?;
-                        self.submit(executor, texture, UiColor::TRANSPARENT, &[area], &frame)
+                        for region in &regions {
+                            let left = libm::floorf(region.left() * factor).max(0.) as u32;
+                            let top = libm::floorf(region.top() * factor).max(0.) as u32;
+                            let right = (libm::ceilf(region.right() * factor) as u32).min(SIDE);
+                            let bottom = (libm::ceilf(region.bottom() * factor) as u32).min(SIDE);
+                            if right <= left || bottom <= top {
+                                continue;
+                            }
+                            let area = PixelBounds {
+                                x: left,
+                                y: top,
+                                width: right - left,
+                                height: bottom - top,
+                            };
+                            let frame = self.lower_once(&flat, scale, area)?;
+                            self.submit(executor, texture, UiColor::TRANSPARENT, &[area], &frame)?;
+                        }
+                        Ok::<_, FrameError<E::Error>>(())
                     })();
                     let degraded = self.backdrop_fallbacks != 0;
                     (
@@ -599,8 +665,10 @@ impl SgfxPaintEncoder {
                     let snap = snap_signature(&dependencies, origin, phase_values);
                     self.raster_tiles[slot] = Tile {
                         list: list.identity(),
-                        source: Arc::downgrade(list),
+                        cache_identity: list.cache_identity(),
+                        recording: Some(Arc::clone(list)),
                         scale,
+                        padding,
                         snap,
                         snap_dependencies: dependencies,
                         phase,
@@ -870,6 +938,83 @@ mod tests {
     }
 
     #[test]
+    fn changing_one_record_updates_its_tile_without_rerasterizing_static_neighbors() {
+        let mut renderer = SgfxPaintEncoder::new(200, 800, false).unwrap();
+        let target = renderer.target_texture(0).unwrap();
+        let mut background = PaintContext::new();
+        background.fill_rect(Rect::from_xywh(0., 0., 200., 1600.), UiColor::WHITE);
+        let background = background.into_display_list();
+        let mut static_paint = PaintContext::new();
+        static_paint.refractive_glass_rounded_rect(
+            Rect::from_xywh(30., 600., 140., 60.),
+            12.,
+            2.52,
+            UiColor::WHITE.with_opacity(0.3),
+            1.,
+        );
+        let static_paint = static_paint.into_display_list();
+        let make = |color, old: Option<&DisplayList>| {
+            let mut changed = PaintContext::new();
+            changed.fill_rect(Rect::from_xywh(30., 40., 80., 20.), color);
+            let mut paint = PaintContext::new();
+            paint.draw_display_list(Point::ZERO, background.clone());
+            paint.draw_display_list(Point::ZERO, changed.into_display_list());
+            paint.draw_display_list(Point::ZERO, static_paint.clone());
+            let bounds = Rect::from_xywh(0., 0., 200., 1600.);
+            if let Some(old) = old {
+                paint.into_cached_layer_revision(bounds, old)
+            } else {
+                paint.into_cached_layer(bounds)
+            }
+        };
+        let mut list = make(UiColor::RED, None);
+        let mut trace = Trace::default();
+        let render =
+            |renderer: &mut SgfxPaintEncoder, trace: &mut Trace, list: Arc<DisplayList>| {
+                let mut ctx = PaintContext::new();
+                ctx.draw_display_list(Point::ZERO, list);
+                renderer
+                    .encode_frame(
+                        trace,
+                        0,
+                        None,
+                        &ctx,
+                        UiColor::WHITE,
+                        1000,
+                        &[(0, 0, 200, 800)],
+                    )
+                    .unwrap();
+            };
+        render(&mut renderer, &mut trace, list.clone());
+        let static_tiles = renderer
+            .raster_tiles
+            .iter()
+            .filter(|t| t.y > 0)
+            .map(|t| t.texture)
+            .collect::<Vec<_>>();
+        assert!(!static_tiles.is_empty());
+        for color in [UiColor::BLUE, UiColor::BLACK, UiColor::RED] {
+            trace.targets.clear();
+            trace.sampled.clear();
+            list = make(color, Some(&list));
+            render(&mut renderer, &mut trace, list.clone());
+            assert!(
+                static_tiles.iter().all(|id| !trace.targets.contains(id)),
+                "unrelated static tiles must never be re-rendered"
+            );
+            assert!(
+                static_tiles.iter().all(|id| trace.sampled.contains(id)),
+                "unchanged pixels are still composited"
+            );
+            assert_eq!(
+                trace.targets.iter().filter(|id| **id != target).count(),
+                1,
+                "only the changed tile needs a render pass; distant glass stays cached"
+            );
+        }
+    }
+
+    #[test]
     fn long_scroll_recycles_a_bounded_tile_pool() {
         let mut renderer = SgfxPaintEncoder::new(200, 120, false).unwrap();
         let mut paint = PaintContext::new();
@@ -1019,7 +1164,7 @@ mod tests {
         let cached_texture = renderer
             .raster_tiles
             .iter()
-            .find(|tile| tile.list == list.identity())
+            .find(|tile| tile.cache_identity == list.cache_identity() && tile.list != 0)
             .unwrap()
             .texture;
         trace.targets.clear();
