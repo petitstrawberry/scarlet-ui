@@ -508,14 +508,21 @@ impl<'a> PaintContext<'a> {
     ) -> PaintContext<'_> {
         let mut result = self.flattened();
         let scale = scale_milli.max(1) as f32 / 1000.;
-        let text_snap = |value: f32, origin: f32| (value + origin) as i32 as f32 - origin;
+        let base = Point::new(libm::floorf(scene_origin.x), libm::floorf(scene_origin.y));
+        let phase = Point::new(scene_origin.x - base.x, scene_origin.y - base.y);
+        let mut text_positions = Vec::new();
         let pixel_snap =
             |value: f32, origin: f32| ((value + origin) * scale) as i32 as f32 / scale - origin;
-        for command in &mut result.commands {
+        for (index, command) in result.commands.iter_mut().enumerate() {
             match command {
                 PaintCommand::DrawText { position, .. } => {
-                    position.x = text_snap(position.x, scene_origin.x);
-                    position.y = text_snap(position.y, scene_origin.y);
+                    text_positions.push((
+                        index,
+                        Point::new(
+                            (position.x + scene_origin.x) as i32 as f32 - base.x + offset.x,
+                            (position.y + scene_origin.y) as i32 as f32 - base.y + offset.y,
+                        ),
+                    ));
                 }
                 PaintCommand::DrawBuffer { dst: rect, .. }
                 | PaintCommand::DrawBufferRect { dst: rect, .. }
@@ -526,15 +533,36 @@ impl<'a> PaintContext<'a> {
                 _ => {}
             }
         }
-        result.translate(offset);
+        // Bake the fractional scene phase into the tile's geometry, then
+        // composite at an integer logical origin. Text keeps its exact global
+        // logical-pixel snap; the cached image is never fractionally resampled.
+        result.translate(Point::new(offset.x + phase.x, offset.y + phase.y));
+        for (index, snapped) in text_positions {
+            if let PaintCommand::DrawText { position, .. } = &mut result.commands[index] {
+                *position = snapped;
+            }
+        }
         result
     }
 
     fn append_flattened<'b>(&'b self, result: &mut PaintContext<'b>, offset: Point) {
+        self.append_commands_at(result, offset, true);
+    }
+
+    fn append_commands_at<'b>(
+        &'b self,
+        result: &mut PaintContext<'b>,
+        offset: Point,
+        flatten: bool,
+    ) {
         for command in &self.commands {
             if let PaintCommand::DrawDisplayList { origin, list } = command {
-                list.context
-                    .append_flattened(result, Point::new(offset.x + origin.x, offset.y + origin.y));
+                let origin = Point::new(offset.x + origin.x, offset.y + origin.y);
+                if flatten {
+                    list.context.append_commands_at(result, origin, true);
+                } else {
+                    result.draw_display_list(origin, Arc::clone(list));
+                }
                 continue;
             }
             let mut translated = PaintContext::new();
@@ -1073,6 +1101,13 @@ impl<'a> PaintContext<'a> {
     /// Append commands at a logical offset, remapping buffers and retained lists.
     pub fn append_at(&mut self, other: &'a PaintContext<'_>, origin: Point) {
         other.append_flattened(self, origin);
+    }
+
+    /// Append at an offset while preserving immutable display-list identities
+    /// and raster-cache hints. Ordinary commands and buffer handles are
+    /// translated/remapped as with [`Self::append_at`].
+    pub fn append_retained_at(&mut self, other: &'a PaintContext<'_>, origin: Point) {
+        other.append_commands_at(self, origin, false);
     }
 
     pub fn commands(&self) -> &[PaintCommand] {
@@ -3459,6 +3494,27 @@ fn inset_rect(rect: Rect, inset: f32) -> Rect {
 mod tests {
     use super::*;
     use crate::testing::alloc_counter::measure_allocations;
+
+    #[test]
+    fn retained_composition_preserves_cache_identity_and_fractional_offset() {
+        let bounds = Rect::from_xywh(0., 0., 100., 300.);
+        let mut paint = PaintContext::new();
+        paint.fill_rect(bounds, Color::WHITE);
+        let list = paint.into_cached_layer(bounds);
+        let mut scene = PaintContext::new();
+        scene.draw_display_list(Point::new(2.25, -20.5), Arc::clone(&list));
+        let mut composed = PaintContext::new();
+        composed.append_retained_at(&scene, Point::new(13., 28.));
+        assert!(
+            matches!(&composed.commands()[0], PaintCommand::DrawDisplayList { origin, list: replayed }
+            if *origin == Point::new(15.25, 7.5) && Arc::ptr_eq(replayed, &list)
+                && replayed.raster_cache_bounds() == Some(bounds))
+        );
+        assert!(
+            matches!(&composed.flattened().commands()[0], PaintCommand::FillPath { path, .. }
+            if path[0] == Point::new(15.25, 7.5))
+        );
+    }
 
     #[test]
     fn cached_glass_recognizes_opaque_rect_paths_but_not_their_bounding_boxes() {

@@ -353,7 +353,14 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
     let Some(context) = context() else {
         return;
     };
-    for (scale, analytic) in [(1, false), (2, false), (1, true), (2, true)] {
+    for (scale, analytic) in [
+        (1, false),
+        (2, false),
+        (3, false),
+        (1, true),
+        (2, true),
+        (3, true),
+    ] {
         let (width, height) = (240 * scale, 180 * scale);
         let mut cached = SgfxPaintEncoder::new(width, height, false).unwrap();
         cached.set_analytic_glass(analytic);
@@ -396,6 +403,12 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
                     12.,
                 );
             }
+            content.draw_icon(
+                Rect::from_xywh(16.25, 102.5, 18., 18.),
+                scarlet_ui_core::icon::Icon::Home,
+                scarlet_ui_core::icon::IconStyle::outline(),
+                Color::BLACK,
+            );
             if glass_height > 0. {
                 content.refractive_glass_rounded_rect(
                     Rect::from_xywh(12., 12., 216., glass_height),
@@ -417,6 +430,13 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
                     Color::WHITE.with_opacity(0.35),
                     1.,
                 );
+                content.refractive_glass_rounded_rect(
+                    Rect::from_xywh(20., 170., 100., 30.),
+                    12.,
+                    2.52,
+                    Color::WHITE.with_opacity(0.35),
+                    1.,
+                );
                 content.fill_rect(Rect::from_xywh(48., 90., 60., 4.), Color::rgb(0., 0., 1.));
             }
             let layer = content.into_cached_layer(Rect::from_xywh(-100., -100., 440., 1400.));
@@ -424,7 +444,7 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
                 layer.raster_cache_bounds().is_some(),
                 "glass and its opaque backing form one retained layer"
             );
-            for offset in [0., -1., -211., -425., -630., -20., -20.25] {
+            for offset in [0., -0.5, -1.5, -1., -211., -425., -630., -20., -20.25] {
                 let mut paint = PaintContext::new();
                 paint.push_rounded_clip(
                     Rect::from_xywh(0., 0., 240., 180.),

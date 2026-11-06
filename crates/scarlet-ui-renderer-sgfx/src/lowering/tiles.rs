@@ -1,5 +1,6 @@
-//! Full-resolution retained scroll layers. Cold/changed/exposed tiles are drawn
-//! on the GPU; warm scrolls only composite their textures. No CPU raster upload.
+//! Full-resolution retained scroll layers. Cold/changed/exposed exact-phase
+//! tiles are drawn on the GPU; warm interiors only composite their textures.
+//! Viewport-boundary dependencies replay in paint order. No CPU raster upload.
 use super::*;
 use scarlet_ui_core::{
     geometry::{Point, Rect},
@@ -8,13 +9,18 @@ use scarlet_ui_core::{
 use sgfx::ir::{BlendComponent, BlendFactor, BlendOp};
 
 const SIDE: u32 = 512;
-const MAX_TILES: usize = 64; // 64 MiB, recycled without growing resource slots.
+const BASE_TILES: usize = 64;
+// Full-resolution exact-phase variants need a larger visible working set on
+// Retina displays. Allocate lazily from 64..128 MiB; reuse immutable resource
+// slots instead of cycling through whole phases on each subpixel scroll.
+const MAX_TILES: usize = 128;
 
 pub(super) struct Tile {
     list: u64,
     source: Weak<DisplayList>,
     scale: u32,
     snap: [usize; 2],
+    phase: [u32; 2],
     x: i32,
     y: i32,
     texture: TextureId,
@@ -90,8 +96,9 @@ fn contains_rect(outer: PixelBounds, inner: FloatRect) -> bool {
 }
 
 // Expand to a dependency closure, not a fixed-width edge strip: another glass
-// intersecting this region may sample across its edge too. A single rectangle
-// is conservative and the bounded recording makes this traversal finite.
+// intersecting this region may sample across its edge too. A rectangle
+// per connected component avoids joining unrelated top/bottom boundaries.
+// The bounded recording makes this traversal finite.
 fn live_boundary(
     list: &DisplayList,
     origin: Point,
@@ -99,7 +106,7 @@ fn live_boundary(
     visible: FloatRect,
     clips: &[(Rect, f32)],
     full: PixelBounds,
-) -> Option<PixelBounds> {
+) -> Vec<PixelBounds> {
     let filters = list
         .context()
         .commands()
@@ -121,13 +128,21 @@ fn live_boundary(
             // Refraction bends inward into the material; only the blur
             // footprint reaches outside it. Match backdrop::source_bounds.
             let h = libm::ceilf(r + (r / 4.).max(1.)) + 1.;
+            let x = libm::floorf(glass.x - h);
+            let y = libm::floorf(glass.y - h);
             Some((
-                glass,
+                // Include the optical geometry's half-pixel coverage fringe.
                 FloatRect::new(
-                    glass.x - h,
-                    glass.y - h,
-                    glass.width + 2. * h,
-                    glass.height + 2. * h,
+                    glass.x - 1.,
+                    glass.y - 1.,
+                    glass.width + 2.,
+                    glass.height + 2.,
+                ),
+                FloatRect::new(
+                    x,
+                    y,
+                    libm::ceilf(glass.right() + h) - x,
+                    libm::ceilf(glass.bottom() + h) - y,
                 ),
             ))
         })
@@ -138,7 +153,7 @@ fn live_boundary(
         full.width as f32,
         full.height as f32,
     );
-    let mut live: Option<FloatRect> = None;
+    let mut regions: Vec<FloatRect> = Vec::new();
     let union = |a: FloatRect, b: FloatRect| {
         let x = a.x.min(b.x);
         let y = a.y.min(b.y);
@@ -155,39 +170,73 @@ fn live_boundary(
                 || capture.y < visible.y
                 || capture.right() > visible.right()
                 || capture.bottom() > visible.bottom()
-                || clips.iter().any(|(_, radius)| *radius > 0.))
+                || clips.iter().any(|(clip, radius)| {
+                    if *radius <= 0. {
+                        return false;
+                    }
+                    let clip = FloatRect::from_logical(*clip, factor);
+                    let r = (*radius * factor)
+                        .min(clip.width * 0.5)
+                        .min(clip.height * 0.5);
+                    let inside = capture.x >= clip.x
+                        && capture.y >= clip.y
+                        && capture.right() <= clip.right()
+                        && capture.bottom() <= clip.bottom();
+                    let band = (capture.x >= clip.x + r && capture.right() <= clip.right() - r)
+                        || (capture.y >= clip.y + r && capture.bottom() <= clip.bottom() - r);
+                    !(inside && band)
+                }))
         {
             if let Some(capture) = capture.intersect(full) {
-                live = Some(live.map_or(capture, |area| union(area, capture)));
+                regions.push(capture);
             }
         }
     }
-    let mut live = live?;
     loop {
-        let old = live;
-        for (glass, capture) in &filters {
-            if glass.intersect(live).is_some() && glass.intersect(visible).is_some() {
-                if let Some(capture) = capture.intersect(full) {
-                    live = union(live, capture);
+        let old = regions.clone();
+        for live in &mut regions {
+            for (glass, capture) in &filters {
+                if glass.intersect(*live).is_some() && glass.intersect(visible).is_some() {
+                    if let Some(capture) = capture.intersect(full) {
+                        *live = union(*live, capture);
+                    }
                 }
             }
         }
-        if old == live {
+        let mut i = 0;
+        while i < regions.len() {
+            let mut j = i + 1;
+            while j < regions.len() {
+                if regions[i].intersect(regions[j]).is_some() {
+                    let other = regions.remove(j);
+                    regions[i] = union(regions[i], other);
+                } else {
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        if old == regions {
             break;
         }
     }
-    let x = libm::floorf(live.x) as u32;
-    let y = libm::floorf(live.y) as u32;
-    Some(PixelBounds {
-        x,
-        y,
-        width: libm::ceilf(live.right()) as u32 - x,
-        height: libm::ceilf(live.bottom()) as u32 - y,
-    })
+    regions
+        .into_iter()
+        .map(|live| {
+            let x = libm::floorf(live.x) as u32;
+            let y = libm::floorf(live.y) as u32;
+            PixelBounds {
+                x,
+                y,
+                width: libm::ceilf(live.right()) as u32 - x,
+                height: libm::ceilf(live.bottom()) as u32 - y,
+            }
+        })
+        .collect()
 }
 
-fn subtract_region(scissor: PixelBounds, live: Option<PixelBounds>) -> Vec<PixelBounds> {
-    let Some(live) = live.and_then(|live| intersect_bounds(scissor, live)) else {
+fn subtract_region(scissor: PixelBounds, live: PixelBounds) -> Vec<PixelBounds> {
+    let Some(live) = intersect_bounds(scissor, live) else {
         return alloc::vec![scissor];
     };
     let right = scissor.x + scissor.width;
@@ -223,6 +272,17 @@ fn subtract_region(scissor: PixelBounds, live: Option<PixelBounds>) -> Vec<Pixel
     .collect()
 }
 
+fn subtract_regions(scissor: PixelBounds, regions: &[PixelBounds]) -> Vec<PixelBounds> {
+    let mut remaining = alloc::vec![scissor];
+    for region in regions {
+        remaining = remaining
+            .into_iter()
+            .flat_map(|area| subtract_region(area, *region))
+            .collect();
+    }
+    remaining
+}
+
 impl SgfxPaintEncoder {
     pub(super) fn lower_cached_layer<E: CommandExecutor>(
         &mut self,
@@ -236,15 +296,14 @@ impl SgfxPaintEncoder {
         let Some(bounds) = list.raster_cache_bounds() else {
             return Ok(None);
         };
-        // Raster text has logical-pixel snapping semantics. Do not resample it
-        // at fractional offsets/DPI: retain the precise normal path there.
+        // Raster text has logical-pixel snapping semantics. Bake fractional
+        // offset phases into separate tiles and composite on the integer grid.
+        // Fractional DPI retains the precise normal path.
         if scale % 1000 != 0
             || scale == 0
             || scale > 8000
             || !origin.x.is_finite()
             || !origin.y.is_finite()
-            || origin.x != libm::roundf(origin.x)
-            || origin.y != libm::roundf(origin.y)
             || (!self
                 .raster_tiles
                 .iter()
@@ -254,6 +313,9 @@ impl SgfxPaintEncoder {
             return Ok(None);
         }
         let factor = scale as f32 / 1000.;
+        let base = Point::new(libm::floorf(origin.x), libm::floorf(origin.y));
+        let phase_values = [origin.x - base.x, origin.y - base.y];
+        let phase = phase_values.map(f32::to_bits);
         // Truncation towards zero changes phase when a fractional raster origin
         // crosses the window origin. Counts uniquely identify those monotone
         // threshold sets for an immutable list; no lossy hash or image resampling.
@@ -268,7 +330,8 @@ impl SgfxPaintEncoder {
                 _ => continue,
             };
             for (axis, value, origin) in [(0, point.x, origin.x), (1, point.y, origin.y)] {
-                if value * unit != libm::truncf(value * unit) && value + origin < 0. {
+                let phased = (value + phase_values[axis]) * unit;
+                if phased != libm::truncf(phased) && value + origin < 0. {
                     snap[axis] += 1;
                 }
             }
@@ -301,7 +364,7 @@ impl SgfxPaintEncoder {
             return Ok(None);
         }
         let side = (SIDE - 2 * padding) / unit * unit;
-        let offset = [origin.x * factor, origin.y * factor];
+        let offset = [base.x * factor, base.y * factor];
         let bounds = FloatRect::new(
             (bounds.left() + origin.x) * factor,
             (bounds.top() + origin.y) * factor,
@@ -324,22 +387,29 @@ impl SgfxPaintEncoder {
                 uploads: Vec::new(),
             }));
         };
-        let live = live_boundary(list, origin, factor, visible, clips, full);
-        if live.is_some_and(|area| contains_rect(area, visible)) {
+        let live = if list.reads_backdrop() {
+            live_boundary(list, origin, factor, visible, clips, full)
+        } else {
+            Vec::new()
+        };
+        if live.iter().any(|area| contains_rect(*area, visible)) {
             return Ok(None);
         }
         let x0 = libm::floorf((visible.x - offset[0]) / side as f32) as i32;
         let y0 = libm::floorf((visible.y - offset[1]) / side as f32) as i32;
         let x1 = libm::ceilf((visible.right() - offset[0]) / side as f32) as i32;
         let y1 = libm::ceilf((visible.bottom() - offset[1]) / side as f32) as i32;
-        if i64::from(x1 - x0) * i64::from(y1 - y0) > MAX_TILES as i64 {
+        let visible_tiles = i64::from(x1 - x0) * i64::from(y1 - y0);
+        if visible_tiles > BASE_TILES as i64 {
             return Ok(None);
         }
+        let pool_limit = (visible_tiles as usize * 4).clamp(BASE_TILES, MAX_TILES);
         // Reserve visible warm tiles before allocating cold exposed tiles.
         for tile in &mut self.raster_tiles {
             if tile.list == list.identity()
                 && tile.scale == scale
                 && tile.snap == snap
+                && tile.phase == phase
                 && tile.x >= x0
                 && tile.x < x1
                 && tile.y >= y0
@@ -371,10 +441,10 @@ impl SgfxPaintEncoder {
                     side as f32,
                     side as f32,
                 );
-                if live.is_some_and(|area| {
+                if live.iter().any(|area| {
                     tile_rect
                         .intersect(visible)
-                        .is_some_and(|rect| contains_rect(area, rect))
+                        .is_some_and(|rect| contains_rect(*area, rect))
                 }) {
                     continue;
                 }
@@ -383,6 +453,7 @@ impl SgfxPaintEncoder {
                     tile.list == list.identity()
                         && tile.scale == scale
                         && tile.snap == snap
+                        && tile.phase == phase
                         && tile.x == x
                         && tile.y == y
                 });
@@ -396,7 +467,7 @@ impl SgfxPaintEncoder {
                         .filter(|(_, tile)| tile.used != self.frame_serial)
                         .min_by_key(|(_, tile)| (tile.source.strong_count() != 0, tile.used))
                         .map(|(slot, _)| slot);
-                    let slot = if self.raster_tiles.len() < MAX_TILES
+                    let slot = if self.raster_tiles.len() < pool_limit
                         && candidate.is_none_or(|i| self.raster_tiles[i].source.strong_count() != 0)
                     {
                         let stage = |_| Error::sgfx(Stage::DefineResources);
@@ -419,6 +490,7 @@ impl SgfxPaintEncoder {
                             source: Weak::new(),
                             scale,
                             snap,
+                            phase,
                             x,
                             y,
                             texture,
@@ -481,6 +553,7 @@ impl SgfxPaintEncoder {
                         source: Arc::downgrade(list),
                         scale,
                         snap,
+                        phase,
                         x,
                         y,
                         texture,
@@ -501,7 +574,7 @@ impl SgfxPaintEncoder {
                 if let Some(geometry) =
                     tessellator.textured_rect(rect, [[lo, lo], [hi, lo], [hi, hi], [lo, hi]])?
                 {
-                    for scissor in subtract_region(geometry.scissor, live) {
+                    for scissor in subtract_regions(geometry.scissor, &live) {
                         push_draw(
                             &mut draws,
                             &mut tessellator,
@@ -521,7 +594,7 @@ impl SgfxPaintEncoder {
             draws,
             uploads: Vec::new(),
         };
-        if let Some(area) = live {
+        for area in live {
             // Cached output is absent throughout the dependency closure. Replay
             // the original order there, with the original viewport clips, so a
             // filter never samples cached pixels from later foreground paint.
@@ -645,13 +718,33 @@ mod tests {
         );
     }
     #[test]
+    fn repeated_fractional_scroll_phase_reuses_tiles_without_resampling() {
+        let mut renderer = SgfxPaintEncoder::new(200, 120, false).unwrap();
+        let list = layer(UiColor::RED);
+        let mut trace = Trace::default();
+        frame(&mut renderer, &mut trace, &list, -0.5).unwrap();
+        assert!(
+            !renderer.raster_tiles.is_empty(),
+            "a fractional offset must not bypass the layer cache"
+        );
+        let target = renderer.target_texture(0).unwrap();
+        trace.targets.clear();
+        frame(&mut renderer, &mut trace, &list, -1.5).unwrap();
+        assert_eq!(
+            trace.targets,
+            [target],
+            "a repeated exact fractional phase reuses existing GPU pixels"
+        );
+    }
+
+    #[test]
     fn long_scroll_recycles_a_bounded_tile_pool() {
         let mut renderer = SgfxPaintEncoder::new(200, 120, false).unwrap();
         let mut paint = PaintContext::new();
         paint.fill_rounded_rect(Rect::from_xywh(0., 0., 200., 100000.), 0., UiColor::WHITE);
         let list = paint.into_cached_layer(Rect::from_xywh(0., 0., 200., 100000.));
         let mut trace = Trace::default();
-        for row in 0..MAX_TILES + 16 {
+        for row in 0..BASE_TILES + 16 {
             frame(
                 &mut renderer,
                 &mut trace,
@@ -659,9 +752,109 @@ mod tests {
                 -(row as f32 * SIDE as f32),
             )
             .unwrap();
-            assert!(renderer.raster_tiles.len() <= MAX_TILES);
+            assert!(renderer.raster_tiles.len() <= BASE_TILES);
         }
-        assert_eq!(renderer.raster_tiles.len(), MAX_TILES);
+        assert_eq!(renderer.raster_tiles.len(), BASE_TILES);
+    }
+
+    #[test]
+    fn boundary_closure_includes_rounded_capture_pixels_and_neighbor_coverage() {
+        let mut paint = PaintContext::new();
+        for rect in [
+            Rect::from_xywh(0.25, 20.25, 20., 20.),
+            Rect::from_xywh(20., 46.5, 30., 20.),
+        ] {
+            paint.refractive_glass_rounded_rect(rect, 4., 2.52, UiColor::WHITE, 1.);
+        }
+        let list = paint.into_display_list();
+        let area = live_boundary(
+            &list,
+            Point::ZERO,
+            1.,
+            FloatRect::new(0., 0., 200., 200.),
+            &[],
+            PixelBounds {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 200,
+            },
+        )[0];
+        assert!(
+            area.y + area.height >= 72,
+            "an adjacent lens's half-pixel coverage enters the rounded live region, so its complete source footprint must be replayed too"
+        );
+    }
+
+    #[test]
+    fn distant_top_and_bottom_lenses_leave_the_static_middle_cached() {
+        let mut paint = PaintContext::new();
+        for y in [-2., 190.] {
+            paint.refractive_glass_rounded_rect(
+                Rect::from_xywh(20., y, 160., 16.),
+                8.,
+                2.52,
+                UiColor::WHITE,
+                1.,
+            );
+        }
+        let list = paint.into_display_list();
+        let full = PixelBounds {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 200,
+        };
+        let regions = live_boundary(
+            &list,
+            Point::ZERO,
+            1.,
+            FloatRect::new(0., 0., 200., 200.),
+            &[],
+            full,
+        );
+        assert_eq!(
+            regions.len(),
+            2,
+            "independent edge dependencies must not become a full-viewport replay"
+        );
+        assert!(
+            subtract_regions(full, &regions)
+                .iter()
+                .any(|area| area.y <= 80 && area.y + area.height >= 120),
+            "the unchanged middle remains a cached composite"
+        );
+    }
+
+    #[test]
+    fn rounded_window_does_not_make_interior_glass_live() {
+        let mut paint = PaintContext::new();
+        paint.refractive_glass_rounded_rect(
+            Rect::from_xywh(20., 30., 160., 50.),
+            12.,
+            2.52,
+            UiColor::WHITE,
+            1.,
+        );
+        let list = paint.into_display_list();
+        let bounds = Rect::from_xywh(0., 0., 200., 200.);
+        let regions = live_boundary(
+            &list,
+            Point::ZERO,
+            1.,
+            FloatRect::from_logical(bounds, 1.),
+            &[(bounds, 20.)],
+            PixelBounds {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 200,
+            },
+        );
+        assert!(
+            regions.is_empty(),
+            "a rounded Window must not disable caching for lenses well inside its straight core"
+        );
     }
 
     #[test]

@@ -753,6 +753,14 @@ try {
     ]) {
       const denseContext=await monitoredContext({viewport:{width,height},deviceScaleFactor:dpr,serviceWorkers:'block'});
       try {
+        await denseContext.addInitScript(()=>{
+          window.__scarletBufferCopyBytes=0;
+          const copy=GPUCommandEncoder.prototype.copyBufferToBuffer;
+          GPUCommandEncoder.prototype.copyBufferToBuffer=function(...args) {
+            window.__scarletBufferCopyBytes+=Number(args[4]);
+            return copy.apply(this,args);
+          };
+        });
         page=await denseContext.newPage();
         monitorPage(page);
         await ready('/widget-factory/','scarlet_ui_widget_factory');
@@ -762,12 +770,34 @@ try {
         const overview=await untilPixels(`factory-hidpi-${dpr}-overview`,frame=>hasTextOnWhite(frame,heading,100));
         await page.mouse.click(width*.3,height-36);
         await page.mouse.move(width-2,30);
-        const controls=await untilPixels(`factory-hidpi-${dpr}-controls`,frame=>changedPixels(overview,frame,heading)>100);
+        let controls=await untilPixels(`factory-hidpi-${dpr}-controls`,frame=>changedPixels(overview,frame,heading)>100);
         // The neutral, narrow side contour must survive the dense Controls
         // scene. A blur-only budget fallback has no dark line at this edge.
         const rim=scaled({x:11,y:height-38,width:3,height:4});
         assert(coloredPixels(controls,rim,(r,g,b)=>Math.max(r,g,b)-Math.min(r,g,b)<10&&r<225).count>=2,
           `Controls navigation lost its optical contour at DPR ${dpr}`);
+        // A warm static scroll must reuse tiles rather than silently expanding
+        // the complete Controls recording back into live geometry on Web.
+        await page.mouse.move(8,height*.5);
+        await screenshot(`factory-hidpi-${dpr}-before-warm-scroll`);
+        // Prime both integer and half-logical-pixel phases. The first render
+        // of a new exact phase is a legitimate cold tile, not a cache hit.
+        for(let warm=0;warm<2;warm++) {
+          const previous=await page.evaluate(()=>window.__scarletBufferCopyBytes);
+          await page.mouse.wheel(0,4);
+          await page.waitForFunction(before=>window.__scarletBufferCopyBytes>before,previous,{timeout:12000});
+          controls=await screenshot(`factory-hidpi-${dpr}-prime-${warm}`);
+        }
+        const copiedBefore=await page.evaluate(()=>window.__scarletBufferCopyBytes);
+        await page.mouse.wheel(0,4);
+        await page.waitForFunction(before=>window.__scarletBufferCopyBytes>before,copiedBefore,{timeout:12000});
+        controls=await screenshot(`factory-hidpi-${dpr}-warm-scroll`);
+        const warmScrollBufferBytes=await page.evaluate(()=>window.__scarletBufferCopyBytes)-copiedBefore;
+        // Fixed navigation/shadow geometry is denser at 3x; neither budget
+        // admits expanding the complete Controls page into live geometry.
+        assert(warmScrollBufferBytes<dpr*500_000,
+          `Static Controls scroll bypassed retained tiles at DPR ${dpr}: ${warmScrollBufferBytes} buffer-copy bytes`);
+        event('warm-scroll-buffer-copies',{dpr,bytes:warmScrollBufferBytes});
         await page.mouse.click(145,14);
         const menu=await untilPixels(`factory-hidpi-${dpr}-menu`,frame=>
           changedPixels(controls,frame,scaled({x:150,y:32,width:230,height:70}))>100);
