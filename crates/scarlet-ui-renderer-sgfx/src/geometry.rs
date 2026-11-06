@@ -11,13 +11,24 @@ pub(crate) const MAX_FRAME_VERTICES: usize = 196_608;
 /// A point on an inset rounded contour; 13 points per quarter include both
 /// tangent endpoints, so the straight sides never cut across a rounded corner.
 fn glass_contour(rect: Rect, radius: f32, inset: f32, index: usize) -> Point {
+    glass_contour_with_steps(rect, radius, inset, index, 12)
+}
+
+fn glass_contour_with_steps(
+    rect: Rect,
+    radius: f32,
+    inset: f32,
+    index: usize,
+    steps: usize,
+) -> Point {
     let radius = radius
         .max(0.)
         .min(rect.size.width.min(rect.size.height) * 0.5);
     let r = (radius - inset).max(0.);
-    let corner = (index / 13) % 4;
-    let step = index % 13;
-    let angle = core::f32::consts::PI * (-1. + corner as f32 * 0.5 + step as f32 / 24.);
+    let corner = (index / (steps + 1)) % 4;
+    let step = index % (steps + 1);
+    let angle =
+        core::f32::consts::PI * (-1. + corner as f32 * 0.5 + step as f32 / (2 * steps) as f32);
     let cx = if corner == 0 || corner == 3 {
         rect.left() + inset + r
     } else {
@@ -710,7 +721,7 @@ impl Tessellator {
         self.finish_range(start)
     }
 
-    /// Soft curved-shoulder reflection, 12 segments per corner. Colors are already
+    /// Contour reflection, 24 segments per corner. Colors are already
     /// assigned per vertex and must not be replaced by color_geometry.
     fn glass_rim_raw(
         &mut self,
@@ -728,13 +739,15 @@ impl Tessellator {
         }
         let bezel = scarlet_ui_core::glass::glass_bezel(rect, radius);
         let vertex = |i: usize, d: f32| {
-            let corner = (i / 13) % 4;
-            let step = i % 13;
-            let angle = core::f32::consts::PI * (-1.0 + corner as f32 * 0.5 + step as f32 / 24.0);
+            let corner = (i / 25) % 4;
+            let step = i % 25;
+            let angle = core::f32::consts::PI * (-1.0 + corner as f32 * 0.5 + step as f32 / 48.0);
             let nx = libm::cosf(angle);
             let ny = libm::sinf(angle);
-            let p = glass_contour(rect, radius, d, i);
-            let reflection = scarlet_ui_core::glass::glass_surface_reflection(d, -nx, -ny, bezel);
+            let p = glass_contour_with_steps(rect, radius, d, i, 24);
+            let reflection = scarlet_ui_core::glass::glass_surface_reflection_at_scale(
+                d, -nx, -ny, bezel, self.scale,
+            );
             let rgb = if reflection >= 0.0 { 1.0 } else { 0.0 };
             Vertex {
                 position: [p.x * self.scale, p.y * self.scale],
@@ -743,32 +756,88 @@ impl Tessellator {
             }
         };
         // Calculate outside mutable borrowing of the tessellator.
-        let mut rings = [[Vertex::solid(Point2::new(0.0, 0.0)); 52]; 7];
-        for i in 0..52 {
+        // The inset light needs extra radial samples; keep this bounded cache-
+        // build scratch off the native host's stack.
+        let mut rings = Vec::new();
+        rings
+            .try_reserve_exact(17)
+            .map_err(|_| Error::FrameTooComplex)?;
+        rings.resize(17, [Vertex::solid(Point2::new(0.0, 0.0)); 100]);
+        for i in 0..100 {
             let angle =
-                core::f32::consts::PI * (-1. + (i / 13) as f32 * 0.5 + (i % 13) as f32 / 24.);
+                core::f32::consts::PI * (-1. + (i / 25) as f32 * 0.5 + (i % 25) as f32 / 48.);
             let (width, _) =
                 scarlet_ui_core::glass::glass_contour_edge(-libm::cosf(angle), -libm::sinf(angle));
-            let width = width.min(bezel * 0.10);
-            // Resolve the compact shade independently from the broad reflection.
-            for (ring, d) in [
-                0.,
-                width * 0.5,
-                width,
-                bezel * 0.16,
-                bezel * 0.4,
-                bezel * 0.7,
-                bezel,
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                rings[ring][i] = vertex(i, d);
+            let width = width.min(bezel);
+            let line_width =
+                scarlet_ui_core::glass::glass_contour_width(-libm::cosf(angle), self.scale)
+                    .min(bezel);
+            let half_pixel = 0.5 / self.scale;
+            // Keep black and white vertex colors on separate sides of the
+            // zero crossing. Interpolating their RGB together would darken a
+            // pale backdrop independently of the intended shadow strength.
+            let reflection_at = |d| {
+                scarlet_ui_core::glass::glass_surface_reflection_at_scale(
+                    d,
+                    -libm::cosf(angle),
+                    -libm::sinf(angle),
+                    bezel,
+                    self.scale,
+                )
+            };
+            let all_light = reflection_at(0.) >= 0. && reflection_at(line_width) >= 0.;
+            let mut lo = 0.;
+            let mut hi = bezel;
+            for _ in 0..8 {
+                let mid = (lo + hi) * 0.5;
+                let reflection = scarlet_ui_core::glass::glass_surface_reflection_at_scale(
+                    mid,
+                    -libm::cosf(angle),
+                    -libm::sinf(angle),
+                    bezel,
+                    self.scale,
+                );
+                if reflection < 0. {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            let zero = if all_light { bezel } else { (lo + hi) * 0.5 };
+            let inset = 1. / self.scale;
+            let rim_width = (1.25 + 0.50 * libm::cosf(angle) * libm::cosf(angle)).min(bezel * 0.10);
+            let mut distances = [
+                (0., 0),
+                (width * 0.25, 0),
+                (width * 0.5, 0),
+                (width, 0),
+                ((inset - half_pixel).max(0.), 0),
+                ((inset + half_pixel).min(bezel), 0),
+                ((inset + rim_width * 0.5).min(bezel), 0),
+                ((inset + rim_width).min(bezel), 0),
+                ((line_width - half_pixel).max(0.), 0),
+                (line_width, 0),
+                (zero, 1),
+                (zero, 2),
+                ((line_width + half_pixel).min(bezel), 0),
+                (bezel * 0.16, 0),
+                (bezel * 0.4, 0),
+                (bezel * 0.7, 0),
+                (bezel, 0),
+            ];
+            distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            for (ring, (d, crossing)) in distances.into_iter().enumerate() {
+                let mut v = vertex(i, d);
+                if crossing != 0 {
+                    let rgb = if crossing == 1 && !all_light { 0. } else { 1. };
+                    v.color = [rgb, rgb, rgb, 0.];
+                }
+                rings[ring][i] = v;
             }
         }
-        for ring in 0..6 {
-            for i in 0..52 {
-                let next = (i + 1) % 52;
+        for ring in 0..16 {
+            for i in 0..100 {
+                let next = (i + 1) % 100;
                 self.push_triangle([rings[ring][i], rings[ring][next], rings[ring + 1][next]])?;
                 self.push_triangle([rings[ring][i], rings[ring + 1][next], rings[ring + 1][i]])?;
             }

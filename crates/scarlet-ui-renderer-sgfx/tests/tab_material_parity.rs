@@ -468,8 +468,8 @@ fn menu_background_contrast_is_bounded_in_both_render_paths() {
 }
 
 /// Strong contour strokes are especially visible on dark glass. Compare the
-/// entire shoulder, including corners, in both SGFX paths rather than checking
-/// only the flat material interior.
+/// entire shoulder and the finer horizontal rims, including corners, in both
+/// SGFX paths. Fractional origins cover the search bar and dock reference shapes.
 #[test]
 fn shoulder_reflection_stays_soft_and_matches_cpu() {
     use scarlet_ui_core::{
@@ -484,7 +484,6 @@ fn shoulder_reflection_stays_soft_and_matches_cpu() {
     if let Some(dir) = &output {
         fs::create_dir_all(dir).unwrap();
     }
-    let rect = Rect::from_xywh(24., 24., 272., 112.);
     for (name, background, tint) in [
         (
             "dark",
@@ -497,95 +496,280 @@ fn shoulder_reflection_stays_soft_and_matches_cpu() {
             ColorPalette::light().surface(),
         ),
     ] {
-        for scale in [1000, 1500, 2000] {
-            let (width, height) = (320 * scale / 1000, 160 * scale / 1000);
-            let mut paint = PaintContext::new();
-            paint.refractive_glass_rounded_rect(rect, 24., 2.52, tint.with_opacity(0.64), 1.);
-            let mut cpu = CpuPaintRenderer::new(Size::new(320., 160.), scale, background);
-            cpu.execute(&paint);
-            let cpu: Vec<u8> = cpu
-                .buffer()
-                .as_slice()
-                .iter()
-                .flat_map(|p| p.to_le_bytes())
-                .collect();
-            for analytic in [false, true] {
-                let mut encoder = SgfxPaintEncoder::new(width, height, false).unwrap();
-                encoder.set_analytic_glass(analytic);
-                let target = encoder.target_texture(0).unwrap();
-                let mut resources = context.create_resources(encoder.resource_table());
-                resources
-                    .map_image(
-                        target,
-                        context
-                            .create_image(width, height, TextureFormat::Bgra8Unorm)
-                            .unwrap(),
-                    )
-                    .unwrap();
-                let queue = context.create_queue();
-                encoder
-                    .encode_frame(
-                        &mut queue.executor(&mut resources),
-                        0,
-                        None,
-                        &paint,
-                        background,
-                        scale,
-                        &[(0, 0, width, height)],
-                    )
-                    .unwrap();
-                assert_eq!(encoder.backdrop_fallback_count(), 0);
-                let gpu = resources.read_texture(target).unwrap();
-                let center = ((height / 2 * width + width / 2) * 4) as usize;
-                let mut max_delta = 0;
-                let mut max_lift = 0;
-                for y in 0..height {
-                    for x in 0..width {
-                        let point = Point::new(
-                            (x as f32 + 0.5) * 1000. / scale as f32,
-                            (y as f32 + 0.5) * 1000. / scale as f32,
-                        );
-                        let (distance, _, _) = glass_edge(rect, 24., point);
-                        if distance < 0.5 || distance >= glass_bezel(rect, 24.) {
-                            continue;
-                        }
-                        let at = ((y * width + x) * 4) as usize;
-                        for c in 0..3 {
-                            max_delta = max_delta.max(cpu[at + c].abs_diff(gpu[at + c]));
-                            max_lift = max_lift.max(gpu[at + c].saturating_sub(gpu[center + c]));
+        for (shape, rect, radius) in [
+            ("folder", Rect::from_xywh(104., 24., 112., 112.), 24.),
+            ("search", Rect::from_xywh(24.25, 52.25, 272., 55.5), 27.75),
+            ("dock", Rect::from_xywh(24.5, 44.5, 272., 71.), 32.),
+        ] {
+            for scale in [1000, 1500, 2000] {
+                let (width, height) = (320 * scale / 1000, 160 * scale / 1000);
+                let mut paint = PaintContext::new();
+                paint.refractive_glass_rounded_rect(
+                    rect,
+                    radius,
+                    2.52,
+                    tint.with_opacity(0.64),
+                    1.,
+                );
+                let mut cpu = CpuPaintRenderer::new(Size::new(320., 160.), scale, background);
+                cpu.execute(&paint);
+                let cpu: Vec<u8> = cpu
+                    .buffer()
+                    .as_slice()
+                    .iter()
+                    .flat_map(|p| p.to_le_bytes())
+                    .collect();
+                for analytic in [false, true] {
+                    let mut encoder = SgfxPaintEncoder::new(width, height, false).unwrap();
+                    encoder.set_analytic_glass(analytic);
+                    let target = encoder.target_texture(0).unwrap();
+                    let mut resources = context.create_resources(encoder.resource_table());
+                    resources
+                        .map_image(
+                            target,
+                            context
+                                .create_image(width, height, TextureFormat::Bgra8Unorm)
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    let queue = context.create_queue();
+                    encoder
+                        .encode_frame(
+                            &mut queue.executor(&mut resources),
+                            0,
+                            None,
+                            &paint,
+                            background,
+                            scale,
+                            &[(0, 0, width, height)],
+                        )
+                        .unwrap();
+                    assert_eq!(encoder.backdrop_fallback_count(), 0);
+                    let gpu = resources.read_texture(target).unwrap();
+                    let center = ((height / 2 * width + width / 2) * 4) as usize;
+                    let mut max_delta = 0;
+                    let mut max_lift = 0;
+                    for y in 0..height {
+                        for x in 0..width {
+                            let point = Point::new(
+                                (x as f32 + 0.5) * 1000. / scale as f32,
+                                (y as f32 + 0.5) * 1000. / scale as f32,
+                            );
+                            let (distance, _, _) = glass_edge(rect, radius, point);
+                            if distance * scale as f32 / 1000. < 0.5
+                                || distance >= glass_bezel(rect, radius)
+                            {
+                                continue;
+                            }
+                            let at = ((y * width + x) * 4) as usize;
+                            for c in 0..3 {
+                                max_delta = max_delta.max(cpu[at + c].abs_diff(gpu[at + c]));
+                                if distance >= 3. {
+                                    max_lift =
+                                        max_lift.max(gpu[at + c].saturating_sub(gpu[center + c]));
+                                }
+                            }
                         }
                     }
-                }
-                if name == "light" {
-                    let factor = scale as f32 / 1000.;
-                    let side = ((24. * factor) as u32..(27. * factor) as u32)
-                        .map(|x| gpu[((height / 2 * width + x) * 4) as usize])
-                        .min()
-                        .unwrap();
-                    let top = ((24. * factor) as u32..(27. * factor) as u32)
-                        .map(|y| gpu[((y * width + width / 2) * 4) as usize])
-                        .min()
-                        .unwrap();
-                    assert!(side + 3 < gpu[center], "sides need a compact dark contour");
+                    if name == "light" {
+                        let factor = scale as f32 / 1000.;
+                        let side = ((rect.left() * factor).ceil() as u32
+                            ..((rect.left() + 3.) * factor) as u32)
+                            .map(|x| gpu[((height / 2 * width + x) * 4) as usize])
+                            .min()
+                            .unwrap();
+                        let top = ((rect.top() * factor).ceil() as u32
+                            ..((rect.top() + 3.) * factor) as u32)
+                            .map(|y| gpu[((y * width + width / 2) * 4) as usize])
+                            .min()
+                            .unwrap();
+                        assert!(side + 3 < gpu[center], "sides need a compact dark contour");
+                        assert!(
+                            side + 3 < top,
+                            "side contours must be firmer than horizontal edges"
+                        );
+                    }
+                    let label = format!("shoulder-{shape}-{name}-{scale}-{analytic}");
+                    // Core tests verify both shadow stages and the restored
+                    // narrow light independently. Here compare their combined
+                    // pixels; a lit top edge need not be darker than its center.
+                    eprintln!("{label}: CPU/GPU delta {max_delta}, reflection lift {max_lift}");
+                    if let Some(dir) = &output {
+                        save(&dir.join(format!("{label}-gpu.ppm")), width, height, &gpu).unwrap();
+                    }
                     assert!(
-                        side + 3 < top,
-                        "side contours must be firmer than horizontal edges"
+                        max_lift <= 40,
+                        "{label}: the broad shoulder must stay soft outside the fine rim"
+                    );
+                    assert!(
+                        max_delta <= 14,
+                        "{label}: shoulder differs between renderers"
                     );
                 }
-                let label = format!("shoulder-{name}-{scale}-{analytic}");
-                eprintln!("{label}: CPU/GPU delta {max_delta}, reflection lift {max_lift}");
-                if let Some(dir) = &output {
-                    save(&dir.join(format!("{label}-gpu.ppm")), width, height, &gpu).unwrap();
-                }
-                assert!(
-                    max_lift <= 40,
-                    "{label}: reflection must not paint a bright outline"
-                );
-                assert!(
-                    max_delta <= 14,
-                    "{label}: shoulder differs between renderers"
-                );
             }
+        }
+    }
+}
+
+/// Manual proof for comparing contour treatments on identical colored content.
+#[test]
+#[ignore = "manual GPU readback for contour review"]
+fn contour_review_scene() {
+    let context = context().expect("contour review requires a GPU adapter");
+    let output = std::path::PathBuf::from(
+        std::env::var_os("SCARLET_TAB_PARITY_DIR").expect("set SCARLET_TAB_PARITY_DIR"),
+    );
+    fs::create_dir_all(&output).unwrap();
+    scarlet_ui_core::graphics::set_default_font(include_bytes!(
+        "../../../examples/web-counter/assets/DejaVuSans.ttf"
+    ))
+    .unwrap();
+    let mut paint = PaintContext::new();
+    paint.fill_vertical_gradient_rounded_rect(
+        Rect::from_xywh(0., 0., 353., 320.),
+        0.,
+        Color::rgb(124, 211, 244),
+        Color::rgb(149, 160, 204),
+    );
+    paint.fill_rounded_rect(
+        Rect::from_xywh(-25., 100., 110., 220.),
+        48.,
+        Color::rgb(226, 236, 246),
+    );
+    paint.fill_rounded_rect(
+        Rect::from_xywh(150., 90., 145., 240.),
+        64.,
+        Color::rgb(57, 64, 91),
+    );
+    paint.fill_rounded_rect(
+        Rect::from_xywh(235., 187., 160., 138.),
+        48.,
+        Color::rgb(206, 161, 181),
+    );
+    for y in [51., 159., 240., 270.] {
+        paint.fill_rect(
+            Rect::from_xywh(0., y, 353., 1.),
+            Color::WHITE.with_opacity(0.4),
+        );
+    }
+    for (rect, radius, tint) in [
+        (
+            Rect::from_xywh(23., 16., 307., 42.),
+            21.,
+            Color::WHITE.with_opacity(0.18),
+        ),
+        (
+            Rect::from_xywh(23., 78., 142., 142.),
+            24.,
+            Color::WHITE.with_opacity(0.18),
+        ),
+        (
+            Rect::from_xywh(188., 78., 142., 142.),
+            24.,
+            Color::WHITE.with_opacity(0.18),
+        ),
+        (
+            Rect::from_xywh(15., 236., 323., 52.),
+            26.,
+            GlassMaterial::regular().tint,
+        ),
+    ] {
+        // The same two stock floating-elevation shadows stay present in every
+        // option, behind both the near-edge falloff and the fine contour.
+        paint.draw_rounded_rect_shadow(
+            rect,
+            radius,
+            Offset::new(0., 1.),
+            3.,
+            0.,
+            Color::BLACK.with_opacity(0.055),
+        );
+        paint.draw_rounded_rect_shadow(
+            rect,
+            radius,
+            Offset::new(0., 4.),
+            10.,
+            0.,
+            Color::BLACK.with_opacity(0.075),
+        );
+        paint.refractive_glass_rounded_rect(rect, radius, 2.52, tint, 1.);
+    }
+    paint.draw_text(Point::new(147., 28.), "Search", Color::WHITE, 16.);
+    for origin in [Point::new(36., 91.), Point::new(201., 91.)] {
+        for (i, color) in [
+            Color::rgb(233, 238, 245),
+            Color::rgb(52, 126, 232),
+            Color::rgb(45, 181, 109),
+            Color::rgb(36, 41, 51),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let rect = Rect::from_xywh(
+                origin.x + (i % 2) as f32 * 63.,
+                origin.y + (i / 2) as f32 * 63.,
+                53.,
+                53.,
+            );
+            paint.fill_rounded_rect(rect, 12., color);
+        }
+    }
+    for (i, color) in [
+        Color::rgb(230, 139, 190),
+        Color::rgb(222, 226, 234),
+        Color::rgb(22, 25, 31),
+        Color::rgb(57, 160, 232),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        paint.fill_rounded_rect(
+            Rect::from_xywh(39. + i as f32 * 80., 244., 36., 36.),
+            10.,
+            color,
+        );
+    }
+    for scale in [1000, 1500, 2000] {
+        let (width, height) = (353 * scale / 1000, 320 * scale / 1000);
+        for analytic in [false, true] {
+            let mut encoder = SgfxPaintEncoder::new(width, height, false).unwrap();
+            encoder.set_analytic_glass(analytic);
+            let target = encoder.target_texture(0).unwrap();
+            let mut resources = context.create_resources(encoder.resource_table());
+            resources
+                .map_image(
+                    target,
+                    context
+                        .create_image(width, height, TextureFormat::Bgra8Unorm)
+                        .unwrap(),
+                )
+                .unwrap();
+            let queue = context.create_queue();
+            encoder
+                .encode_frame(
+                    &mut queue.executor(&mut resources),
+                    0,
+                    None,
+                    &paint,
+                    Color::WHITE,
+                    scale,
+                    &[(0, 0, width, height)],
+                )
+                .unwrap();
+            assert_eq!(encoder.backdrop_fallback_count(), 0);
+            let gpu = resources.read_texture(target).unwrap();
+            let sample = |x, y| gpu[(((y * scale / 1000) * width + x * scale / 1000) * 4) as usize];
+            assert!(
+                sample(176, 62) + 2 < sample(345, 62),
+                "outer drop shadow must remain visible beyond the search bar"
+            );
+            save(
+                &output.join(format!("review-{scale}-{analytic}.ppm")),
+                width,
+                height,
+                &gpu,
+            )
+            .unwrap();
         }
     }
 }

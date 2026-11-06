@@ -6,6 +6,13 @@
 use crate::geometry::{Point, Rect};
 use core::sync::atomic::{AtomicU8, Ordering};
 
+// Layer review C: tighten the near-edge stage while preserving the outer drop shadow.
+const CONTOUR_LINE_TOP: f32 = 0.11;
+const CONTOUR_LINE_SIDE: f32 = 0.20;
+const CONTOUR_NEAR_TOP: f32 = 1.75;
+const CONTOUR_NEAR_SIDE: f32 = 2.5;
+const CONTOUR_NEAR_STRENGTH: f32 = 0.06;
+
 /// Application-wide quality ceiling for built-in glass materials.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
@@ -118,26 +125,49 @@ pub fn glass_highlight_edge(inward_x: f32, inward_y: f32) -> (f32, f32) {
     )
 }
 
-/// Width and opacity of the compact dark contour, in logical pixels.
-/// Side-facing normals carry a firmer edge; horizontal shoulders stay finer.
+/// Width of the smooth near-edge shadow and opacity of the separate fine line.
+/// The near-edge falloff remains present behind the sharper contour.
 #[doc(hidden)]
 pub fn glass_contour_edge(inward_x: f32, inward_y: f32) -> (f32, f32) {
     let side = inward_x * inward_x;
+    // Reach the first interior sample even when a 1x edge falls on a pixel
+    // center, while keeping both horizontal rims finer than the side contour.
     (
-        0.55 + 0.25 * side,
-        0.05 + 0.13 * side + 0.025 * (-inward_y).max(0.),
+        CONTOUR_NEAR_TOP + (CONTOUR_NEAR_SIDE - CONTOUR_NEAR_TOP) * side,
+        CONTOUR_LINE_TOP
+            + (CONTOUR_LINE_SIDE - CONTOUR_LINE_TOP) * side
+            + 0.015 * (-inward_y).max(0.),
     )
 }
 
-/// A soft directional reflection spread across the curved shoulder.
-/// The normal tilts toward the viewer across the same shoulder as refraction.
-/// This moves and broadens the specular lobe across the surface instead of
-/// painting a bright outline. Horizontal shoulders receive the soft light;
-/// side-facing contours carry compact shading. Negative values shade toward
-/// black; positive values reflect toward white. This screen-space approximation
-/// follows the reference appearance without claiming its optical mechanism.
+/// Contour widths are rounded in device pixels before the normal interpolates
+/// them around each corner. Both cardinal widths survive fractional scaling.
+#[doc(hidden)]
+pub fn glass_contour_width(inward_x: f32, scale: f32) -> f32 {
+    let scale = scale.max(0.001);
+    let top = libm::roundf(scale * 0.5).max(1.);
+    let side = libm::roundf(scale).max(top + 1.);
+    (top + (side - top) * inward_x * inward_x) / scale
+}
+
+/// Soft light across the curved shoulder, a smooth near-edge shadow, and a
+/// separate fine contour. These stages coexist; elevation draws the soft
+/// outer drop shadow independently. Positive values reflect toward white,
+/// negative values shade toward black.
 #[doc(hidden)]
 pub fn glass_surface_reflection(distance: f32, inward_x: f32, inward_y: f32, bezel: f32) -> f32 {
+    glass_surface_reflection_at_scale(distance, inward_x, inward_y, bezel, 1.)
+}
+
+/// Keep the shadow line distinct from the shoulder's blurred reflection.
+#[doc(hidden)]
+pub fn glass_surface_reflection_at_scale(
+    distance: f32,
+    inward_x: f32,
+    inward_y: f32,
+    bezel: f32,
+    scale: f32,
+) -> f32 {
     if distance < 0. || bezel <= 0. || distance >= bezel {
         return 0.;
     }
@@ -159,11 +189,55 @@ pub fn glass_surface_reflection(distance: f32, inward_x: f32, inward_y: f32, bez
     let fresnel = grazing2 * grazing2 * grazing;
     let horizontal = inward_y * inward_y;
     let surface = (0.012 * fresnel + (0.16 * key + 0.06 * fill) * normal_xy) * horizontal;
-    let (width, opacity) = glass_contour_edge(inward_x, inward_y);
-    let width = width.min(bezel * 0.10);
+    let (near_shadow, line_shadow) =
+        glass_shadow_layers(distance, inward_x, inward_y, bezel, scale);
+    // Keep the soft reflection; add distinct shadow stages instead of erasing
+    // it underneath a solid outline. Elevation's outer shadow is independent.
+    surface + glass_rim_light_inset(distance, inward_x, inward_y, bezel, scale)
+        - near_shadow
+        - line_shadow
+}
+
+// Original narrow light component, retained independently of the C shadow stages.
+fn glass_rim_light(distance: f32, inward_x: f32, inward_y: f32, bezel: f32) -> f32 {
+    if distance < 0. || bezel <= 0. {
+        return 0.;
+    }
+    let width = (1.25 + 0.50 * inward_x * inward_x).min(bezel * 0.10);
     let fade = (1. - distance / width).clamp(0., 1.);
-    let shade = opacity * fade * fade * (3. - 2. * fade);
-    surface - shade
+    (0.34 - 0.06 * (-inward_y).max(0.)) * inward_y * inward_y * fade * fade * (3. - 2. * fade)
+}
+
+// Translate only the narrow light by one device pixel. Its new inner boundary
+// needs the same one-pixel coverage ramp formerly supplied by the silhouette.
+fn glass_rim_light_inset(
+    distance: f32,
+    inward_x: f32,
+    inward_y: f32,
+    bezel: f32,
+    scale: f32,
+) -> f32 {
+    let scale = scale.max(0.001);
+    let shifted = distance - 1. / scale;
+    let entry = (shifted * scale + 0.5).clamp(0., 1.);
+    glass_rim_light(shifted.max(0.), inward_x, inward_y, bezel) * entry
+}
+
+fn glass_shadow_layers(
+    distance: f32,
+    inward_x: f32,
+    inward_y: f32,
+    bezel: f32,
+    scale: f32,
+) -> (f32, f32) {
+    let (near_width, line_opacity) = glass_contour_edge(inward_x, inward_y);
+    let near_width = near_width.min(bezel).max(0.0001);
+    let near = (1. - distance / near_width).clamp(0., 1.);
+    let near_shadow = CONTOUR_NEAR_STRENGTH * near * near * (3. - 2. * near);
+    let scale = scale.max(0.001);
+    let line_width = glass_contour_width(inward_x, scale).min(bezel);
+    let line = ((line_width - distance) * scale + 0.5).clamp(0., 1.);
+    (near_shadow, line_opacity * line)
 }
 
 #[cfg(test)]
@@ -175,27 +249,77 @@ mod tests {
         let reflection = |d, x, y| glass_surface_reflection(d, x, y, bezel);
         assert!(reflection(3., 0.6, 0.8) > reflection(3., -0.8, 0.6));
         assert!(reflection(3., -0.6, -0.8) > 0.01);
-        assert!(reflection(2., 0.6, 0.8) > reflection(0., 0.6, 0.8));
         assert_eq!(reflection(bezel, 0., 1.), 0.);
         assert_eq!(reflection(-1., 0., 1.), 0.);
         for i in 0..100 {
             let value = reflection(i as f32 * bezel / 100., 0., 1.);
-            assert!((-0.18..=0.18).contains(&value));
+            assert!((-0.35..=0.36).contains(&value));
         }
     }
     #[test]
     fn side_contours_are_firmer_while_horizontal_shoulders_carry_light() {
         let reflection = |d, x, y| glass_surface_reflection(d, x, y, 20.);
-        assert!(reflection(0., 1., 0.) < reflection(0., 0., 1.) - 0.10);
-        assert!(reflection(0., -1., 0.) < reflection(0., 0., -1.) - 0.08);
-        assert_eq!(reflection(2., 1., 0.), 0.);
+        assert!(reflection(0., 1., 0.) < reflection(0., 0., 1.));
+        assert!(reflection(0., -1., 0.) < reflection(0., 0., -1.));
+        assert_eq!(reflection(4., 1., 0.), 0.);
         assert!(reflection(2., 0., 1.) > 0.01);
         for angle in 0..72 {
             let a = angle as f32 * core::f32::consts::TAU / 72.;
             for step in 0..100 {
                 let value = reflection(step as f32 * 0.2, libm::cosf(a), libm::sinf(a));
-                assert!((-0.185..=0.18).contains(&value));
+                assert!((-0.35..=0.36).contains(&value));
             }
+        }
+    }
+    #[test]
+    fn horizontal_rim_light_keeps_its_original_width_and_strength() {
+        assert!((glass_rim_light(0., 0., 1., 20.) - 0.34).abs() < 0.0001);
+        assert!((glass_rim_light(0., 0., -1., 20.) - 0.28).abs() < 0.0001);
+        assert!((glass_rim_light(0.625, 0., 1., 20.) - 0.17).abs() < 0.0001);
+        for y in [-1., 1.] {
+            assert_eq!(glass_rim_light(1.25, 0., y, 20.), 0.);
+            assert!(glass_surface_reflection_at_scale(0., 0., y, 20., 2.) < 0.);
+        }
+        assert_eq!(glass_rim_light(0., 1., 0., 20.), 0.);
+    }
+    #[test]
+    fn rim_light_translates_one_device_pixel_without_widening_or_recoloring() {
+        for scale in [0.75, 1., 1.25, 1.5, 2., 3.] {
+            for (x, y) in [(0., 1.), (0., -1.), (0.6, 0.8)] {
+                assert_eq!(glass_rim_light_inset(0.5 / scale, x, y, 20., scale), 0.);
+                for pixel in 0..8 {
+                    let original = glass_rim_light((pixel as f32 + 0.5) / scale, x, y, 20.);
+                    let shifted =
+                        glass_rim_light_inset((pixel as f32 + 1.5) / scale, x, y, 20., scale);
+                    assert!((original - shifted).abs() < 0.00001);
+                }
+            }
+        }
+    }
+    #[test]
+    fn fine_shadow_near_shadow_and_soft_light_coexist() {
+        let scale = 2.;
+        for (x, y) in [(0., 1.), (0., -1.), (1., 0.), (-1., 0.)] {
+            let (near, line) = glass_shadow_layers(0.25, x, y, 20., scale);
+            assert!(near > 0. && line > 0.);
+            let width = glass_contour_width(x, scale);
+            let (near, line) = glass_shadow_layers(width + 0.5, x, y, 20., scale);
+            assert!(
+                near > 0.,
+                "soft near-edge shadow must survive past the fine line"
+            );
+            assert_eq!(line, 0.);
+        }
+        assert!(glass_surface_reflection_at_scale(4., 0., 1., 20., scale) > 0.01);
+    }
+    #[test]
+    fn shadow_widths_remain_distinct_in_device_pixels() {
+        for scale in [0.75, 1., 1.25, 1.5, 2., 3.] {
+            let top = glass_contour_width(0., scale) * scale;
+            let side = glass_contour_width(1., scale) * scale;
+            assert_eq!(top, libm::roundf(top));
+            assert_eq!(side, libm::roundf(side));
+            assert!(top >= 1. && side >= top + 1.);
         }
     }
     #[test]

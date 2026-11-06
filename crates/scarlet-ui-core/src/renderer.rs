@@ -2137,7 +2137,7 @@ impl CpuPaintRenderer {
                         radius,
                         Point::new(x as f32 + 0.5, y as f32 + 0.5),
                     );
-                    crate::glass::glass_surface_reflection(d / scale, nx, ny, bezel)
+                    crate::glass::glass_surface_reflection_at_scale(d / scale, nx, ny, bezel, scale)
                         * refraction.clamp(0.0, 1.0)
                 } else {
                     0.0
