@@ -677,13 +677,27 @@ fn shoulder_reflection_stays_soft_and_matches_cpu() {
                                 (x as f32 + 0.5) * 1000. / scale as f32,
                                 (y as f32 + 0.5) * 1000. / scale as f32,
                             );
-                            let (distance, _, _) = glass_edge(rect, radius, point);
+                            let (distance, nx, ny) = glass_edge(rect, radius, point);
+                            let at = ((y * width + x) * 4) as usize;
+                            if name == "light"
+                                && (0.0..=1.0).contains(&(distance * scale as f32 / 1000.))
+                                && nx.abs() > 0.05
+                                && ny.abs() > 0.05
+                            {
+                                // Agreement between two renderers is insufficient:
+                                // every curved contour pixel must remain darker
+                                // than the pale surface, including where light
+                                // used to cancel its shadow into a dotted arc.
+                                assert!(
+                                    gpu[at].saturating_add(4) <= gpu[center],
+                                    "contour disappears: {shape} {scale} analytic={analytic} ({x},{y})"
+                                );
+                            }
                             if distance * scale as f32 / 1000. < 0.5
                                 || distance >= glass_bezel(rect, radius)
                             {
                                 continue;
                             }
-                            let at = ((y * width + x) * 4) as usize;
                             for c in 0..3 {
                                 max_delta = max_delta.max(cpu[at + c].abs_diff(gpu[at + c]));
                                 if distance >= 3. {

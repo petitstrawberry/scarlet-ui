@@ -2131,26 +2131,31 @@ impl CpuPaintRenderer {
                 } else {
                     old
                 };
-                let reflection = if blur && refraction > 0.0 {
+                let (light, near, line) = if blur && refraction > 0.0 {
                     let (d, nx, ny) = crate::glass::glass_edge(
                         rect,
                         radius,
                         Point::new(x as f32 + 0.5, y as f32 + 0.5),
                     );
-                    crate::glass::glass_surface_reflection_at_scale(d / scale, nx, ny, bezel, scale)
-                        * refraction.clamp(0.0, 1.0)
+                    let (light, near, line) = crate::glass::glass_surface_layers_at_scale(
+                        (d / scale).max(0.),
+                        nx,
+                        ny,
+                        bezel,
+                        scale,
+                    );
+                    let strength = refraction.clamp(0., 1.);
+                    (light * strength, near * strength, line * strength)
                 } else {
-                    0.0
+                    (0.0, 0.0, 0.0)
                 };
                 let mut output = [0.0; 4];
                 for c in 0..4 {
                     let mut material = tint[c] + filtered[c] * (1.0 - tint_alpha);
-                    let light = if c == 3 || reflection >= 0.0 {
-                        255.0
-                    } else {
-                        0.0
-                    };
-                    material += (light - material) * reflection.abs();
+                    let shadow_target = if c == 3 { 255. } else { 0. };
+                    material += (shadow_target - material) * near;
+                    material += (255. - material) * light;
+                    material += (shadow_target - material) * line;
                     output[c] = old[c] + (material - old[c]) * amount;
                 }
                 pixels[index] = unpremultiply_pixel(output);
