@@ -219,14 +219,15 @@ impl SgfxPaintEncoder {
         let analytic = self.analytic_glass && full_resolution;
         let refraction = if analytic
             || (self.backdrop_filters < 16
-                && tessellator.vertices().len() + 16_384 < crate::geometry::MAX_FRAME_VERTICES)
+                && tessellator.vertices().len() + 32_768 < crate::geometry::MAX_FRAME_VERTICES)
         {
             refraction.clamp(0.0, 1.0)
         } else {
             0.0
         };
         // The material and ancestor clips affect only the output, never the halo.
-        if !analytic {
+        let clip_material = !analytic && refraction <= 0.0;
+        if clip_material {
             tessellator.push_clip(rect, corner_radius)?;
         }
         let sampling = if full_resolution {
@@ -250,7 +251,7 @@ impl SgfxPaintEncoder {
         } else {
             tessellator.textured_rect(physical, [[u0, v0], [u1, v0], [u1, v1], [u0, v1]])
         };
-        if !analytic {
+        if clip_material {
             tessellator.pop_clip();
         }
         let Some(geometry) = geometry? else {
@@ -289,10 +290,10 @@ impl SgfxPaintEncoder {
             }),
         )?;
         if refraction > 0.0 && !analytic {
-            tessellator.push_clip(rect, corner_radius)?;
+            // The rim carries its own half-pixel coverage fringe. Preserve
+            // ancestor clips, but do not cut that fringe at the glass boundary.
             let rim =
                 tessellator.glass_rim(rect, corner_radius, opacity * refraction.clamp(0.0, 1.0));
-            tessellator.pop_clip();
             if let Some(geometry) = rim? {
                 draws.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
                 draws.push(Draw {

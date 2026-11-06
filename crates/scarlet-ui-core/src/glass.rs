@@ -108,7 +108,7 @@ pub fn glass_reflection(distance: f32, inward_x: f32, inward_y: f32) -> f32 {
 }
 
 /// Legacy narrow-boundary parameters, retained for source compatibility.
-/// Built-in materials use only `glass_surface_reflection`, without this outline.
+/// Built-in materials use `glass_surface_layers_at_scale`, without this outline.
 /// Both values vary around the
 /// contour: the key-lit corner is broader/brighter, the opposing return weaker,
 /// and the sides between them nearly disappear. Width is in logical pixels.
@@ -150,16 +150,16 @@ pub fn glass_contour_width(inward_x: f32, scale: f32) -> f32 {
     (top + (side - top) * inward_x * inward_x) / scale
 }
 
-/// Soft light across the curved shoulder, a smooth near-edge shadow, and a
-/// separate fine contour. These stages coexist; elevation draws the soft
-/// outer drop shadow independently. Positive values reflect toward white,
-/// negative values shade toward black.
+/// Signed compatibility approximation of the curved shoulder and contour.
+/// Built-in renderers composite `glass_surface_layers_at_scale` independently
+/// so light cannot cancel the fine contour before blending with the backdrop.
 #[doc(hidden)]
 pub fn glass_surface_reflection(distance: f32, inward_x: f32, inward_y: f32, bezel: f32) -> f32 {
     glass_surface_reflection_at_scale(distance, inward_x, inward_y, bezel, 1.)
 }
 
-/// Keep the shadow line distinct from the shoulder's blurred reflection.
+/// Scale-aware signed compatibility approximation; use independent layers
+/// below for rendering.
 #[doc(hidden)]
 pub fn glass_surface_reflection_at_scale(
     distance: f32,
@@ -168,8 +168,24 @@ pub fn glass_surface_reflection_at_scale(
     bezel: f32,
     scale: f32,
 ) -> f32 {
+    let (light, near, line) =
+        glass_surface_layers_at_scale(distance, inward_x, inward_y, bezel, scale);
+    light - near - line
+}
+
+/// Independent light, near-edge shade, and fine contour opacities. Composite
+/// near shade, light, then contour; subtracting opacities erases a dark contour
+/// even when white light cannot brighten an already pale backdrop.
+#[doc(hidden)]
+pub fn glass_surface_layers_at_scale(
+    distance: f32,
+    inward_x: f32,
+    inward_y: f32,
+    bezel: f32,
+    scale: f32,
+) -> (f32, f32, f32) {
     if distance < 0. || bezel <= 0. || distance >= bezel {
-        return 0.;
+        return (0., 0., 0.);
     }
     let t = (1. - distance / bezel).clamp(0., 1.);
     let normal_xy = t * t;
@@ -191,11 +207,11 @@ pub fn glass_surface_reflection_at_scale(
     let surface = (0.012 * fresnel + (0.16 * key + 0.06 * fill) * normal_xy) * horizontal;
     let (near_shadow, line_shadow) =
         glass_shadow_layers(distance, inward_x, inward_y, bezel, scale);
-    // Keep the soft reflection; add distinct shadow stages instead of erasing
-    // it underneath a solid outline. Elevation's outer shadow is independent.
-    surface + glass_rim_light_inset(distance, inward_x, inward_y, bezel, scale)
-        - near_shadow
-        - line_shadow
+    (
+        surface + glass_rim_light_inset(distance, inward_x, inward_y, bezel, scale),
+        near_shadow,
+        line_shadow,
+    )
 }
 
 // Original narrow light component, retained independently of the C shadow stages.

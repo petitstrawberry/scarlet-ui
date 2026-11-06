@@ -3264,7 +3264,9 @@ fn push_draw_phase(
     source: DrawSource,
     snap_phase: [f32; 2],
 ) -> Result<()> {
-    tessellator.color_geometry(geometry, color)?;
+    if !matches!(source, DrawSource::Backdrop(_)) {
+        tessellator.color_geometry(geometry, color)?;
+    }
     if let Some(previous) = draws.last_mut() {
         let previous_end = previous
             .geometry
