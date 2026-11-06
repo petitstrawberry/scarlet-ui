@@ -89,6 +89,45 @@ the geometric distance of every descendant from a screen edge. Apply SafeArea
 at the container that owns the boundary; an arbitrary inset frame does not
 implicitly consume it. Choose edges explicitly for separate branches.
 
+## Floating application chrome
+
+`ContentShell` separates the safe content rectangle from the paint viewport.
+It accepts independent optional `.header(view, height)` and
+`.sidebar(view, width)` slots. Omitted slots consume no space. Chrome slots
+are placed within the inherited platform safe area and paint after content;
+normal event dispatch gives their controls priority over content beneath them.
+Wrap the shell in a canvas `Surface` to keep its background continuous.
+
+```rust
+use scarlet_ui::prelude::*;
+
+let toolbar = Surface::new(
+    HeaderBar::new(Text::new("Library")).surface(Color::CLEAR).separator(Color::CLEAR),
+    SurfaceRole::Structural,
+).material(GlassMaterial::regular()).corner_radius(16.).padding(8.);
+let page = ContentShell::scrolling(
+    ScrollView::new(Text::new("Scrollable document")).vertical().content_size(0., 1200.),
+).header(toolbar, 64.).underlap(24.);
+```
+
+Use `ContentShell::new(fixed_content)` for forms, empty states, or mixed stacks
+with their own fixed status rows: it fits the content inside the safe rectangle.
+Use `ContentShell::scrolling(scrollport)` when ScrollView, ListView, or GridView
+owns the content boundary. The viewport extends under the adjacent chrome by
+16 points by default (configurable with `.underlap(...)`), while the first item,
+scrollbar, and reveal targets stay safe. The last item remains reachable above
+the bottom system reservation. Underlap is bounded by the occupied slot; it does
+not turn the whole toolbar into a scroll viewport. This uses ordinary retained
+scroll composition and the existing GlassMaterial backdrop dependency.
+
+`NavigationView::content_underlap(points)` similarly opts a floating sidebar and its header
+chrome into a slightly larger selected-content viewport. Its default is zero;
+Simple navigation and the existing floating bottom bar retain their behavior.
+The selected page owns the forwarded reservations: use ContentShell for the
+page header, ScrollView for a document, or `.safe_area_padding(...)` for fixed
+content. Multiple sibling branches handle their own reservations independently.
+A header height of zero removes the header slot entirely.
+
 ## Observation and lifecycle
 
 `GeometryProxy::safe_area_insets()` exposes the scope's unconsumed insets through

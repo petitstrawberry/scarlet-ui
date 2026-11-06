@@ -188,6 +188,7 @@ where
     /// Width reserved when using sidebar presentation.
     sidebar_width: f32,
     sidebar_style: NavigationSidebarStyle,
+    content_underlap: f32,
     floating_bar_bottom_overlap: f32,
     /// Requested adaptive presentation policy.
     presentation: NavigationPresentation,
@@ -233,6 +234,7 @@ where
             selected_index: State::new(state_id, 0),
             sidebar_width: 200.0,
             sidebar_style: NavigationSidebarStyle::Simple,
+            content_underlap: 0.,
             floating_bar_bottom_overlap: 0.0,
             presentation: NavigationPresentation::Automatic,
             minimum_content_size: Size::new(
@@ -267,6 +269,7 @@ where
             selected_index: navigation_selected_state(state_key),
             sidebar_width: 200.0,
             sidebar_style: NavigationSidebarStyle::Simple,
+            content_underlap: 0.,
             floating_bar_bottom_overlap: 0.0,
             presentation: NavigationPresentation::Automatic,
             minimum_content_size: Size::new(
@@ -295,6 +298,23 @@ where
     pub fn sidebar_style(mut self, style: NavigationSidebarStyle) -> Self {
         self.sidebar_style = style;
         self
+    }
+
+    /// Extend the content viewport beneath a floating sidebar and its header.
+    /// Reservations are forwarded as safe areas: scrollports inset their
+    /// contents, while fixed pages should use SafeArea or ContentShell.
+    /// Simple navigation keeps its existing partitioned layout.
+    pub fn content_underlap(mut self, points: f32) -> Self {
+        self.content_underlap = if points.is_finite() {
+            points.max(0.)
+        } else {
+            0.
+        };
+        self
+    }
+
+    pub(crate) fn get_content_underlap(&self) -> f32 {
+        self.content_underlap
     }
 
     /// Allow a floating bottom bar to overlap the bottom safe area by up to
@@ -591,6 +611,7 @@ where
             selected_index: self.selected_index.clone(),
             sidebar_width: self.sidebar_width,
             sidebar_style: self.sidebar_style,
+            content_underlap: self.content_underlap,
             floating_bar_bottom_overlap: self.floating_bar_bottom_overlap,
             presentation: self.presentation,
             minimum_content_size: self.minimum_content_size,

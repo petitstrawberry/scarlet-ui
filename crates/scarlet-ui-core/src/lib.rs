@@ -163,11 +163,11 @@ pub use views::modifiers::{
     Padding, SafeArea, SetSize,
 };
 pub use views::{
-    BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, HorizontalSizeClass,
-    IconView, Image, ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView,
-    ScrollWheelDirection, ScrollbarVisibility, Select, SelectStyle, Slider, TabBarPlacement,
-    TabBarPosition, TabItem, TabStyle, TabView, Toggle, VectorImageData, VectorTriangle,
-    VerticalSizeClass, WindowSizeClass,
+    BitmapImage, CanvasView, ContentShell, Divider, DividerOrientation, GridView, HeaderBar,
+    HorizontalSizeClass, IconView, Image, ImageFit, ImageSource, ListView, ProgressView,
+    ScrollAxis, ScrollView, ScrollWheelDirection, ScrollbarVisibility, Select, SelectStyle, Slider,
+    TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, Toggle, VectorImageData,
+    VectorTriangle, VerticalSizeClass, WindowSizeClass,
 };
 pub use views::{
     Button, ElevationRole, GlassMaterial, HStack, LazyVStack, Rectangle, Spacer, SplitAxis,
@@ -226,7 +226,7 @@ pub mod prelude {
         OnMouseMove, Padding,
     };
     pub use crate::views::{
-        BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar,
+        BitmapImage, CanvasView, ContentShell, Divider, DividerOrientation, GridView, HeaderBar,
         HorizontalSizeClass, IconView, Image, ImageFit, ImageSource, ListView, ProgressView,
         ScrollAxis, ScrollView, ScrollWheelDirection, ScrollbarVisibility, Select, SelectStyle,
         Slider, TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, Toggle,
