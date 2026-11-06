@@ -556,13 +556,15 @@ fn shoulder_reflection_stays_soft_and_matches_cpu() {
                                 (y as f32 + 0.5) * 1000. / scale as f32,
                             );
                             let (distance, _, _) = glass_edge(rect, radius, point);
-                            if distance < 0.5 || distance >= glass_bezel(rect, radius) {
+                            if distance * scale as f32 / 1000. < 0.5
+                                || distance >= glass_bezel(rect, radius)
+                            {
                                 continue;
                             }
                             let at = ((y * width + x) * 4) as usize;
                             for c in 0..3 {
                                 max_delta = max_delta.max(cpu[at + c].abs_diff(gpu[at + c]));
-                                if distance >= 2. {
+                                if distance >= 3. {
                                     max_lift =
                                         max_lift.max(gpu[at + c].saturating_sub(gpu[center + c]));
                                 }
@@ -588,21 +590,17 @@ fn shoulder_reflection_stays_soft_and_matches_cpu() {
                         );
                     }
                     let label = format!("shoulder-{shape}-{name}-{scale}-{analytic}");
-                    // On a dark, uniform backdrop the hairline must lift above the
-                    // broader shoulder at BOTH edges, even at fractional origins.
-                    if name == "dark" {
+                    if name == "light" {
                         let factor = scale as f32 / 1000.;
-                        let pixel = |y: u32| gpu[((y * width + width / 2) * 4) as usize];
                         for (edge, inward) in [(rect.top(), 1.), (rect.bottom(), -1.)] {
                             let boundary = edge * factor;
-                            let peak = (boundary.floor() as u32 - 1..=boundary.ceil() as u32 + 1)
-                                .map(pixel)
-                                .max()
+                            let shadow = (boundary.floor() as u32..=boundary.ceil() as u32 + 1)
+                                .map(|y| gpu[((y * width + width / 2) * 4) as usize])
+                                .min()
                                 .unwrap();
-                            let shoulder = pixel(((edge + inward * 2.5) * factor) as u32);
                             assert!(
-                                peak >= shoulder + 4,
-                                "{label}: missing horizontal rim at {edge}: {peak} vs {shoulder}"
+                                shadow + 2 < gpu[center],
+                                "{label}: faint shadow at {edge}, inward={inward}"
                             );
                         }
                     }

@@ -734,7 +734,9 @@ impl Tessellator {
             let nx = libm::cosf(angle);
             let ny = libm::sinf(angle);
             let p = glass_contour(rect, radius, d, i);
-            let reflection = scarlet_ui_core::glass::glass_surface_reflection(d, -nx, -ny, bezel);
+            let reflection = scarlet_ui_core::glass::glass_surface_reflection_at_scale(
+                d, -nx, -ny, bezel, self.scale,
+            );
             let rgb = if reflection >= 0.0 { 1.0 } else { 0.0 };
             Vertex {
                 position: [p.x * self.scale, p.y * self.scale],
@@ -743,30 +745,34 @@ impl Tessellator {
             }
         };
         // Calculate outside mutable borrowing of the tessellator.
-        let mut rings = [[Vertex::solid(Point2::new(0.0, 0.0)); 52]; 7];
+        let mut rings = [[Vertex::solid(Point2::new(0.0, 0.0)); 52]; 9];
         for i in 0..52 {
             let angle =
                 core::f32::consts::PI * (-1. + (i / 13) as f32 * 0.5 + (i % 13) as f32 / 24.);
             let (width, _) =
                 scarlet_ui_core::glass::glass_contour_edge(-libm::cosf(angle), -libm::sinf(angle));
             let width = width.min(bezel * 0.10);
-            // Resolve the compact shade independently from the broad reflection.
-            for (ring, d) in [
+            let line_width =
+                scarlet_ui_core::glass::glass_contour_width(-libm::cosf(angle), self.scale)
+                    .min(bezel);
+            let half_pixel = 0.5 / self.scale;
+            let mut distances = [
                 0.,
                 width * 0.5,
                 width,
+                (line_width - half_pixel).max(0.),
+                (line_width + half_pixel).min(bezel),
                 bezel * 0.16,
                 bezel * 0.4,
                 bezel * 0.7,
                 bezel,
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            ];
+            distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            for (ring, d) in distances.into_iter().enumerate() {
                 rings[ring][i] = vertex(i, d);
             }
         }
-        for ring in 0..6 {
+        for ring in 0..8 {
             for i in 0..52 {
                 let next = (i + 1) % 52;
                 self.push_triangle([rings[ring][i], rings[ring][next], rings[ring + 1][next]])?;

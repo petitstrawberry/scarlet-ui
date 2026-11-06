@@ -6,6 +6,9 @@
 use crate::geometry::{Point, Rect};
 use core::sync::atomic::{AtomicU8, Ordering};
 
+// Contour review A: keep shadow strength, separate the line from the soft light.
+const CONTOUR_SHADOW_GAIN: f32 = 1.0;
+
 /// Application-wide quality ceiling for built-in glass materials.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
@@ -131,6 +134,16 @@ pub fn glass_contour_edge(inward_x: f32, inward_y: f32) -> (f32, f32) {
     )
 }
 
+/// Contour widths are rounded in device pixels before the normal interpolates
+/// them around each corner. Both cardinal widths survive fractional scaling.
+#[doc(hidden)]
+pub fn glass_contour_width(inward_x: f32, scale: f32) -> f32 {
+    let scale = scale.max(0.001);
+    let top = libm::roundf(scale).max(1.);
+    let side = libm::roundf(2. * scale).max(top + 1.);
+    (top + (side - top) * inward_x * inward_x) / scale
+}
+
 /// A soft directional reflection spread across the curved shoulder.
 /// The normal tilts toward the viewer across the same shoulder as refraction.
 /// This moves and broadens the specular lobe across the surface instead of
@@ -141,6 +154,18 @@ pub fn glass_contour_edge(inward_x: f32, inward_y: f32) -> (f32, f32) {
 /// follows the reference appearance without claiming its optical mechanism.
 #[doc(hidden)]
 pub fn glass_surface_reflection(distance: f32, inward_x: f32, inward_y: f32, bezel: f32) -> f32 {
+    glass_surface_reflection_at_scale(distance, inward_x, inward_y, bezel, 1.)
+}
+
+/// Keep the shadow line distinct from the shoulder's blurred reflection.
+#[doc(hidden)]
+pub fn glass_surface_reflection_at_scale(
+    distance: f32,
+    inward_x: f32,
+    inward_y: f32,
+    bezel: f32,
+    scale: f32,
+) -> f32 {
     if distance < 0. || bezel <= 0. || distance >= bezel {
         return 0.;
     }
@@ -165,10 +190,14 @@ pub fn glass_surface_reflection(distance: f32, inward_x: f32, inward_y: f32, bez
     let (width, opacity) = glass_contour_edge(inward_x, inward_y);
     let width = width.min(bezel * 0.10);
     let fade = (1. - distance / width).clamp(0., 1.);
-    // Keep a readable hairline on both horizontal edges, including the weaker
-    // return light at the bottom. Blend continuously into the dark side contour.
-    let rim = (0.34 - 0.06 * (-inward_y).max(0.)) * horizontal - opacity;
-    surface + rim * fade * fade * (3. - 2. * fade)
+    let light = (0.34 - 0.06 * (-inward_y).max(0.)) * horizontal;
+    let shoulder = surface + light * fade * fade * (3. - 2. * fade);
+    let scale = scale.max(0.001);
+    let line_width = glass_contour_width(inward_x, scale).min(bezel);
+    // Only the last physical pixel is antialiased. Do not diffuse the shadow
+    // across the whole band or let shoulder light wash over the line.
+    let line = ((line_width - distance) * scale + 0.5).clamp(0., 1.);
+    shoulder * (1. - line) - opacity * CONTOUR_SHADOW_GAIN * line
 }
 
 #[cfg(test)]
@@ -184,7 +213,7 @@ mod tests {
         assert_eq!(reflection(-1., 0., 1.), 0.);
         for i in 0..100 {
             let value = reflection(i as f32 * bezel / 100., 0., 1.);
-            assert!((-0.185..=0.36).contains(&value));
+            assert!((-0.35..=0.36).contains(&value));
         }
     }
     #[test]
@@ -192,25 +221,25 @@ mod tests {
         let reflection = |d, x, y| glass_surface_reflection(d, x, y, 20.);
         assert!(reflection(0., 1., 0.) < reflection(0., 0., 1.) - 0.10);
         assert!(reflection(0., -1., 0.) < reflection(0., 0., -1.) - 0.08);
-        assert_eq!(reflection(2., 1., 0.), 0.);
+        assert_eq!(reflection(3., 1., 0.), 0.);
         assert!(reflection(2., 0., 1.) > 0.01);
         for angle in 0..72 {
             let a = angle as f32 * core::f32::consts::TAU / 72.;
             for step in 0..100 {
                 let value = reflection(step as f32 * 0.2, libm::cosf(a), libm::sinf(a));
-                assert!((-0.185..=0.36).contains(&value));
+                assert!((-0.35..=0.36).contains(&value));
             }
         }
     }
     #[test]
     fn horizontal_rims_remain_visible_and_thinner_than_the_sides() {
-        let (side_width, _) = glass_contour_edge(1., 0.);
+        let side_width = glass_contour_width(1., 1.);
         for y in [-1., 1.] {
-            let (width, _) = glass_contour_edge(0., y);
+            let width = glass_contour_width(0., 1.);
             assert!(width < side_width);
             let reflection = |d| glass_surface_reflection(d, 0., y, 20.);
-            assert!(reflection(0.) > reflection(2.) + 0.18);
-            assert!(reflection(0.5) > reflection(1.5) + 0.05);
+            assert!(reflection(0.) < reflection(2.) - 0.03);
+            assert!(reflection(0.5) < reflection(2.) - 0.03);
             assert!(
                 reflection(2.) > 0.,
                 "the broad shoulder still carries light"
