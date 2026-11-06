@@ -353,12 +353,12 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
     let Some(context) = context() else {
         return;
     };
-    for scale in [1, 2] {
+    for (scale, analytic) in [(1, false), (2, false), (1, true), (2, true)] {
         let (width, height) = (240 * scale, 180 * scale);
         let mut cached = SgfxPaintEncoder::new(width, height, false).unwrap();
-        cached.set_analytic_glass(true);
+        cached.set_analytic_glass(analytic);
         let mut direct = SgfxPaintEncoder::new(width, height, false).unwrap();
-        direct.set_analytic_glass(true);
+        direct.set_analytic_glass(analytic);
         let cached_target = cached.target_texture(0).unwrap();
         let direct_target = direct.target_texture(0).unwrap();
         let mut cached_resources = context.create_resources(cached.resource_table());
@@ -382,7 +382,7 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
         let queue = context.create_queue();
         for glass_height in [0., 70., 1100.] {
             let mut content = PaintContext::new();
-            content.fill_rounded_rect(Rect::from_xywh(-100., -100., 440., 1400.), 0., Color::WHITE);
+            content.fill_rect(Rect::from_xywh(-100., -100., 440., 1400.), Color::WHITE);
             for row in 0..60 {
                 content.fill_rounded_rect(
                     Rect::from_xywh(10.5, row as f32 * 20., 190., 12.),
@@ -404,6 +404,20 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
                     Color::WHITE.with_opacity(0.35),
                     1.,
                 );
+            }
+            if glass_height > 0. {
+                // At offset -20 the first lens crosses the scrollport and
+                // its capture overlaps this otherwise interior lens. Later
+                // foreground must never leak from a cached final image into
+                // either lens's earlier backdrop sample.
+                content.refractive_glass_rounded_rect(
+                    Rect::from_xywh(32., 84., 160., 40.),
+                    12.,
+                    2.52,
+                    Color::WHITE.with_opacity(0.35),
+                    1.,
+                );
+                content.fill_rect(Rect::from_xywh(48., 90., 60., 4.), Color::rgb(0., 0., 1.));
             }
             let layer = content.into_cached_layer(Rect::from_xywh(-100., -100., 440., 1400.));
             assert!(
@@ -445,7 +459,7 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
                 let max = a.iter().zip(&b).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
                 assert!(
                     max <= 2,
-                    "tile seam or changed paint: scale={scale}, glass_height={glass_height}, offset={offset}, max error={max}"
+                    "tile seam or changed paint: analytic={analytic}, scale={scale}, glass_height={glass_height}, offset={offset}, max error={max}"
                 );
             }
         }

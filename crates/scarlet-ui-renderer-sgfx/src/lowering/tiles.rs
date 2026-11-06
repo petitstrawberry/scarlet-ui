@@ -82,6 +82,147 @@ fn eligible(list: &DisplayList) -> bool {
         })
 }
 
+fn contains_rect(outer: PixelBounds, inner: FloatRect) -> bool {
+    outer.x as f32 <= inner.x
+        && outer.y as f32 <= inner.y
+        && (outer.x + outer.width) as f32 >= inner.right()
+        && (outer.y + outer.height) as f32 >= inner.bottom()
+}
+
+// Expand to a dependency closure, not a fixed-width edge strip: another glass
+// intersecting this region may sample across its edge too. A single rectangle
+// is conservative and the bounded recording makes this traversal finite.
+fn live_boundary(
+    list: &DisplayList,
+    origin: Point,
+    factor: f32,
+    visible: FloatRect,
+    clips: &[(Rect, f32)],
+    full: PixelBounds,
+) -> Option<PixelBounds> {
+    let filters = list
+        .context()
+        .commands()
+        .iter()
+        .filter_map(|command| {
+            let PaintCommand::BackdropFilterRoundedRect {
+                rect, blur_radius, ..
+            } = command
+            else {
+                return None;
+            };
+            let glass = FloatRect::new(
+                (rect.left() + origin.x) * factor,
+                (rect.top() + origin.y) * factor,
+                rect.size.width * factor,
+                rect.size.height * factor,
+            );
+            let r = (blur_radius.max(0.) * factor).min(64.);
+            // Refraction bends inward into the material; only the blur
+            // footprint reaches outside it. Match backdrop::source_bounds.
+            let h = libm::ceilf(r + (r / 4.).max(1.)) + 1.;
+            Some((
+                glass,
+                FloatRect::new(
+                    glass.x - h,
+                    glass.y - h,
+                    glass.width + 2. * h,
+                    glass.height + 2. * h,
+                ),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let full = FloatRect::new(
+        full.x as f32,
+        full.y as f32,
+        full.width as f32,
+        full.height as f32,
+    );
+    let mut live: Option<FloatRect> = None;
+    let union = |a: FloatRect, b: FloatRect| {
+        let x = a.x.min(b.x);
+        let y = a.y.min(b.y);
+        FloatRect::new(
+            x,
+            y,
+            a.right().max(b.right()) - x,
+            a.bottom().max(b.bottom()) - y,
+        )
+    };
+    for (glass, capture) in &filters {
+        if glass.intersect(visible).is_some()
+            && (capture.x < visible.x
+                || capture.y < visible.y
+                || capture.right() > visible.right()
+                || capture.bottom() > visible.bottom()
+                || clips.iter().any(|(_, radius)| *radius > 0.))
+        {
+            if let Some(capture) = capture.intersect(full) {
+                live = Some(live.map_or(capture, |area| union(area, capture)));
+            }
+        }
+    }
+    let mut live = live?;
+    loop {
+        let old = live;
+        for (glass, capture) in &filters {
+            if glass.intersect(live).is_some() && glass.intersect(visible).is_some() {
+                if let Some(capture) = capture.intersect(full) {
+                    live = union(live, capture);
+                }
+            }
+        }
+        if old == live {
+            break;
+        }
+    }
+    let x = libm::floorf(live.x) as u32;
+    let y = libm::floorf(live.y) as u32;
+    Some(PixelBounds {
+        x,
+        y,
+        width: libm::ceilf(live.right()) as u32 - x,
+        height: libm::ceilf(live.bottom()) as u32 - y,
+    })
+}
+
+fn subtract_region(scissor: PixelBounds, live: Option<PixelBounds>) -> Vec<PixelBounds> {
+    let Some(live) = live.and_then(|live| intersect_bounds(scissor, live)) else {
+        return alloc::vec![scissor];
+    };
+    let right = scissor.x + scissor.width;
+    let bottom = scissor.y + scissor.height;
+    [
+        PixelBounds {
+            x: scissor.x,
+            y: scissor.y,
+            width: scissor.width,
+            height: live.y - scissor.y,
+        },
+        PixelBounds {
+            x: scissor.x,
+            y: live.y + live.height,
+            width: scissor.width,
+            height: bottom - live.y - live.height,
+        },
+        PixelBounds {
+            x: scissor.x,
+            y: live.y,
+            width: live.x - scissor.x,
+            height: live.height,
+        },
+        PixelBounds {
+            x: live.x + live.width,
+            y: live.y,
+            width: right - live.x - live.width,
+            height: live.height,
+        },
+    ]
+    .into_iter()
+    .filter(|area| area.width > 0 && area.height > 0)
+    .collect()
+}
+
 impl SgfxPaintEncoder {
     pub(super) fn lower_cached_layer<E: CommandExecutor>(
         &mut self,
@@ -183,42 +324,9 @@ impl SgfxPaintEncoder {
                 uploads: Vec::new(),
             }));
         };
-        if list.reads_backdrop() {
-            // The scrollport clips preceding content, not just final glass.
-            // A filter touching that boundary reads the outside scene: it is
-            // not an isolated layer even if its local recording has a backing.
-            for command in list.context().commands() {
-                if let PaintCommand::BackdropFilterRoundedRect {
-                    rect, blur_radius, ..
-                } = command
-                {
-                    let glass = FloatRect::new(
-                        (rect.left() + origin.x) * factor,
-                        (rect.top() + origin.y) * factor,
-                        rect.size.width * factor,
-                        rect.size.height * factor,
-                    );
-                    if glass.intersect(visible).is_none() {
-                        continue;
-                    }
-                    let r = (blur_radius.max(0.) * factor).min(64.);
-                    let h = libm::ceilf(r + (r / 4.).max(1.)) + 1.;
-                    let capture = FloatRect::new(
-                        glass.x - h,
-                        glass.y - h,
-                        glass.width + 2. * h,
-                        glass.height + 2. * h,
-                    );
-                    if capture.x < visible.x
-                        || capture.y < visible.y
-                        || capture.right() > visible.right()
-                        || capture.bottom() > visible.bottom()
-                        || clips.iter().any(|(_, radius)| *radius > 0.)
-                    {
-                        return Ok(None);
-                    }
-                }
-            }
+        let live = live_boundary(list, origin, factor, visible, clips, full);
+        if live.is_some_and(|area| contains_rect(area, visible)) {
+            return Ok(None);
         }
         let x0 = libm::floorf((visible.x - offset[0]) / side as f32) as i32;
         let y0 = libm::floorf((visible.y - offset[1]) / side as f32) as i32;
@@ -257,6 +365,20 @@ impl SgfxPaintEncoder {
         let mut draws = Vec::new();
         for y in y0..y1 {
             for x in x0..x1 {
+                let tile_rect = FloatRect::new(
+                    offset[0] + x as f32 * side as f32,
+                    offset[1] + y as f32 * side as f32,
+                    side as f32,
+                    side as f32,
+                );
+                if live.is_some_and(|area| {
+                    tile_rect
+                        .intersect(visible)
+                        .is_some_and(|rect| contains_rect(area, rect))
+                }) {
+                    continue;
+                }
+
                 let existing = self.raster_tiles.iter().position(|tile| {
                     tile.list == list.identity()
                         && tile.scale == scale
@@ -379,21 +501,50 @@ impl SgfxPaintEncoder {
                 if let Some(geometry) =
                     tessellator.textured_rect(rect, [[lo, lo], [hi, lo], [hi, hi], [lo, hi]])?
                 {
-                    push_draw(
-                        &mut draws,
-                        &mut tessellator,
-                        geometry,
-                        [1.; 4],
-                        DrawSource::PremultipliedTexture(tile.texture),
-                    )?;
+                    for scissor in subtract_region(geometry.scissor, live) {
+                        push_draw(
+                            &mut draws,
+                            &mut tessellator,
+                            GeometryRange {
+                                scissor,
+                                ..geometry
+                            },
+                            [1.; 4],
+                            DrawSource::PremultipliedTexture(tile.texture),
+                        )?;
+                    }
                 }
             }
         }
-        Ok(Some(LoweredFrame {
+        let mut frame = LoweredFrame {
             vertex_bytes: encode_paint_vertices(tessellator.vertices())?,
             draws,
             uploads: Vec::new(),
-        }))
+        };
+        if let Some(area) = live {
+            // Cached output is absent throughout the dependency closure. Replay
+            // the original order there, with the original viewport clips, so a
+            // filter never samples cached pixels from later foreground paint.
+            let mut context = PaintContext::new();
+            for (clip, radius) in clips {
+                context.push_rounded_clip(*clip, *radius);
+            }
+            context.push_clip(Rect::from_xywh(
+                area.x as f32 / factor,
+                area.y as f32 / factor,
+                area.width as f32 / factor,
+                area.height as f32 / factor,
+            ));
+            context.draw_display_list(origin, Arc::clone(list));
+            context.pop_clip();
+            for _ in clips {
+                context.pop_clip();
+            }
+            let flat = context.flattened();
+            let live_frame = self.lower_once(&flat, scale, full)?;
+            retained::append_frame(&mut frame, live_frame)?;
+        }
+        Ok(Some(frame))
     }
 }
 
@@ -404,6 +555,7 @@ mod tests {
     #[derive(Default)]
     struct Trace {
         targets: Vec<TextureId>,
+        sampled: Vec<TextureId>,
         fail: bool,
     }
     impl CommandExecutor for Trace {
@@ -418,6 +570,9 @@ mod tests {
             for command in commands.commands() {
                 if let Command::BeginRenderPass(pass) = command {
                     self.targets.push(pass.target().id());
+                }
+                if let Command::SetTexture(texture) = command {
+                    self.sampled.push(texture.id());
                 }
                 assert!(
                     !matches!(command, Command::WriteTexture { .. }),
@@ -536,11 +691,26 @@ mod tests {
             [target],
             "unchanged local refraction is not recomputed"
         );
+        let cached_texture = renderer
+            .raster_tiles
+            .iter()
+            .find(|tile| tile.list == list.identity())
+            .unwrap()
+            .texture;
         trace.targets.clear();
+        trace.sampled.clear();
         frame(&mut renderer, &mut trace, &list, -30.).unwrap();
         assert!(
             trace.targets.len() > 1,
             "outside backdrop dependency is live at the scrollport edge"
+        );
+        assert!(
+            trace.sampled.contains(&cached_texture),
+            "the unaffected interior still composites its cached texture"
+        );
+        assert!(
+            !trace.targets.contains(&cached_texture),
+            "a boundary dependency must not rerasterize the static interior"
         );
     }
 
