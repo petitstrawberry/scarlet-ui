@@ -141,6 +141,13 @@ buffer remains opaque and readable rather than claiming cross-window blur.
 
 ## Performance and quality policy
 
+Short virtual rows without backdrop reads share their enclosing scroll layer's
+GPU tiles. Allocating separate 512-pixel textures for every short row wastes
+space and can evict the parent viewport's working set on Retina displays.
+Nested rows at most 256 physical pixels tall replay into parent tiles;
+independent tall content and backdrop materials keep their own caches. Pixel
+parity and bounded-allocation regressions cover this routing.
+
 Release CPU benchmark medians on this shared cloud machine (1x / 2x): baseline
 0.58 / 2.50 ms; one material 1.18 / 4.05 ms; three 1.54 / 14.82 ms; eighty
 29.34 / 143.79 ms. These are one synthetic scene and noisy shared-machine
