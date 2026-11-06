@@ -756,7 +756,13 @@ impl Tessellator {
             }
         };
         // Calculate outside mutable borrowing of the tessellator.
-        let mut rings = [[Vertex::solid(Point2::new(0.0, 0.0)); 100]; 13];
+        // The inset light needs extra radial samples; keep this bounded cache-
+        // build scratch off the native host's stack.
+        let mut rings = Vec::new();
+        rings
+            .try_reserve_exact(17)
+            .map_err(|_| Error::FrameTooComplex)?;
+        rings.resize(17, [Vertex::solid(Point2::new(0.0, 0.0)); 100]);
         for i in 0..100 {
             let angle =
                 core::f32::consts::PI * (-1. + (i / 25) as f32 * 0.5 + (i % 25) as f32 / 48.);
@@ -798,11 +804,17 @@ impl Tessellator {
                 }
             }
             let zero = if all_light { bezel } else { (lo + hi) * 0.5 };
+            let inset = 1. / self.scale;
+            let rim_width = (1.25 + 0.50 * libm::cosf(angle) * libm::cosf(angle)).min(bezel * 0.10);
             let mut distances = [
                 (0., 0),
                 (width * 0.25, 0),
                 (width * 0.5, 0),
                 (width, 0),
+                ((inset - half_pixel).max(0.), 0),
+                ((inset + half_pixel).min(bezel), 0),
+                ((inset + rim_width * 0.5).min(bezel), 0),
+                ((inset + rim_width).min(bezel), 0),
                 ((line_width - half_pixel).max(0.), 0),
                 (line_width, 0),
                 (zero, 1),
@@ -823,7 +835,7 @@ impl Tessellator {
                 rings[ring][i] = v;
             }
         }
-        for ring in 0..12 {
+        for ring in 0..16 {
             for i in 0..100 {
                 let next = (i + 1) % 100;
                 self.push_triangle([rings[ring][i], rings[ring][next], rings[ring + 1][next]])?;

@@ -104,11 +104,13 @@ fn specular_lobe(cosine: f32) -> f32 {
     let side_pixels = max(floor(scale + 0.5), top_pixels + 1.0);
     let line_width = min(top_pixels + (side_pixels - top_pixels) * side, bezel);
     let line = clamp(line_width - max(e.x, 0.0) + 0.5, 0.0, 1.0);
-    // Restore the original light at its original width and strength.
+    // Same narrow light and strength, translated one device pixel inward.
     let rim_width = max(0.0001, min((1.25 + 0.50 * side) * scale, bezel * 0.10));
-    let rim_fade = clamp(1.0 - max(e.x, 0.0) / rim_width, 0.0, 1.0);
+    let rim_distance = e.x - 1.0;
+    let rim_entry = clamp(rim_distance + 0.5, 0.0, 1.0);
+    let rim_fade = clamp(1.0 - max(rim_distance, 0.0) / rim_width, 0.0, 1.0);
     let rim_light = (0.34 - 0.06 * max(-e.z, 0.0)) * e.z * e.z
-        * rim_fade * rim_fade * (3.0 - 2.0 * rim_fade);
+        * rim_fade * rim_fade * (3.0 - 2.0 * rim_fade) * rim_entry;
     let reflection = (surface + rim_light - near_shadow - opacity * line) * p.optics.y;
     let light = vec4(select(vec3(0.0), vec3(1.0), reflection >= 0.0), 1.0);
     material += (light - material) * abs(reflection);

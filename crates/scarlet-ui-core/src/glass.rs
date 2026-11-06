@@ -193,7 +193,9 @@ pub fn glass_surface_reflection_at_scale(
         glass_shadow_layers(distance, inward_x, inward_y, bezel, scale);
     // Keep the soft reflection; add distinct shadow stages instead of erasing
     // it underneath a solid outline. Elevation's outer shadow is independent.
-    surface + glass_rim_light(distance, inward_x, inward_y, bezel) - near_shadow - line_shadow
+    surface + glass_rim_light_inset(distance, inward_x, inward_y, bezel, scale)
+        - near_shadow
+        - line_shadow
 }
 
 // Original narrow light component, retained independently of the C shadow stages.
@@ -204,6 +206,21 @@ fn glass_rim_light(distance: f32, inward_x: f32, inward_y: f32, bezel: f32) -> f
     let width = (1.25 + 0.50 * inward_x * inward_x).min(bezel * 0.10);
     let fade = (1. - distance / width).clamp(0., 1.);
     (0.34 - 0.06 * (-inward_y).max(0.)) * inward_y * inward_y * fade * fade * (3. - 2. * fade)
+}
+
+// Translate only the narrow light by one device pixel. Its new inner boundary
+// needs the same one-pixel coverage ramp formerly supplied by the silhouette.
+fn glass_rim_light_inset(
+    distance: f32,
+    inward_x: f32,
+    inward_y: f32,
+    bezel: f32,
+    scale: f32,
+) -> f32 {
+    let scale = scale.max(0.001);
+    let shifted = distance - 1. / scale;
+    let entry = (shifted * scale + 0.5).clamp(0., 1.);
+    glass_rim_light(shifted.max(0.), inward_x, inward_y, bezel) * entry
 }
 
 fn glass_shadow_layers(
@@ -261,9 +278,23 @@ mod tests {
         assert!((glass_rim_light(0.625, 0., 1., 20.) - 0.17).abs() < 0.0001);
         for y in [-1., 1.] {
             assert_eq!(glass_rim_light(1.25, 0., y, 20.), 0.);
-            assert!(glass_surface_reflection_at_scale(0., 0., y, 20., 2.) > 0.05);
+            assert!(glass_surface_reflection_at_scale(0., 0., y, 20., 2.) < 0.);
         }
         assert_eq!(glass_rim_light(0., 1., 0., 20.), 0.);
+    }
+    #[test]
+    fn rim_light_translates_one_device_pixel_without_widening_or_recoloring() {
+        for scale in [0.75, 1., 1.25, 1.5, 2., 3.] {
+            for (x, y) in [(0., 1.), (0., -1.), (0.6, 0.8)] {
+                assert_eq!(glass_rim_light_inset(0.5 / scale, x, y, 20., scale), 0.);
+                for pixel in 0..8 {
+                    let original = glass_rim_light((pixel as f32 + 0.5) / scale, x, y, 20.);
+                    let shifted =
+                        glass_rim_light_inset((pixel as f32 + 1.5) / scale, x, y, 20., scale);
+                    assert!((original - shifted).abs() < 0.00001);
+                }
+            }
+        }
     }
     #[test]
     fn fine_shadow_near_shadow_and_soft_light_coexist() {
