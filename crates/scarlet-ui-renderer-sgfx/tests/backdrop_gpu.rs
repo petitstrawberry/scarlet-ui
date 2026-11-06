@@ -7,6 +7,15 @@ use sgfx_backend_wgpu::{Context, Device};
 use std::time::Instant;
 
 fn context() -> Option<Context> {
+    // Parallel GPU fixtures must not change the global font after another
+    // fixture has retained text pixels. Install one deterministic font first.
+    static FONT: std::sync::Once = std::sync::Once::new();
+    FONT.call_once(|| {
+        scarlet_ui_core::graphics::set_default_font(include_bytes!(
+            "../../../examples/web-counter/assets/DejaVuSans.ttf"
+        ))
+        .unwrap();
+    });
     let context = try_context();
     if context.is_none() {
         assert!(
@@ -346,10 +355,6 @@ fn batched_materials_keep_independent_capture_and_work_buffer_contents() {
 #[test]
 fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
     use scarlet_ui_core::geometry::Point;
-    scarlet_ui_core::graphics::set_default_font(include_bytes!(
-        "../../../examples/web-counter/assets/DejaVuSans.ttf"
-    ))
-    .unwrap();
     let Some(context) = context() else {
         return;
     };
@@ -967,5 +972,247 @@ fn retained_revisions_and_partial_backdrop_reconstruction_match_full_frames() {
             );
             previous = Some(layer);
         }
+    }
+}
+
+#[test]
+fn nested_cached_scroll_pictures_match_full_frames_in_window_space() {
+    use scarlet_ui_core::{geometry::Point, renderer::DisplayList};
+    use std::sync::Arc;
+    let Some(context) = context() else {
+        return;
+    };
+    for (scale, analytic) in [(1, false), (2, false), (3, false), (2, true)] {
+        let (width, height) = (240 * scale, 480 * scale);
+        let mut cached = SgfxPaintEncoder::new(width, height, false).unwrap();
+        cached.set_analytic_glass(analytic);
+        let mut direct = SgfxPaintEncoder::new(width, height, false).unwrap();
+        direct.set_analytic_glass(analytic);
+        let a_target = cached.target_texture(0).unwrap();
+        let b_target = direct.target_texture(0).unwrap();
+        let mut a_resources = context.create_resources(cached.resource_table());
+        let mut b_resources = context.create_resources(direct.resource_table());
+        a_resources
+            .map_image(
+                a_target,
+                context
+                    .create_image(width, height, TextureFormat::Bgra8Unorm)
+                    .unwrap(),
+            )
+            .unwrap();
+        b_resources
+            .map_image(
+                b_target,
+                context
+                    .create_image(width, height, TextureFormat::Bgra8Unorm)
+                    .unwrap(),
+            )
+            .unwrap();
+        let queue = context.create_queue();
+        let backdrop = |ctx: &mut PaintContext<'_>, bounds: Rect| {
+            ctx.fill_rect(bounds, Color::WHITE);
+            for row in 0..70 {
+                ctx.fill_rect(
+                    Rect::from_xywh(4., row as f32 * 10., 210., 2.),
+                    Color::rgba(0.2, 0.3, 0.8, 0.5),
+                );
+            }
+        };
+        let bounds = Rect::from_xywh(-50., -50., 340., 850.);
+        let mut inner = PaintContext::new();
+        backdrop(&mut inner, bounds);
+        for row in 0..16 {
+            inner.draw_text(
+                Point::new(12.25, row as f32 * 35. + 2.5),
+                format!("Track {row}"),
+                Color::BLACK,
+                15.,
+            );
+        }
+        inner.refractive_glass_rounded_rect(
+            Rect::from_xywh(20., 90., 160., 60.),
+            12.,
+            5.,
+            Color::WHITE.with_opacity(0.3),
+            1.,
+        );
+        let inner = inner.into_cached_layer(bounds);
+        let mut old_middle: Option<Arc<DisplayList>> = None;
+        let mut old_outer: Option<Arc<DisplayList>> = None;
+        for (step, (inside_x, inside, middle_offset, outer_offset)) in [
+            (0., 0.25, 0.25, 0.25),
+            (0., 8.25, 0.25, 0.25),
+            (64., 20.25, 0.25, 0.25),
+            (64., 20.25, 14.25, 0.25),
+            (64., 20.25, 14.25, 28.25),
+            (0., 4.25, 2.25, 0.25),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut middle = PaintContext::new();
+            backdrop(&mut middle, bounds);
+            middle.push_rounded_clip(Rect::from_xywh(18., 24., 150., 130.), 7.);
+            middle.draw_display_list(Point::new(18. - inside_x, 24. - inside), inner.clone());
+            middle.pop_clip();
+            middle.fill_rect(Rect::from_xywh(8., 30., 175., 2.), Color::BLACK);
+            middle.refractive_glass_rounded_rect(
+                Rect::from_xywh(20., 170., 150., 60.),
+                12.,
+                4.,
+                Color::WHITE.with_opacity(0.3),
+                1.,
+            );
+            let middle = if let Some(old) = &old_middle {
+                middle.into_cached_layer_revision(bounds, old)
+            } else {
+                middle.into_cached_layer(bounds)
+            };
+            let mut outer = PaintContext::new();
+            backdrop(&mut outer, bounds);
+            outer.push_rounded_clip(Rect::from_xywh(10., 30., 190., 240.), 9.);
+            outer.draw_display_list(Point::new(10., 30. - middle_offset), middle.clone());
+            outer.pop_clip();
+            outer.refractive_glass_rounded_rect(
+                Rect::from_xywh(20., 400., 180., 60.),
+                16.,
+                5.,
+                Color::WHITE.with_opacity(0.3),
+                1.,
+            );
+            let outer = if let Some(old) = &old_outer {
+                outer.into_cached_layer_revision(bounds, old)
+            } else {
+                outer.into_cached_layer(bounds)
+            };
+            assert!(
+                inner.raster_cache_bounds().is_some()
+                    && middle.raster_cache_bounds().is_some()
+                    && outer.raster_cache_bounds().is_some()
+            );
+            let mut paint = PaintContext::new();
+            paint.push_rounded_clip(Rect::from_xywh(0., 0., 240., 480.), 10.);
+            paint.draw_display_list(Point::new(-0.25, -outer_offset), outer.clone());
+            paint.pop_clip();
+            cached
+                .encode_frame(
+                    &mut queue.executor(&mut a_resources),
+                    0,
+                    None,
+                    &paint,
+                    Color::WHITE,
+                    scale * 1000,
+                    &[(0, 0, width, height)],
+                )
+                .unwrap();
+            direct
+                .encode_frame(
+                    &mut queue.executor(&mut b_resources),
+                    0,
+                    None,
+                    &paint.flattened(),
+                    Color::WHITE,
+                    scale * 1000,
+                    &[(0, 0, width, height)],
+                )
+                .unwrap();
+            let a = a_resources.read_texture(a_target).unwrap();
+            let b = b_resources.read_texture(b_target).unwrap();
+            let max = a.iter().zip(&b).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+            assert!(
+                max <= 3,
+                "nested cached pixels diverged: scale={scale} analytic={analytic} step={step} max={max}"
+            );
+            old_middle = Some(middle);
+            old_outer = Some(outer);
+        }
+    }
+}
+
+#[test]
+fn nested_cache_depth_fallback_preserves_window_space_text() {
+    use scarlet_ui_core::geometry::Point;
+    let Some(context) = context() else { return };
+    let (width, height, scale) = (240, 200, 2000);
+    let mut cached = SgfxPaintEncoder::new(width, height, false).unwrap();
+    let mut direct = SgfxPaintEncoder::new(width, height, false).unwrap();
+    let a_target = cached.target_texture(0).unwrap();
+    let b_target = direct.target_texture(0).unwrap();
+    let mut a_resources = context.create_resources(cached.resource_table());
+    let mut b_resources = context.create_resources(direct.resource_table());
+    a_resources
+        .map_image(
+            a_target,
+            context
+                .create_image(width, height, TextureFormat::Bgra8Unorm)
+                .unwrap(),
+        )
+        .unwrap();
+    b_resources
+        .map_image(
+            b_target,
+            context
+                .create_image(width, height, TextureFormat::Bgra8Unorm)
+                .unwrap(),
+        )
+        .unwrap();
+    let queue = context.create_queue();
+    let bounds = Rect::from_xywh(0., 0., 180., 180.);
+    let mut leaf = PaintContext::new();
+    leaf.fill_rect(bounds, Color::WHITE);
+    for row in 0..5 {
+        leaf.draw_text(
+            Point::new(10.25, 10.25 + row as f32 * 20.),
+            "Nested fallback",
+            Color::BLACK,
+            15.,
+        );
+    }
+    let mut picture = leaf.into_cached_layer(bounds);
+    // The ninth picture crosses the encoder's eight-target recursion limit.
+    // Its raw text would otherwise enter the mesh fallback in tile coordinates.
+    for _ in 0..8 {
+        let mut parent = PaintContext::new();
+        parent.draw_display_list(Point::ZERO, picture);
+        picture = parent.into_cached_layer(bounds);
+    }
+    for origin in [
+        Point::new(-20.5, -25.5),
+        Point::new(-20.25, -25.25),
+        Point::new(0.25, 0.25),
+    ] {
+        let mut paint = PaintContext::new();
+        paint.draw_display_list(origin, picture.clone());
+        cached
+            .encode_frame(
+                &mut queue.executor(&mut a_resources),
+                0,
+                None,
+                &paint,
+                Color::WHITE,
+                scale,
+                &[(0, 0, width, height)],
+            )
+            .unwrap();
+        direct
+            .encode_frame(
+                &mut queue.executor(&mut b_resources),
+                0,
+                None,
+                &paint.flattened(),
+                Color::WHITE,
+                scale,
+                &[(0, 0, width, height)],
+            )
+            .unwrap();
+        let a = a_resources.read_texture(a_target).unwrap();
+        let b = b_resources.read_texture(b_target).unwrap();
+        assert!(
+            b.chunks_exact(4)
+                .any(|pixel| pixel[..3].iter().all(|c| *c < 200)),
+            "the depth-fallback fixture must contain visible text"
+        );
+        let max = a.iter().zip(&b).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+        assert_eq!(max, 0, "depth fallback shifted text at {origin:?}");
     }
 }

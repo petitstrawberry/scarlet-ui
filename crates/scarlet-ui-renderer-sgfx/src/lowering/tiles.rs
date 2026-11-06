@@ -14,6 +14,7 @@ const BASE_TILES: usize = 64;
 // Retina displays. Allocate lazily from 64..128 MiB; reuse immutable resource
 // slots instead of cycling through whole phases on each subpixel scroll.
 const MAX_TILES: usize = 128;
+const MAX_TILE_DEPTH: usize = 8;
 
 pub(super) struct Tile {
     list: u64,
@@ -359,7 +360,8 @@ impl SgfxPaintEncoder {
         // Raster text has logical-pixel snapping semantics. Bake fractional
         // offset phases into separate tiles and composite on the integer grid.
         // Fractional DPI retains the precise normal path.
-        if scale % 1000 != 0
+        if self.tile_depth >= MAX_TILE_DEPTH
+            || scale % 1000 != 0
             || scale == 0
             || scale > 8000
             || !origin.x.is_finite()
@@ -373,6 +375,10 @@ impl SgfxPaintEncoder {
             return Ok(None);
         }
         let factor = scale as f32 / 1000.;
+        let scene_origin = Point::new(
+            origin.x - self.tile_translation.x,
+            origin.y - self.tile_translation.y,
+        );
         let base = Point::new(libm::floorf(origin.x), libm::floorf(origin.y));
         let phase_values = [origin.x - base.x, origin.y - base.y];
         let phase = phase_values.map(f32::to_bits);
@@ -450,7 +456,7 @@ impl SgfxPaintEncoder {
                 && tile.list != 0
                 && tile.scale == scale
                 && tile.padding == padding
-                && tile.snap == snap_signature(&tile.snap_dependencies, origin, phase_values)
+                && tile.snap == snap_signature(&tile.snap_dependencies, scene_origin, phase_values)
                 && tile.phase == phase
                 && tile.x >= x0
                 && tile.x < x1
@@ -498,7 +504,7 @@ impl SgfxPaintEncoder {
                         && tile.scale == scale
                         && tile.padding == padding
                         && tile.snap
-                            == snap_signature(&tile.snap_dependencies, origin, phase_values)
+                            == snap_signature(&tile.snap_dependencies, scene_origin, phase_values)
                         && tile.phase == phase
                         && tile.x == x
                         && tile.y == y
@@ -573,15 +579,22 @@ impl SgfxPaintEncoder {
                     // Commit identity only after successful rendering. Rejected
                     // submissions must never turn a partially drawn tile into a hit.
                     self.raster_tiles[slot].list = 0;
+                    // A recursive child render cannot recycle its parent's target.
+                    self.raster_tiles[slot].used = self.frame_serial;
                     let texture = self.raster_tiles[slot].texture;
-                    let flat = list.flat_context().raster_tile_context(
-                        origin,
-                        Point::new(
-                            (padding as f32 - x as f32 * side as f32) / factor,
-                            (padding as f32 - y as f32 * side as f32) / factor,
-                        ),
+                    let tile_offset = Point::new(
+                        (padding as f32 - x as f32 * side as f32) / factor,
+                        (padding as f32 - y as f32 * side as f32) / factor,
+                    );
+                    let flat = list.context().raster_tile_composite_context(
+                        scene_origin,
+                        tile_offset,
                         scale,
                     );
+                    let nested = flat
+                        .commands()
+                        .iter()
+                        .any(|c| matches!(c, PaintCommand::DrawDisplayList { .. }));
                     let tile_bounds =
                         Rect::from_xywh(0., 0., SIDE as f32 / factor, SIDE as f32 / factor);
                     let regions = match changes {
@@ -611,7 +624,17 @@ impl SgfxPaintEncoder {
                     let dimensions = (self.width, self.height);
                     self.width = SIDE;
                     self.height = SIDE;
-                    core::mem::swap(&mut self.backdrop, &mut self.tile_backdrop);
+                    let depth = self.tile_depth;
+                    if self.tile_backdrops.len() == depth {
+                        self.tile_backdrops.push(None);
+                    }
+                    core::mem::swap(&mut self.backdrop, &mut self.tile_backdrops[depth]);
+                    let old_translation = self.tile_translation;
+                    self.tile_translation = Point::new(
+                        tile_offset.x - libm::floorf(scene_origin.x),
+                        tile_offset.y - libm::floorf(scene_origin.y),
+                    );
+                    self.tile_depth += 1;
                     let budget = (
                         self.backdrop_pixels,
                         self.backdrop_filters,
@@ -635,7 +658,24 @@ impl SgfxPaintEncoder {
                                 width: right - left,
                                 height: bottom - top,
                             };
-                            let frame = self.lower_once(&flat, scale, area)?;
+                            let frame = if nested {
+                                // Keep the reconstruction scissor around child composites too.
+                                let mut clipped = PaintContext::new();
+                                clipped.push_clip(Rect::new(
+                                    Point::new(left as f32 / factor, top as f32 / factor),
+                                    scarlet_ui_core::geometry::Size::new(
+                                        (right - left) as f32 / factor,
+                                        (bottom - top) as f32 / factor,
+                                    ),
+                                ));
+                                clipped.append_retained_at(&flat, Point::ZERO);
+                                clipped.pop_clip();
+                                super::retained::owned_frame(
+                                    self.lower_retained(executor, &clipped, scale, area)?,
+                                )
+                            } else {
+                                super::retained::owned_frame(self.lower_once(&flat, scale, area)?)
+                            };
                             self.submit(executor, texture, UiColor::TRANSPARENT, &[area], &frame)?;
                         }
                         Ok::<_, FrameError<E::Error>>(())
@@ -646,7 +686,9 @@ impl SgfxPaintEncoder {
                         self.backdrop_filters,
                         self.backdrop_fallbacks,
                     ) = budget;
-                    core::mem::swap(&mut self.backdrop, &mut self.tile_backdrop);
+                    self.tile_depth = depth;
+                    self.tile_translation = old_translation;
+                    core::mem::swap(&mut self.backdrop, &mut self.tile_backdrops[depth]);
                     (self.width, self.height) = dimensions;
                     rendered?;
                     if degraded {
@@ -662,7 +704,7 @@ impl SgfxPaintEncoder {
                         ),
                         scale,
                     );
-                    let snap = snap_signature(&dependencies, origin, phase_values);
+                    let snap = snap_signature(&dependencies, scene_origin, phase_values);
                     self.raster_tiles[slot] = Tile {
                         list: list.identity(),
                         cache_identity: list.cache_identity(),
@@ -726,7 +768,13 @@ impl SgfxPaintEncoder {
                 area.width as f32 / factor,
                 area.height as f32 / factor,
             ));
-            context.draw_display_list(origin, Arc::clone(list));
+            let local;
+            if self.tile_depth > 0 {
+                local = list.context().raster_tile_context(scene_origin, base, scale);
+                context.append_at(&local, Point::ZERO);
+            } else {
+                context.draw_display_list(origin, Arc::clone(list));
+            }
             context.pop_clip();
             for _ in clips {
                 context.pop_clip();
@@ -1015,6 +1063,67 @@ mod tests {
     }
 
     #[test]
+    fn nested_scroll_reuses_child_pixels_and_stopped_parent_pixels() {
+        let mut renderer = SgfxPaintEncoder::new(200, 220, false).unwrap();
+        let target = renderer.target_texture(0).unwrap();
+        let mut inner = PaintContext::new();
+        inner.fill_rect(Rect::from_xywh(0., 0., 180., 700.), UiColor::WHITE);
+        for row in 0..60 {
+            inner.fill_rect(
+                Rect::from_xywh(10., row as f32 * 10., 80., 3.),
+                UiColor::RED,
+            );
+        }
+        let inner = inner.into_cached_layer(Rect::from_xywh(0., 0., 180., 700.));
+        let make = |offset: f32, previous: Option<&DisplayList>| {
+            let mut outer = PaintContext::new();
+            outer.fill_rect(Rect::from_xywh(0., 0., 200., 800.), UiColor::WHITE);
+            outer.push_clip(Rect::from_xywh(10., 20., 160., 140.));
+            outer.draw_display_list(Point::new(10., 20. - offset), inner.clone());
+            outer.pop_clip();
+            outer.fill_rect(Rect::from_xywh(10., 180., 140., 10.), UiColor::BLUE);
+            if let Some(old) = previous {
+                outer.into_cached_layer_revision(Rect::from_xywh(0., 0., 200., 800.), old)
+            } else {
+                outer.into_cached_layer(Rect::from_xywh(0., 0., 200., 800.))
+            }
+        };
+        let mut outer = make(0., None);
+        let mut trace = Trace::default();
+        frame(&mut renderer, &mut trace, &outer, 0.).unwrap();
+        let child_tiles = renderer
+            .raster_tiles
+            .iter()
+            .filter(|t| t.list == inner.identity())
+            .map(|t| t.texture)
+            .collect::<Vec<_>>();
+        assert!(
+            !child_tiles.is_empty(),
+            "child picture must actually have independent raster tiles"
+        );
+        for offset in [4., 12., 4., 0.] {
+            outer = make(offset, Some(&outer));
+            trace.targets.clear();
+            trace.sampled.clear();
+            frame(&mut renderer, &mut trace, &outer, 0.).unwrap();
+            assert!(
+                child_tiles.iter().all(|t| !trace.targets.contains(t)),
+                "inner motion must composite cached pixels"
+            );
+            assert!(child_tiles.iter().any(|t| trace.sampled.contains(t)));
+        }
+        trace.targets.clear();
+        frame(&mut renderer, &mut trace, &outer, -4.).unwrap();
+        assert_eq!(
+            trace.targets,
+            [target],
+            "moving the outer viewport must reuse its complete static picture"
+        );
+        assert_eq!(renderer.tile_depth, 0);
+        assert_eq!(renderer.tile_translation, Point::ZERO);
+    }
+
+    #[test]
     fn long_scroll_recycles_a_bounded_tile_pool() {
         let mut renderer = SgfxPaintEncoder::new(200, 120, false).unwrap();
         let mut paint = PaintContext::new();
@@ -1182,6 +1291,269 @@ mod tests {
             !trace.targets.contains(&cached_texture),
             "a boundary dependency must not rerasterize the static interior"
         );
+    }
+
+    #[derive(Default)]
+    struct FailingTileTrace {
+        trace: Trace,
+        snapshots: Vec<(TextureId, TextureId)>,
+        fail_target: Option<TextureId>,
+        accepted_before_failure: usize,
+        rejected: Option<TextureId>,
+    }
+
+    impl CommandExecutor for FailingTileTrace {
+        type Error = ();
+
+        fn execute<'r, 'data>(
+            &mut self,
+            commands: &CommandBuffer<'r, 'data>,
+        ) -> core::result::Result<(), ()> {
+            if let Some(target) = self.fail_target {
+                if commands.commands().iter().any(|command| {
+                    matches!(command, Command::BeginRenderPass(pass) if pass.target().id() == target)
+                }) {
+                    if self.accepted_before_failure == 0 {
+                        self.fail_target = None;
+                        self.rejected = Some(target);
+                        return Err(());
+                    }
+                    self.accepted_before_failure -= 1;
+                }
+            }
+            self.trace.execute(commands)?;
+            for command in commands.commands() {
+                if let Command::CopyTextureToTexture {
+                    source,
+                    destination,
+                    ..
+                } = command
+                {
+                    self.snapshots.push((source.id(), destination.id()));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl FailingTileTrace {
+        fn snapshot_for(&self, target: TextureId) -> TextureId {
+            let snapshots = self
+                .snapshots
+                .iter()
+                .filter_map(|(source, snapshot)| (*source == target).then_some(*snapshot))
+                .collect::<Vec<_>>();
+            assert!(
+                !snapshots.is_empty(),
+                "the fixture must exercise backdrop scratch"
+            );
+            assert!(snapshots.iter().all(|snapshot| *snapshot == snapshots[0]));
+            snapshots[0]
+        }
+    }
+
+    fn check_nested_tile_failure(fail_child: bool) {
+        let mut renderer = SgfxPaintEncoder::new(320, 300, false).unwrap();
+        let target = renderer.target_texture(0).unwrap();
+        let make = |color: UiColor, previous: Option<&(Arc<DisplayList>, Arc<DisplayList>)>| {
+            let child_bounds = Rect::from_xywh(0., 0., 160., 200.);
+            let mut child = PaintContext::new();
+            child.fill_rect(child_bounds, UiColor::WHITE);
+            // Two disjoint repairs let one submission modify the old tile before
+            // the second submission fails, rather than failing a pristine tile.
+            for y in [44., 124.] {
+                child.fill_rect(Rect::from_xywh(32., y + 8., 64., 6.), color);
+                child.refractive_glass_rounded_rect(
+                    Rect::from_xywh(24., y, 88., 26.),
+                    8.,
+                    2.,
+                    UiColor::WHITE.with_opacity(0.3),
+                    1.,
+                );
+            }
+            let child = match previous {
+                Some((previous_child, _)) => {
+                    child.into_cached_layer_revision(child_bounds, previous_child)
+                }
+                None => child.into_cached_layer(child_bounds),
+            };
+            let parent_bounds = Rect::from_xywh(0., 0., 240., 400.);
+            let mut parent = PaintContext::new();
+            parent.fill_rect(parent_bounds, UiColor::WHITE);
+            parent.draw_display_list(Point::new(24., 28.), child.clone());
+            parent.fill_rect(Rect::from_xywh(40., 264., 144., 6.), color);
+            parent.refractive_glass_rounded_rect(
+                Rect::from_xywh(40., 256., 144., 26.),
+                8.,
+                2.,
+                UiColor::WHITE.with_opacity(0.3),
+                1.,
+            );
+            let parent = match previous {
+                Some((_, previous_parent)) => {
+                    parent.into_cached_layer_revision(parent_bounds, previous_parent)
+                }
+                None => parent.into_cached_layer(parent_bounds),
+            };
+            (child, parent)
+        };
+        let render = |renderer: &mut SgfxPaintEncoder,
+                      trace: &mut FailingTileTrace,
+                      parent: &Arc<DisplayList>| {
+            let mut paint = PaintContext::new();
+            // Allocate distinct main-frame scratch before entering either tile.
+            paint.refractive_glass_rounded_rect(
+                Rect::from_xywh(256., 32., 40., 40.),
+                8.,
+                2.,
+                UiColor::WHITE.with_opacity(0.3),
+                1.,
+            );
+            paint.draw_display_list(Point::new(7.25, -3.5), parent.clone());
+            renderer.encode_frame(
+                trace,
+                0,
+                None,
+                &paint,
+                UiColor::WHITE,
+                1000,
+                &[(0, 0, 320, 300)],
+            )
+        };
+        let tile_for = |renderer: &SgfxPaintEncoder, list: &DisplayList| {
+            let tiles = renderer
+                .raster_tiles
+                .iter()
+                .filter(|tile| tile.list == list.identity())
+                .map(|tile| tile.texture)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                tiles.len(),
+                1,
+                "each fixture layer occupies exactly one tile"
+            );
+            tiles[0]
+        };
+        let original = make(UiColor::RED, None);
+        let mut trace = FailingTileTrace::default();
+        render(&mut renderer, &mut trace, &original.1).unwrap();
+        let child_target = tile_for(&renderer, &original.0);
+        let parent_target = tile_for(&renderer, &original.1);
+        let scratch = [
+            trace.snapshot_for(target),
+            trace.snapshot_for(parent_target),
+            trace.snapshot_for(child_target),
+        ];
+        assert_ne!(scratch[0], scratch[1]);
+        assert_ne!(scratch[0], scratch[2]);
+        assert_ne!(scratch[1], scratch[2]);
+        let budget = (
+            renderer.backdrop_pixels,
+            renderer.backdrop_filters,
+            renderer.backdrop_fallbacks,
+        );
+        assert_eq!(
+            budget.1, 1,
+            "nested budgets must not leak into the main frame"
+        );
+        let changed = make(UiColor::BLUE, Some(&original));
+        let failed_target = if fail_child {
+            child_target
+        } else {
+            parent_target
+        };
+        trace = FailingTileTrace {
+            fail_target: Some(failed_target),
+            accepted_before_failure: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            render(&mut renderer, &mut trace, &changed.1),
+            Err(FrameError::Execution(()))
+        ));
+        assert_eq!(trace.rejected, Some(failed_target));
+        assert!(
+            trace.trace.targets.contains(&failed_target),
+            "a prior accepted repair must already have changed the failed tile"
+        );
+        assert_eq!((renderer.width(), renderer.height()), (320, 300));
+        assert_eq!(renderer.tile_depth, 0);
+        assert_eq!(renderer.tile_translation, Point::ZERO);
+        assert_eq!(renderer.tile_backdrops.len(), 2);
+        assert!(renderer.backdrop.is_some());
+        assert!(renderer.tile_backdrops.iter().all(Option::is_some));
+        assert_eq!(
+            (
+                renderer.backdrop_pixels,
+                renderer.backdrop_filters,
+                renderer.backdrop_fallbacks
+            ),
+            budget
+        );
+        assert_eq!(
+            renderer
+                .raster_tiles
+                .iter()
+                .find(|tile| tile.texture == parent_target)
+                .unwrap()
+                .list,
+            0,
+            "a partially reconstructed parent must never retain its old or new identity"
+        );
+        assert!(
+            renderer
+                .raster_tiles
+                .iter()
+                .all(|tile| tile.list != changed.1.identity())
+        );
+        if fail_child {
+            assert_eq!(
+                renderer
+                    .raster_tiles
+                    .iter()
+                    .find(|tile| tile.texture == child_target)
+                    .unwrap()
+                    .list,
+                0
+            );
+        } else {
+            assert_eq!(
+                tile_for(&renderer, &changed.0),
+                child_target,
+                "the completed child remains usable when its parent's later repair fails"
+            );
+        }
+
+        // Retry without discard_frame: even before the platform's conservative
+        // invalidation, no incomplete tile may be treated as a cache hit.
+        trace = FailingTileTrace::default();
+        render(&mut renderer, &mut trace, &changed.1).unwrap();
+        let repaired_parent = tile_for(&renderer, &changed.1);
+        assert!(trace.trace.targets.contains(&repaired_parent));
+        tile_for(&renderer, &changed.0);
+
+        // Force both depths to execute again and observe their snapshot texture
+        // IDs, not just Some/None: a misplaced scratch image can otherwise pass
+        // dimension/depth checks while retaining the wrong resource ownership.
+        let next = make(UiColor::RED, Some(&changed));
+        trace = FailingTileTrace::default();
+        render(&mut renderer, &mut trace, &next.1).unwrap();
+        assert_eq!(trace.snapshot_for(target), scratch[0]);
+        assert_eq!(trace.snapshot_for(tile_for(&renderer, &next.1)), scratch[1]);
+        assert_eq!(trace.snapshot_for(tile_for(&renderer, &next.0)), scratch[2]);
+        assert_eq!((renderer.width(), renderer.height()), (320, 300));
+        assert_eq!(renderer.tile_depth, 0);
+        assert_eq!(renderer.tile_translation, Point::ZERO);
+    }
+
+    #[test]
+    fn nested_child_render_failure_restores_state_and_retries_partial_tiles() {
+        check_nested_tile_failure(true);
+    }
+
+    #[test]
+    fn nested_parent_render_failure_restores_state_and_retries_partial_tiles() {
+        check_nested_tile_failure(false);
     }
 
     #[test]
