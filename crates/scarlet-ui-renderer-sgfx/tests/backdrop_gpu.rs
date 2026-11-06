@@ -7,6 +7,15 @@ use sgfx_backend_wgpu::{Context, Device};
 use std::time::Instant;
 
 fn context() -> Option<Context> {
+    // Parallel GPU fixtures must not change the global font after another
+    // fixture has retained text pixels. Install one deterministic font first.
+    static FONT: std::sync::Once = std::sync::Once::new();
+    FONT.call_once(|| {
+        scarlet_ui_core::graphics::set_default_font(include_bytes!(
+            "../../../examples/web-counter/assets/DejaVuSans.ttf"
+        ))
+        .unwrap();
+    });
     let context = try_context();
     if context.is_none() {
         assert!(
@@ -346,10 +355,6 @@ fn batched_materials_keep_independent_capture_and_work_buffer_contents() {
 #[test]
 fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
     use scarlet_ui_core::geometry::Point;
-    scarlet_ui_core::graphics::set_default_font(include_bytes!(
-        "../../../examples/web-counter/assets/DejaVuSans.ttf"
-    ))
-    .unwrap();
     let Some(context) = context() else {
         return;
     };
