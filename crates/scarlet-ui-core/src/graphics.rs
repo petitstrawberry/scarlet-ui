@@ -56,6 +56,14 @@ pub fn set_current_scale_milli(scale_milli: u32) {
     CURRENT_SCALE_MILLI.store(scale_milli.max(1), Ordering::Relaxed);
 }
 
+/// Snap a logical text origin once, on the output pixel grid.
+/// Half-pixel ties round toward positive infinity so integer translations are
+/// invariant even when retained content crosses the window origin.
+#[doc(hidden)]
+pub fn text_origin_physical(value: f32, scale_milli: u32) -> i32 {
+    libm::floorf(value * (scale_milli.max(1) as f32 / 1000.) + 0.5) as i32
+}
+
 #[cfg(all(test, feature = "std"))]
 mod scale_context_tests {
     #[test]
@@ -953,7 +961,7 @@ pub fn rasterize_text_with_font_stack(
             glyphs.push(RasterizedGlyph {
                 key: glyph.key,
                 x: caret_x as i32 + glyph.origin_x,
-                y: caret_y as i32 + glyph.origin_y,
+                y: libm::floorf(caret_y + 0.5) as i32 + glyph.origin_y,
                 width: glyph.width,
                 height: glyph.height,
                 mask: glyph.mask,
@@ -1374,8 +1382,8 @@ impl<'a> Canvas<'a> {
             return;
         };
         self.draw_text_sized_with_font_stack_internal(
-            x,
-            y,
+            x as f32,
+            y as f32,
             text,
             color,
             font_size_px,
@@ -1409,8 +1417,8 @@ impl<'a> Canvas<'a> {
             return;
         };
         self.draw_text_sized_with_font_stack_internal(
-            x,
-            y,
+            x as f32,
+            y as f32,
             text,
             color,
             font_size_px,
@@ -1445,8 +1453,8 @@ impl<'a> Canvas<'a> {
         font_stack: &FontStack,
     ) {
         self.draw_text_sized_with_font_stack_internal(
-            x,
-            y,
+            x as f32,
+            y as f32,
             text,
             color,
             font_size_px,
@@ -1469,8 +1477,8 @@ impl<'a> Canvas<'a> {
         corner_radius: f32,
     ) {
         self.draw_text_sized_with_font_stack_internal(
-            x,
-            y,
+            x as f32,
+            y as f32,
             text,
             color,
             font_size_px,
@@ -1479,18 +1487,50 @@ impl<'a> Canvas<'a> {
         );
     }
 
+    pub(crate) fn draw_text_at(
+        &mut self,
+        position: crate::geometry::Point,
+        text: &str,
+        color: Color,
+        font_size_px: f32,
+        font_stack: Option<&FontStack>,
+        clip: Option<(Rect, f32)>,
+    ) {
+        let default_stack;
+        let stack = match font_stack {
+            Some(stack) => stack,
+            None => {
+                default_stack = default_font_stack_for_text(text);
+                let Some(stack) = default_stack.as_ref() else {
+                    return;
+                };
+                stack
+            }
+        };
+        let clip = clip.map(|(rect, radius)| self.scale_clip(rect, radius));
+        self.draw_text_sized_with_font_stack_internal(
+            position.x,
+            position.y,
+            text,
+            color,
+            font_size_px,
+            stack,
+            clip,
+        );
+    }
+
     fn draw_text_sized_with_font_stack_internal(
         &mut self,
-        x: i32,
-        y: i32,
+        x: f32,
+        y: f32,
         text: &str,
         color: Color,
         font_size_px: f32,
         font_stack: &FontStack,
         clip: Option<PhysicalClip>,
     ) {
-        let origin_x = self.scale_floor_i32(x);
-        let origin_y = self.scale_floor_i32(y);
+        let origin_x = text_origin_physical(x, self.scale_milli);
+        let origin_y = text_origin_physical(y, self.scale_milli);
         let glyphs =
             rasterize_text_with_font_stack(text, font_size_px, self.scale_milli, font_stack);
 

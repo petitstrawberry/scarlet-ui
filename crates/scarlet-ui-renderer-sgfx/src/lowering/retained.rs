@@ -233,10 +233,8 @@ impl SgfxPaintEncoder {
                                     }
                                     draw.offset = match draw.source {
                                         DrawSource::Glyph(_) => [
-                                            scale_text_origin(origin.x + draw.snap_phase[0], scale)
-                                                as f32,
-                                            scale_text_origin(origin.y + draw.snap_phase[1], scale)
-                                                as f32,
+                                            text_replay_offset(origin.x, draw.snap_phase[0], scale),
+                                            text_replay_offset(origin.y, draw.snap_phase[1], scale),
                                         ],
                                         DrawSource::IconGlyph(_)
                                         | DrawSource::Texture(_)
@@ -505,6 +503,9 @@ pub(super) fn append_frame(target: &mut LoweredFrame<'_>, frame: LoweredFrame<'_
 struct ReplayOffsets {
     shapes: [f32; 2],
 }
+fn text_replay_offset(origin: f32, anchor: f32, scale: u32) -> f32 {
+    scale_text_origin(origin + anchor, scale) as f32 - scale_text_origin(anchor, scale) as f32
+}
 fn replay_offset(list: &DisplayList, origin: Point, scale_milli: u32) -> Option<ReplayOffsets> {
     if !origin.x.is_finite() || !origin.y.is_finite() {
         return None;
@@ -519,12 +520,7 @@ fn replay_offset(list: &DisplayList, origin: Point, scale_milli: u32) -> Option<
             | PaintCommand::StrokeRect { .. }
             | PaintCommand::StrokeRoundedRect { .. }
             | PaintCommand::DrawRoundedRectShadow { .. } => {}
-            PaintCommand::DrawText { position, .. }
-                if scale_milli % 1000 == 0
-                    && origin.x >= 0.
-                    && origin.y >= 0.
-                    && position.x >= 0.
-                    && position.y >= 0. => {}
+            PaintCommand::DrawText { .. } => {}
             PaintCommand::DrawBuffer { dst, .. } | PaintCommand::DrawBufferRect { dst, .. }
                 if scale_milli % 1000 == 0
                     && origin.x >= 0.
@@ -571,8 +567,7 @@ fn replay_scissor(
     scale_milli: u32,
 ) -> Option<PixelBounds> {
     let mut scissor = FloatRect::new(0., 0., full.width as f32, full.height as f32);
-    // Text snaps in logical pixels, images in physical pixels. Include their
-    // maximum rounding displacement before accepting a rounded clip's core.
+    // Include raster rounding displacement before accepting a rounded clip's core.
     let pad = scale_milli.max(1) as f32 / 1000. + 1.;
     let bounds = FloatRect::new(
         bounds.x + offset[0] - pad,
@@ -1038,10 +1033,10 @@ mod tests {
         assert!(executor.passes > passes);
     }
     #[test]
-    fn fractional_scale_text_and_mixed_commands_use_precise_path() {
+    fn fractional_scale_text_keeps_precise_origin_during_replay() {
         let mut c = PaintContext::new();
         c.draw_text(Point::ZERO, "Hello", UiColor::BLACK, 13.);
-        assert!(replay_offset(&c.into_display_list(), Point::new(10.5, 20.5), 1500).is_none());
+        assert!(replay_offset(&c.into_display_list(), Point::new(10.5, 20.5), 1500).is_some());
         let mut c = PaintContext::new();
         c.draw_text(Point::ZERO, "Hello", UiColor::BLACK, 13.);
         c.draw_text(Point::new(0.5, 10.), "World", UiColor::BLACK, 13.);
@@ -1149,14 +1144,8 @@ mod tests {
                     &[(0, 0, 200, 120)],
                 )
                 .unwrap();
-            if scale % 1000 == 0 {
-                assert_eq!(encoder.retained_meshes.len(), 1);
-                assert_eq!((executor.writes, executor.texture_writes), writes);
-            } else {
-                // Fractional DPI uses precise vector lowering, never a view bitmap.
-                assert!(encoder.retained_meshes.is_empty());
-                assert_eq!(executor.texture_writes, writes.1);
-            }
+            assert_eq!(encoder.retained_meshes.len(), 1);
+            assert_eq!((executor.writes, executor.texture_writes), writes);
             assert!(encoder.buffer_textures.is_empty());
         }
     }

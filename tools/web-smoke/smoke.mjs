@@ -92,6 +92,25 @@ async function visibleToggle(name) {
   return {frame,toggle:togglePixels(frame,factoryContentArea())};
 }
 
+function inputsGeometry(frame, x, top=60) {
+  // Probe the empty trailing column of the three Inputs surfaces. Deriving
+  // their vertical bands from rendered pixels avoids old font-height offsets.
+  const probe=x+200, bands=[];
+  let start;
+  for(let y=top;y<frame.height-70;y++) {
+    const i=(y*frame.width+probe)*4;
+    const rgb=[...frame.data.subarray(i,i+3)];
+    const fill=Math.min(...rgb)>=230&&Math.max(...rgb)<=252&&Math.max(...rgb)-Math.min(...rgb)<10;
+    if(fill) start??=y;
+    else if(start!==undefined) {
+      if(y-start>=24) bands.push({x,y:start-2,width:320,height:y-start+4});
+      start=undefined;
+    }
+  }
+  assert.equal(bands.length,3,'Inputs must show TextField, Select and TextView surfaces');
+  return {field:bands[0],select:bands[1],view:bands[2]};
+}
+
 async function monitoredContext(options) {
   const context=await browser.newContext(options);
   await context.route('**/*',route=>{
@@ -673,8 +692,9 @@ try {
       }
       if(name==='inputs') {
         const selectX=pageX+padding+(stacked?0:168);
-        const selectY=28+(stacked?146:110);
-        await page.mouse.click(selectX+80,selectY+14);
+        const select=inputsGeometry(frame,selectX).select;
+        const selectY=select.y;
+        await page.mouse.click(selectX+80,selectY+select.height/2);
         const popupArea={x:selectX,y:selectY,width:Math.min(230,viewportWidth-selectX),height:145};
         await untilPixels('factory-'+viewportWidth+'-select',img=>changedPixels(frame,img,popupArea)>500);
         await page.keyboard.press('Escape');
@@ -722,8 +742,10 @@ try {
     await safeNavigate(1,'factory-safe-area-controls');
     await safeNavigate(2,'factory-safe-area-inputs');
     const beforeSelect=await screenshot('factory-safe-area-before-select');
-    const selectX=insets.left+16,selectY=insets.top+28+146;
-    await page.mouse.click(selectX+80,selectY+14);
+    const selectX=insets.left+16;
+    const select=inputsGeometry(beforeSelect,selectX,insets.top+60).select;
+    const selectY=select.y;
+    await page.mouse.click(selectX+80,selectY+select.height/2);
     await untilPixels('factory-safe-area-select',frame=>
       changedPixels(beforeSelect,frame,{x:selectX,y:selectY,width:230,height:145})>500&&
       unsafeEdges(frame).every(area=>[dark,red].every(ink=>coloredPixels(frame,area,ink).count===coloredPixels(beforeSelect,area,ink).count)));
@@ -826,15 +848,18 @@ try {
   await ready('/widget-factory/','scarlet_ui_widget_factory');
   await page.mouse.click(70,128);await page.mouse.move(950,30);
   const editor=page.locator('textarea[data-scarlet-text-input]');
-  const fieldPixels={x:382,y:92,width:320,height:34};
-  const viewPixels={x:382,y:222,width:320,height:195};
+  const inputGeometry=inputsGeometry(await screenshot('factory-editor-geometry'),382);
+  const fieldPixels=inputGeometry.field;
+  const viewPixels=inputGeometry.view;
+  const fieldY=fieldPixels.y+fieldPixels.height/2;
+  const viewY=viewPixels.y+24;
   const waitEditor=()=>page.waitForFunction(()=>
     document.activeElement?.matches('textarea[data-scarlet-text-input]'));
   const waitValue=value=>page.waitForFunction(value=>
     document.querySelector('textarea[data-scarlet-text-input]')?.value===value,value);
   const assertNoEditor=async()=>assert.equal(await editor.evaluate(element=>
     document.activeElement===element),false,'Non-editor controls must not focus the textarea');
-  await page.mouse.click(450,106);
+  await page.mouse.click(450,fieldY);
   await waitEditor();
   const fieldBefore=await screenshot('factory-editor-before');
   await page.keyboard.press('Control+A');
@@ -855,7 +880,7 @@ try {
   assert.deepEqual(await editor.evaluate(element=>[element.selectionStart,element.selectionEnd]),[4,4]);
   await page.mouse.click(740,520);
   await assertNoEditor();
-  await page.mouse.click(450,106);await waitEditor();await waitValue('日本😀');
+  await page.mouse.click(450,fieldY);await waitEditor();await waitValue('日本😀');
   await page.keyboard.press('Control+A');
   await editor.evaluate(element=>{
     element.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true,data:''}));
@@ -873,7 +898,7 @@ try {
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
   await waitValue('IME-漢字😀');
   await page.mouse.click(740,520);await assertNoEditor();
-  await page.mouse.click(450,106);await waitEditor();await waitValue('IME-漢字😀');
+  await page.mouse.click(450,fieldY);await waitEditor();await waitValue('IME-漢字😀');
   await untilPixels('factory-editor-composition-simulated',img=>changedPixels(fieldBefore,img,fieldPixels)>30);
   // Menu keyboard input must not leak to the textarea that was just editing.
   await page.keyboard.press('Home');
@@ -918,7 +943,7 @@ try {
     editingContact=false;
     await assertNoEditor();
     await editingTouch.send('Input.dispatchTouchEvent',{type:'touchStart',
-      touchPoints:[{x:450,y:250,id:1,radiusX:3,radiusY:3,force:1}]});
+      touchPoints:[{x:450,y:viewY,id:1,radiusX:3,radiusY:3,force:1}]});
     editingContact=true;
     await editingTouch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
     editingContact=false;
@@ -953,7 +978,7 @@ try {
         targetCanvas:event.target===canvas};
     },{once:true});
   });
-  await page.mouse.move(450,250);await page.mouse.down();
+  await page.mouse.move(450,viewY);await page.mouse.down();
   assert.deepEqual(await page.evaluate(()=>window.__scarletLateDown),
     {trusted:true,prevented:true,targetCanvas:true},
     'Late canvas mousedown must be cancelled without stopping propagation');
@@ -973,7 +998,7 @@ try {
   await page.keyboard.type('!');await waitValue('line1\nnext!');
   report.checks.push('late trusted canvas mousedown preserves editor focus; secondary and outside defaults remain untouched');
   await page.mouse.click(740,520);await assertNoEditor();
-  await page.mouse.click(450,250);await waitEditor();await waitValue('line1\nnext!');
+  await page.mouse.click(450,viewY);await waitEditor();await waitValue('line1\nnext!');
   // The caret-sized DOM proxy must not soft-wrap otherwise Home/End target
   // one-character visual lines instead of the unwrapped native TextView line.
   await page.keyboard.press('Control+A');await page.keyboard.type('abc def');
@@ -981,7 +1006,7 @@ try {
   await page.keyboard.press('End');await page.keyboard.type('E');
   await waitValue('Habc defE');
   await page.mouse.click(740,520);await assertNoEditor();
-  await page.mouse.click(450,250);await waitEditor();await waitValue('Habc defE');
+  await page.mouse.click(450,viewY);await waitEditor();await waitValue('Habc defE');
   report.checks.push('trusted TextView Home/End follow native unwrapped line boundaries and persist to core');
 
   await page.mouse.click(70,88);await assertNoEditor();

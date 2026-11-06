@@ -86,6 +86,7 @@ struct Draw {
     source: DrawSource,
     vertex_buffer: Option<BufferId>,
     offset: [f32; 2],
+    // Text keeps the full logical origin; images/icons keep their fractional phase.
     snap_phase: [f32; 2],
 }
 
@@ -1412,7 +1413,7 @@ impl SgfxPaintEncoder {
                                 color,
                                 DrawSource::Glyph(texture),
                                 if self.recording_mesh {
-                                    [fractional(position.x), fractional(position.y)]
+                                    [position.x, position.y]
                                 } else {
                                     [0., 0.]
                                 },
@@ -3577,8 +3578,7 @@ fn translated_pixel_transform(width: u32, height: u32, offset: [f32; 2]) -> Resu
 }
 
 fn scale_text_origin(value: f32, scale_milli: u32) -> i32 {
-    let logical = value as i32;
-    ((logical as i64).saturating_mul(scale_milli.max(1) as i64) / 1000) as i32
+    scarlet_ui_core::graphics::text_origin_physical(value, scale_milli)
 }
 
 fn fractional(value: f32) -> f32 {

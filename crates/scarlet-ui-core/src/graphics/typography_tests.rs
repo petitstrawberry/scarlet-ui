@@ -85,6 +85,33 @@ fn fallback_font_uses_the_primary_baseline_at_the_same_em_scale() {
 }
 
 #[test]
+fn fractional_baselines_use_the_nearest_physical_pixel() {
+    let font = stack();
+    // The fixture's ascent is 1160 units/em and ink top is 740 units/em.
+    // At 12px its physical baselines are 13.92, 17.4 and 27.84 pixels.
+    for (dpi, ink_top) in [(1000, 5), (1250, 5), (2000, 10)] {
+        let glyphs = rasterize_text_with_font_stack("A", 12., dpi, &font);
+        assert_eq!(glyphs[0].y, ink_top, "dpi={dpi}");
+    }
+}
+
+#[test]
+fn fractional_origins_snap_on_the_output_grid_without_an_upward_bias() {
+    // A 17px line centered in a 36px control starts at 9.5, not 9.
+    assert_eq!(text_origin_physical(9.5, 1000), 10);
+    assert_eq!(text_origin_physical(9.5, 1250), 12);
+    assert_eq!(text_origin_physical(9.5, 2000), 19);
+    for dpi in [1000, 2000, 3000] {
+        for x in [-20.75, -10.5, -0.5, 0.25, 9.5] {
+            assert_eq!(
+                text_origin_physical(x + 20., dpi) - text_origin_physical(x, dpi),
+                20 * (dpi / 1000) as i32,
+            );
+        }
+    }
+}
+
+#[test]
 fn text_layout_prefix_widths_match_complete_run_measurement() {
     let stack = stack();
     let measure = TextMeasure {

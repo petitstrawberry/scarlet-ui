@@ -37,6 +37,14 @@ measured line height. Guesses such as `font_size * 1.2` and fixed 15/16-pixel
 heights placed the corrected text too low. This is a control-layout correction,
 not an adjustment to the glyph baseline or a global upward pixel offset.
 
+Fractional line origins are retained through layout, recording and nested scroll
+translations. CPU and SGFX snap once to the nearest physical pixel; they do not
+truncate logical coordinates before applying output scale. Glyph baselines also
+round to the nearest physical pixel. This preserves a centered 9.5px origin at
+2× as 19px instead of moving it up to 18px. Half-pixel ties use a consistent
+direction across the window origin so translated text meshes and raster tiles
+can retain their pixels without introducing an origin-dependent shift.
+
 Fallback discovery also verifies that a candidate has a vector outline for the
 requested visible glyph. A cmap hit in a bitmap/color-only font cannot be drawn
 by this renderer; discovery continues to another candidate instead of accepting

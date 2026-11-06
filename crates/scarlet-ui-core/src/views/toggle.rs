@@ -347,13 +347,6 @@ impl ElementRenderObject for ToggleRenderObject {
                 },
             );
         }
-        if self.focused && self.enabled {
-            style::focus_indicator(
-                ctx,
-                Rect::new(origin, self.size),
-                ColorPalette::default().primary(),
-            );
-        }
         true
     }
 
@@ -383,6 +376,59 @@ impl ElementRenderObject for ToggleRenderObject {
 mod tests {
     use super::*;
     use crate::renderer::PaintCommand;
+
+    #[test]
+    fn focus_does_not_add_chrome() {
+        for on in [false, true] {
+            for held in [false, true] {
+                let mut toggle = ToggleRenderObject::new(on);
+                toggle.set_pressed(held);
+                let mut unfocused = PaintContext::new();
+                toggle.paint(&mut unfocused, Point::ZERO);
+                let unfocused = unfocused.into_display_list();
+                for focused in [true, false] {
+                    toggle.set_focused(focused);
+                    assert_eq!(toggle.is_focused(), focused);
+                    let mut paint = PaintContext::new();
+                    toggle.paint(&mut paint, Point::ZERO);
+                    assert_eq!(paint.commands(), unfocused.context().commands());
+                    assert_eq!(toggle.get_is_on(), on);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keyboard_activation_retains_focus_and_repeat_suppression() {
+        use crate::event::{Event, FocusEvent, KeyCode, KeyEvent, KeyModifiers, Phase};
+        let state = State::new(crate::state::generate_state_id(), false);
+        let mut element = Toggle::new(state.clone()).create_element();
+        let key = |pressed| {
+            Event::Keyboard(if pressed {
+                KeyEvent::Pressed {
+                    keycode: KeyCode::Space,
+                    modifiers: KeyModifiers::empty(),
+                }
+            } else {
+                KeyEvent::Released {
+                    keycode: KeyCode::Space,
+                    modifiers: KeyModifiers::empty(),
+                }
+            })
+        };
+        assert!(!element.handle_event(&key(true), Phase::Target));
+        assert!(element.handle_event(&Event::Focus(FocusEvent::Gained), Phase::Target));
+        for expected in [true, false] {
+            assert!(element.handle_event(&key(true), Phase::Target));
+            assert!(element.handle_event(&key(true), Phase::Target));
+            assert_eq!(state.get(), expected, "held keys must toggle only once");
+            assert!(element.handle_event(&key(false), Phase::Target));
+            assert!(element.wants_keyboard_focus());
+        }
+        element.handle_event(&Event::Focus(FocusEvent::Lost), Phase::Target);
+        assert!(!element.handle_event(&key(true), Phase::Target));
+        assert!(!state.get());
+    }
 
     #[test]
     fn thumb_material_is_uniform_backdrop_only_and_preserves_center() {

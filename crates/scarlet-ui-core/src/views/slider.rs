@@ -477,13 +477,6 @@ impl ElementRenderObject for SliderRenderObject {
                 },
             );
         }
-        if self.focused && self.enabled {
-            style::focus_indicator(
-                ctx,
-                Rect::new(origin, self.size),
-                ColorPalette::default().primary(),
-            );
-        }
         true
     }
 
@@ -531,6 +524,60 @@ mod tests {
     use super::*;
     use crate::element::LayoutConstraints;
     use crate::renderer::PaintCommand;
+
+    #[test]
+    fn focus_does_not_add_chrome() {
+        for value in [0.0, 0.5, 1.0] {
+            for dragging in [false, true] {
+                let mut slider = SliderRenderObject::new(value, 0.0, 1.0, false);
+                slider.set_dragging(dragging);
+                let mut unfocused = PaintContext::new();
+                slider.paint(&mut unfocused, Point::ZERO);
+                let unfocused = unfocused.into_display_list();
+                for focused in [true, false] {
+                    slider.set_focused(focused);
+                    assert_eq!(slider.is_focused(), focused);
+                    let mut paint = PaintContext::new();
+                    slider.paint(&mut paint, Point::ZERO);
+                    assert_eq!(paint.commands(), unfocused.context().commands());
+                    assert_eq!(slider.get_value(), value);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keyboard_adjustment_retains_focus_and_clamps_values() {
+        use crate::event::{Event, FocusEvent, KeyCode, KeyEvent, KeyModifiers, Phase};
+        let state = State::new(crate::state::generate_state_id(), 50.0);
+        let mut element = Slider::new(state.clone())
+            .min(0.0)
+            .max(100.0)
+            .create_element();
+        let key = |keycode| {
+            Event::Keyboard(KeyEvent::Pressed {
+                keycode,
+                modifiers: KeyModifiers::empty(),
+            })
+        };
+        assert!(!element.handle_event(&key(KeyCode::Right), Phase::Target));
+        assert!(element.handle_event(&Event::Focus(FocusEvent::Gained), Phase::Target));
+        for (code, expected) in [
+            (KeyCode::Right, 51.0),
+            (KeyCode::PageDown, 41.0),
+            (KeyCode::End, 100.0),
+            (KeyCode::Up, 100.0),
+            (KeyCode::Home, 0.0),
+            (KeyCode::Left, 0.0),
+        ] {
+            assert!(element.handle_event(&key(code), Phase::Target));
+            assert_eq!(state.get(), expected);
+            assert!(element.wants_keyboard_focus());
+        }
+        element.handle_event(&Event::Focus(FocusEvent::Lost), Phase::Target);
+        assert!(!element.handle_event(&key(KeyCode::Right), Phase::Target));
+        assert_eq!(state.get(), 0.0);
+    }
 
     #[test]
     fn thumb_material_is_uniform_backdrop_only_and_preserves_center() {

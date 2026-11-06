@@ -33,14 +33,13 @@ pub(super) struct Tile {
     used: u64,
 }
 
-// Only raster origins whose output can reach this tile affect its snap key.
-// A label crossing the window origin must not invalidate every interior tile.
-// Use glyph ink bounds (including overhangs and long lines), not font advances.
+// Only truncating image/icon origins need a sign-dependent key. Text rounds
+// on the physical grid and is invariant under integer translations, including
+// when it crosses the window origin.
 fn snap_dependencies(list: &DisplayList, tile: FloatRect, scale: u32) -> Vec<(Point, f32)> {
     let factor = scale as f32 / 1000.;
     let intersects = |rect: FloatRect| {
-        // Truncation can move text by a logical pixel, images by a physical
-        // pixel; include both signs, the exact fractional phase and coverage.
+        // Include both signs of physical truncation and fractional coverage.
         FloatRect::new(rect.x - 2., rect.y - 2., rect.width + 4., rect.height + 4.)
             .intersect(tile)
             .is_some()
@@ -49,31 +48,6 @@ fn snap_dependencies(list: &DisplayList, tile: FloatRect, scale: u32) -> Vec<(Po
         .commands()
         .iter()
         .filter_map(|command| match command {
-            PaintCommand::DrawText {
-                position,
-                text,
-                font_size_px,
-                font_stack,
-                ..
-            } => {
-                let glyphs = match font_stack {
-                    Some(stack) => rasterize_text_cached_with_font_stack(
-                        text, *font_size_px, scale, stack,
-                    ),
-                    None => rasterize_text_cached(text, *font_size_px, scale),
-                };
-                glyphs
-                    .iter()
-                    .any(|glyph| {
-                        intersects(FloatRect::new(
-                            position.x + glyph.x as f32 / factor,
-                            position.y + glyph.y as f32 / factor,
-                            glyph.width as f32 / factor,
-                            glyph.height as f32 / factor,
-                        ))
-                    })
-                    .then_some((*position, 1.))
-            }
             PaintCommand::DrawIcon { rect, .. }
             | PaintCommand::DrawBuffer { dst: rect, .. }
             | PaintCommand::DrawBufferRect { dst: rect, .. } => {
@@ -366,8 +340,8 @@ impl SgfxPaintEncoder {
         let Some(bounds) = list.raster_cache_bounds() else {
             return Ok(None);
         };
-        // Raster text has logical-pixel snapping semantics. Bake fractional
-        // offset phases into separate tiles and composite on the integer grid.
+        // Bake fractional offset phases into separate tiles and composite on
+        // the integer grid, preserving window-space physical text snapping.
         // Fractional DPI retains the precise normal path.
         if self.tile_depth >= MAX_TILE_DEPTH
             || scale % 1000 != 0
@@ -914,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn origin_crossing_invalidates_only_tiles_reached_by_that_text() {
+    fn text_tiles_stay_warm_when_crossing_the_window_origin() {
         scarlet_ui_core::graphics::set_default_font(include_bytes!(
             "../../../../examples/web-counter/assets/DejaVuSans.ttf"
         ))
@@ -980,12 +954,12 @@ mod tests {
                 render(&mut renderer, &mut trace, -20.25);
                 assert_eq!(
                     trace.sampled.contains(&interior),
-                    !long_line,
-                    "only text with actual ink reaching the interior can invalidate it"
+                    true,
+                    "text snapping is translation invariant across the window origin"
                 );
                 assert_eq!(
                     trace.targets.iter().filter(|id| **id != target).count(),
-                    if long_line { 2 } else { 1 }
+                    0
                 );
                 trace.targets.clear();
                 render(&mut renderer, &mut trace, -21.25);
