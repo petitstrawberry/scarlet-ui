@@ -388,6 +388,19 @@ impl<'a> PaintContext<'a> {
     // Prove that each filter reads only earlier opaque paint in this recording.
     // A glass label alone is not isolated; a card including its opaque backing is.
     fn backdrop_is_local(&self) -> bool {
+        fn add_backing(opaque: &mut Vec<Rect>, clips: &[Rect], mut bounds: Rect) {
+            for clip in clips {
+                let left = bounds.left().max(clip.left());
+                let top = bounds.top().max(clip.top());
+                bounds = Rect::from_xywh(
+                    left,
+                    top,
+                    (bounds.right().min(clip.right()) - left).max(0.),
+                    (bounds.bottom().min(clip.bottom()) - top).max(0.),
+                );
+            }
+            opaque.push(bounds);
+        }
         let mut opaque: Vec<Rect> = Vec::new();
         let mut clips: Vec<Rect> = Vec::new();
         for command in &self.commands {
@@ -419,23 +432,35 @@ impl<'a> PaintContext<'a> {
                         .max(0.)
                         .min(rect.size.width * 0.5)
                         .min(rect.size.height * 0.5);
-                    let mut bounds = Rect::from_xywh(
+                    let bounds = Rect::from_xywh(
                         rect.left() + r,
                         rect.top() + r,
                         (rect.size.width - 2. * r).max(0.),
                         (rect.size.height - 2. * r).max(0.),
                     );
-                    for clip in &clips {
-                        let left = bounds.left().max(clip.left());
-                        let top = bounds.top().max(clip.top());
-                        bounds = Rect::from_xywh(
-                            left,
-                            top,
-                            (bounds.right().min(clip.right()) - left).max(0.),
-                            (bounds.bottom().min(clip.bottom()) - top).max(0.),
-                        );
+                    add_backing(&mut opaque, &clips, bounds);
+                }
+                PaintCommand::FillPath { path, color } if color.a >= 1. => {
+                    // fill_rect, including the standard Background modifier,
+                    // records an axis-aligned rectangle as a four-point path.
+                    // Prove the actual edges, never assume a path's bounding
+                    // box is opaque (triangles and crossed paths have holes).
+                    if let [a, b, c, d] = path.as_slice() {
+                        if a.y == b.y
+                            && b.x == c.x
+                            && c.y == d.y
+                            && d.x == a.x
+                            && b.x > a.x
+                            && c.y > b.y
+                            && [a.x, a.y, b.x, c.y].iter().all(|value| value.is_finite())
+                        {
+                            add_backing(
+                                &mut opaque,
+                                &clips,
+                                Rect::from_xywh(a.x, a.y, b.x - a.x, c.y - a.y),
+                            );
+                        }
                     }
-                    opaque.push(bounds);
                 }
                 PaintCommand::BackdropFilterRoundedRect {
                     rect, blur_radius, ..
@@ -3434,6 +3459,79 @@ fn inset_rect(rect: Rect, inset: f32) -> Rect {
 mod tests {
     use super::*;
     use crate::testing::alloc_counter::measure_allocations;
+
+    #[test]
+    fn cached_glass_recognizes_opaque_rect_paths_but_not_their_bounding_boxes() {
+        let bounds = Rect::from_xywh(0., 0., 120., 80.);
+        let glass = |ctx: &mut PaintContext<'_>| {
+            ctx.refractive_glass_rounded_rect(
+                Rect::from_xywh(20., 20., 80., 40.),
+                12.,
+                4.,
+                Color::WHITE.with_opacity(0.5),
+                1.,
+            )
+        };
+        let mut opaque = PaintContext::new();
+        opaque.fill_rect(bounds, Color::WHITE);
+        glass(&mut opaque);
+        assert_eq!(
+            opaque.into_cached_layer(bounds).raster_cache_bounds(),
+            Some(bounds)
+        );
+        for (path, color) in [
+            (path_rect(bounds), Color::WHITE.with_opacity(0.9)),
+            (
+                path_triangle(
+                    Point::new(0., 0.),
+                    Point::new(120., 0.),
+                    Point::new(0., 80.),
+                ),
+                Color::WHITE,
+            ),
+            (
+                alloc::vec![
+                    Point::new(0., 0.),
+                    Point::new(120., 80.),
+                    Point::new(120., 0.),
+                    Point::new(0., 80.)
+                ],
+                Color::WHITE,
+            ),
+        ] {
+            let mut paint = PaintContext::new();
+            paint.fill_path(path, color);
+            glass(&mut paint);
+            assert!(
+                paint
+                    .into_cached_layer(bounds)
+                    .raster_cache_bounds()
+                    .is_none(),
+                "translucent, triangular and self-intersecting backings are not opaque rectangles"
+            );
+        }
+        let mut clipped = PaintContext::new();
+        clipped.push_clip(Rect::from_xywh(30., 30., 50., 20.));
+        clipped.fill_rect(bounds, Color::WHITE);
+        clipped.pop_clip();
+        glass(&mut clipped);
+        assert!(
+            clipped
+                .into_cached_layer(bounds)
+                .raster_cache_bounds()
+                .is_none(),
+            "the backing must include the filter halo after clipping"
+        );
+        let mut late = PaintContext::new();
+        glass(&mut late);
+        late.fill_rect(bounds, Color::WHITE);
+        assert!(
+            late.into_cached_layer(bounds)
+                .raster_cache_bounds()
+                .is_none(),
+            "later paint cannot back an earlier filter"
+        );
+    }
 
     fn aa_pixels(ctx: &PaintContext<'_>, scale: u32, background: Color) -> Buffer {
         let mut renderer = CpuPaintRenderer::new(Size::new(40.0, 40.0), scale, background);

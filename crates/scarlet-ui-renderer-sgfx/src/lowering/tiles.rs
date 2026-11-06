@@ -515,8 +515,8 @@ mod tests {
         renderer.set_analytic_glass(true);
         let target = renderer.target_texture(0).unwrap();
         let mut paint = PaintContext::new();
-        paint.fill_rounded_rect(Rect::from_xywh(0., -100., 200., 1200.), 0., UiColor::WHITE);
-        paint.fill_rounded_rect(Rect::from_xywh(20., 40., 100., 10.), 0., UiColor::RED);
+        paint.fill_rect(Rect::from_xywh(0., -100., 200., 1200.), UiColor::WHITE);
+        paint.fill_rect(Rect::from_xywh(20., 40., 100., 10.), UiColor::RED);
         paint.refractive_glass_rounded_rect(
             Rect::from_xywh(20., 30., 160., 50.),
             12.,
