@@ -762,7 +762,7 @@ impl Tessellator {
                 core::f32::consts::PI * (-1. + (i / 25) as f32 * 0.5 + (i % 25) as f32 / 48.);
             let (width, _) =
                 scarlet_ui_core::glass::glass_contour_edge(-libm::cosf(angle), -libm::sinf(angle));
-            let width = width.min(bezel * 0.10);
+            let width = width.min(bezel);
             let line_width =
                 scarlet_ui_core::glass::glass_contour_width(-libm::cosf(angle), self.scale)
                     .min(bezel);
@@ -770,8 +770,8 @@ impl Tessellator {
             // Keep black and white vertex colors on separate sides of the
             // zero crossing. Interpolating their RGB together would darken a
             // pale backdrop independently of the intended shadow strength.
-            let mut lo = (line_width - half_pixel).max(0.);
-            let mut hi = (line_width + half_pixel).min(bezel);
+            let mut lo = 0.;
+            let mut hi = bezel;
             for _ in 0..8 {
                 let mid = (lo + hi) * 0.5;
                 let reflection = scarlet_ui_core::glass::glass_surface_reflection_at_scale(

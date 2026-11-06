@@ -637,7 +637,7 @@ fn contour_review_scene() {
     .unwrap();
     let mut paint = PaintContext::new();
     paint.fill_vertical_gradient_rounded_rect(
-        Rect::from_xywh(0., 0., 353., 300.),
+        Rect::from_xywh(0., 0., 353., 320.),
         0.,
         Color::rgb(124, 211, 244),
         Color::rgb(149, 160, 204),
@@ -685,6 +685,24 @@ fn contour_review_scene() {
             GlassMaterial::regular().tint,
         ),
     ] {
+        // The same two stock floating-elevation shadows stay present in every
+        // option, behind both the near-edge falloff and the fine contour.
+        paint.draw_rounded_rect_shadow(
+            rect,
+            radius,
+            Offset::new(0., 1.),
+            3.,
+            0.,
+            Color::BLACK.with_opacity(0.055),
+        );
+        paint.draw_rounded_rect_shadow(
+            rect,
+            radius,
+            Offset::new(0., 4.),
+            10.,
+            0.,
+            Color::BLACK.with_opacity(0.075),
+        );
         paint.refractive_glass_rounded_rect(rect, radius, 2.52, tint, 1.);
     }
     paint.draw_text(Point::new(147., 28.), "Search", Color::WHITE, 16.);
@@ -723,7 +741,7 @@ fn contour_review_scene() {
         );
     }
     for scale in [1000, 1500, 2000] {
-        let (width, height) = (353 * scale / 1000, 300 * scale / 1000);
+        let (width, height) = (353 * scale / 1000, 320 * scale / 1000);
         for analytic in [false, true] {
             let mut encoder = SgfxPaintEncoder::new(width, height, false).unwrap();
             encoder.set_analytic_glass(analytic);
@@ -751,6 +769,11 @@ fn contour_review_scene() {
                 .unwrap();
             assert_eq!(encoder.backdrop_fallback_count(), 0);
             let gpu = resources.read_texture(target).unwrap();
+            let sample = |x, y| gpu[(((y * scale / 1000) * width + x * scale / 1000) * 4) as usize];
+            assert!(
+                sample(176, 62) + 2 < sample(345, 62),
+                "outer drop shadow must remain visible beyond the search bar"
+            );
             save(
                 &output.join(format!("review-{scale}-{analytic}.ppm")),
                 width,

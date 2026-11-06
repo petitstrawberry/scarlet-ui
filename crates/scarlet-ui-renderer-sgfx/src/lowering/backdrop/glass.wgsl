@@ -1,4 +1,8 @@
-const CONTOUR_SHADOW_GAIN: f32 = 1.0;
+const CONTOUR_LINE_TOP: f32 = 0.08;
+const CONTOUR_LINE_SIDE: f32 = 0.16;
+const CONTOUR_NEAR_TOP: f32 = 2.5;
+const CONTOUR_NEAR_SIDE: f32 = 3.5;
+const CONTOUR_NEAR_STRENGTH: f32 = 0.04;
 struct Parameters {
     rect: vec4<f32>,
     extent: vec4<f32>,
@@ -92,16 +96,15 @@ fn specular_lobe(cosine: f32) -> f32 {
     // Match core::glass_surface_reflection: dark sides and finer bright horizontal rims.
     let surface = (0.012 * fresnel + (0.16 * key + 0.06 * fill) * normal_xy) * e.z * e.z;
     let side = e.y * e.y;
-    let width = max(0.0001, min((1.25 + 0.50 * side) * scale, bezel * 0.10));
-    let opacity = 0.05 + 0.13 * side + 0.025 * max(-e.z, 0.0);
-    let fade = clamp(1.0 - max(e.x, 0.0) / width, 0.0, 1.0);
-    let line_light = (0.34 - 0.06 * max(-e.z, 0.0)) * e.z * e.z;
-    let shoulder = surface + line_light * fade * fade * (3.0 - 2.0 * fade);
+    let near_width = max(0.0001, min((CONTOUR_NEAR_TOP + (CONTOUR_NEAR_SIDE - CONTOUR_NEAR_TOP) * side) * scale, bezel));
+    let opacity = CONTOUR_LINE_TOP + (CONTOUR_LINE_SIDE - CONTOUR_LINE_TOP) * side + 0.015 * max(-e.z, 0.0);
+    let near = clamp(1.0 - max(e.x, 0.0) / near_width, 0.0, 1.0);
+    let near_shadow = CONTOUR_NEAR_STRENGTH * near * near * (3.0 - 2.0 * near);
     let top_pixels = max(floor(scale * 0.5 + 0.5), 1.0);
     let side_pixels = max(floor(scale + 0.5), top_pixels + 1.0);
     let line_width = min(top_pixels + (side_pixels - top_pixels) * side, bezel);
     let line = clamp(line_width - max(e.x, 0.0) + 0.5, 0.0, 1.0);
-    let reflection = (shoulder * (1.0 - line) - opacity * CONTOUR_SHADOW_GAIN * line) * p.optics.y;
+    let reflection = (surface - near_shadow - opacity * line) * p.optics.y;
     let light = vec4(select(vec3(0.0), vec3(1.0), reflection >= 0.0), 1.0);
     material += (light - material) * abs(reflection);
     return material * coverage(position.xy);

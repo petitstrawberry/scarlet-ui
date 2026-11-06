@@ -6,8 +6,12 @@
 use crate::geometry::{Point, Rect};
 use core::sync::atomic::{AtomicU8, Ordering};
 
-// Contour review A: keep shadow strength, separate the line from the soft light.
-const CONTOUR_SHADOW_GAIN: f32 = 1.0;
+// Layer review A: retain soft light, a smooth near-edge shadow, and a fine contour.
+const CONTOUR_LINE_TOP: f32 = 0.08;
+const CONTOUR_LINE_SIDE: f32 = 0.16;
+const CONTOUR_NEAR_TOP: f32 = 2.5;
+const CONTOUR_NEAR_SIDE: f32 = 3.5;
+const CONTOUR_NEAR_STRENGTH: f32 = 0.04;
 
 /// Application-wide quality ceiling for built-in glass materials.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -121,16 +125,18 @@ pub fn glass_highlight_edge(inward_x: f32, inward_y: f32) -> (f32, f32) {
     )
 }
 
-/// Width and shading opacity of the compact contour, in logical pixels.
-/// Side-facing normals carry a wider dark edge; horizontal rims stay finer.
+/// Width of the smooth near-edge shadow and opacity of the separate fine line.
+/// The near-edge falloff remains present behind the sharper contour.
 #[doc(hidden)]
 pub fn glass_contour_edge(inward_x: f32, inward_y: f32) -> (f32, f32) {
     let side = inward_x * inward_x;
     // Reach the first interior sample even when a 1x edge falls on a pixel
     // center, while keeping both horizontal rims finer than the side contour.
     (
-        1.25 + 0.50 * side,
-        0.05 + 0.13 * side + 0.025 * (-inward_y).max(0.),
+        CONTOUR_NEAR_TOP + (CONTOUR_NEAR_SIDE - CONTOUR_NEAR_TOP) * side,
+        CONTOUR_LINE_TOP
+            + (CONTOUR_LINE_SIDE - CONTOUR_LINE_TOP) * side
+            + 0.015 * (-inward_y).max(0.),
     )
 }
 
@@ -144,14 +150,10 @@ pub fn glass_contour_width(inward_x: f32, scale: f32) -> f32 {
     (top + (side - top) * inward_x * inward_x) / scale
 }
 
-/// A soft directional reflection spread across the curved shoulder.
-/// The normal tilts toward the viewer across the same shoulder as refraction.
-/// This moves and broadens the specular lobe across the surface instead of
-/// painting a broad bright outline. Horizontal shoulders receive soft light
-/// and a finer bright rim; side-facing contours carry compact shading.
-/// Negative values shade toward black; positive values reflect toward white.
-/// This screen-space approximation
-/// follows the reference appearance without claiming its optical mechanism.
+/// Soft light across the curved shoulder, a smooth near-edge shadow, and a
+/// separate fine contour. These stages coexist; elevation draws the soft
+/// outer drop shadow independently. Positive values reflect toward white,
+/// negative values shade toward black.
 #[doc(hidden)]
 pub fn glass_surface_reflection(distance: f32, inward_x: f32, inward_y: f32, bezel: f32) -> f32 {
     glass_surface_reflection_at_scale(distance, inward_x, inward_y, bezel, 1.)
@@ -187,17 +189,28 @@ pub fn glass_surface_reflection_at_scale(
     let fresnel = grazing2 * grazing2 * grazing;
     let horizontal = inward_y * inward_y;
     let surface = (0.012 * fresnel + (0.16 * key + 0.06 * fill) * normal_xy) * horizontal;
-    let (width, opacity) = glass_contour_edge(inward_x, inward_y);
-    let width = width.min(bezel * 0.10);
-    let fade = (1. - distance / width).clamp(0., 1.);
-    let light = (0.34 - 0.06 * (-inward_y).max(0.)) * horizontal;
-    let shoulder = surface + light * fade * fade * (3. - 2. * fade);
+    let (near_shadow, line_shadow) =
+        glass_shadow_layers(distance, inward_x, inward_y, bezel, scale);
+    // Keep the soft reflection; add distinct shadow stages instead of erasing
+    // it underneath a solid outline. Elevation's outer shadow is independent.
+    surface - near_shadow - line_shadow
+}
+
+fn glass_shadow_layers(
+    distance: f32,
+    inward_x: f32,
+    inward_y: f32,
+    bezel: f32,
+    scale: f32,
+) -> (f32, f32) {
+    let (near_width, line_opacity) = glass_contour_edge(inward_x, inward_y);
+    let near_width = near_width.min(bezel).max(0.0001);
+    let near = (1. - distance / near_width).clamp(0., 1.);
+    let near_shadow = CONTOUR_NEAR_STRENGTH * near * near * (3. - 2. * near);
     let scale = scale.max(0.001);
     let line_width = glass_contour_width(inward_x, scale).min(bezel);
-    // Only the last physical pixel is antialiased. Do not diffuse the shadow
-    // across the whole band or let shoulder light wash over the line.
     let line = ((line_width - distance) * scale + 0.5).clamp(0., 1.);
-    shoulder * (1. - line) - opacity * CONTOUR_SHADOW_GAIN * line
+    (near_shadow, line_opacity * line)
 }
 
 #[cfg(test)]
@@ -219,9 +232,9 @@ mod tests {
     #[test]
     fn side_contours_are_firmer_while_horizontal_shoulders_carry_light() {
         let reflection = |d, x, y| glass_surface_reflection(d, x, y, 20.);
-        assert!(reflection(0., 1., 0.) < reflection(0., 0., 1.) - 0.10);
-        assert!(reflection(0., -1., 0.) < reflection(0., 0., -1.) - 0.08);
-        assert_eq!(reflection(3., 1., 0.), 0.);
+        assert!(reflection(0., 1., 0.) < reflection(0., 0., 1.));
+        assert!(reflection(0., -1., 0.) < reflection(0., 0., -1.));
+        assert_eq!(reflection(4., 1., 0.), 0.);
         assert!(reflection(2., 0., 1.) > 0.01);
         for angle in 0..72 {
             let a = angle as f32 * core::f32::consts::TAU / 72.;
@@ -245,6 +258,22 @@ mod tests {
                 "the broad shoulder still carries light"
             );
         }
+    }
+    #[test]
+    fn fine_shadow_near_shadow_and_soft_light_coexist() {
+        let scale = 2.;
+        for (x, y) in [(0., 1.), (0., -1.), (1., 0.), (-1., 0.)] {
+            let (near, line) = glass_shadow_layers(0.25, x, y, 20., scale);
+            assert!(near > 0. && line > 0.);
+            let width = glass_contour_width(x, scale);
+            let (near, line) = glass_shadow_layers(width + 0.5, x, y, 20., scale);
+            assert!(
+                near > 0.,
+                "soft near-edge shadow must survive past the fine line"
+            );
+            assert_eq!(line, 0.);
+        }
+        assert!(glass_surface_reflection_at_scale(4., 0., 1., 20., scale) > 0.01);
     }
     #[test]
     fn shadow_widths_remain_distinct_in_device_pixels() {
