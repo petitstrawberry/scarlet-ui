@@ -18,7 +18,7 @@ use crate::renderer::PaintContext;
 use crate::view::View;
 
 use super::style;
-pub use super::style::{ElevationRole, GlassMaterial, SurfaceRole};
+pub use super::style::{ChromeStyle, ElevationRole, GlassMaterial, SurfaceRole};
 
 /// Reusable surface appearance, independent of geometry and layout.
 ///

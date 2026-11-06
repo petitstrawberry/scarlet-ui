@@ -1,5 +1,24 @@
 # Shared glass material trial
 
+## Default chrome
+
+NavigationView (both constructors), HeaderBar and TabView default to Bubble
+Glass. Sidebar and bottom navigation use the existing Floating geometry; tabs
+use the existing content-sized material bar. HeaderBar paints glass within its
+existing bounds and adds no padding or safe-area reservation. Its component
+outline defaults to 16px, independently configurable with `.corner_radius`.
+Navigation content underlap remains an explicit layout choice.
+
+Use `.chrome_style(ChromeStyle::Simple)` on any of these components for the
+previous solid treatment, or `ChromeStyle::BubbleGlass` to restore the default.
+Presets reset appearance colors; apply color/material overrides afterward.
+`NavigationSidebarStyle::Simple` and `Floating` remain supported.
+`HeaderBar::surface(color)` explicitly selects a solid fill, including CLEAR
+when the bar is already wrapped in a styled Surface, preventing double glass.
+Low-level render-object constructors with explicit colors retain their prior
+semantics. Surface itself still defaults to flat; ordinary content backgrounds
+are not made translucent.
+
 ## Bubble Glass composition
 
 `SurfaceStyle::bubble_glass()` packages the shared glass appearance, including

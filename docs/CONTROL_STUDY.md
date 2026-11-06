@@ -40,9 +40,10 @@ renderer is removed.
   thumb center. Their face becomes translucent and has a soft shadow, without
   any added rim. These proportions follow the supplied interaction reference,
   not copied assets. Off/on examples appear together in the Factory.
-- `NavigationSidebarStyle::Simple` stays the default. `Floating` is opt-in and
-  adds an inset panel, rounded selection rows and explicit spacing. Bottom
-  navigation behavior is unchanged. Widget Factory opts into the trial style.
+- Bubble Glass is the default for sidebar and bottom navigation: an inset panel
+  or capsule with rounded destination rows. `NavigationSidebarStyle::Simple`
+  retains the original solid rail. Navigation, HeaderBar and TabView also share
+  `.chrome_style(ChromeStyle::Simple)` for explicit legacy appearance.
 - Disabled controls have disabled input and focus behavior, not just faded paint.
   Button and Select gain keyboard activation and focus feedback.
 - Select separates Form and Menu styles. Form remains the default input surface.

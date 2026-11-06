@@ -57,7 +57,6 @@ fn tab_view(selected: usize, bottom: bool) -> TabView {
             Text::new("Region Inspector").font_size(13.0), ProgressView::new(0.52).frame(220.0,18.0),
         }.spacing(10.0).padding(12.0)),
     ], State::new(scarlet_ui_core::generate_state_id(), selected))
-        .material(GlassMaterial::regular())
         .tab_bar_placement(if bottom {TabBarPlacement::Bottom} else {TabBarPlacement::Top})
 }
 fn tab(selected: usize, bottom: bool) -> Box<dyn Element> {
@@ -337,7 +336,6 @@ fn navigation_scene(width: u32, height: u32) -> Box<dyn Element> {
     );
     let view = NavigationView::new(links)
         .presentation(NavigationPresentation::Automatic)
-        .sidebar_style(NavigationSidebarStyle::Floating)
         .shows_icons(true)
         .minimum_content_size(Size::new(320.0, 0.0));
     view.selected_index_state().set(3);

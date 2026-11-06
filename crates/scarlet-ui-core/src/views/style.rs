@@ -141,6 +141,17 @@ pub enum ElevationRole {
     Overlay,
 }
 
+/// Shared appearance policy for navigation, tab bars and application headers.
+/// Geometry and content-safe-area reservations remain owned by each component.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChromeStyle {
+    /// Shared glass material and inset navigation/selection treatment.
+    #[default]
+    BubbleGlass,
+    /// Original solid surfaces and edge-to-edge navigation treatment.
+    Simple,
+}
+
 /// An in-app backdrop material shared by controls and surfaces.
 ///
 /// The renderer samples content already painted behind the shape, blurs it,

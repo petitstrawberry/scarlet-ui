@@ -2325,17 +2325,17 @@ mod tests {
             }
 
             for event in [
-                MouseEvent::Moved { x: 10, y: 45 },
+                MouseEvent::Moved { x: 32, y: 72 },
                 MouseEvent::ButtonPressed {
                     button: MouseButton::Left,
-                    x: 10,
-                    y: 45,
+                    x: 32,
+                    y: 72,
                     click_count: 1,
                 },
                 MouseEvent::ButtonReleased {
                     button: MouseButton::Left,
-                    x: 10,
-                    y: 45,
+                    x: 32,
+                    y: 72,
                     click_count: 1,
                 },
             ] {

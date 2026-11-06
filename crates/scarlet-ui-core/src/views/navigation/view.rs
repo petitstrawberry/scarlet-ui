@@ -37,12 +37,12 @@ const DEFAULT_MINIMUM_CONTENT_HEIGHT: f32 = 240.0;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NavigationSidebarStyle {
     /// The original edge-to-edge rail and narrow selection indicator.
-    #[default]
     Simple,
     /// An inset rounded panel with softly tinted, rounded destination rows.
     /// Uses the shared in-app backdrop material and a uniform selected tint.
     /// In bottom-bar presentation, floats an inset glass capsule above the
     /// window edge. Selection uses a translucent tint without an indicator line.
+    #[default]
     Floating,
 }
 
@@ -233,7 +233,7 @@ where
             links,
             selected_index: State::new(state_id, 0),
             sidebar_width: 200.0,
-            sidebar_style: NavigationSidebarStyle::Simple,
+            sidebar_style: NavigationSidebarStyle::default(),
             content_underlap: 0.,
             floating_bar_bottom_overlap: 0.0,
             presentation: NavigationPresentation::Automatic,
@@ -268,7 +268,7 @@ where
             links,
             selected_index: navigation_selected_state(state_key),
             sidebar_width: 200.0,
-            sidebar_style: NavigationSidebarStyle::Simple,
+            sidebar_style: NavigationSidebarStyle::default(),
             content_underlap: 0.,
             floating_bar_bottom_overlap: 0.0,
             presentation: NavigationPresentation::Automatic,
@@ -294,10 +294,19 @@ where
         self
     }
 
-    /// Opt into a sidebar treatment without changing adaptive presentation.
+    /// Select navigation appearance without changing adaptive presentation.
+    /// Bubble Glass (`Floating`) is the default; `Simple` retains the old rail.
     pub fn sidebar_style(mut self, style: NavigationSidebarStyle) -> Self {
         self.sidebar_style = style;
         self
+    }
+
+    /// Select the shared Bubble Glass or legacy Simple chrome appearance.
+    pub fn chrome_style(self, style: crate::views::ChromeStyle) -> Self {
+        self.sidebar_style(match style {
+            crate::views::ChromeStyle::BubbleGlass => NavigationSidebarStyle::Floating,
+            crate::views::ChromeStyle::Simple => NavigationSidebarStyle::Simple,
+        })
     }
 
     /// Extend the content viewport beneath a floating sidebar and its header.
@@ -652,9 +661,9 @@ mod tests {
     }
 
     #[test]
-    fn floating_sidebar_is_opt_in_and_survives_clone() {
+    fn bubble_glass_is_default_and_simple_remains_explicit() {
         let view = NavigationView::new((NavigationLink::new("Home", || Text::new("Home")),));
-        assert_eq!(view.get_sidebar_style(), NavigationSidebarStyle::Simple);
+        assert_eq!(view.get_sidebar_style(), NavigationSidebarStyle::Floating);
         let floating = view.sidebar_style(NavigationSidebarStyle::Floating);
         assert_eq!(
             floating.clone().get_sidebar_style(),
@@ -668,7 +677,18 @@ mod tests {
             (NavigationLink::new("Home", || Text::new("Home")),),
             999999,
         );
-        assert_eq!(keyed.get_sidebar_style(), NavigationSidebarStyle::Simple);
+        assert_eq!(keyed.get_sidebar_style(), NavigationSidebarStyle::Floating);
+        let simple = keyed.chrome_style(crate::views::ChromeStyle::Simple);
+        assert_eq!(
+            simple.clone().get_sidebar_style(),
+            NavigationSidebarStyle::Simple
+        );
+        assert_eq!(
+            simple
+                .chrome_style(crate::views::ChromeStyle::BubbleGlass)
+                .get_sidebar_style(),
+            NavigationSidebarStyle::Floating
+        );
     }
     use crate::views::{NavigationLink, Text};
     use crate::{Icon, InteractionMode, Size};

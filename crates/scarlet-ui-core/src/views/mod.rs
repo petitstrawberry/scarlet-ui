@@ -66,7 +66,7 @@ pub use select::{Select, SelectChangeCallback, SelectRenderObject, SelectStyle};
 pub use slider::{Slider, SliderRenderObject};
 pub use spacer::{Spacer, SpacerRenderObject};
 pub use split::{SplitAxis, SplitAxisPolicy, SplitView, SplitViewRenderObject};
-pub use surface::{ElevationRole, GlassMaterial, Surface, SurfaceRole, SurfaceStyle};
+pub use surface::{ChromeStyle, ElevationRole, GlassMaterial, Surface, SurfaceRole, SurfaceStyle};
 pub use tab::{TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, TabViewRenderObject};
 pub use text::{Text, TextRenderObject, TextStyle, TextTone};
 pub use text_field::{TextField, TextFieldRenderObject};
