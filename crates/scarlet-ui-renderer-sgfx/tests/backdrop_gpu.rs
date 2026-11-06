@@ -444,7 +444,9 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
                 layer.raster_cache_bounds().is_some(),
                 "glass and its opaque backing form one retained layer"
             );
-            for offset in [0., -0.5, -1.5, -1., -211., -425., -630., -20., -20.25] {
+            for offset in [
+                0., -0.5, -1.5, -1., -211., -425., -630., -20., -20.25, -31.25, -51.25, -91.25,
+            ] {
                 let mut paint = PaintContext::new();
                 paint.push_rounded_clip(
                     Rect::from_xywh(0., 0., 240., 180.),

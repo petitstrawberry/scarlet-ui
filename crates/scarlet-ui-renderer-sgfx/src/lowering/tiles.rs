@@ -20,11 +20,67 @@ pub(super) struct Tile {
     source: Weak<DisplayList>,
     scale: u32,
     snap: [usize; 2],
+    snap_dependencies: Vec<(Point, f32)>,
     phase: [u32; 2],
     x: i32,
     y: i32,
     texture: TextureId,
     used: u64,
+}
+
+// Only raster origins whose output can reach this tile affect its snap key.
+// A label crossing the window origin must not invalidate every interior tile.
+// Use glyph ink bounds (including overhangs and long lines), not font advances.
+fn snap_dependencies(list: &DisplayList, tile: FloatRect, scale: u32) -> Vec<(Point, f32)> {
+    let factor = scale as f32 / 1000.;
+    let intersects = |rect: FloatRect| {
+        // Truncation can move text by a logical pixel, images by a physical
+        // pixel; include both signs, the exact fractional phase and coverage.
+        FloatRect::new(rect.x - 2., rect.y - 2., rect.width + 4., rect.height + 4.)
+            .intersect(tile)
+            .is_some()
+    };
+    list.context()
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            PaintCommand::DrawText {
+                position,
+                text,
+                font_size_px,
+                ..
+            } => rasterize_text_cached(text, *font_size_px, scale)
+                .iter()
+                .any(|glyph| {
+                    intersects(FloatRect::new(
+                        position.x + glyph.x as f32 / factor,
+                        position.y + glyph.y as f32 / factor,
+                        glyph.width as f32 / factor,
+                        glyph.height as f32 / factor,
+                    ))
+                })
+                .then_some((*position, 1.)),
+            PaintCommand::DrawIcon { rect, .. }
+            | PaintCommand::DrawBuffer { dst: rect, .. }
+            | PaintCommand::DrawBufferRect { dst: rect, .. } => {
+                intersects(FloatRect::from_logical(*rect, 1.)).then_some((rect.origin, factor))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn snap_signature(dependencies: &[(Point, f32)], origin: Point, phase: [f32; 2]) -> [usize; 2] {
+    let mut snap = [0; 2];
+    for (point, unit) in dependencies {
+        for (axis, value, origin) in [(0, point.x, origin.x), (1, point.y, origin.y)] {
+            let phased = (value + phase[axis]) * unit;
+            if phased != libm::truncf(phased) && value + origin < 0. {
+                snap[axis] += 1;
+            }
+        }
+    }
+    snap
 }
 
 impl Tile {
@@ -316,26 +372,6 @@ impl SgfxPaintEncoder {
         let base = Point::new(libm::floorf(origin.x), libm::floorf(origin.y));
         let phase_values = [origin.x - base.x, origin.y - base.y];
         let phase = phase_values.map(f32::to_bits);
-        // Truncation towards zero changes phase when a fractional raster origin
-        // crosses the window origin. Counts uniquely identify those monotone
-        // threshold sets for an immutable list; no lossy hash or image resampling.
-        let mut snap = [0; 2];
-        for command in list.context().commands() {
-            let (point, unit) = match command {
-                PaintCommand::DrawText { position, .. } => (*position, 1.),
-                PaintCommand::DrawBuffer { dst, .. } | PaintCommand::DrawBufferRect { dst, .. } => {
-                    (dst.origin, factor)
-                }
-                PaintCommand::DrawIcon { rect, .. } => (rect.origin, factor),
-                _ => continue,
-            };
-            for (axis, value, origin) in [(0, point.x, origin.x), (1, point.y, origin.y)] {
-                let phased = (value + phase_values[axis]) * unit;
-                if phased != libm::truncf(phased) && value + origin < 0. {
-                    snap[axis] += 1;
-                }
-            }
-        }
         let mut halo = 0_f32;
         if list.reads_backdrop() {
             for command in list.context().commands() {
@@ -408,7 +444,7 @@ impl SgfxPaintEncoder {
         for tile in &mut self.raster_tiles {
             if tile.list == list.identity()
                 && tile.scale == scale
-                && tile.snap == snap
+                && tile.snap == snap_signature(&tile.snap_dependencies, origin, phase_values)
                 && tile.phase == phase
                 && tile.x >= x0
                 && tile.x < x1
@@ -452,7 +488,8 @@ impl SgfxPaintEncoder {
                 let existing = self.raster_tiles.iter().position(|tile| {
                     tile.list == list.identity()
                         && tile.scale == scale
-                        && tile.snap == snap
+                        && tile.snap
+                            == snap_signature(&tile.snap_dependencies, origin, phase_values)
                         && tile.phase == phase
                         && tile.x == x
                         && tile.y == y
@@ -489,7 +526,8 @@ impl SgfxPaintEncoder {
                             list: 0,
                             source: Weak::new(),
                             scale,
-                            snap,
+                            snap: [0; 2],
+                            snap_dependencies: Vec::new(),
                             phase,
                             x,
                             y,
@@ -548,11 +586,23 @@ impl SgfxPaintEncoder {
                     if degraded {
                         return Ok(None);
                     }
+                    let dependencies = snap_dependencies(
+                        list,
+                        FloatRect::new(
+                            (x as f32 * side as f32 - padding as f32) / factor,
+                            (y as f32 * side as f32 - padding as f32) / factor,
+                            SIDE as f32 / factor,
+                            SIDE as f32 / factor,
+                        ),
+                        scale,
+                    );
+                    let snap = snap_signature(&dependencies, origin, phase_values);
                     self.raster_tiles[slot] = Tile {
                         list: list.identity(),
                         source: Arc::downgrade(list),
                         scale,
                         snap,
+                        snap_dependencies: dependencies,
                         phase,
                         x,
                         y,
@@ -630,6 +680,7 @@ mod tests {
         targets: Vec<TextureId>,
         sampled: Vec<TextureId>,
         fail: bool,
+        allow_glyph_uploads: bool,
     }
     impl CommandExecutor for Trace {
         type Error = ();
@@ -648,7 +699,7 @@ mod tests {
                     self.sampled.push(texture.id());
                 }
                 assert!(
-                    !matches!(command, Command::WriteTexture { .. }),
+                    !matches!(command, Command::WriteTexture { .. }) || self.allow_glyph_uploads,
                     "layers are GPU rendered"
                 );
             }
@@ -735,6 +786,87 @@ mod tests {
             [target],
             "a repeated exact fractional phase reuses existing GPU pixels"
         );
+    }
+
+    #[test]
+    fn origin_crossing_invalidates_only_tiles_reached_by_that_text() {
+        scarlet_ui_core::graphics::set_default_font(include_bytes!(
+            "../../../../examples/web-counter/assets/DejaVuSans.ttf"
+        ))
+        .unwrap();
+        for vertical in [false, true] {
+            for long_line in [false, true] {
+                let (width, height) = if vertical { (200, 800) } else { (800, 200) };
+                let bounds = if vertical {
+                    Rect::from_xywh(0., 0., 200., 2000.)
+                } else {
+                    Rect::from_xywh(0., 0., 2000., 200.)
+                };
+                let mut renderer = SgfxPaintEncoder::new(width, height, false).unwrap();
+                let target = renderer.target_texture(0).unwrap();
+                let mut paint = PaintContext::new();
+                paint.fill_rect(bounds, UiColor::WHITE);
+                let text = if long_line {
+                    if vertical {
+                        "Ink\n".repeat(70)
+                    } else {
+                        "Ink ".repeat(70)
+                    }
+                } else {
+                    "Short label".into()
+                };
+                paint.draw_text(Point::new(8.5, 8.5), &text, UiColor::BLACK, 12.);
+                let list = paint.into_cached_layer(bounds);
+                let mut trace = Trace {
+                    allow_glyph_uploads: true,
+                    ..Trace::default()
+                };
+                let render = |renderer: &mut SgfxPaintEncoder, trace: &mut Trace, y| {
+                    let mut frame = PaintContext::new();
+                    frame.draw_display_list(
+                        if vertical {
+                            Point::new(0., y)
+                        } else {
+                            Point::new(y, 0.)
+                        },
+                        list.clone(),
+                    );
+                    renderer
+                        .encode_frame(
+                            trace,
+                            0,
+                            None,
+                            &frame,
+                            UiColor::WHITE,
+                            1000,
+                            &[(0, 0, width, height)],
+                        )
+                        .unwrap();
+                };
+                render(&mut renderer, &mut trace, -0.25);
+                let interior = renderer
+                    .raster_tiles
+                    .iter()
+                    .find(|t| if vertical { t.y == 1 } else { t.x == 1 })
+                    .unwrap()
+                    .texture;
+                trace.targets.clear();
+                trace.sampled.clear();
+                render(&mut renderer, &mut trace, -20.25);
+                assert_eq!(
+                    trace.sampled.contains(&interior),
+                    !long_line,
+                    "only text with actual ink reaching the interior can invalidate it"
+                );
+                assert_eq!(
+                    trace.targets.iter().filter(|id| **id != target).count(),
+                    if long_line { 2 } else { 1 }
+                );
+                trace.targets.clear();
+                render(&mut renderer, &mut trace, -21.25);
+                assert_eq!(trace.targets, [target], "unchanged snap phase stays warm");
+            }
+        }
     }
 
     #[test]
