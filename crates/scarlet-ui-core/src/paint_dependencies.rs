@@ -474,6 +474,60 @@ mod tests {
     }
 
     #[test]
+    fn explicit_font_revisions_reuse_clones_and_repair_added_and_removed_ink() {
+        use crate::graphics::FontStack;
+        let blank = FontStack::new(include_bytes!("testing/fonts/metrics-blank.ttf")).unwrap();
+        let ink = blank
+            .clone()
+            .with_fallback(include_bytes!("testing/fonts/metrics-fallback.ttf"))
+            .unwrap();
+        let viewport = r(0., 0., 160., 100.);
+        let record = |stack: &FontStack| {
+            let mut ctx = PaintContext::new();
+            ctx.draw_text_with_font_stack(
+                Point::new(4., 3.),
+                "A☃",
+                Color::BLACK,
+                36.,
+                Arc::new(stack.clone()),
+            );
+            ctx.into_display_list()
+        };
+        for scale in [1000, 1250, 2000] {
+            let first = record(&blank);
+            let unchanged = record(&blank.clone());
+            assert!(unchanged.context().same_recording(&first));
+            assert!(unchanged.damage_since(&first, scale).unwrap().is_empty());
+            let with_ink = record(&ink);
+            assert!(!with_ink.context().same_recording(&first));
+            let mut partial = CpuPaintRenderer::new(viewport.size, scale, Color::WHITE);
+            partial.execute(first.context());
+            for (previous, current, has_ink) in [
+                (&first, &with_ink, true),
+                (&with_ink, &unchanged, false),
+            ] {
+                let damage = current.damage_since(previous, scale).unwrap();
+                assert!(
+                    !damage.is_empty(),
+                    "a fallback change must invalidate its ink"
+                );
+                assert!(damage.iter().all(|r| r.right() < 100. && r.bottom() < 80.));
+                partial.execute_with_damage(current.context(), Some(&damage));
+                let mut full = CpuPaintRenderer::new(viewport.size, scale, Color::WHITE);
+                full.execute(current.context());
+                assert_eq!(partial.buffer().as_slice(), full.buffer().as_slice());
+                assert_eq!(
+                    full.buffer()
+                        .as_slice()
+                        .iter()
+                        .any(|p| *p != Color::WHITE.to_bgra()),
+                    has_ink
+                );
+            }
+        }
+    }
+
+    #[test]
     fn physical_rounding_connects_adjacent_reader_before_replay() {
         let mut ctx = PaintContext::new();
         effect(&mut ctx, r(10.2, 10., 5., 5.), r(30., 10., 5., 5.));

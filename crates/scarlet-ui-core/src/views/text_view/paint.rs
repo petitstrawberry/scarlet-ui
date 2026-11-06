@@ -1,12 +1,16 @@
 //! Paint helpers for the multi-line text view.
 
+use alloc::collections::BTreeSet;
 use alloc::string::ToString;
+use alloc::vec::Vec;
+use core::ops::Range;
+
+use super::decoration::TextDecorations;
 
 use super::layout::{TextViewLayout, VisualLine};
 use super::{BORDER_WIDTH, TextDocument, TextPosition, TextSelection};
 use crate::color::Color;
 use crate::geometry::{Point, Rect, Size};
-use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::views::style;
 
@@ -64,21 +68,7 @@ pub fn paint_text_view(
     show_line_numbers: bool,
     highlight_current_line: bool,
 ) {
-    let bounds = Rect::new(origin, size);
-    // Explicit color overrides are a uniform face, never a simulated glass bevel.
-    style::fill_control(ctx, bounds, background_color);
-    if border_color.a > 0.0 {
-        style::stroke_control(ctx, bounds, style::metrics().border_width, border_color);
-    }
-    if focused {
-        style::focus_indicator(
-            ctx,
-            bounds,
-            focused_border_color.with_opacity(focused_border_color.a * 0.40),
-        );
-    }
-
-    paint_text_view_content(
+    paint_text_view_with_decorations(
         ctx,
         origin,
         size,
@@ -101,6 +91,80 @@ pub fn paint_text_view(
         preedit_spans,
         show_line_numbers,
         highlight_current_line,
+        &TextDecorations::default(),
+        false,
+    );
+}
+
+pub(super) fn paint_text_view_with_decorations(
+    ctx: &mut PaintContext,
+    origin: Point,
+    size: Size,
+    layout: &TextViewLayout,
+    document: &TextDocument,
+    selection: TextSelection,
+    focused: bool,
+    font_size: f32,
+    padding: f32,
+    background_color: Color,
+    text_color: Color,
+    placeholder_color: Color,
+    selection_color: Color,
+    current_line_color: Color,
+    border_color: Color,
+    focused_border_color: Color,
+    placeholder: &str,
+    preedit: &str,
+    preedit_cursor_byte: u32,
+    preedit_spans: &[u8],
+    show_line_numbers: bool,
+    highlight_current_line: bool,
+    decorations: &TextDecorations,
+    borderless: bool,
+) {
+    let bounds = Rect::new(origin, size);
+    if borderless {
+        ctx.fill_rect(bounds, background_color);
+    } else {
+        // Explicit color overrides are a uniform face, never a simulated glass bevel.
+        style::fill_control(ctx, bounds, background_color);
+        if border_color.a > 0.0 {
+            style::stroke_control(ctx, bounds, style::metrics().border_width, border_color);
+        }
+        if focused {
+            style::focus_indicator(
+                ctx,
+                bounds,
+                focused_border_color.with_opacity(focused_border_color.a * 0.40),
+            );
+        }
+    }
+
+    paint_text_view_content_with_decorations(
+        ctx,
+        origin,
+        size,
+        layout,
+        document,
+        selection,
+        focused,
+        font_size,
+        padding,
+        background_color,
+        text_color,
+        placeholder_color,
+        selection_color,
+        current_line_color,
+        border_color,
+        focused_border_color,
+        placeholder,
+        preedit,
+        preedit_cursor_byte,
+        preedit_spans,
+        show_line_numbers,
+        highlight_current_line,
+        decorations,
+        borderless,
     );
 }
 
@@ -129,6 +193,60 @@ pub(crate) fn paint_text_view_content(
     show_line_numbers: bool,
     highlight_current_line: bool,
 ) {
+    paint_text_view_content_with_decorations(
+        ctx,
+        origin,
+        size,
+        layout,
+        document,
+        selection,
+        focused,
+        font_size,
+        padding,
+        background_color,
+        text_color,
+        placeholder_color,
+        selection_color,
+        current_line_color,
+        _border_color,
+        focused_border_color,
+        placeholder,
+        preedit,
+        preedit_cursor_byte,
+        preedit_spans,
+        show_line_numbers,
+        highlight_current_line,
+        &TextDecorations::default(),
+        false,
+    );
+}
+
+pub(super) fn paint_text_view_content_with_decorations(
+    ctx: &mut PaintContext,
+    origin: Point,
+    size: Size,
+    layout: &TextViewLayout,
+    document: &TextDocument,
+    selection: TextSelection,
+    focused: bool,
+    font_size: f32,
+    padding: f32,
+    background_color: Color,
+    text_color: Color,
+    placeholder_color: Color,
+    selection_color: Color,
+    current_line_color: Color,
+    _border_color: Color,
+    focused_border_color: Color,
+    placeholder: &str,
+    preedit: &str,
+    preedit_cursor_byte: u32,
+    preedit_spans: &[u8],
+    show_line_numbers: bool,
+    highlight_current_line: bool,
+    decorations: &TextDecorations,
+    borderless: bool,
+) {
     let metrics = style::metrics();
     let clip_rect = Rect::from_xywh(
         origin.x + BORDER_WIDTH,
@@ -136,10 +254,14 @@ pub(crate) fn paint_text_view_content(
         (size.width - BORDER_WIDTH * 2.0).max(0.0),
         (size.height - BORDER_WIDTH * 2.0).max(0.0),
     );
-    ctx.push_rounded_clip(
-        clip_rect,
-        style::radius_for(clip_rect, (metrics.control_radius - BORDER_WIDTH).max(0.0)),
-    );
+    if borderless {
+        ctx.push_clip(clip_rect);
+    } else {
+        ctx.push_rounded_clip(
+            clip_rect,
+            style::radius_for(clip_rect, (metrics.control_radius - BORDER_WIDTH).max(0.0)),
+        );
+    }
 
     if highlight_current_line && focused {
         paint_current_line(ctx, origin, size, layout, selection, current_line_color);
@@ -152,7 +274,6 @@ pub(crate) fn paint_text_view_content(
             ctx,
             origin,
             layout,
-            font_size,
             padding,
             placeholder_color,
             background_color,
@@ -179,7 +300,8 @@ pub(crate) fn paint_text_view_content(
         preedit,
         text_color,
         placeholder_color,
-        font_size,
+        decorations,
+        text_clip,
     );
     if focused && !preedit.is_empty() {
         paint_preedit(
@@ -199,7 +321,7 @@ pub(crate) fn paint_text_view_content(
         let mut caret = layout.cursor_rect(selection.caret, document);
         if !preedit.is_empty() {
             let prefix = preedit_prefix(preedit, preedit_cursor_byte);
-            caret.origin.x += graphics::measure_text_sized(prefix, font_size).0 as f32;
+            caret.origin.x += layout.measure_text(prefix).0 as f32;
         }
         caret.origin.x += origin.x;
         caret.origin.y += origin.y;
@@ -219,11 +341,7 @@ fn paint_current_line(
     color: Color,
 ) {
     let logical_line = layout.line_index_at_byte(selection.caret.byte);
-    for line in layout
-        .visual_lines
-        .iter()
-        .filter(|line| line.logical_line == logical_line)
-    {
+    for line in visible_lines(layout).filter(|line| line.logical_line == logical_line) {
         ctx.fill_rect(
             Rect::from_xywh(origin.x, origin.y + line.y, size.width, layout.line_height),
             color,
@@ -262,7 +380,6 @@ fn paint_line_numbers(
     ctx: &mut PaintContext,
     origin: Point,
     layout: &TextViewLayout,
-    font_size: f32,
     padding: f32,
     color: Color,
     background_color: Color,
@@ -283,9 +400,9 @@ fn paint_line_numbers(
         }
         last_logical = Some(line.logical_line);
         let label = (line.logical_line + 1).to_string();
-        let label_width = graphics::measure_text_sized(&label, font_size).0 as f32;
+        let label_width = layout.measure_text(&label).0 as f32;
         let x = origin.x + padding + (layout.gutter_width - label_width - 6.0).max(0.0);
-        ctx.draw_text(Point::new(x, origin.y + line.y), label, color, font_size);
+        layout.draw_text(ctx, Point::new(x, origin.y + line.y), label, color);
     }
 }
 
@@ -300,68 +417,170 @@ fn paint_visible_text(
     preedit: &str,
     text_color: Color,
     placeholder_color: Color,
-    font_size: f32,
+    decorations: &TextDecorations,
+    clip: Rect,
 ) {
     if document.len() == 0 && preedit.is_empty() && !placeholder.is_empty() {
         if let Some(line) = layout.visual_lines.first() {
-            ctx.draw_text(
+            layout.draw_text(
+                ctx,
                 Point::new(origin.x + line.x, origin.y + line.y),
                 placeholder,
                 placeholder_color,
-                font_size,
             );
         }
         return;
     }
     for line in visible_lines(layout) {
-        if focused && !preedit.is_empty() && line.contains_byte(selection.caret.byte) {
-            paint_line_with_preedit_gap(
+        let gap = if focused && !preedit.is_empty() && line.contains_byte(selection.caret.byte) {
+            Some((
+                line.display_byte_for_document_byte(selection.caret.byte),
+                layout.measure_text(preedit).0 as f32,
+            ))
+        } else {
+            None
+        };
+        // Split at the composition insertion point so source decorations never
+        // color or underline the IME text, and suffix marks move with the suffix.
+        let split = gap.map_or(line.text().len(), |(byte, _)| byte);
+        for (part, shift) in [
+            (0..split, 0.0),
+            (
+                split..line.text().len(),
+                gap.map_or(0.0, |(_, width)| width),
+            ),
+        ] {
+            let x = origin.x + line.x + shift;
+            let visible =
+                line.visible_display_range(clip.origin.x - x, clip.origin.x + clip.size.width - x);
+            let part = part.start.max(visible.start)..part.end.min(visible.end);
+            if part.start >= part.end {
+                continue;
+            }
+            paint_foreground(
                 ctx,
-                origin,
+                origin.y + line.y,
+                x,
+                layout,
                 line,
-                selection.caret,
-                preedit,
+                part.clone(),
                 text_color,
-                font_size,
+                decorations,
             );
-            continue;
+            paint_diagnostics(
+                ctx,
+                origin.y + line.y,
+                x,
+                layout,
+                line,
+                part,
+                decorations,
+                clip,
+            );
         }
-        ctx.draw_text(
-            Point::new(origin.x + line.x, origin.y + line.y),
-            line.text(),
-            text_color,
-            font_size,
+    }
+}
+
+// Convert only intersections with a visible row; no full document flattening.
+// Mapping through VisualLine also expands tab ranges to all display spaces.
+fn display_range(line: &VisualLine, range: &Range<usize>) -> Range<usize> {
+    let text = line.text();
+    let mut start = line.display_byte_for_document_byte(range.start);
+    let mut end = line.display_end_for_document_byte(range.end);
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    while end < text.len() && !text.is_char_boundary(end) {
+        end += 1;
+    }
+    start..end
+}
+
+fn paint_foreground(
+    ctx: &mut PaintContext,
+    y: f32,
+    x: f32,
+    layout: &TextViewLayout,
+    line: &VisualLine,
+    part: Range<usize>,
+    default_color: Color,
+    decorations: &TextDecorations,
+) {
+    let mut events = Vec::new();
+    let mut colors = Vec::new();
+    for span in decorations.foreground.intersecting(line.text_range.clone()) {
+        let range = display_range(line, &span.range);
+        let start = range.start.max(part.start);
+        let end = range.end.min(part.end);
+        if start < end {
+            let index = colors.len();
+            colors.push(span.color);
+            events.push((start, true, span.priority, index));
+            events.push((end, false, span.priority, index));
+        }
+    }
+    events.sort_unstable();
+    let mut active = BTreeSet::new();
+    let mut byte = part.start;
+    for (at, entering, priority, index) in events {
+        if at > byte {
+            let color = active
+                .last()
+                .map_or(default_color, |&(_, index)| colors[index]);
+            layout.draw_text(
+                ctx,
+                Point::new(x + line.width_to_display_byte(byte), y),
+                &line.text()[byte..at],
+                color,
+            );
+            byte = at;
+        }
+        if entering {
+            active.insert((priority, index));
+        } else {
+            active.remove(&(priority, index));
+        }
+    }
+    if byte < part.end {
+        layout.draw_text(
+            ctx,
+            Point::new(x + line.width_to_display_byte(byte), y),
+            &line.text()[byte..part.end],
+            default_color,
         );
     }
 }
 
-fn paint_line_with_preedit_gap(
+fn paint_diagnostics(
     ctx: &mut PaintContext,
-    origin: Point,
+    y: f32,
+    x: f32,
+    layout: &TextViewLayout,
     line: &VisualLine,
-    position: TextPosition,
-    preedit: &str,
-    text_color: Color,
-    font_size: f32,
+    part: Range<usize>,
+    decorations: &TextDecorations,
+    clip: Rect,
 ) {
-    let display_byte = line.display_byte_for_document_byte(position.byte);
-    let (prefix, suffix) = split_at_char_boundary(line.text(), display_byte);
-    let x = origin.x + line.x;
-    let y = origin.y + line.y;
-
-    if !prefix.is_empty() {
-        ctx.draw_text(Point::new(x, y), prefix, text_color, font_size);
-    }
-
-    let prefix_width = graphics::measure_text_sized(prefix, font_size).0 as f32;
-    let preedit_width = graphics::measure_text_sized(preedit, font_size).0 as f32;
-    if !suffix.is_empty() {
-        ctx.draw_text(
-            Point::new(x + prefix_width + preedit_width, y),
-            suffix,
-            text_color,
-            font_size,
-        );
+    let mut spans: Vec<_> = decorations
+        .diagnostics
+        .intersecting(line.text_range.clone())
+        .collect();
+    spans.sort_unstable_by_key(|span| span.priority);
+    for span in spans {
+        let range = display_range(line, &span.range);
+        let start = range.start.max(part.start);
+        let end = range.end.min(part.end);
+        if start >= end {
+            continue;
+        }
+        let left = (x + line.width_to_display_byte(start)).max(clip.origin.x);
+        let right = (x + line.width_to_display_byte(end)).min(clip.origin.x + clip.size.width);
+        if left < right {
+            ctx.fill_rect(
+                Rect::from_xywh(left, y + layout.line_height - 2.0, right - left, 1.0),
+                span.color,
+            );
+        }
     }
 }
 
@@ -380,12 +599,13 @@ fn paint_preedit(
     let caret = layout.cursor_rect(position, document);
     let x = origin.x + caret.origin.x;
     let y = origin.y + caret.origin.y;
-    paint_preedit_marks(ctx, x, y, preedit, spans, font_size, active_color);
-    ctx.draw_text(Point::new(x, y), preedit, text_color, font_size);
+    paint_preedit_marks(ctx, layout, x, y, preedit, spans, font_size, active_color);
+    layout.draw_text(ctx, Point::new(x, y), preedit, text_color);
 }
 
 fn paint_preedit_marks(
     ctx: &mut PaintContext,
+    layout: &TextViewLayout,
     x: f32,
     y: f32,
     preedit: &str,
@@ -396,6 +616,7 @@ fn paint_preedit_marks(
     if spans.is_empty() {
         paint_preedit_mark_span(
             ctx,
+            layout,
             x,
             y,
             preedit,
@@ -439,6 +660,7 @@ fn paint_preedit_marks(
                 != 0;
             paint_preedit_mark_span(
                 ctx,
+                layout,
                 x,
                 y,
                 preedit,
@@ -455,6 +677,7 @@ fn paint_preedit_marks(
 
 fn paint_preedit_mark_span(
     ctx: &mut PaintContext,
+    layout: &TextViewLayout,
     x: f32,
     y: f32,
     preedit: &str,
@@ -464,8 +687,8 @@ fn paint_preedit_mark_span(
     font_size: f32,
     active_color: Color,
 ) {
-    let prefix_width = graphics::measure_text_sized(&preedit[..start], font_size).0 as f32;
-    let span_width = graphics::measure_text_sized(&preedit[start..end], font_size).0 as f32;
+    let prefix_width = layout.measure_text(&preedit[..start]).0 as f32;
+    let span_width = layout.measure_text(&preedit[start..end]).0 as f32;
     let underline_x = x + prefix_width;
     let underline_y = (y + font_size * 1.15).max(0.0);
     let thickness = if active { 3.0 } else { 1.0 };
@@ -495,10 +718,8 @@ fn visible_lines(layout: &TextViewLayout) -> impl Iterator<Item = &VisualLine> {
     layout.visual_lines[layout.visible_lines.clone()].iter()
 }
 
-fn width_to_byte(line: &VisualLine, byte: usize, font_size: f32) -> f32 {
-    let display_byte = line.display_byte_for_document_byte(byte);
-    let prefix = clamp_str_prefix(line.text(), display_byte);
-    graphics::measure_text_sized(prefix, font_size).0 as f32
+fn width_to_byte(line: &VisualLine, byte: usize, _font_size: f32) -> f32 {
+    line.width_to_byte(byte)
 }
 
 fn preedit_prefix(preedit: &str, byte: u32) -> &str {
@@ -512,20 +733,4 @@ fn clamp_byte_boundary(text: &str, byte: u32) -> u32 {
         byte -= 1;
     }
     byte as u32
-}
-
-fn clamp_str_prefix(text: &str, byte: usize) -> &str {
-    let mut byte = byte.min(text.len());
-    while byte > 0 && !text.is_char_boundary(byte) {
-        byte -= 1;
-    }
-    &text[..byte]
-}
-
-fn split_at_char_boundary(text: &str, byte: usize) -> (&str, &str) {
-    let mut byte = byte.min(text.len());
-    while byte > 0 && !text.is_char_boundary(byte) {
-        byte -= 1;
-    }
-    text.split_at(byte)
 }

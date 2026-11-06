@@ -1,5 +1,6 @@
 //! Multi-line editable text view.
 
+mod decoration;
 mod document;
 mod editing;
 mod layout;
@@ -15,10 +16,13 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 
+use decoration::{DecorationIndex, TextDecorations};
+pub use decoration::{TextDiagnosticSpan, TextStyleSpan};
+
 pub use document::{EditDelta, TextDocument, TextPosition};
 pub(crate) use editing::{
     handle_text_view_focus, handle_text_view_keyboard, handle_text_view_mouse,
-    handle_text_view_text_input, handle_text_view_touch,
+    handle_text_view_scroll_gesture, handle_text_view_text_input, handle_text_view_touch,
 };
 pub use layout::{TextViewLayout, VisualLine};
 pub use selection::{TabMode, TextSelection, TextViewScroll, WrapMode};
@@ -29,6 +33,7 @@ use crate::element::{
     Element, ElementRenderObject, LayoutConstraints, RenderElement, TextInputElementState,
 };
 use crate::geometry::{Point, Rect, Size};
+use crate::graphics::FontStack;
 use crate::renderer::PaintContext;
 use crate::state::{Listenable, State};
 use crate::view::View;
@@ -42,6 +47,15 @@ enum TextBinding {
     Document(State<TextDocument>),
 }
 
+/// A text hit at a widget-local pointer position.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextViewHit {
+    /// Absolute UTF-8 byte offset at the nearest grapheme boundary.
+    pub byte_offset: usize,
+    /// Pointer coordinates in logical pixels relative to the TextView viewport.
+    pub position: Point,
+}
+
 /// Multi-line editable text view.
 #[derive(Clone)]
 pub struct TextView {
@@ -50,8 +64,12 @@ pub struct TextView {
     scroll: Option<State<TextViewScroll>>,
     wrap_mode: Option<State<WrapMode>>,
     static_wrap_mode: WrapMode,
+    reveal_selection_on_change: bool,
+    autofocus: bool,
+    automatic_software_keyboard: bool,
     placeholder: String,
     font_size: f32,
+    font_stack: Option<Arc<FontStack>>,
     padding: f32,
     tab_mode: TabMode,
     line_numbers: bool,
@@ -59,17 +77,39 @@ pub struct TextView {
     background_color: Color,
     material: Option<style::GlassMaterial>,
     text_color: Color,
+    decorations: TextDecorations,
     placeholder_color: Color,
     selection_color: Color,
     current_line_color: Color,
     border_color: Color,
     focused_border_color: Color,
+    borderless: bool,
     on_copy: Option<Arc<dyn for<'a> Fn(Cow<'a, str>) + 'static>>,
     on_paste: Option<Arc<dyn Fn() -> Option<Cow<'static, str>> + 'static>>,
     on_text_change: Option<Arc<dyn Fn(&EditDelta) + 'static>>,
+    on_hover: Option<Arc<dyn Fn(Option<TextViewHit>) + 'static>>,
+    on_modified_click: Option<Arc<dyn Fn(TextViewHit) + 'static>>,
+    caret_rect: Option<State<Rect>>,
 }
 
 impl TextView {
+    pub fn text_spans(mut self, spans: Vec<TextStyleSpan>) -> Self {
+        self.decorations.foreground =
+            DecorationIndex::new(spans.into_iter().map(|span| (span.range, span.color)));
+        self
+    }
+
+    pub fn diagnostic_spans(mut self, spans: Vec<TextDiagnosticSpan>) -> Self {
+        self.decorations.diagnostics =
+            DecorationIndex::new(spans.into_iter().map(|span| (span.range, span.color)));
+        self
+    }
+
+    pub fn borderless(mut self) -> Self {
+        self.borderless = true;
+        self
+    }
+
     /// Create a text view bound to a string state.
     ///
     /// # Arguments
@@ -84,11 +124,11 @@ impl TextView {
         Self::base(TextBinding::String(text), selection)
     }
 
-    /// Create a text view bound to a rope-backed document state.
+    /// Create a text view bound to a shared immutable document state.
     ///
     /// # Arguments
     ///
-    /// * `text` - Document state used by the O(log n) editing path.
+    /// * `text` - Document state with shared snapshots and indexed line access.
     /// * `selection` - Selection state shared with the view.
     ///
     /// # Returns
@@ -106,8 +146,12 @@ impl TextView {
             scroll: None,
             wrap_mode: None,
             static_wrap_mode: WrapMode::None,
+            reveal_selection_on_change: false,
+            autofocus: false,
+            automatic_software_keyboard: true,
             placeholder: String::new(),
             font_size: 14.0,
+            font_stack: None,
             padding: 8.0,
             tab_mode: TabMode::Tab,
             line_numbers: false,
@@ -115,6 +159,7 @@ impl TextView {
             background_color: style::surface_color(&palette, style::SurfaceRole::Canvas),
             material: Some(style::GlassMaterial::editing()),
             text_color: palette.text(),
+            decorations: TextDecorations::default(),
             placeholder_color: palette.text_secondary(),
             selection_color: style::text_selection_highlight(
                 palette.primary(),
@@ -123,10 +168,39 @@ impl TextView {
             current_line_color: palette.background_secondary(),
             border_color: palette.divider(),
             focused_border_color: style::focus_highlight(&palette),
+            borderless: false,
             on_copy: None,
             on_paste: None,
             on_text_change: None,
+            on_hover: None,
+            on_modified_click: None,
+            caret_rect: None,
         }
+    }
+
+    /// Reveal an externally changed selection, for example Find or Undo.
+    /// Scroll-only updates leave the caret where it is, so reading another
+    /// part of the document never jumps back to the selection.
+    pub fn reveal_selection_on_change(mut self, reveal: bool) -> Self {
+        self.reveal_selection_on_change = reveal;
+        self
+    }
+
+    /// Set initial keyboard focus. An unchanged value preserves subsequent
+    /// user focus changes; changing the value explicitly requests that focus.
+    pub fn autofocus(mut self, autofocus: bool) -> Self {
+        self.autofocus = autofocus;
+        self
+    }
+
+    /// Allow focus to automatically show a software keyboard (default: `true`).
+    ///
+    /// Setting this to `false` preserves editing, selection, hardware keyboard
+    /// input and IME composition. Platforms may still honor explicit requests
+    /// to show the keyboard. Rebuilding with a new value updates a focused editor.
+    pub fn automatic_software_keyboard(mut self, allow: bool) -> Self {
+        self.automatic_software_keyboard = allow;
+        self
     }
 
     /// Bind an external scroll state.
@@ -200,6 +274,16 @@ impl TextView {
         self
     }
 
+    /// Use an explicit primary/fallback stack for this editor's text.
+    ///
+    /// Applies to document text, line numbers, placeholder and IME composition.
+    /// Font sizes remain logical pixels per em. Other views keep their fonts.
+    /// Without this override, the text view uses the global default stack.
+    pub fn font_stack(mut self, font_stack: FontStack) -> Self {
+        self.font_stack = Some(Arc::new(font_stack));
+        self
+    }
+
     /// Set the content padding.
     ///
     /// # Arguments
@@ -232,7 +316,8 @@ impl TextView {
     ///
     /// # Arguments
     ///
-    /// * `enabled` - `true` to reserve space for line numbers in later tasks.
+    /// * `enabled` - `true` to show line numbers with at least four digits of
+    ///   reserved width, keeping the text origin stable as the document grows.
     ///
     /// # Returns
     ///
@@ -405,6 +490,29 @@ impl TextView {
         self
     }
 
+    /// Observe pointer movement without changing selection. Receives `None`
+    /// on exit or outside editable content. Use captured `State` for updates;
+    /// applications own hover delays and cancellation.
+    pub fn on_hover(mut self, callback: impl Fn(Option<TextViewHit>) + 'static) -> Self {
+        self.on_hover = Some(Arc::new(callback));
+        self
+    }
+
+    /// Handle a primary-modifier left press (Command on macOS, Control elsewhere).
+    /// Installing this callback consumes that press without moving the selection.
+    pub fn on_modified_click(mut self, callback: impl Fn(TextViewHit) + 'static) -> Self {
+        self.on_modified_click = Some(Arc::new(callback));
+        self
+    }
+
+    /// Publish the caret rectangle in widget-local logical pixels after geometry
+    /// changes. Writes only when different; this output is not a view listenable.
+    /// Anchor overlays to this state without reserving editor layout space.
+    pub fn caret_rect_state(mut self, rect: State<Rect>) -> Self {
+        self.caret_rect = Some(rect);
+        self
+    }
+
     /// Return the bound string state when using the convenience constructor.
     ///
     /// # Returns
@@ -473,18 +581,27 @@ pub struct TextViewRenderObject {
     text_document: TextDocument,
     selection: TextSelection,
     scroll: TextViewScroll,
+    // Preserve the requested offset across intermediate parent measurement passes.
+    requested_scroll: TextViewScroll,
+    scroll_state: Option<State<TextViewScroll>>,
     wrap_mode: WrapMode,
     preedit: String,
     preedit_cursor_byte: u32,
     preedit_anchor_byte: u32,
     preedit_spans: Vec<u8>,
     focused: bool,
+    autofocus: bool,
+    automatic_software_keyboard: bool,
     dragging: bool,
+    pub(crate) pointer_modifiers: crate::event::KeyModifiers,
+    caret_rect: Option<State<Rect>>,
     desired_x: Option<f32>,
     size: Size,
     layout: TextViewLayout,
+    keyboard_bottom: Option<f32>,
     placeholder: String,
     font_size: f32,
+    font_stack: Option<Arc<FontStack>>,
     padding: f32,
     tab_mode: TabMode,
     line_numbers: bool,
@@ -492,11 +609,13 @@ pub struct TextViewRenderObject {
     background_color: Color,
     material: Option<style::GlassMaterial>,
     text_color: Color,
+    decorations: TextDecorations,
     placeholder_color: Color,
     selection_color: Color,
     current_line_color: Color,
     border_color: Color,
     focused_border_color: Color,
+    borderless: bool,
 }
 
 impl TextViewRenderObject {
@@ -524,32 +643,49 @@ impl TextViewRenderObject {
             .as_ref()
             .map(State::get)
             .unwrap_or(view.static_wrap_mode);
-        let layout = TextViewLayout::compute(
-            &text_document,
+        // The first real constraints determine wrapping. Avoid laying out the
+        // entire document into one-pixel rows while constructing the shell.
+        let layout = TextViewLayout::compute_with_font_stack(
+            &TextDocument::new(),
             view.font_size,
             view.padding,
             wrap_mode,
             Size::ZERO,
-            scroll,
+            TextViewScroll::default(),
             view.line_numbers,
+            view.font_stack.as_ref(),
         );
+
+        let requested_selection = view.selection.get();
+        let selection = TextSelection {
+            anchor: text_document.clamp_position(requested_selection.anchor),
+            caret: text_document.clamp_position(requested_selection.caret),
+        };
 
         Self {
             text_document,
-            selection: view.selection.get(),
+            selection,
             scroll,
+            requested_scroll: scroll,
+            scroll_state: view.scroll.clone(),
             wrap_mode,
             preedit: String::new(),
             preedit_cursor_byte: 0,
             preedit_anchor_byte: 0,
             preedit_spans: Vec::new(),
-            focused: false,
+            focused: view.autofocus,
+            autofocus: view.autofocus,
+            automatic_software_keyboard: view.automatic_software_keyboard,
             dragging: false,
+            pointer_modifiers: crate::event::KeyModifiers::empty(),
+            caret_rect: view.caret_rect.clone(),
             desired_x: None,
             size: Size::ZERO,
             layout,
+            keyboard_bottom: None,
             placeholder: view.placeholder.clone(),
             font_size: view.font_size,
+            font_stack: view.font_stack.clone(),
             padding: view.padding,
             tab_mode: view.tab_mode,
             line_numbers: view.line_numbers,
@@ -557,30 +693,27 @@ impl TextViewRenderObject {
             background_color: view.background_color,
             material: view.material,
             text_color: view.text_color,
+            decorations: view.decorations.clone(),
             placeholder_color: view.placeholder_color,
             selection_color: view.selection_color,
             current_line_color: view.current_line_color,
             border_color: view.border_color,
             focused_border_color: view.focused_border_color,
+            borderless: view.borderless,
         }
     }
 
     pub(crate) fn compute_layout(&mut self) {
-        let layout = TextViewLayout::compute(
+        if !self.layout.matches_with_font_stack(
             &self.text_document,
             self.font_size,
             self.padding,
             self.wrap_mode,
             self.size,
-            self.scroll,
             self.line_numbers,
-        );
-        let clamped_scroll = layout.clamp_scroll(self.scroll);
-        self.layout = if clamped_scroll == self.scroll {
-            layout
-        } else {
-            self.scroll = clamped_scroll;
-            TextViewLayout::compute(
+            self.font_stack.as_ref(),
+        ) {
+            self.layout = TextViewLayout::compute_with_font_stack(
                 &self.text_document,
                 self.font_size,
                 self.padding,
@@ -588,8 +721,53 @@ impl TextViewRenderObject {
                 self.size,
                 self.scroll,
                 self.line_numbers,
-            )
+                self.font_stack.as_ref(),
+            );
+        }
+        self.layout.set_viewport(self.size);
+        self.layout.viewport_height = (self.visible_bottom() - self.padding * 2.0).max(1.0);
+        let base_width = match self.wrap_mode {
+            WrapMode::None => self.layout.max_line_width,
+            WrapMode::Soft => self.layout.viewport_width,
         };
+        self.layout.content_width = base_width;
+        if !self.preedit.is_empty() {
+            // Composition is painted inline without changing document byte
+            // ranges. Allow a temporary horizontal reveal even on wrapped rows.
+            let caret = self.cursor_rect();
+            let preedit_width = self.layout.measure_text(&self.preedit).0 as f32;
+            let composition_end = caret.origin.x + self.layout.scroll.x - self.layout.text_origin_x
+                + preedit_width
+                + caret.size.width;
+            self.layout.content_width = base_width.max(composition_end);
+        }
+        self.scroll = self.layout.set_scroll(self.requested_scroll);
+    }
+
+    pub(super) fn visible_bottom(&self) -> f32 {
+        self.keyboard_bottom
+            .unwrap_or(self.size.height)
+            .min(self.size.height)
+    }
+
+    fn publish_caret_rect(&self) {
+        if let Some(state) = &self.caret_rect {
+            let rect = self.text_input_cursor_rect();
+            if state.get() != rect {
+                state.set(rect);
+            }
+        }
+    }
+
+    /// Resolve a pointer hit without changing selection or scrolling.
+    pub fn hit_at_point(&self, position: Point) -> Option<TextViewHit> {
+        if !Rect::new(Point::ZERO, self.size).contains(position) {
+            return None;
+        }
+        self.hit_test(position).map(|hit| TextViewHit {
+            byte_offset: self.text_document.clamp_position(hit).byte,
+            position,
+        })
     }
 
     /// Convert a widget-local point to a text position.
@@ -619,8 +797,7 @@ impl TextViewRenderObject {
         let mut cursor_rect = self.cursor_rect();
         if !self.preedit.is_empty() {
             let prefix = preedit_prefix(&self.preedit, self.preedit_anchor_byte);
-            cursor_rect.origin.x +=
-                crate::graphics::measure_text_sized(prefix, self.font_size).0 as f32;
+            cursor_rect.origin.x += self.layout.measure_text(prefix).0 as f32;
         }
         cursor_rect
     }
@@ -685,14 +862,21 @@ impl TextViewRenderObject {
         self.preedit_anchor_byte = clamp_byte_boundary(preedit, anchor_byte);
         self.preedit_spans.clear();
         self.preedit_spans.extend_from_slice(spans);
+        self.compute_layout();
+        self.publish_caret_rect();
     }
 
     /// Clear the active IME preedit state.
     pub(crate) fn clear_preedit(&mut self) {
+        let had_preedit = !self.preedit.is_empty();
         self.preedit.clear();
         self.preedit_cursor_byte = 0;
         self.preedit_anchor_byte = 0;
         self.preedit_spans.clear();
+        if had_preedit {
+            self.compute_layout();
+            self.publish_caret_rect();
+        }
     }
 
     /// Return the text-input state exposed to platform IME backends.
@@ -708,11 +892,57 @@ impl TextViewRenderObject {
             surrounding_text: self.text_document.as_str().into_owned(),
             cursor_byte: self.selection.caret.byte as u32,
             anchor_byte: self.selection.anchor.byte as u32,
+            automatic_software_keyboard: self.automatic_software_keyboard,
         }
     }
 }
 
 impl ElementRenderObject for TextViewRenderObject {
+    fn accepts_touch_scroll(&self) -> bool {
+        self.layout.content_width > self.layout.viewport_width
+            || self.layout.content_height > self.layout.viewport_height
+    }
+
+    fn avoid_input_occlusion(
+        &mut self,
+        occlusion: Option<Rect>,
+        _caret: Option<Rect>,
+        reveal: bool,
+    ) -> bool {
+        let before = (self.keyboard_bottom, self.scroll);
+        self.keyboard_bottom = occlusion
+            .filter(|area| {
+                self.focused
+                    && area.size.width > 0.
+                    && area.size.height > 0.
+                    && area.origin.x < self.size.width
+                    && area.origin.x + area.size.width > 0.
+                    && area.origin.y >= self.padding * 2. + self.layout.line_height
+                    && area.origin.y < self.size.height
+            })
+            .map(|area| area.origin.y);
+        self.compute_layout();
+        if self.keyboard_bottom.is_some() && (reveal || before.0 != self.keyboard_bottom) {
+            let caret = self.text_input_cursor_rect();
+            let bottom = self.visible_bottom() - self.padding;
+            let mut requested = self.scroll;
+            if caret.origin.y + caret.size.height > bottom {
+                requested.y += caret.origin.y + caret.size.height - bottom;
+            } else if caret.origin.y < self.padding {
+                requested.y -= self.padding - caret.origin.y;
+            }
+            self.scroll = self.layout.set_scroll(requested);
+        }
+        self.requested_scroll = self.scroll;
+        if before.1 != self.scroll {
+            if let Some(state) = &self.scroll_state {
+                state.set(self.scroll);
+            }
+            self.publish_caret_rect();
+        }
+        before != (self.keyboard_bottom, self.scroll)
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         let desired = Size::new(
             if constraints.max_width.is_finite() {
@@ -731,6 +961,17 @@ impl ElementRenderObject for TextViewRenderObject {
         self.size
     }
 
+    fn flush_layout_notifications(&mut self) {
+        // Only the final viewport may commit a clamp (for example after resize).
+        self.requested_scroll = self.scroll;
+        if let Some(state) = &self.scroll_state {
+            if state.get() != self.scroll {
+                state.set(self.scroll);
+            }
+        }
+        self.publish_caret_rect();
+    }
+
     fn size(&self) -> Size {
         self.size
     }
@@ -742,11 +983,11 @@ impl ElementRenderObject for TextViewRenderObject {
     }
 
     fn reads_backdrop(&self) -> bool {
-        self.material.is_some()
+        self.material.is_some() && !self.borderless
     }
 
     fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
-        let paint_content = if let Some(material) = self.material {
+        let paint_content = if let Some(material) = self.material.filter(|_| !self.borderless) {
             style::paint_glass_material(
                 ctx,
                 Rect::new(origin, self.size),
@@ -756,9 +997,9 @@ impl ElementRenderObject for TextViewRenderObject {
             if self.focused {
                 style::glass_control_focus(ctx, Rect::new(origin, self.size), material);
             }
-            paint::paint_text_view_content
+            paint::paint_text_view_content_with_decorations
         } else {
-            paint::paint_text_view
+            paint::paint_text_view_with_decorations
         };
         paint_content(
             ctx,
@@ -770,7 +1011,7 @@ impl ElementRenderObject for TextViewRenderObject {
             self.focused,
             self.font_size,
             self.padding,
-            if self.material.is_some() {
+            if self.material.is_some() && !self.borderless {
                 Color::CLEAR
             } else {
                 self.background_color
@@ -787,6 +1028,8 @@ impl ElementRenderObject for TextViewRenderObject {
             &self.preedit_spans,
             self.line_numbers,
             self.current_line_highlight,
+            &self.decorations,
+            self.borderless,
         );
         true
     }
@@ -809,33 +1052,77 @@ impl ElementRenderObject for TextViewRenderObject {
         let Some(view) = new_view.as_any().downcast_ref::<TextView>() else {
             return crate::element::UpdateResult::Replaced;
         };
-        let focused = self.focused;
-        let dragging = self.dragging;
-        let preedit = self.preedit.clone();
-        let preedit_cursor_byte = self.preedit_cursor_byte;
-        let preedit_anchor_byte = self.preedit_anchor_byte;
-        let preedit_spans = self.preedit_spans.clone();
-        let desired_x = self.desired_x;
-        let scroll = self.scroll;
-        let size = self.size;
-        *self = TextViewRenderObject::from_view(view);
-        if view.scroll.is_none() {
-            self.scroll = scroll;
+        if self.autofocus != view.autofocus {
+            self.set_focused(view.autofocus);
+            self.autofocus = view.autofocus;
         }
-        self.focused = focused;
-        self.dragging = dragging;
-        self.preedit = preedit;
-        self.preedit_cursor_byte = preedit_cursor_byte;
-        self.preedit_anchor_byte = preedit_anchor_byte;
-        self.preedit_spans = preedit_spans;
-        self.desired_x = desired_x;
-        self.size = size;
+        match &view.text {
+            TextBinding::String(text) => {
+                let text = text.get();
+                if self.text_document.as_str().as_ref() != text {
+                    self.text_document = TextDocument::from_str(&text);
+                }
+            }
+            TextBinding::Document(text) => self.text_document = text.get(),
+        }
+        let requested_selection = view.selection.get();
+        let selection = TextSelection {
+            anchor: self
+                .text_document
+                .clamp_position(requested_selection.anchor),
+            caret: self.text_document.clamp_position(requested_selection.caret),
+        };
+        let selection_changed = self.selection != selection;
+        self.selection = selection;
+        if let Some(scroll) = &view.scroll {
+            self.requested_scroll = scroll.get();
+        }
+        self.scroll_state = view.scroll.clone();
+        self.wrap_mode = view
+            .wrap_mode
+            .as_ref()
+            .map(State::get)
+            .unwrap_or(view.static_wrap_mode);
+        self.caret_rect = view.caret_rect.clone();
+        self.automatic_software_keyboard = view.automatic_software_keyboard;
+        self.placeholder.clone_from(&view.placeholder);
+        self.font_size = view.font_size;
+        let font_changed = self.font_stack.as_deref().map(FontStack::cache_id)
+            != view.font_stack.as_deref().map(FontStack::cache_id);
+        self.font_stack.clone_from(&view.font_stack);
+        self.padding = view.padding;
+        self.tab_mode = view.tab_mode;
+        self.line_numbers = view.line_numbers;
+        self.current_line_highlight = view.current_line_highlight;
+        self.background_color = view.background_color;
+        self.material = view.material;
+        self.text_color = view.text_color;
+        self.decorations = view.decorations.clone();
+        self.placeholder_color = view.placeholder_color;
+        self.selection_color = view.selection_color;
+        self.current_line_color = view.current_line_color;
+        self.border_color = view.border_color;
+        self.focused_border_color = view.focused_border_color;
+        self.borderless = view.borderless;
         self.compute_layout();
+        if font_changed {
+            self.desired_x = None;
+        }
+        if selection_changed {
+            self.desired_x = None;
+            if view.reveal_selection_on_change {
+                editing::ensure_caret_visible(view, self);
+            }
+        }
+        self.publish_caret_rect();
         crate::element::UpdateResult::Updated
     }
 
     fn update_needs_layout(&self) -> bool {
-        true
+        // TextView fills its constraints; selection, scroll, text and styling
+        // only change internal geometry, already refreshed in update(). Avoid
+        // re-running ancestor measurement passes on every selection event.
+        false
     }
 }
 

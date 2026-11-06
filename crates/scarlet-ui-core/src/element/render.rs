@@ -33,6 +33,8 @@ fn update_slider_value(
     if (slider.get_value().get() - new_value).abs() > 0.001 {
         slider.get_value().set(new_value);
         slider.invoke_on_change(new_value);
+        render_object.set_value(slider.get_value().get());
+        crate::pipeline::mark_element_needs_paint(pipeline_id, id);
     }
 }
 
@@ -59,6 +61,8 @@ fn activate_toggle(
     let next = !state.get();
     render_object.set_is_on(next);
     state.set(next);
+    toggle.invoke_on_change(next);
+    render_object.set_is_on(state.get());
     crate::pipeline::mark_element_needs_paint(pipeline_id, id);
 }
 
@@ -412,6 +416,21 @@ pub trait RenderObject: Any {
         false
     }
 
+    /// Adjust internal scrolling for a native keyboard overlay.
+    fn avoid_input_occlusion(
+        &mut self,
+        _occlusion: Option<Rect>,
+        _caret: Option<Rect>,
+        _reveal: bool,
+    ) -> bool {
+        false
+    }
+
+    /// Keep release activation valid while a touch stays within this control.
+    fn keeps_touch_press_within_bounds(&self) -> bool {
+        false
+    }
+
     /// Layout this RenderObject and its children
     ///
     /// Container render objects can override this to implement custom layout
@@ -528,6 +547,16 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
                 .view
                 .as_any()
                 .downcast_ref::<crate::views::Select>()
+                .is_some_and(|view| !view.is_enabled() || view.option_count() == 0)
+            || self
+                .view
+                .as_any()
+                .downcast_ref::<crate::views::Toggle>()
+                .is_some_and(|view| !view.is_enabled())
+            || self
+                .view
+                .as_any()
+                .downcast_ref::<crate::views::Slider>()
                 .is_some_and(|view| !view.is_enabled())
     }
 
@@ -1000,6 +1029,19 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         if self
             .render_object
             .as_any()
+            .downcast_ref::<crate::views::ToggleRenderObject>()
+            .is_some_and(|object| object.is_focused())
+            || self
+                .render_object
+                .as_any()
+                .downcast_ref::<crate::views::SliderRenderObject>()
+                .is_some_and(|object| object.is_focused())
+        {
+            return true;
+        }
+        if self
+            .render_object
+            .as_any()
             .downcast_ref::<crate::views::ButtonRenderObject>()
             .is_some_and(|button| button.is_focused())
         {
@@ -1041,6 +1083,8 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             return false;
         }
         self.view.as_any().is::<crate::views::Button>()
+            || self.view.as_any().is::<crate::views::Toggle>()
+            || self.view.as_any().is::<crate::views::Slider>()
             || self
                 .view
                 .as_any()
@@ -1188,6 +1232,30 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         Some(&mut self.render_object)
     }
 
+    fn avoid_input_occlusion(
+        &mut self,
+        occlusion: Option<Rect>,
+        caret: Option<Rect>,
+        reveal: bool,
+    ) -> bool {
+        if !self
+            .render_object
+            .avoid_input_occlusion(occlusion, caret, reveal)
+        {
+            return false;
+        }
+        match self.render_object.apply_scroll_offset(&mut self.children) {
+            ScrollOffsetUpdate::ChildrenChanged => {
+                crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id)
+            }
+            ScrollOffsetUpdate::NeedsComposite => {
+                crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id)
+            }
+            _ => crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id),
+        }
+        true
+    }
+
     fn reveal_text_input(&mut self, request: Option<(Rect, Rect)>) -> bool {
         if !self.render_object.reveal_text_input(request) {
             return false;
@@ -1244,45 +1312,79 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     fn handle_event(&mut self, _event: &crate::event::Event, _phase: crate::event::Phase) -> bool {
         use crate::event::{Event, MouseButton, MouseEvent, Phase};
 
+        if let Event::ModifiersChanged(modifiers) = _event {
+            if let Some(object) = self
+                .render_object
+                .as_any_mut()
+                .downcast_mut::<crate::views::TextViewRenderObject>()
+            {
+                object.pointer_modifiers = *modifiers;
+            }
+            return false;
+        }
+
         if self.control_is_disabled() {
             self.activation_key = None;
             return false;
         }
 
         if let Event::Keyboard(key_event) = _event {
+            if _phase == Phase::Target {
+                if let Some(toggle) = self.view.as_any().downcast_ref::<crate::views::Toggle>()
+                    && let Some(object) = self
+                        .render_object
+                        .as_any_mut()
+                        .downcast_mut::<crate::views::ToggleRenderObject>()
+                    && object.is_focused()
+                    && let Some(activate) = object.activation_key(*key_event)
+                {
+                    if activate {
+                        activate_toggle(toggle, object, self.pipeline_id, self.id);
+                    }
+                    return true;
+                }
+                if let Some(slider) = self.view.as_any().downcast_ref::<crate::views::Slider>()
+                    && let Some(object) = self
+                        .render_object
+                        .as_any_mut()
+                        .downcast_mut::<crate::views::SliderRenderObject>()
+                    && object.is_focused()
+                    && let crate::event::KeyEvent::Pressed { keycode, .. } = key_event
+                {
+                    use crate::event::KeyCode;
+                    let step = (slider.get_max() - slider.get_min()) / 100.0;
+                    let value = slider.get_value().get();
+                    let next = match keycode {
+                        KeyCode::Left | KeyCode::Down => Some(value - step),
+                        KeyCode::Right | KeyCode::Up => Some(value + step),
+                        KeyCode::PageDown => Some(value - step * 10.0),
+                        KeyCode::PageUp => Some(value + step * 10.0),
+                        KeyCode::Home => Some(slider.get_min()),
+                        KeyCode::End => Some(slider.get_max()),
+                        _ => None,
+                    };
+                    if let Some(next) = next {
+                        let next = next.clamp(slider.get_min(), slider.get_max());
+                        if next != value {
+                            slider.get_value().set(next);
+                            slider.invoke_on_change(next);
+                        }
+                        object.set_value(slider.get_value().get());
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        return true;
+                    }
+                }
+            }
             if _phase == Phase::Target
                 && let Some(button) = self.view.as_any().downcast_ref::<crate::views::Button>()
-                && let Some(render_object) = self
+                && let Some(object) = self
                     .render_object
                     .as_any_mut()
                     .downcast_mut::<crate::views::ButtonRenderObject>()
+                && let Some(activate) = object.handle_keyboard(*key_event)
             {
-                if !render_object.is_focused() {
-                    return false;
-                }
-                match key_event {
-                    crate::event::KeyEvent::Pressed { keycode, .. }
-                        if matches!(
-                            keycode,
-                            crate::event::KeyCode::Enter | crate::event::KeyCode::Space
-                        ) =>
-                    {
-                        if self.activation_key.is_none() {
-                            self.activation_key = Some(*keycode);
-                            render_object.set_keyboard_pressed(true);
-                        }
-                    }
-                    crate::event::KeyEvent::Released { keycode, .. }
-                        if self.activation_key == Some(*keycode) =>
-                    {
-                        self.activation_key = None;
-                        let activate = render_object.is_keyboard_pressed();
-                        render_object.set_keyboard_pressed(false);
-                        if activate {
-                            button.invoke_on_click();
-                        }
-                    }
-                    _ => return false,
+                if activate {
+                    button.invoke_on_click();
                 }
                 crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                 return true;
@@ -1370,6 +1472,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                                 crate::event::KeyCode::Enter
                                     | crate::event::KeyCode::Space
                                     | crate::event::KeyCode::Down
+                                    | crate::event::KeyCode::Up
+                                    | crate::event::KeyCode::Home
+                                    | crate::event::KeyCode::End
                             ) {
                                 activate_select(
                                     select_view,
@@ -1384,6 +1489,31 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                             return false;
                         }
                         match keycode {
+                            crate::event::KeyCode::Home | crate::event::KeyCode::End => {
+                                let index = if *keycode == crate::event::KeyCode::Home {
+                                    0
+                                } else {
+                                    select_view.option_count().saturating_sub(1)
+                                };
+                                select_ro.set_hovered_index(Some(index));
+                                select_ro.adjust_scroll();
+                                true
+                            }
+                            crate::event::KeyCode::PageUp | crate::event::KeyCode::PageDown => {
+                                let last = select_view.option_count().saturating_sub(1);
+                                let current = select_ro
+                                    .hovered_index()
+                                    .unwrap_or_else(|| select_view.selected_index().get())
+                                    .min(last);
+                                let index = if *keycode == crate::event::KeyCode::PageUp {
+                                    current.saturating_sub(select_ro.page_step())
+                                } else {
+                                    current.saturating_add(select_ro.page_step()).min(last)
+                                };
+                                select_ro.set_hovered_index(Some(index));
+                                select_ro.adjust_scroll();
+                                true
+                            }
                             crate::event::KeyCode::Up => {
                                 let current = select_ro
                                     .hovered_index()
@@ -1437,6 +1567,28 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             // here would invoke capture handlers again on the same path.
             if _phase == Phase::Capture {
                 return false;
+            }
+            // Scroll containers receive unconsumed navigation on the normal
+            // ancestor route, after the focused editor/control has handled it.
+            if self.render_object.owns_child_viewport()
+                && self.render_object.handle_event(_event, _phase)
+            {
+                match self.render_object.apply_scroll_offset(&mut self.children) {
+                    ScrollOffsetUpdate::ChildrenChanged => {
+                        crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id);
+                    }
+                    ScrollOffsetUpdate::NeedsComposite => {
+                        crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id);
+                    }
+                    ScrollOffsetUpdate::NeedsPaint => {
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                        for child in &self.children {
+                            crate::pipeline::mark_element_needs_paint(self.pipeline_id, child.id());
+                        }
+                    }
+                    ScrollOffsetUpdate::None => {}
+                }
+                return true;
             }
             for child in self.children.iter_mut() {
                 if child.handle_event(_event, _phase) {
@@ -1513,6 +1665,24 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 let focused = *focus_event == crate::event::FocusEvent::Gained;
                 if !focused {
                     self.activation_key = None;
+                }
+                if let Some(object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::ToggleRenderObject>()
+                {
+                    object.set_focused(focused);
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                    return true;
+                }
+                if let Some(object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::SliderRenderObject>()
+                {
+                    object.set_focused(focused);
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                    return true;
                 }
                 if let Some(button) = self
                     .render_object
@@ -1593,6 +1763,29 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         }
 
         if let Event::TouchGesture(gesture) = _event {
+            if matches!(_phase, Phase::Target | Phase::Bubble)
+                && matches!(
+                    gesture,
+                    crate::event::TouchGesture::Scroll { .. }
+                        | crate::event::TouchGesture::ScrollMomentum { .. }
+                )
+                && let Some(view) = self.view.as_any().downcast_ref::<crate::views::TextView>()
+                && let Some(render_object) = self
+                    .render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::TextViewRenderObject>()
+            {
+                let handled = crate::views::text_view::handle_text_view_scroll_gesture(
+                    view,
+                    render_object,
+                    gesture,
+                );
+                if handled {
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                }
+                return handled;
+            }
+
             if matches!(_phase, Phase::Target | Phase::Bubble)
                 && let crate::event::TouchGesture::Tap { x, y, .. } = gesture
                 && self
@@ -2187,8 +2380,11 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                         if crate::debug::is_enabled() {
                             crate::logln!("[RenderElement] Toggle click id={:?}", self.id);
                         }
+                        let activate = render_object.is_mouse_pressed();
                         render_object.set_pressed(false);
-                        activate_toggle(toggle, render_object, self.pipeline_id, self.id);
+                        if activate {
+                            activate_toggle(toggle, render_object, self.pipeline_id, self.id);
+                        }
                         return true;
                     }
                     _ => {}

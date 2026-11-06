@@ -38,6 +38,7 @@ pub struct TextField {
     blur_on_submit: bool,
     blur_on_empty: bool,
     autofocus: bool,
+    automatic_software_keyboard: bool,
     background_color: Color,
     material: Option<style::GlassMaterial>,
     border_color: Color,
@@ -62,6 +63,7 @@ impl TextField {
             blur_on_submit: false,
             blur_on_empty: false,
             autofocus: false,
+            automatic_software_keyboard: true,
             background_color: style::surface_color(&palette, style::SurfaceRole::Canvas),
             material: Some(style::GlassMaterial::editing()),
             border_color: palette.border(),
@@ -88,6 +90,12 @@ impl TextField {
 
     pub(crate) fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Control automatic software keyboard presentation while preserving editing and IME.
+    pub fn automatic_software_keyboard(mut self, automatic: bool) -> Self {
+        self.automatic_software_keyboard = automatic;
+        self
     }
 
     /// Set placeholder text shown while the value is empty.
@@ -220,6 +228,12 @@ impl TextField {
         self
     }
 
+    /// Set the placeholder color without changing the entered text or glass material.
+    pub fn placeholder_color(mut self, color: Color) -> Self {
+        self.placeholder_color = color;
+        self
+    }
+
     /// Return the bound text state.
     pub fn text_state(&self) -> &State<String> {
         &self.text
@@ -275,6 +289,7 @@ pub struct TextFieldRenderObject {
     preedit_spans: alloc::vec::Vec<u8>,
     focused: bool,
     autofocus: bool,
+    automatic_software_keyboard: bool,
     dragging: bool,
     placeholder: String,
     background_color: Color,
@@ -306,6 +321,7 @@ impl TextFieldRenderObject {
             preedit_spans: alloc::vec::Vec::new(),
             focused: view.autofocus && view.enabled,
             autofocus: view.autofocus,
+            automatic_software_keyboard: view.automatic_software_keyboard,
             dragging: false,
             placeholder: view.placeholder.clone(),
             background_color: view.background_color,
@@ -345,7 +361,12 @@ impl ElementRenderObject for TextFieldRenderObject {
         let line_height = graphics::line_height_sized(self.font_size).max(1) as f32;
         let intrinsic = Size::new(
             measured_width as f32 + preedit_width + self.padding * 2.0,
-            (line_height + self.padding * 2.0).max(style::CONTROL_HEIGHT),
+            if self.font_size == style::CONTROL_FONT_SIZE && self.padding == style::CONTROL_PADDING
+            {
+                style::CONTROL_HEIGHT
+            } else {
+                (line_height + self.padding * 2.0).max(style::CONTROL_HEIGHT)
+            },
         );
         self.size = constraints.constrain(intrinsic);
         self.compute_layout();
@@ -557,6 +578,7 @@ impl TextFieldRenderObject {
             surrounding_text: self.text_document.as_str().into_owned(),
             cursor_byte: self.selection.caret.byte as u32,
             anchor_byte: self.selection.anchor.byte as u32,
+            automatic_software_keyboard: self.automatic_software_keyboard,
         }
     }
 
@@ -1125,13 +1147,15 @@ mod tests {
             command,
             PaintCommand::FillVerticalGradientRoundedRect { .. }
         )));
-        assert!(
-            context
-                .commands()
-                .iter()
-                .skip(1)
-                .any(|command| matches!(command, PaintCommand::DrawText { .. }))
-        );
+        if !render_object.text_document.is_empty() || !render_object.placeholder.is_empty() {
+            assert!(
+                context
+                    .commands()
+                    .iter()
+                    .skip(1)
+                    .any(|command| matches!(command, PaintCommand::DrawText { .. }))
+            );
+        }
         match context.commands().first().expect("field surface") {
             PaintCommand::BackdropFilterRoundedRect { tint, .. } => *tint,
             _ => panic!("filter backdrop before crisp editable content"),

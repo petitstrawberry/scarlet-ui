@@ -16,6 +16,17 @@ use crate::{geometry::Point, graphics};
 
 use super::*;
 
+#[path = "decoration_tests.rs"]
+mod decoration_tests;
+#[path = "font_stack_tests.rs"]
+mod font_stack_tests;
+#[path = "performance.rs"]
+mod performance;
+#[path = "regressions.rs"]
+mod regressions;
+#[path = "touch_scroll_tests.rs"]
+mod touch_scroll_tests;
+
 #[test]
 fn document_round_trips_full_text() {
     for text in ["", "hello", "こんにちは", "😀😃😄", "hello こんにちは 👋"] {
@@ -459,7 +470,7 @@ fn visible_range_contains_only_rows_intersecting_viewport() {
     assert_eq!(layout.visible_lines, 4..7);
     for (index, line) in layout.visual_lines.iter().enumerate() {
         let intersects_viewport =
-            line.y < 24.0 - BORDER_WIDTH && line.y + layout.line_height > BORDER_WIDTH;
+            line.y < viewport_height - BORDER_WIDTH && line.y + layout.line_height > BORDER_WIDTH;
         assert_eq!(
             layout.visible_lines.contains(&index),
             intersects_viewport,
@@ -467,7 +478,7 @@ fn visible_range_contains_only_rows_intersecting_viewport() {
             line.y,
             layout.line_height,
             BORDER_WIDTH,
-            24.0 - BORDER_WIDTH
+            viewport_height - BORDER_WIDTH
         );
     }
 }
@@ -558,16 +569,17 @@ fn hit_testing_returns_expected_byte_position() {
 #[test]
 fn hit_testing_accounts_for_scroll_offset() {
     let document = TextDocument::from_str("first\nsecond\nthird");
+    let line_height = graphics::line_height_sized(14.0) as f32;
     let scroll = TextViewScroll {
         x: 0.0,
-        y: 14.0 * 1.2,
+        y: line_height,
     };
     let layout = TextViewLayout::compute(
         &document,
         14.0,
         8.0,
         WrapMode::None,
-        Size::new(200.0, 80.0),
+        Size::new(200.0, line_height + 16.0),
         scroll,
         false,
     );
@@ -664,7 +676,8 @@ fn primary_key(c: char) -> KeyEvent {
     KeyEvent::Pressed {
         keycode: KeyCode::Char(c),
         modifiers: KeyModifiers {
-            control: true,
+            control: !cfg!(target_os = "macos"),
+            super_key: cfg!(target_os = "macos"),
             ..KeyModifiers::empty()
         },
     }
@@ -1092,13 +1105,24 @@ fn paint_text_is_clipped_to_text_area_when_horizontally_scrolled_with_line_numbe
             )
         })
         .expect("line number should be painted");
+    let line = &render_object.layout.visual_lines[0];
+    let visible = line.visible_display_range(
+        render_object.layout.text_origin_x - line.x,
+        render_object.size.width - BORDER_WIDTH - line.x,
+    );
+    assert!(
+        visible.len() < source.len(),
+        "offscreen columns should be culled"
+    );
     let text_index = commands
         .iter()
         .position(|command| {
             matches!(
                 command,
                 PaintCommand::DrawText { text, position, .. }
-                    if text == &source && position.x < render_object.layout.text_origin_x
+                    if text == &line.text()[visible.clone()]
+                        && position.x == line.x + line.width_to_display_byte(visible.start)
+                        && position.x < render_object.layout.text_origin_x
             )
         })
         .expect("horizontally scrolled text should move left of the text origin");
@@ -1468,7 +1492,7 @@ fn update_without_scroll_state_preserves_internal_scroll() {
     let selection = State::new(StateId::new(1241), TextSelection::collapsed(0));
     let view = TextView::new(text.clone(), selection.clone());
     let mut render_object = render_object_with_size(&view, 120.0, 56.0);
-    render_object.scroll = render_object.layout.clamp_scroll(TextViewScroll {
+    render_object.requested_scroll = render_object.layout.clamp_scroll(TextViewScroll {
         x: 0.0,
         y: render_object.layout.line_height * 2.0,
     });

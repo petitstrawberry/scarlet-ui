@@ -11,6 +11,7 @@ use crate::state::State;
 use crate::view::View;
 use crate::views::style::{self, SurfaceRole};
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 
@@ -18,12 +19,38 @@ use core::any::Any;
 #[derive(Clone)]
 pub struct Toggle {
     is_on: State<bool>,
+    enabled: bool,
+    on_change: Option<Arc<dyn Fn(bool)>>,
 }
 
 impl Toggle {
     /// Create a new Toggle
     pub fn new(is_on: State<bool>) -> Self {
-        Self { is_on }
+        Self {
+            is_on,
+            enabled: true,
+            on_change: None,
+        }
+    }
+
+    pub fn on_change(mut self, callback: impl Fn(bool) + 'static) -> Self {
+        self.on_change = Some(Arc::new(callback));
+        self
+    }
+
+    pub fn invoke_on_change(&self, value: bool) {
+        if let Some(callback) = &self.on_change {
+            callback(value);
+        }
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Get the is_on state
@@ -34,10 +61,11 @@ impl Toggle {
 
 impl View for Toggle {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
-            self.clone(),
-            ToggleRenderObject::new(self.is_on.get()),
-        ))
+        Box::new(RenderElement::new(self.clone(), {
+            let mut object = ToggleRenderObject::new(self.is_on.get());
+            object.enabled = self.enabled;
+            object
+        }))
     }
 
     fn listenables(&self) -> Vec<&dyn crate::state::Listenable> {
@@ -54,6 +82,9 @@ impl View for Toggle {
 /// A platform-neutral switch using capsule geometry and the semantic palette.
 pub struct ToggleRenderObject {
     is_on: bool,
+    enabled: bool,
+    focused: bool,
+    activation_key: Option<crate::event::KeyCode>,
     hovered: bool,
     pressed: crate::views::press::PressSources,
     size: Size,
@@ -61,6 +92,46 @@ pub struct ToggleRenderObject {
 }
 
 impl ToggleRenderObject {
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused && self.enabled;
+        if !self.focused {
+            self.activation_key = None;
+        }
+    }
+
+    pub(crate) fn activation_key(&mut self, event: crate::event::KeyEvent) -> Option<bool> {
+        use crate::event::{KeyCode, KeyEvent};
+        match event {
+            KeyEvent::Pressed {
+                keycode: key @ (KeyCode::Enter | KeyCode::Space),
+                modifiers,
+            } if !modifiers.control && !modifiers.alt && !modifiers.super_key => {
+                let first = self.activation_key.is_none();
+                if first {
+                    self.activation_key = Some(key);
+                }
+                Some(first)
+            }
+            KeyEvent::Released {
+                keycode: key @ (KeyCode::Enter | KeyCode::Space),
+                ..
+            } => {
+                if self.activation_key == Some(key) {
+                    self.activation_key = None;
+                }
+                Some(false)
+            }
+            KeyEvent::Char {
+                c: ' ' | '\r' | '\n',
+            } => Some(false),
+            _ => None,
+        }
+    }
+
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
     fn colors(&self, palette: &ColorPalette) -> (Color, Color) {
         let base_track = if self.is_on {
             palette.primary()
@@ -91,6 +162,9 @@ impl ToggleRenderObject {
 
         Self {
             is_on,
+            enabled: true,
+            focused: false,
+            activation_key: None,
             hovered: false,
             pressed: crate::views::press::PressSources::default(),
             size: Size::new(metrics.toggle_width, metrics.toggle_height),
@@ -110,6 +184,10 @@ impl ToggleRenderObject {
 
     pub fn set_hovered(&mut self, hovered: bool) {
         self.hovered = hovered;
+    }
+
+    pub fn is_mouse_pressed(&self) -> bool {
+        self.pressed.is_mouse_pressed()
     }
 
     pub fn set_pressed(&mut self, pressed: bool) {
@@ -275,7 +353,14 @@ impl ElementRenderObject for ToggleRenderObject {
     fn update(&mut self, new_view: &dyn crate::view::View) -> crate::element::UpdateResult {
         if let Some(toggle) = new_view.as_any().downcast_ref::<Toggle>() {
             let new_is_on = toggle.is_on.get();
-            if self.is_on != new_is_on {
+            if self.is_on != new_is_on || self.enabled != toggle.enabled {
+                self.enabled = toggle.enabled;
+                if !self.enabled {
+                    self.activation_key = None;
+                    self.focused = false;
+                    self.hovered = false;
+                    self.pressed = Default::default();
+                }
                 self.is_on = new_is_on;
                 crate::element::UpdateResult::Updated
             } else {
@@ -291,6 +376,59 @@ impl ElementRenderObject for ToggleRenderObject {
 mod tests {
     use super::*;
     use crate::renderer::PaintCommand;
+
+    #[test]
+    fn focus_does_not_add_chrome() {
+        for on in [false, true] {
+            for held in [false, true] {
+                let mut toggle = ToggleRenderObject::new(on);
+                toggle.set_pressed(held);
+                let mut unfocused = PaintContext::new();
+                toggle.paint(&mut unfocused, Point::ZERO);
+                let unfocused = unfocused.into_display_list();
+                for focused in [true, false] {
+                    toggle.set_focused(focused);
+                    assert_eq!(toggle.is_focused(), focused);
+                    let mut paint = PaintContext::new();
+                    toggle.paint(&mut paint, Point::ZERO);
+                    assert_eq!(paint.commands(), unfocused.context().commands());
+                    assert_eq!(toggle.get_is_on(), on);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keyboard_activation_retains_focus_and_repeat_suppression() {
+        use crate::event::{Event, FocusEvent, KeyCode, KeyEvent, KeyModifiers, Phase};
+        let state = State::new(crate::state::generate_state_id(), false);
+        let mut element = Toggle::new(state.clone()).create_element();
+        let key = |pressed| {
+            Event::Keyboard(if pressed {
+                KeyEvent::Pressed {
+                    keycode: KeyCode::Space,
+                    modifiers: KeyModifiers::empty(),
+                }
+            } else {
+                KeyEvent::Released {
+                    keycode: KeyCode::Space,
+                    modifiers: KeyModifiers::empty(),
+                }
+            })
+        };
+        assert!(!element.handle_event(&key(true), Phase::Target));
+        assert!(element.handle_event(&Event::Focus(FocusEvent::Gained), Phase::Target));
+        for expected in [true, false] {
+            assert!(element.handle_event(&key(true), Phase::Target));
+            assert!(element.handle_event(&key(true), Phase::Target));
+            assert_eq!(state.get(), expected, "held keys must toggle only once");
+            assert!(element.handle_event(&key(false), Phase::Target));
+            assert!(element.wants_keyboard_focus());
+        }
+        element.handle_event(&Event::Focus(FocusEvent::Lost), Phase::Target);
+        assert!(!element.handle_event(&key(true), Phase::Target));
+        assert!(!state.get());
+    }
 
     #[test]
     fn thumb_material_is_uniform_backdrop_only_and_preserves_center() {

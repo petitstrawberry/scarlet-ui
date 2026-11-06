@@ -35,8 +35,26 @@ pub enum Event {
     /// must update PlatformWindow::safe_area_insets before emitting this event.
     SafeAreaChanged { insets: crate::geometry::EdgeInsets },
 
+    /// Apply a confirmed fullscreen state and its logical backing size together.
+    /// No frame may be painted between the decoration callback and resize.
+    FullscreenConfigure {
+        width: u32,
+        height: u32,
+        fullscreen: bool,
+    },
+
     /// Window fullscreen state changed on the platform.
     FullscreenChanged { fullscreen: bool },
+
+    /// The compositor presents this app scene without desktop window chrome.
+    /// This does not change the application's explicit fullscreen state.
+    TabletPresentationChanged { active: bool },
+
+    /// Keyboard-covered rectangle in window-local logical coordinates.
+    /// The backing surface and app layout keep their full size.
+    InputPanelOcclusionChanged {
+        occlusion: Option<crate::geometry::Rect>,
+    },
 
     /// One compositor-paced frame opportunity is ready for this window.
     FrameReady {
@@ -65,6 +83,9 @@ pub enum Event {
     Touch(TouchChange),
     /// A gesture accepted by the touch arena for that widget path.
     TouchGesture(TouchGesture),
+
+    /// Current native modifier state, including modifier-only changes.
+    ModifiersChanged(KeyModifiers),
 
     /// Keyboard event
     Keyboard(KeyEvent),
@@ -248,14 +269,17 @@ pub struct KeyModifiers {
 impl KeyModifiers {
     /// Returns the application shortcut modifier state.
     ///
-    /// Scarlet applications use Control for ordinary shortcuts. Super is
-    /// reserved for desktop-global actions such as the application launcher.
+    /// Uses Command (Super/Meta) on macOS and Control on other platforms.
     ///
     /// # Returns
     ///
-    /// `true` when Control is pressed.
+    /// `true` when the platform's primary modifier is pressed.
     pub fn primary(self) -> bool {
-        self.control
+        if cfg!(target_os = "macos") {
+            self.super_key
+        } else {
+            self.control
+        }
     }
 
     /// Returns empty keyboard modifiers.

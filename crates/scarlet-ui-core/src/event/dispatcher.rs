@@ -91,6 +91,7 @@ pub struct EventDispatcher {
     /// (non-trackpad) wheel gestures via `WHEEL_GESTURE_IDLE`.
     wheel_last_event_at: Option<Instant>,
     left_button_down: bool,
+    modifiers: crate::event::KeyModifiers,
     focused_id: Option<ElementId>,
     focused_path: Vec<ElementId>,
     /// Relative-motion handler selected by the most recent pointer press.
@@ -112,6 +113,7 @@ struct TouchRoute {
     path: Vec<ElementId>,
     scrollable: bool,
     drag_axis: Option<TouchDragAxis>,
+    press_bounds: Option<Rect>,
     scroll_target: Option<ElementId>,
     scroll_last_consumer: Option<ElementId>,
     scroll_consumers: Vec<ElementId>,
@@ -150,6 +152,7 @@ impl EventDispatcher {
             path_origins_scratch: Vec::new(),
             wheel_last_event_at: None,
             left_button_down: false,
+            modifiers: crate::event::KeyModifiers::empty(),
             focused_id: None,
             focused_path: Vec::new(),
             pointer_lock_candidate_id: None,
@@ -305,6 +308,10 @@ impl EventDispatcher {
             self.cancel_animations(element_tree);
         }
         let handled = match event {
+            Event::ModifiersChanged(modifiers) => {
+                self.modifiers = *modifiers;
+                self.dispatch_text_input(element_tree, event)
+            }
             Event::Quit => {
                 // Quit event is handled at application level
                 self.handle_quit(element_tree);
@@ -314,7 +321,10 @@ impl EventDispatcher {
                 self.handle_resize(element_tree, *width, *height);
                 false
             }
-            Event::FullscreenChanged { .. } => false,
+            Event::FullscreenConfigure { .. } | Event::FullscreenChanged { .. } => false,
+            Event::TabletPresentationChanged { .. } | Event::InputPanelOcclusionChanged { .. } => {
+                false
+            }
             Event::FrameReady { .. } | Event::WindowSuspendedChanged { .. } => false,
             Event::InputEnvironmentChanged(_) => false,
             Event::PointerLockChanged { locked } => {
@@ -325,7 +335,14 @@ impl EventDispatcher {
             Event::Mouse(mouse_event) => self.dispatch_mouse(element_tree, mouse_event),
             Event::TouchFrame(frame) => self.dispatch_touch_frame(element_tree, frame),
             Event::Touch(_) | Event::TouchGesture(_) => false,
-            Event::Keyboard(key_event) => self.dispatch_keyboard(element_tree, key_event),
+            Event::Keyboard(key_event) => {
+                if let crate::event::KeyEvent::Pressed { modifiers, .. }
+                | crate::event::KeyEvent::Released { modifiers, .. } = key_event
+                {
+                    self.modifiers = *modifiers;
+                }
+                self.dispatch_keyboard(element_tree, key_event)
+            }
             Event::Gamepad(_) => {
                 // Route to element focus, or the window root when none exists.
                 let path = self
@@ -364,7 +381,23 @@ impl EventDispatcher {
                         .is_some_and(|e| e.handle_event(event, Phase::Target))
                 }
             }
-            Event::Focus(focus_event) => self.dispatch_focus(element_tree, focus_event),
+            Event::Focus(focus_event) => {
+                if *focus_event == crate::event::FocusEvent::Lost {
+                    self.modifiers = crate::event::KeyModifiers::empty();
+                    if self.left_button_down {
+                        let point = self.captured_point.unwrap_or(Point::ZERO);
+                        self.dispatch_mouse(
+                            element_tree,
+                            &crate::event::MouseEvent::ButtonCancelled {
+                                button: crate::event::MouseButton::Left,
+                                x: point.x as i32,
+                                y: point.y as i32,
+                            },
+                        );
+                    }
+                }
+                self.dispatch_focus(element_tree, focus_event)
+            }
             Event::Lifecycle(lifecycle_event) => {
                 self.dispatch_lifecycle(element_tree, lifecycle_event)
             }
@@ -455,11 +488,19 @@ impl EventDispatcher {
                             })
                     })
                 });
+                let press_bounds = path.last().zip(origins.last()).and_then(|(id, origin)| {
+                    let element = element_tree.find_element_mut(*id)?;
+                    element
+                        .render_object()?
+                        .keeps_touch_press_within_bounds()
+                        .then(|| Rect::new(*origin, element.bounds().size))
+                });
                 self.touch_routes.push(TouchRoute {
                     id: change.id,
                     path,
                     scrollable,
                     drag_axis,
+                    press_bounds,
                     scroll_target: None,
                     scroll_last_consumer: None,
                     scroll_consumers: Vec::new(),
@@ -488,6 +529,7 @@ impl EventDispatcher {
             }
             let scrollable = self.touch_routes[route_index].scrollable;
             let drag_axis = self.touch_routes[route_index].drag_axis;
+            let press_bounds = self.touch_routes[route_index].press_bounds;
             if change.phase == TouchPhase::Move {
                 self.touch_routes[route_index]
                     .velocity
@@ -516,10 +558,12 @@ impl EventDispatcher {
                 handled |= activated;
             }
             let mut completed_scroll = false;
-            for gesture in self
-                .touch_arena
-                .process_with_drag_axis(change, scrollable, drag_axis)
-            {
+            for gesture in self.touch_arena.process_with_press_bounds(
+                change,
+                scrollable,
+                drag_axis,
+                press_bounds,
+            ) {
                 let primary_id = gesture.primary_id();
                 if matches!(gesture, TouchGesture::CancelPress { .. })
                     && let Some(route) = self
@@ -1088,6 +1132,7 @@ impl EventDispatcher {
                         event,
                         *path_origins.last().unwrap_or(&Point::ZERO),
                     ));
+                    target.handle_event(&Event::ModifiersChanged(self.modifiers), Phase::Target);
                     handled = target.handle_event(&localized, Phase::Target);
                     if handled {
                         handled_id = Some(target_id);
@@ -1117,6 +1162,25 @@ impl EventDispatcher {
                         }
                     }
                 }
+            }
+
+            // A divider or scrollbar can claim a press during bubbling even
+            // though a child was hit first. Deliver the whole drag to that
+            // handler; otherwise the child can consume release and leave the
+            // ancestor dragging after the physical button is up.
+            if matches!(
+                event,
+                crate::event::MouseEvent::ButtonPressed {
+                    button: crate::event::MouseButton::Left,
+                    ..
+                }
+            ) && !handled_in_capture
+                && let Some(id) = handled_id
+                && let Some(handler_path) = element_tree.find_path_ids(id)
+            {
+                self.captured_id = Some(id);
+                self.captured_path = handler_path;
+                self.captured_point = Some(point);
             }
 
             // Lock the wheel gesture onto the element that actually handled
@@ -1283,26 +1347,30 @@ impl EventDispatcher {
         element_tree: &mut ElementTree,
         event: &crate::event::KeyEvent,
     ) -> bool {
+        self.reconcile_keyboard_focus(element_tree);
+        if let crate::event::KeyEvent::Pressed {
+            keycode: crate::event::KeyCode::Tab,
+            modifiers,
+        } = event
+            && !modifiers.control
+            && !modifiers.alt
+            && !modifiers.super_key
+        {
+            let editing_multiline_text = self
+                .current_focus_path(element_tree)
+                .and_then(|path| path.last().copied())
+                .and_then(|id| element_tree.find_element(id))
+                .and_then(|element| element.render_object())
+                .is_some_and(|render| render.as_any().is::<crate::views::TextViewRenderObject>());
+            // A multiline editor owns Tab for indentation. Single-line fields
+            // and ordinary controls participate in the window's focus order.
+            if !editing_multiline_text && self.advance_keyboard_focus(element_tree, modifiers.shift)
+            {
+                return true;
+            }
+        }
         let path = self
-            .focused_id
-            .and_then(|focused_id| {
-                element_tree
-                    .element_wants_keyboard_focus(focused_id)
-                    .then(|| element_tree.find_path_ids(focused_id))
-                    .flatten()
-            })
-            .or_else(|| element_tree.find_keyboard_focus_path_ids())
-            .or_else(|| {
-                if self
-                    .focused_path
-                    .last()
-                    .is_some_and(|id| element_tree.element_wants_keyboard_focus(*id))
-                {
-                    Some(self.focused_path.clone())
-                } else {
-                    None
-                }
-            })
+            .current_focus_path(element_tree)
             .or_else(|| element_tree.root().map(|root| alloc::vec![root.id()]));
 
         let Some(path) = path else {
@@ -1311,9 +1379,6 @@ impl EventDispatcher {
         let Some(target_id) = path.last().copied() else {
             return false;
         };
-        self.focused_id = Some(target_id);
-        self.focused_path = path.clone();
-
         if crate::debug::is_enabled() {
             crate::logln!(
                 "[EventDispatcher] keyboard: {:?} target_id={:?} path_len={}",
@@ -1356,6 +1421,29 @@ impl EventDispatcher {
             crate::logln!("[EventDispatcher] keyboard handled={}", handled);
         }
         handled
+    }
+
+    fn advance_keyboard_focus(&mut self, element_tree: &mut ElementTree, reverse: bool) -> bool {
+        let candidates = element_tree.keyboard_focus_candidates();
+        if candidates.is_empty() {
+            return false;
+        }
+        let current = self
+            .current_focus_path(element_tree)
+            .and_then(|path| path.last().copied())
+            .and_then(|id| candidates.iter().position(|candidate| *candidate == id));
+        let next = match (current, reverse) {
+            (Some(index), false) => (index + 1) % candidates.len(),
+            (Some(0) | None, true) => candidates.len() - 1,
+            (Some(index), true) => index - 1,
+            (None, false) => 0,
+        };
+        let target_id = candidates[next];
+        let Some(path) = element_tree.find_path_ids(target_id) else {
+            return false;
+        };
+        self.set_focused_element(element_tree, target_id, &path);
+        true
     }
 
     fn reset_text_input_reveal(&mut self, tree: &mut ElementTree) -> bool {
@@ -1459,26 +1547,8 @@ impl EventDispatcher {
     }
 
     fn dispatch_text_input(&mut self, element_tree: &mut ElementTree, event: &Event) -> bool {
-        let path = self
-            .focused_id
-            .and_then(|focused_id| {
-                element_tree
-                    .element_wants_keyboard_focus(focused_id)
-                    .then(|| element_tree.find_path_ids(focused_id))
-                    .flatten()
-            })
-            .or_else(|| element_tree.find_keyboard_focus_path_ids())
-            .or_else(|| {
-                if self
-                    .focused_path
-                    .last()
-                    .is_some_and(|id| element_tree.element_wants_keyboard_focus(*id))
-                {
-                    Some(self.focused_path.clone())
-                } else {
-                    None
-                }
-            });
+        self.reconcile_keyboard_focus(element_tree);
+        let path = self.current_focus_path(element_tree);
 
         let Some(path) = path else {
             return false;
@@ -1486,9 +1556,6 @@ impl EventDispatcher {
         let Some(target_id) = path.last().copied() else {
             return false;
         };
-        self.focused_id = Some(target_id);
-        self.focused_path = path;
-
         element_tree
             .find_element_mut(target_id)
             .is_some_and(|target| target.handle_event(event, Phase::Target))
@@ -1874,23 +1941,20 @@ impl EventDispatcher {
         target_id: ElementId,
         path: &[ElementId],
     ) {
-        if self.focused_id == Some(target_id) {
-            self.focused_path = path.to_vec();
-            return;
-        }
-
-        if let Some(old_path) = self.current_focus_path(element_tree)
-            && let Some(old_target_id) = old_path.last().copied()
-            && old_target_id != target_id
-            && let Some(old_target) = element_tree.find_element_mut(old_target_id)
-        {
-            let _ = old_target
-                .handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
+        for old_target_id in element_tree.keyboard_focus_claims() {
+            if old_target_id != target_id
+                && let Some(old_target) = element_tree.find_element_mut(old_target_id)
+            {
+                let _ = old_target
+                    .handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
+            }
         }
 
         self.focused_id = Some(target_id);
         self.focused_path = path.to_vec();
-        if let Some(target) = element_tree.find_element_mut(target_id) {
+        if !element_tree.element_wants_keyboard_focus(target_id)
+            && let Some(target) = element_tree.find_element_mut(target_id)
+        {
             let _ = target.handle_event(
                 &Event::Focus(crate::event::FocusEvent::Gained),
                 Phase::Target,
@@ -1899,15 +1963,46 @@ impl EventDispatcher {
     }
 
     fn clear_focused_element(&mut self, element_tree: &mut ElementTree) {
-        if let Some(old_path) = self.current_focus_path(element_tree)
-            && let Some(old_target_id) = old_path.last().copied()
-            && let Some(old_target) = element_tree.find_element_mut(old_target_id)
-        {
-            let _ = old_target
-                .handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
+        for old_target_id in element_tree.keyboard_focus_claims() {
+            if let Some(old_target) = element_tree.find_element_mut(old_target_id) {
+                let _ = old_target
+                    .handle_event(&Event::Focus(crate::event::FocusEvent::Lost), Phase::Target);
+            }
         }
         self.focused_id = None;
         self.focused_path.clear();
+    }
+
+    /// Keep programmatic focus, visual caret state and the dispatch route in
+    /// agreement. A new request takes precedence over the retained target. If
+    /// several are mounted together, the last declared request wins; this also
+    /// lets an autofocus child take precedence over its focusable wrapper.
+    pub(crate) fn reconcile_keyboard_focus(&mut self, element_tree: &mut ElementTree) {
+        let claims = element_tree.keyboard_focus_claims();
+        let requested = claims
+            .iter()
+            .rev()
+            .copied()
+            .find(|id| Some(*id) != self.focused_id)
+            .or_else(|| self.focused_id.filter(|id| claims.contains(id)));
+        // When an editor disappears or explicitly blurs, retain its nearest
+        // surviving focusable ancestor. Routing straight to Window would skip
+        // application capture/bubble handlers below that root.
+        let target = requested.or_else(|| {
+            self.focused_path.iter().rev().skip(1).copied().find(|id| {
+                element_tree
+                    .find_element(*id)
+                    .is_some_and(|element| element.accepts_keyboard_focus())
+            })
+        });
+        if let Some(target) = target
+            && let Some(path) = element_tree.find_path_ids(target)
+        {
+            self.set_focused_element(element_tree, target, &path);
+        } else {
+            self.focused_id = None;
+            self.focused_path.clear();
+        }
     }
 
     fn current_focus_path(&mut self, element_tree: &mut ElementTree) -> Option<Vec<ElementId>> {
@@ -2087,6 +2182,10 @@ impl Default for EventDispatcher {
         Self::new()
     }
 }
+
+#[cfg(test)]
+#[path = "focus_tests.rs"]
+mod focus_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2825,12 +2924,20 @@ mod tests {
     }
 
     fn repeating_button_fixture() -> (ElementTree, EventDispatcher, Rc<Cell<u32>>) {
+        button_fixture(true)
+    }
+
+    fn button_fixture(repeat: bool) -> (ElementTree, EventDispatcher, Rc<Cell<u32>>) {
         let activations = Rc::new(Cell::new(0));
         let callback_activations = activations.clone();
-        let root = Button::new("delete")
-            .on_click(move || callback_activations.set(callback_activations.get() + 1))
-            .repeat_while_pressed(Duration::from_millis(420), Duration::from_millis(55))
-            .frame(100.0, 50.0);
+        let button = Button::new("delete")
+            .on_click(move || callback_activations.set(callback_activations.get() + 1));
+        let button = if repeat {
+            button.repeat_while_pressed(Duration::from_millis(420), Duration::from_millis(55))
+        } else {
+            button
+        };
+        let root = button.frame(100.0, 50.0);
         let mut tree = ElementTree::new();
         tree.set_root(root.create_element());
         tree.layout(LayoutConstraints::tight(100.0, 50.0));
@@ -2858,6 +2965,76 @@ mod tests {
                 touch_major: None,
             }],
         })
+    }
+
+    #[test]
+    fn standard_button_releases_activate_after_in_bounds_motion_and_long_holds() {
+        for (x, time_ns) in [(45, 50_000_000), (25, 650_000_000), (45, 650_000_000)] {
+            let (mut tree, mut dispatcher, activations) = button_fixture(false);
+            dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Down, 1));
+            let mut moved = button_touch(TouchPhase::Move, 20_000_000);
+            if let Event::TouchFrame(frame) = &mut moved {
+                frame.changes[0].x = x;
+            }
+            dispatcher.dispatch(&mut tree, &moved);
+            assert_eq!(activations.get(), 0);
+            let mut release = button_touch(TouchPhase::Up, time_ns);
+            if let Event::TouchFrame(frame) = &mut release {
+                frame.changes[0].x = x;
+            }
+            dispatcher.dispatch(&mut tree, &release);
+            assert_eq!(activations.get(), 1);
+            dispatcher.dispatch(&mut tree, &release);
+            assert_eq!(activations.get(), 1);
+        }
+    }
+
+    #[test]
+    fn standard_button_exit_then_return_never_activates() {
+        let (mut tree, mut dispatcher, activations) = button_fixture(false);
+        dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Down, 1));
+        let mut outside = button_touch(TouchPhase::Move, 20_000_000);
+        if let Event::TouchFrame(frame) = &mut outside {
+            frame.changes[0].x = 101;
+        }
+        dispatcher.dispatch(&mut tree, &outside);
+        dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Move, 30_000_000));
+        dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Up, 650_000_000));
+        assert_eq!(activations.get(), 0);
+    }
+
+    #[test]
+    fn button_press_policy_rebuilds_preserve_enabled_and_repeat_semantics() {
+        let (mut tree, mut dispatcher, activations) = button_fixture(false);
+        let target = tree.keyboard_focus_candidates()[0];
+        for (enabled, repeat) in [
+            (true, false),
+            (true, true),
+            (true, false),
+            (false, false),
+            (true, false),
+        ] {
+            let count = activations.clone();
+            let button = Button::new("delete")
+                .enabled(enabled)
+                .on_click(move || count.set(count.get() + 1));
+            let button = if repeat {
+                button.repeat_while_pressed(Duration::from_millis(420), Duration::from_millis(55))
+            } else {
+                button
+            };
+            tree.find_element_mut(target).unwrap().update(&button);
+            let before = activations.get();
+            dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Down, 1));
+            assert_eq!(activations.get(), before + u32::from(enabled && repeat));
+            let mut moved = button_touch(TouchPhase::Move, 20_000_000);
+            if let Event::TouchFrame(frame) = &mut moved {
+                frame.changes[0].x = 45;
+            }
+            dispatcher.dispatch(&mut tree, &moved);
+            dispatcher.dispatch(&mut tree, &button_touch(TouchPhase::Up, 650_000_000));
+            assert_eq!(activations.get(), before + u32::from(enabled));
+        }
     }
 
     #[test]

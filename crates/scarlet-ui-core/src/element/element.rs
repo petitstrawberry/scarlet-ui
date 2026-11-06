@@ -67,6 +67,9 @@ pub struct TextInputElementState {
     pub cursor_byte: u32,
     /// Byte offset of the selection anchor within `surrounding_text`.
     pub anchor_byte: u32,
+    /// Whether focus may automatically show a software keyboard. This does not
+    /// disable hardware keyboard input, selection, IME, or an explicit panel request.
+    pub automatic_software_keyboard: bool,
 }
 
 impl WindowSizeLimits {
@@ -449,6 +452,18 @@ pub trait Element {
     /// Get text-input state if this element is the focused editable control.
     fn text_input_state(&self) -> Option<TextInputElementState> {
         None
+    }
+
+    /// Adjust scrolling for a keyboard overlay without changing layout size.
+    /// Both rectangles use this element's local coordinates. `reveal` is false
+    /// during manual scrolling, so the keyboard never pulls the caret back.
+    fn avoid_input_occlusion(
+        &mut self,
+        _occlusion: Option<Rect>,
+        _caret: Option<Rect>,
+        _reveal: bool,
+    ) -> bool {
+        false
     }
 
     /// Drop cached buffers for this element and its descendants.

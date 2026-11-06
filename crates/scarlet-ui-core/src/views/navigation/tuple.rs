@@ -413,3 +413,44 @@ impl NavigationLinkTuple
         }
     }
 }
+
+// Settings includes a seventh section for running-system information.
+impl NavigationLinkTuple
+    for (
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+    )
+{
+    fn count(&self) -> usize {
+        7
+    }
+    fn get_label(&self, index: usize) -> &str {
+        [
+            &self.0, &self.1, &self.2, &self.3, &self.4, &self.5, &self.6,
+        ][index]
+            .label()
+    }
+    fn get_icon(&self, index: usize) -> Option<Icon> {
+        [
+            &self.0, &self.1, &self.2, &self.3, &self.4, &self.5, &self.6,
+        ][index]
+            .get_icon()
+    }
+    fn build_content(&self, index: usize) -> Box<dyn View> {
+        [
+            &self.0, &self.1, &self.2, &self.3, &self.4, &self.5, &self.6,
+        ][index]
+            .build_content()
+    }
+    fn get_on_select(&self, index: usize) -> Option<Rc<dyn Fn()>> {
+        [
+            &self.0, &self.1, &self.2, &self.3, &self.4, &self.5, &self.6,
+        ][index]
+            .selection_callback()
+    }
+}

@@ -48,6 +48,7 @@ extern crate scarlet_ui_macros;
 
 pub mod application;
 pub mod buffer;
+pub mod clipboard;
 mod clock;
 pub mod color;
 pub mod command;
@@ -79,6 +80,7 @@ pub mod state;
 pub(crate) mod testing;
 pub mod view;
 pub mod views;
+pub mod window_chrome;
 
 #[doc(hidden)]
 pub mod __private {
@@ -173,8 +175,8 @@ pub use views::{
     Window, WindowContentLayout, WindowShadow, ZStack,
 };
 pub use views::{
-    EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView, TextViewRenderObject,
-    TextViewScroll, WrapMode,
+    EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,
+    TextStyleSpan, TextView, TextViewHit, TextViewRenderObject, TextViewScroll, WrapMode,
 };
 pub use views::{NavigationLink, NavigationPresentation, NavigationSidebarStyle, NavigationView};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
@@ -237,8 +239,8 @@ pub mod prelude {
         VStack, Window, WindowContentLayout, WindowShadow, ZStack,
     };
     pub use crate::views::{
-        EditDelta, TabMode, TextDocument, TextPosition, TextSelection, TextView,
-        TextViewRenderObject, TextViewScroll, WrapMode,
+        EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,
+        TextStyleSpan, TextView, TextViewHit, TextViewRenderObject, TextViewScroll, WrapMode,
     };
     pub use crate::views::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};
     pub use crate::views::{

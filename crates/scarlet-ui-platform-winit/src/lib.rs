@@ -56,6 +56,8 @@ use ::winit::window::{
 
 #[cfg(target_os = "macos")]
 mod file_dialog;
+#[cfg(target_os = "macos")]
+mod native_menu;
 #[cfg(feature = "sgfx")]
 mod sgfx_renderer;
 mod tablet_mode;
@@ -543,12 +545,24 @@ impl WinitEventState {
         }));
     }
 
+    fn push_modifiers(&mut self, modifiers: KeyModifiers) {
+        if self.modifiers != modifiers {
+            self.modifiers = modifiers;
+            self.push(Event::ModifiersChanged(modifiers));
+        }
+    }
+
     fn push_keyboard_input(&mut self, key: &Key, state: WinitElementState) {
         let keycode = map_key(key);
         let modifiers = self.modifiers;
         if state == WinitElementState::Pressed {
             self.push(Event::Keyboard(KeyEvent::Pressed { keycode, modifiers }));
-            if !self.ime_preedit_active {
+            // Ctrl/Command shortcuts must not also replace the selection with text.
+            // Ctrl+Alt is retained for layouts that report AltGr this way.
+            if !self.ime_preedit_active
+                && !modifiers.super_key
+                && !(modifiers.control && !modifiers.alt)
+            {
                 // Winit represents a normal space as a named key. Emit the
                 // same text event as SWS, separately from the physical press.
                 let text = match key {
@@ -793,6 +807,8 @@ struct WinitSharedState {
     native_loop_active: Cell<bool>,
     windows: RefCell<BTreeMap<WindowId, WinitWindowEntry>>,
     pointer_lock_owner: RefCell<Option<WindowId>>,
+    #[cfg(target_os = "macos")]
+    menus: RefCell<native_menu::NativeMenus>,
 }
 
 impl WinitSharedState {
@@ -803,6 +819,8 @@ impl WinitSharedState {
             native_loop_active: Cell::new(false),
             windows: RefCell::new(BTreeMap::new()),
             pointer_lock_owner: RefCell::new(None),
+            #[cfg(target_os = "macos")]
+            menus: RefCell::new(native_menu::NativeMenus::default()),
         }
     }
 
@@ -817,6 +835,8 @@ impl WinitSharedState {
     }
 
     fn remove_window(&self, window_id: WindowId) {
+        #[cfg(target_os = "macos")]
+        self.menus.borrow_mut().remove(window_id);
         self.clear_pointer_lock_owner(window_id);
         self.windows.borrow_mut().remove(&window_id);
     }
@@ -927,6 +947,7 @@ impl WinitNativeHandler<'_> {
 #[cfg(target_os = "macos")]
 impl ApplicationHandler for WinitNativeHandler<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.pump.resumed(event_loop);
         self.run_tick(event_loop);
     }
 
@@ -961,12 +982,23 @@ impl ApplicationHandler for WinitNativeHandler<'_> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.pump.about_to_wait(event_loop);
         self.run_tick(event_loop);
     }
 }
 
 impl ApplicationHandler for WinitPumpHandler {
-    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
+    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        self.shared.menus.borrow_mut().launched();
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // AppKit can deliver didBecomeKey before NSApplication.keyWindow is
+        // updated. Reconcile once its native event dispatch has completed.
+        #[cfg(target_os = "macos")]
+        self.shared.menus.borrow_mut().refresh();
+    }
 
     fn window_event(
         &mut self,
@@ -1003,6 +1035,8 @@ impl ApplicationHandler for WinitPumpHandler {
                 ));
             }
             WindowEvent::Destroyed => {
+                #[cfg(target_os = "macos")]
+                self.shared.menus.borrow_mut().remove(window_id);
                 self.shared.clear_pointer_lock_owner(window_id);
                 mark_pointer_lock_released(&mut state);
                 state.push(Event::Quit);
@@ -1024,6 +1058,8 @@ impl ApplicationHandler for WinitPumpHandler {
                 });
             }
             WindowEvent::Focused(focused) => {
+                #[cfg(target_os = "macos")]
+                self.shared.menus.borrow_mut().refresh();
                 state.window_focused = focused;
                 if !focused {
                     state.reconcile_pointer_buttons(0);
@@ -1033,12 +1069,12 @@ impl ApplicationHandler for WinitPumpHandler {
                     release_native_pointer_lock(&window, &mut state);
                     state.manual_move_active = false;
                     state.ime_preedit_active = false;
-                    state.modifiers = KeyModifiers::empty();
+                    state.push_modifiers(KeyModifiers::empty());
                     state.discard_pending_empty_preedit();
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
-                state.modifiers = map_modifiers(modifiers.state());
+                state.push_modifiers(map_modifiers(modifiers.state()));
             }
             WindowEvent::CursorMoved { position, .. } => {
                 if state.manual_move_active {
@@ -1457,6 +1493,13 @@ impl WinitPlatformWindow {
         };
         let surface_id = next_surface_id();
         let state = Rc::new(RefCell::new(WinitEventState::new(scale_factor)));
+        #[cfg(target_os = "macos")]
+        shared.menus.borrow_mut().update(
+            &window,
+            surface_id,
+            &request.menu_titles,
+            Rc::downgrade(&state),
+        )?;
         shared.windows.borrow_mut().insert(
             window.id(),
             WinitWindowEntry {
@@ -1834,6 +1877,13 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn set_menu_titles(&mut self, _menu_titles: &str) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        self.shared.menus.borrow_mut().update(
+            &self.window,
+            self.surface_id,
+            _menu_titles,
+            Rc::downgrade(&self.state),
+        )?;
         Ok(())
     }
 
@@ -2022,6 +2072,106 @@ fn map_wheel_phase(phase: TouchPhase) -> WheelPhase {
 mod tests {
     use super::*;
     use scarlet_ui_core::platform::{WindowFrame, WindowTitleBar};
+
+    #[test]
+    fn modifier_only_changes_publish_command_control_and_release_for_pointer_actions() {
+        let mut state = WinitEventState::new(1.0);
+        for native in [
+            ModifiersState::SUPER,
+            ModifiersState::CONTROL,
+            ModifiersState::empty(),
+        ] {
+            let modifiers = map_modifiers(native);
+            state.push_modifiers(modifiers);
+            assert_eq!(state.modifiers, modifiers);
+            assert!(
+                matches!(state.pop(), Some(Event::ModifiersChanged(actual)) if actual == modifiers)
+            );
+            assert!(
+                state.pop().is_none(),
+                "modifier changes must not synthesize text"
+            );
+            state.push_modifiers(modifiers);
+            assert!(state.pop().is_none());
+        }
+    }
+
+    #[test]
+    fn application_shortcuts_emit_keys_without_printable_text() {
+        for modifiers in [
+            KeyModifiers {
+                control: true,
+                ..KeyModifiers::empty()
+            },
+            KeyModifiers {
+                super_key: true,
+                ..KeyModifiers::empty()
+            },
+        ] {
+            for key in [
+                Key::Character("a".into()),
+                Key::Character("s".into()),
+                Key::Named(NamedKey::Space),
+            ] {
+                let mut state = WinitEventState::new_with_wheel_coalesce(1.0, false);
+                state.modifiers = modifiers;
+                state.push_keyboard_input(&key, WinitElementState::Pressed);
+                state.push_keyboard_input(&key, WinitElementState::Released);
+                assert!(matches!(
+                    state.pop(),
+                    Some(Event::Keyboard(KeyEvent::Pressed { .. }))
+                ));
+                assert!(matches!(
+                    state.pop(),
+                    Some(Event::Keyboard(KeyEvent::Released { .. }))
+                ));
+                assert!(state.pop().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn shifted_and_altgr_text_remain_printable() {
+        for (modifiers, text, expected) in [
+            (
+                KeyModifiers {
+                    shift: true,
+                    ..KeyModifiers::empty()
+                },
+                "A",
+                'A',
+            ),
+            (
+                KeyModifiers {
+                    control: true,
+                    alt: true,
+                    ..KeyModifiers::empty()
+                },
+                "€",
+                '€',
+            ),
+            (
+                KeyModifiers {
+                    alt: true,
+                    ..KeyModifiers::empty()
+                },
+                "ø",
+                'ø',
+            ),
+        ] {
+            let mut state = WinitEventState::new_with_wheel_coalesce(1.0, false);
+            state.modifiers = modifiers;
+            state.push_keyboard_input(&Key::Character(text.into()), WinitElementState::Pressed);
+            assert!(matches!(
+                state.pop(),
+                Some(Event::Keyboard(KeyEvent::Pressed { .. }))
+            ));
+            assert!(
+                matches!(state.pop(), Some(Event::Keyboard(KeyEvent::Char { c })) if c == expected)
+            );
+            assert!(state.pop().is_none());
+        }
+    }
 
     #[test]
     fn space_emits_one_text_event_per_press_and_repeat() {

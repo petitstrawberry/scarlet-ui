@@ -9,6 +9,14 @@ use scarlet_ui_core::file_dialog::{
 pub(crate) const CAPABILITIES_METHOD: &str = "GetPickerCapabilities";
 pub(crate) const EXTENSION_CAPABILITY: &str = "extension-list-v1";
 
+/// Existing OpenFile argument indices 3 and 4: allow_multiple, select_directories.
+pub(crate) fn open_selection_flags(mode: FileDialogMode) -> [bool; 2] {
+    [
+        mode == FileDialogMode::OpenMultiple,
+        mode == FileDialogMode::OpenFolder,
+    ]
+}
+
 pub(crate) fn native_filter(
     options: &FileDialog,
     extensions_supported: bool,
@@ -45,6 +53,15 @@ pub(crate) fn native_filter(
 mod tests {
     use super::*;
     use scarlet_ui_core::file_dialog::FileDialogFilter;
+
+    #[test]
+    fn folder_selection_uses_existing_directory_flag_without_filter_capability() {
+        let options = FileDialog::new(FileDialogMode::OpenFolder);
+        assert_eq!(open_selection_flags(options.mode), [false, true]);
+        assert_eq!(open_selection_flags(FileDialogMode::Open), [false, false]);
+        assert_eq!(native_filter(&options, false), Ok(String::new()));
+        assert_eq!(native_filter(&options, true), Ok(String::new()));
+    }
     #[test]
     fn filtered_single_open_and_save_use_the_union() {
         for mode in [FileDialogMode::Open, FileDialogMode::Save] {

@@ -381,6 +381,7 @@ impl Button {
         render_object.appearance = self.appearance;
         render_object.material = self.material;
         render_object.enabled = self.enabled;
+        render_object.repeats_on_press = self.press_repeat.is_some();
         render_object
     }
 }
@@ -419,12 +420,49 @@ pub struct ButtonRenderObject {
     hovered: bool,
     focused: bool,
     keyboard_pressed: bool,
+    keyboard_key: Option<crate::event::KeyCode>,
+    repeats_on_press: bool,
     pressed: crate::views::press::PressSources,
     size: Size,
     buffer: Option<Buffer>,
 }
 
 impl ButtonRenderObject {
+    pub fn handle_keyboard(&mut self, event: crate::event::KeyEvent) -> Option<bool> {
+        use crate::event::{KeyCode, KeyEvent};
+        if !self.enabled || !self.focused {
+            return None;
+        }
+        match event {
+            KeyEvent::Pressed {
+                keycode: key @ (KeyCode::Enter | KeyCode::Space),
+                modifiers,
+            } if !modifiers.control && !modifiers.alt && !modifiers.super_key => {
+                if self.keyboard_key.is_none() {
+                    self.keyboard_key = Some(key);
+                    self.keyboard_pressed = true;
+                }
+                Some(false)
+            }
+            KeyEvent::Released {
+                keycode: key @ (KeyCode::Enter | KeyCode::Space),
+                ..
+            } => {
+                let activate = self.keyboard_key == Some(key);
+                if activate {
+                    self.keyboard_key = None;
+                    self.keyboard_pressed = false;
+                    self.keyboard_key = None;
+                }
+                Some(activate)
+            }
+            KeyEvent::Char {
+                c: ' ' | '\r' | '\n',
+            } => Some(false),
+            _ => None,
+        }
+    }
+
     /// Create a button render object.
     ///
     /// # Arguments
@@ -472,6 +510,8 @@ impl ButtonRenderObject {
             hovered: false,
             focused: false,
             keyboard_pressed: false,
+            keyboard_key: None,
+            repeats_on_press: false,
             pressed: crate::views::press::PressSources::default(),
             size: Size::ZERO,
             buffer: None,
@@ -498,7 +538,13 @@ impl ButtonRenderObject {
             0.0
         };
         let width = text_width as f32 + icon_width + self.padding * 2.0;
-        let height = graphics::line_height_sized(self.font_size) as f32 + self.padding * 2.0;
+        let height = if self.font_size == style::CONTROL_FONT_SIZE
+            && self.padding == style::CONTROL_PADDING
+        {
+            style::CONTROL_HEIGHT
+        } else {
+            graphics::line_height_sized(self.font_size) as f32 + self.padding * 2.0
+        };
 
         Size { width, height }
     }
@@ -531,6 +577,7 @@ impl ButtonRenderObject {
         self.focused = focused && self.enabled;
         if !self.focused {
             self.keyboard_pressed = false;
+            self.keyboard_key = None;
             self.pressed = Default::default();
         }
     }
@@ -581,6 +628,10 @@ impl ButtonRenderObject {
 }
 
 impl ElementRenderObject for ButtonRenderObject {
+    fn keeps_touch_press_within_bounds(&self) -> bool {
+        self.enabled && !self.repeats_on_press
+    }
+
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
         let intrinsic = self.estimate_size();
 

@@ -10,13 +10,18 @@ extern crate alloc;
 extern crate scarlet_std as std;
 
 mod backend;
+mod backing_refresh;
+mod clipboard;
+mod configure_batch;
 mod file_dialog;
 mod file_dialog_policy;
+mod keyboard;
 mod shared_image;
 mod sink;
 mod text_input_sync;
 
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -24,6 +29,7 @@ pub use backend::{
     DEFAULT_GPU_DEVICE, Error as SgfxPaintError, Result as SgfxPaintResult, SgfxPaintBackend,
     Stage as SgfxPaintStage,
 };
+use backing_refresh::BackingRefresh;
 use core::sync::atomic::{AtomicBool, Ordering};
 use scarlet_ui_core::buffer::Buffer;
 use scarlet_ui_core::color::Color;
@@ -31,7 +37,7 @@ use scarlet_ui_core::compositor::DamageRect;
 use scarlet_ui_core::element::{TextInputElementState, WindowSizeLimits};
 use scarlet_ui_core::error::{Error, Result};
 use scarlet_ui_core::event::{
-    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase,
+    Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, ScrollSource, WheelPhase, WindowEvent,
 };
 use scarlet_ui_core::geometry::{EdgeInsets, Point, Rect, Size};
 use scarlet_ui_core::input_environment::{InputEnvironment, WindowingMode};
@@ -58,6 +64,23 @@ pub use sink::{
 };
 use sws::event::{Event as SwsEvent, abs_code, event_type, key_code, rel_code};
 use sws_client as sws;
+
+// Optional WINDOW_STATE_CHANGED bit introduced by SWS 7aa475f3. The wire
+// payload and decoder are unchanged; keep the shared-image SDK ABI aligned
+// with SGFX instead of requiring every graphics backend to upgrade for this bit.
+const SWS_TABLET_MANAGED: u32 = 1 << 4;
+
+fn window_close_request_event(window_id: u32, surface_id: u32) -> Option<Event> {
+    (window_id == surface_id).then_some(Event::Window(WindowEvent::CloseRequested))
+}
+
+fn text_input_content_hint(automatic_software_keyboard: bool) -> u32 {
+    if automatic_software_keyboard {
+        sws_protocol::text_input_content_hints::NONE
+    } else {
+        sws_protocol::text_input_content_hints::NO_AUTO_SOFTWARE_KEYBOARD
+    }
+}
 
 #[cfg(feature = "std")]
 use std::time::{Duration, Instant};
@@ -486,6 +509,7 @@ impl SgfxFrameSink for SwsSgfxFrameSink {
 
 struct SwsSgfxPaintBackend {
     backend: SgfxPaintBackend<SwsSgfxFrameSink>,
+    backing_refresh: Rc<BackingRefresh>,
 }
 
 impl PaintBackend for SwsSgfxPaintBackend {
@@ -503,6 +527,9 @@ impl PaintBackend for SwsSgfxPaintBackend {
         logical_damage: Option<&[Rect]>,
         physical_damage: Option<&[DamageRect]>,
     ) -> Result<BackendFrame<'a>> {
+        if self.backing_refresh.take_sgfx_replacement() {
+            self.backend.invalidate_backing();
+        }
         self.backend
             .render(context, background_color, logical_damage, physical_damage)
     }
@@ -725,6 +752,9 @@ pub struct SWSPlatformWindow {
     next_frame_callback_id: u64,
     pending_frame_callback_id: Option<u64>,
     fullscreen: bool,
+    tablet_managed: bool,
+    backing_refresh: Rc<BackingRefresh>,
+    configure_batch: configure_batch::ConfigureBatch,
     suspended: bool,
     pointer_locked: bool,
     pointer_lock_requested: Option<bool>,
@@ -1030,6 +1060,14 @@ impl SWSPlatformWindow {
         ((value as i64).saturating_mul(scale_milli as i64) / 1000) as i32
     }
 
+    fn effective_geometry_insets(&self) -> EdgeInsets {
+        if self.tablet_managed || self.fullscreen {
+            EdgeInsets::ZERO
+        } else {
+            self.window_geometry_insets
+        }
+    }
+
     fn physical_to_logical_pos(&self, value: i32) -> i32 {
         ((value as i64).saturating_mul(1000) / self.scale_milli as i64) as i32
     }
@@ -1296,6 +1334,9 @@ impl SWSPlatformWindow {
             next_frame_callback_id: 1,
             pending_frame_callback_id: None,
             fullscreen: false,
+            tablet_managed: false,
+            backing_refresh: Rc::new(BackingRefresh::default()),
+            configure_batch: configure_batch::ConfigureBatch::default(),
             suspended: false,
             pointer_locked: false,
             pointer_lock_requested: None,
@@ -1458,7 +1499,7 @@ impl SWSPlatformWindow {
                 text: &state.surrounding_text,
                 cursor: state.cursor_byte,
                 anchor: state.anchor_byte,
-                hint: sws_protocol::text_input_content_hints::NONE,
+                hint: text_input_content_hint(state.automatic_software_keyboard),
                 purpose: sws_protocol::text_input_content_purpose::NORMAL,
             },
             |request| {
@@ -1491,7 +1532,11 @@ impl SWSPlatformWindow {
         }
         if self.input_panel_show_pending {
             self.input_panel_show_pending = false;
-            let _ = self.conn.show_text_input_panel(context_id);
+            // This pending request comes from touch focus, not an explicit
+            // application request. Keep IME enabled even when auto-show is off.
+            if state.automatic_software_keyboard {
+                let _ = self.conn.show_text_input_panel(context_id);
+            }
         }
     }
 
@@ -1815,6 +1860,14 @@ impl SWSPlatformWindow {
 }
 
 impl PlatformWindow for SWSPlatformWindow {
+    fn text_clipboard(
+        &self,
+    ) -> core::result::Result<
+        scarlet_ui_core::clipboard::TextClipboard,
+        scarlet_ui_core::clipboard::ClipboardError,
+    > {
+        Ok(clipboard::service(self.conn.clone(), self.surface_id))
+    }
     fn begin_file_dialog(
         &mut self,
         options: &scarlet_ui_core::file_dialog::FileDialog,
@@ -1855,6 +1908,23 @@ impl PlatformWindow for SWSPlatformWindow {
                 self.handle_sws_event(ev);
             }
             self.flush_pending_relative_motion();
+            if let Some(configure) = self.configure_batch.take() {
+                // State and extent belong to the same frame. State-only
+                // notifications remain staged until their configure arrives.
+                let (width, height) = configure.size;
+                self.needs_full_present = true;
+                if let Some(fullscreen) = configure.fullscreen {
+                    // Fullscreen can change CSD without changing the extent.
+                    self.backing_refresh.decoration_changed();
+                    self.push_event(Event::FullscreenConfigure {
+                        width,
+                        height,
+                        fullscreen,
+                    });
+                } else {
+                    self.push_event(Event::Resize { width, height });
+                }
+            }
         }
 
         if self.pending_head < self.pending_events.len() {
@@ -1980,7 +2050,10 @@ impl PlatformWindow for SWSPlatformWindow {
                     backend.backend_kind()
                 );
                 self.renderer_backend = RendererBackendKind::Sgfx;
-                Ok(Some(Box::new(SwsSgfxPaintBackend { backend })))
+                Ok(Some(Box::new(SwsSgfxPaintBackend {
+                    backend,
+                    backing_refresh: self.backing_refresh.clone(),
+                })))
             }
             Err(error)
                 if self.requested_renderer_backend == RequestedRendererBackend::Auto
@@ -2061,9 +2134,9 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn set_title(&mut self, title: &str) {
-        // Note: sws-client doesn't have a set_surface_title method
-        // The title is set during surface creation
-        let _ = title;
+        if let Err(error) = self.conn.set_window_title(self.surface_id, title) {
+            logln!("[ScarletUI] could not update window title: {error:?}");
+        }
     }
 
     fn size(&self) -> Size {
@@ -2071,7 +2144,7 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn managed_size(&self) -> Size {
-        Self::logical_managed_size(self.current_size, self.window_geometry_insets)
+        Self::logical_managed_size(self.current_size, self.effective_geometry_insets())
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
@@ -2087,7 +2160,7 @@ impl PlatformWindow for SWSPlatformWindow {
         let physical_width = self.logical_to_physical_len(width);
         let physical_height = self.logical_to_physical_len(height);
         let physical_geometry = Self::physical_window_geometry(
-            self.window_geometry_insets,
+            self.effective_geometry_insets(),
             physical_width,
             physical_height,
             self.scale_milli,
@@ -2098,13 +2171,17 @@ impl PlatformWindow for SWSPlatformWindow {
                 surface.width() == physical_width && surface.height() == physical_height
             })
             .unwrap_or(false);
-        if self.current_size == new_size && surface_is_current {
+        if !self
+            .backing_refresh
+            .needs_resize(self.current_size == new_size, surface_is_current)
+        {
             return Ok(());
         }
 
         self.conn
             .resize_window(self.surface_id, physical_width, physical_height)
             .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
+        self.backing_refresh.backing_replaced();
         if self.window_geometry_supported
             && let Some(geometry) = physical_geometry
         {
@@ -2120,7 +2197,7 @@ impl PlatformWindow for SWSPlatformWindow {
 
     fn resize_managed(&mut self, width: u32, height: u32) -> Result<()> {
         let (surface_width, surface_height) =
-            Self::logical_surface_size_for_managed(width, height, self.window_geometry_insets);
+            Self::logical_surface_size_for_managed(width, height, self.effective_geometry_insets());
         self.resize(surface_width, surface_height)
     }
 
@@ -2611,14 +2688,12 @@ impl SWSPlatformWindow {
                         let pressed = input.value != 0;
                         if Self::is_modifier_key(code) {
                             self.update_modifier_state(code, pressed);
+                            let modifiers = self.current_modifiers();
+                            self.push_event(Event::ModifiersChanged(modifiers));
                             return;
                         }
                         let mapped_char = self.map_key_char_with_modifiers(code);
-                        let mapped = if mapped_char.is_some_and(|c| c.is_control()) {
-                            mapped_char.map_or(KeyCode::Unknown, KeyCode::Char)
-                        } else {
-                            Self::map_key_code(code)
-                        };
+                        let mapped = Self::map_key_code(code);
                         if debug {
                             logln!(
                                 "[SWSPlatformWindow] key dispatch: code={} value={} mapped={:?} char={:?}",
@@ -2629,21 +2704,12 @@ impl SWSPlatformWindow {
                             );
                         }
                         let modifiers = self.current_modifiers();
-                        if pressed {
-                            self.push_event(Event::Keyboard(KeyEvent::Pressed {
-                                keycode: mapped,
-                                modifiers,
-                            }));
-                            if let Some(c) = mapped_char
-                                && !c.is_control()
-                            {
-                                self.push_event(Event::Keyboard(KeyEvent::Char { c }));
-                            }
-                        } else {
-                            self.push_event(Event::Keyboard(KeyEvent::Released {
-                                keycode: mapped,
-                                modifiers,
-                            }));
+                        for event in
+                            keyboard::keyboard_events(mapped, mapped_char, modifiers, pressed)
+                                .into_iter()
+                                .flatten()
+                        {
+                            self.push_event(Event::Keyboard(event));
                         }
                     }
                     _ => {}
@@ -2709,12 +2775,7 @@ impl SWSPlatformWindow {
                 if surface_id == self.surface_id {
                     let logical_width = self.physical_to_logical_len(width);
                     let logical_height = self.physical_to_logical_len(height);
-                    self.current_size = Size::new(logical_width as f32, logical_height as f32);
-                    self.needs_full_present = true;
-                    self.push_event(Event::Resize {
-                        width: logical_width,
-                        height: logical_height,
-                    });
+                    self.configure_batch.resize(logical_width, logical_height);
                     if debug {
                         logln!(
                             "[SWSPlatformWindow] SurfaceConfigure: physical={}x{} logical={}x{}",
@@ -2730,10 +2791,29 @@ impl SWSPlatformWindow {
                 surface_id,
                 state_flags,
             } if surface_id == self.surface_id => {
+                let tablet_managed = state_flags & SWS_TABLET_MANAGED != 0;
+                if tablet_managed != self.tablet_managed {
+                    self.tablet_managed = tablet_managed;
+                    self.backing_refresh.decoration_changed();
+                    if scarlet_ui_core::debug::frame_log_enabled() {
+                        logln!(
+                            "[Tablet] surface={} managed={} size={:?}",
+                            self.surface_id,
+                            tablet_managed,
+                            self.current_size
+                        );
+                    }
+                    self.surface_regions_cache = None;
+                    self.needs_full_present = true;
+                    self.text_input_sync.invalidate();
+                    self.push_event(Event::TabletPresentationChanged {
+                        active: tablet_managed,
+                    });
+                }
                 let fullscreen = state_flags & sws::window_state::FULLSCREEN != 0;
                 if fullscreen != self.fullscreen {
                     self.fullscreen = fullscreen;
-                    self.push_event(Event::FullscreenChanged { fullscreen });
+                    self.configure_batch.fullscreen(fullscreen);
                 }
                 let suspended = state_flags & sws::window_state::SUSPENDED != 0;
                 if suspended != self.suspended {
@@ -2782,10 +2862,35 @@ impl SWSPlatformWindow {
                     height: self.current_size.height.max(1.0) as u32,
                 });
             }
+            SwsEvent::InputPanelOcclusion(area) if area.window_id == self.surface_id => {
+                let occlusion = (area.width > 0 && area.height > 0).then(|| {
+                    Rect::from_xywh(
+                        self.physical_to_logical_pos(area.x) as f32,
+                        self.physical_to_logical_pos(area.y) as f32,
+                        self.physical_to_logical_len(area.width) as f32,
+                        self.physical_to_logical_len(area.height) as f32,
+                    )
+                });
+                if scarlet_ui_core::debug::frame_log_enabled() {
+                    logln!(
+                        "[InputPanel] surface={} occlusion={:?} size={:?}",
+                        self.surface_id,
+                        occlusion,
+                        self.current_size
+                    );
+                }
+                self.push_event(Event::InputPanelOcclusionChanged { occlusion });
+            }
             SwsEvent::InputEnvironmentChanged(environment) => {
                 self.push_event(Event::InputEnvironmentChanged(map_sws_input_environment(
                     environment,
                 )));
+            }
+            SwsEvent::WindowCloseRequested { window_id } => {
+                if let Some(event) = window_close_request_event(window_id, self.surface_id) {
+                    // Keep the window alive while the application confirms or cancels.
+                    self.push_event(event);
+                }
             }
             SwsEvent::SurfaceDestroyed { surface_id } => {
                 if surface_id == self.surface_id {
@@ -2861,6 +2966,7 @@ impl SWSPlatformWindow {
                 self.text_input_sync.invalidate();
                 if window_id != self.surface_id {
                     self.reset_transient_modifiers();
+                    self.push_event(Event::ModifiersChanged(KeyModifiers::empty()));
                     self.pointer_lock_requested = None;
                     if self.pointer_locked {
                         self.flush_pending_relative_motion();
@@ -2942,6 +3048,53 @@ impl SWSPlatformWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_keyboard_policy_changes_the_committed_hint_without_disabling_ime() {
+        use text_input_sync::{Request, State, SyncResult, TextInputSync};
+        let mut sync = TextInputSync::default();
+        for (serial, automatic) in [(1, true), (2, false), (3, true)] {
+            let mut requests = Vec::new();
+            assert_eq!(
+                sync.synchronize(
+                    7,
+                    serial,
+                    State {
+                        rect: (0, 0, 1, 20),
+                        text: "123",
+                        cursor: 3,
+                        anchor: 0,
+                        hint: text_input_content_hint(automatic),
+                        purpose: sws_protocol::text_input_content_purpose::NORMAL,
+                    },
+                    |request| {
+                        requests.push(request);
+                        true
+                    },
+                ),
+                SyncResult::Committed,
+            );
+            let expected_hint = if automatic { 0 } else { 1 << 10 };
+            assert_eq!(
+                requests,
+                vec![
+                    Request::CursorRect(7, (0, 0, 1, 20)),
+                    Request::SurroundingText(7, 3, 0, "123"),
+                    Request::ContentType(7, expected_hint, 0),
+                    Request::Commit(7, serial),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn compositor_close_request_uses_application_confirmation() {
+        assert!(matches!(
+            window_close_request_event(27, 27),
+            Some(Event::Window(WindowEvent::CloseRequested)),
+        ));
+        assert!(window_close_request_event(28, 27).is_none());
+    }
 
     #[test]
     fn sws_enables_the_standard_normal_window_shadow_by_default() {

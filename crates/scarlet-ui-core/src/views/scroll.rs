@@ -8,7 +8,7 @@ use crate::color::{Color, ColorPalette};
 use crate::element::{
     Element, ElementRenderObject, LayoutConstraints, RenderElement, ScrollOffsetUpdate,
 };
-use crate::event::{Event, MouseEvent, Phase, ScrollSource, WheelPhase};
+use crate::event::{Event, KeyCode, KeyEvent, MouseEvent, Phase, ScrollSource, WheelPhase};
 use crate::geometry::{Point, Rect, Size};
 use crate::pipeline::layers::{LayerClip, LayerPrimitive, LayerPrimitiveKind};
 use crate::renderer::PaintContext;
@@ -17,6 +17,7 @@ use crate::view::View;
 use crate::views::modifiers::RepaintBoundary;
 use crate::views::style;
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::any::Any;
@@ -53,9 +54,29 @@ impl ScrollAxis {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct SelectionScrollTarget {
     axis: ScrollAxis,
+    identity: usize,
     index: usize,
     item_extent: f32,
     offset: f32,
+}
+
+// A virtualized child can resolve its selected item's bounds after viewport sizing.
+type SelectionRangeResolver = Rc<dyn Fn(Size) -> Option<(usize, f32, f32)>>;
+
+fn resolved_selection_range(
+    resolver: &SelectionRangeResolver,
+    size: Size,
+) -> Option<SelectionScrollTarget> {
+    let (identity, start, end) = resolver(size)?;
+    (start.is_finite() && end.is_finite() && start >= 0.0 && end > start).then_some(
+        SelectionScrollTarget {
+            axis: ScrollAxis::Vertical,
+            identity,
+            index: 0,
+            offset: start,
+            item_extent: end - start,
+        },
+    )
 }
 
 /// Wheel direction for a scroll axis.
@@ -98,6 +119,10 @@ impl Default for ScrollbarVisibility {
 }
 
 /// Scrollable viewport for a child view.
+///
+/// Unmodified Page Up/Down and Home/End scroll this viewport when the focused
+/// descendant does not consume the key. Editors and value controls retain their
+/// own navigation. At an edge, an unconsumed key can scroll an outer viewport.
 #[derive(Clone)]
 pub struct ScrollView<V: View> {
     content_safe_area_edges: crate::geometry::SafeAreaEdges,
@@ -117,6 +142,7 @@ pub struct ScrollView<V: View> {
     selection_index_state: Option<State<Option<usize>>>,
     selection_item_extent: Option<f32>,
     selection_target: Option<SelectionScrollTarget>,
+    selection_range_resolver: Option<SelectionRangeResolver>,
 }
 
 impl<V: View> ScrollView<V> {
@@ -148,6 +174,7 @@ impl<V: View> ScrollView<V> {
             selection_index_state: None,
             selection_item_extent: None,
             selection_target: None,
+            selection_range_resolver: None,
         }
     }
 
@@ -388,10 +415,12 @@ impl<V: View> ScrollView<V> {
     /// Updated scroll view.
     pub fn scroll_to_index(mut self, index: Option<usize>, item_extent: f32) -> Self {
         let item_extent = item_extent.max(1.0);
+        self.selection_range_resolver = None;
         self.selection_index_state = None;
         self.selection_item_extent = None;
         self.selection_target = index.map(|index| SelectionScrollTarget {
             axis: ScrollAxis::Vertical,
+            identity: index,
             index,
             item_extent,
             offset: 0.0,
@@ -421,11 +450,13 @@ impl<V: View> ScrollView<V> {
     }
 
     fn set_selection_range(&mut self, axis: ScrollAxis, start: f32, end: f32) {
+        self.selection_range_resolver = None;
         self.selection_index_state = None;
         self.selection_item_extent = None;
         self.selection_target = if start.is_finite() && end.is_finite() && end > start.max(0.0) {
             Some(SelectionScrollTarget {
                 axis,
+                identity: 0,
                 index: 0,
                 offset: start.max(0.0),
                 item_extent: end - start.max(0.0),
@@ -452,10 +483,12 @@ impl<V: View> ScrollView<V> {
     /// Updated scroll view.
     pub fn scroll_to_index_state(mut self, index: State<Option<usize>>, item_extent: f32) -> Self {
         let item_extent = item_extent.max(1.0);
+        self.selection_range_resolver = None;
         self.selection_index_state = Some(index.clone());
         self.selection_item_extent = Some(item_extent);
         self.selection_target = index.get().map(|index| SelectionScrollTarget {
             axis: ScrollAxis::Vertical,
+            identity: index,
             index,
             item_extent,
             offset: 0.0,
@@ -463,10 +496,25 @@ impl<V: View> ScrollView<V> {
         self
     }
 
-    fn current_selection_target(&self) -> Option<SelectionScrollTarget> {
+    pub(crate) fn scroll_to_layout_range(
+        mut self,
+        resolver: impl Fn(Size) -> Option<(usize, f32, f32)> + 'static,
+    ) -> Self {
+        self.selection_index_state = None;
+        self.selection_item_extent = None;
+        self.selection_target = None;
+        self.selection_range_resolver = Some(Rc::new(resolver));
+        self
+    }
+
+    fn current_selection_target(&self, viewport: Size) -> Option<SelectionScrollTarget> {
+        if let Some(resolver) = &self.selection_range_resolver {
+            return resolved_selection_range(resolver, viewport);
+        }
         if let Some(index) = &self.selection_index_state {
             return index.get().map(|index| SelectionScrollTarget {
                 axis: ScrollAxis::Vertical,
+                identity: index,
                 index,
                 item_extent: self.selection_item_extent.unwrap_or(1.0),
                 offset: 0.0,
@@ -608,6 +656,7 @@ pub struct ScrollViewRenderObject<V: View> {
     configured_content_size: Option<Size>,
     content_bottom_inset: f32,
     overlay_bottom_inset: f32,
+    keyboard_bottom_inset: f32,
     wheel_scale: f32,
     horizontal_wheel_direction: ScrollWheelDirection,
     vertical_wheel_direction: ScrollWheelDirection,
@@ -626,6 +675,7 @@ pub struct ScrollViewRenderObject<V: View> {
     scrollbar_active: bool,
     trackpad_axis_engaged: bool,
     selection_target: Option<SelectionScrollTarget>,
+    selection_range_resolver: Option<SelectionRangeResolver>,
     selection_scroll_pending: bool,
     anchor: Option<crate::element::ScrollAnchor>,
     _marker: PhantomData<V>,
@@ -651,6 +701,7 @@ impl<V: View> ScrollViewRenderObject<V> {
             configured_content_size: content_size,
             content_bottom_inset: 0.0,
             overlay_bottom_inset: 0.0,
+            keyboard_bottom_inset: 0.0,
             wheel_scale,
             horizontal_wheel_direction: ScrollWheelDirection::Normal,
             vertical_wheel_direction: ScrollWheelDirection::Normal,
@@ -668,6 +719,7 @@ impl<V: View> ScrollViewRenderObject<V> {
             scrollbar_active: false,
             trackpad_axis_engaged: false,
             selection_target: None,
+            selection_range_resolver: None,
             selection_scroll_pending: false,
             anchor: None,
             _marker: PhantomData,
@@ -705,7 +757,8 @@ impl<V: View> ScrollViewRenderObject<V> {
         render_object.content_safe_area_edges = view.content_safe_area_edges;
         render_object.scrollbar_visibility = view.scrollbar_visibility_value();
         render_object.scrollbar_color = view.scrollbar_color_value();
-        render_object.selection_target = view.current_selection_target();
+        render_object.selection_range_resolver = view.selection_range_resolver.clone();
+        render_object.selection_target = view.current_selection_target(Size::ZERO);
         render_object.selection_scroll_pending = render_object.selection_target.is_some();
         render_object
     }
@@ -742,8 +795,17 @@ impl<V: View> ScrollViewRenderObject<V> {
             .max(0.0)
     }
 
+    fn bottom_overlay_inset(&self) -> f32 {
+        self.overlay_bottom_inset.max(self.keyboard_bottom_inset)
+    }
+
     fn max_offset_y(&self) -> f32 {
-        (self.content_size.height + self.text_input_allowance.height - self.viewport_size.height)
+        (self.content_size.height
+            + self
+                .text_input_allowance
+                .height
+                .max((self.keyboard_bottom_inset - self.overlay_bottom_inset).max(0.0))
+            - self.viewport_size.height)
             .max(0.0)
     }
 
@@ -783,8 +845,8 @@ impl<V: View> ScrollViewRenderObject<V> {
                 - self.safe_area_insets.top
                 - self.safe_area_insets.bottom
                 - self.content_bottom_inset
-                - self.overlay_bottom_inset)
-                .max(1.0)
+                - self.bottom_overlay_inset())
+            .max(1.0)
         };
         let viewport_bottom = viewport_top + viewport_extent;
         let next_offset = if item_top < viewport_top {
@@ -1029,7 +1091,7 @@ impl<V: View> ScrollViewRenderObject<V> {
         let track_h = (self.viewport_size.height
             - self.safe_area_insets.top
             - self.safe_area_insets.bottom
-            - self.overlay_bottom_inset
+            - self.bottom_overlay_inset()
             - metrics.scrollbar_inset * 2.0
             - reserved)
             .max(0.0);
@@ -1071,6 +1133,53 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
     ) -> crate::geometry::EdgeInsets {
         self.content_safe_area_edges.remaining(insets)
     }
+    fn avoid_input_occlusion(
+        &mut self,
+        occlusion: Option<Rect>,
+        caret: Option<Rect>,
+        reveal: bool,
+    ) -> bool {
+        let before = (self.keyboard_bottom_inset, self.offset());
+        let safe = crate::geometry::safe_area_rect(self.viewport_size, self.safe_area_insets);
+        self.keyboard_bottom_inset = occlusion
+            .filter(|area| {
+                caret.is_some()
+                    && self.axes.allows_y()
+                    && area.size.height > 0.
+                    && area.size.width > 0.
+                    && area.origin.x < self.viewport_size.width
+                    && area.origin.x + area.size.width > 0.
+                    && area.origin.y > safe.top()
+                    && area.origin.y < self.viewport_size.height
+            })
+            .map_or(0., |area| self.viewport_size.height - area.origin.y);
+        self.clamp_offsets();
+        if occlusion.is_some() && (reveal || before.0 != self.keyboard_bottom_inset) {
+            if let Some(caret) = caret {
+                // A fully covered inner viewport must reveal within itself
+                // before an outer viewport moves it above the keyboard. Use
+                // the ordinary safe viewport when no usable keyboard edge
+                // intersects it, just as the Web reveal route does.
+                let bottom = (self.viewport_size.height - self.bottom_overlay_inset())
+                    .min(safe.bottom())
+                    .max(safe.top());
+                if caret.origin.y + caret.size.height > bottom {
+                    self.set_offset(
+                        self.offset_x,
+                        self.offset_y + caret.origin.y + caret.size.height - bottom,
+                    );
+                } else if caret.origin.y < safe.top() {
+                    self.set_offset(self.offset_x, self.offset_y + caret.origin.y - safe.top());
+                }
+            }
+        }
+        if before != (self.keyboard_bottom_inset, self.offset()) {
+            self.selection_scroll_pending = false;
+            return true;
+        }
+        false
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         let width = finite_viewport_axis(constraints.min_width, constraints.max_width);
         let height = finite_viewport_axis(constraints.min_height, constraints.max_height);
@@ -1096,6 +1205,13 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         let viewport_width = finite_viewport_axis(constraints.min_width, constraints.max_width);
         let viewport_height = finite_viewport_axis(constraints.min_height, constraints.max_height);
         self.viewport_size = Size::new(viewport_width, viewport_height);
+        if let Some(resolver) = &self.selection_range_resolver {
+            let target = resolved_selection_range(resolver, self.viewport_size);
+            if target != self.selection_target {
+                self.selection_target = target;
+                self.selection_scroll_pending = target.is_some();
+            }
+        }
 
         let insets = self.safe_area_insets;
         let inner = Size::new(
@@ -1220,7 +1336,8 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         ) = scroll_view.exclusive_wheel_axis_lock_values();
         self.scrollbar_visibility = scroll_view.scrollbar_visibility_value();
         self.scrollbar_color = scroll_view.scrollbar_color_value();
-        self.selection_target = scroll_view.current_selection_target();
+        self.selection_range_resolver = scroll_view.selection_range_resolver.clone();
+        self.selection_target = scroll_view.current_selection_target(self.viewport_size);
         if (self.selection_target != old_selection_target
             || self.content_bottom_inset != old_bottom_inset)
             && self.selection_target.is_some()
@@ -1283,7 +1400,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
                 (visible.bottom().min(safe.bottom()) - top).max(0.0),
             );
             visible.size.height = visible.size.height.min(
-                (self.viewport_size.height - self.overlay_bottom_inset - visible.top()).max(0.0),
+                (self.viewport_size.height - self.bottom_overlay_inset() - visible.top()).max(0.0),
             );
             self.selection_scroll_pending = false;
             // Additional travel is needed even when content fits the original
@@ -1319,6 +1436,47 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
     fn handle_event(&mut self, event: &Event, phase: Phase) -> bool {
         if !matches!(phase, Phase::Target | Phase::Bubble) {
             return false;
+        }
+
+        // Controls get first refusal through target/bubble dispatch. In
+        // particular editors retain caret/selection keys, and sliders retain
+        // value keys. Unmodified navigation that reaches the viewport scrolls
+        // it; at an edge the event can continue to an outer scroll container.
+        if let Event::Keyboard(KeyEvent::Pressed { keycode, modifiers }) = event {
+            if modifiers.shift || modifiers.control || modifiers.alt || modifiers.super_key {
+                return false;
+            }
+            let vertical = self.axes.allows_y() && self.max_offset_y() > 0.0;
+            let horizontal = self.axes.allows_x() && self.max_offset_x() > 0.0;
+            if !vertical && !horizontal {
+                return false;
+            }
+            let (offset, extent, maximum) = if vertical {
+                (
+                    self.offset_y,
+                    self.viewport_size.height,
+                    self.max_offset_y(),
+                )
+            } else {
+                (self.offset_x, self.viewport_size.width, self.max_offset_x())
+            };
+            let page = (extent * 0.9).max(1.0);
+            let next = match keycode {
+                KeyCode::PageUp => offset - page,
+                KeyCode::PageDown => offset + page,
+                KeyCode::Home => 0.0,
+                KeyCode::End => maximum,
+                _ => return false,
+            };
+            let changed = if vertical {
+                self.set_offset(self.offset_x, next)
+            } else {
+                self.set_offset(next, self.offset_y)
+            };
+            if changed {
+                self.selection_scroll_pending = false;
+            }
+            return changed;
         }
 
         let (delta_x, delta_y, gesture_active, direct_touch, momentum_start) = match event {
@@ -1567,6 +1725,48 @@ mod tests {
     use crate::state::generate_state_id;
     use crate::view::View;
     use crate::views::Text;
+
+    #[test]
+    fn keyboard_pages_clamp_horizontal_offsets_and_ignore_modified_keys() {
+        let view = ScrollView::new(Text::new("content"))
+            .horizontal()
+            .content_size(350.0, 60.0);
+        let mut object = ScrollViewRenderObject::<Text>::from_view(&view);
+        object.layout(LayoutConstraints::tight(100.0, 60.0));
+        let key = |keycode, modifiers| Event::Keyboard(KeyEvent::Pressed { keycode, modifiers });
+        for modifiers in [
+            crate::event::KeyModifiers {
+                shift: true,
+                ..crate::event::KeyModifiers::empty()
+            },
+            crate::event::KeyModifiers {
+                control: true,
+                ..crate::event::KeyModifiers::empty()
+            },
+            crate::event::KeyModifiers {
+                alt: true,
+                ..crate::event::KeyModifiers::empty()
+            },
+            crate::event::KeyModifiers {
+                super_key: true,
+                ..crate::event::KeyModifiers::empty()
+            },
+        ] {
+            assert!(!object.handle_event(&key(KeyCode::PageDown, modifiers), Phase::Bubble));
+            assert_eq!(object.offset(), (0.0, 0.0));
+        }
+        let plain = crate::event::KeyModifiers::empty();
+        assert!(!object.handle_event(&key(KeyCode::PageDown, plain), Phase::Capture));
+        assert!(object.handle_event(&key(KeyCode::PageDown, plain), Phase::Bubble));
+        assert_eq!(object.offset(), (90.0, 0.0));
+        assert!(object.handle_event(&key(KeyCode::End, plain), Phase::Bubble));
+        assert_eq!(object.offset(), (250.0, 0.0));
+        assert!(!object.handle_event(&key(KeyCode::PageDown, plain), Phase::Bubble));
+        assert!(object.handle_event(&key(KeyCode::PageUp, plain), Phase::Bubble));
+        assert_eq!(object.offset(), (160.0, 0.0));
+        assert!(object.handle_event(&key(KeyCode::Home, plain), Phase::Bubble));
+        assert_eq!(object.offset(), (0.0, 0.0));
+    }
 
     #[test]
     fn active_trackpad_axis_survives_diagonal_jitter_and_resets_after_the_gesture() {
@@ -1954,6 +2154,29 @@ mod tests {
             Phase::Target,
         ));
         assert_eq!(render_object.offset(), (0.0, 0.0));
+    }
+
+    #[test]
+    fn native_keyboard_and_floating_overlay_do_not_double_count_bottom_space() {
+        let view = ScrollView::new(Text::new("content"))
+            .vertical()
+            .content_size(100.0, 2000.0);
+        let mut render = ScrollViewRenderObject::<Text>::from_view(&view);
+        let mut children = alloc::vec![Text::new("content").create_element()];
+        render.set_bottom_overlay_inset(72.0);
+        render.layout_with_children(LayoutConstraints::tight(100.0, 200.0), &mut children);
+        assert_eq!(render.max_offset_y(), 1872.0);
+        render.avoid_input_occlusion(
+            Some(Rect::from_xywh(0.0, 100.0, 100.0, 100.0)),
+            Some(Rect::from_xywh(0.0, 180.0, 1.0, 15.0)),
+            true,
+        );
+        assert_eq!(render.bottom_overlay_inset(), 100.0);
+        assert_eq!(render.max_offset_y(), 1900.0);
+        assert_eq!(render.viewport_size(), Size::new(100.0, 200.0));
+        render.avoid_input_occlusion(None, None, false);
+        assert_eq!(render.bottom_overlay_inset(), 72.0);
+        assert_eq!(render.max_offset_y(), 1872.0);
     }
 
     #[test]

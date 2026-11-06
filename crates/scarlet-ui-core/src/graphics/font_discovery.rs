@@ -1,5 +1,6 @@
 //! Platform-aware discovery of fonts used by the default UI font stack.
 
+use ab_glyph::{Font, FontRef};
 #[cfg(target_os = "scarlet")]
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -81,6 +82,7 @@ impl FontDiscovery {
                     || !font
                         .charmap()
                         .is_some_and(|charmap| charmap.map(ch).is_some())
+                    || !has_drawable_glyph(font.blob.as_ref(), font.index, ch)
                 {
                     return QueryStatus::Continue;
                 }
@@ -95,6 +97,32 @@ impl FontDiscovery {
         };
         self.loaded_faces.push(face);
         Some(DiscoveredFont { bytes, index })
+    }
+}
+
+// The current renderer consumes vector outlines. A cmap hit in a bitmap/color-
+// only face is not usable coverage and would otherwise silently paint nothing.
+// Check once during discovery, rather than parsing outlines on every measure.
+fn has_drawable_glyph(bytes: &[u8], index: u32, ch: char) -> bool {
+    let Ok(font) = FontRef::try_from_slice_and_index(bytes, index) else {
+        return false;
+    };
+    let glyph = font.glyph_id(ch);
+    glyph.0 != 0 && (ch.is_whitespace() || font.outline(glyph).is_some())
+}
+
+#[cfg(test)]
+mod outline_coverage_tests {
+    use super::has_drawable_glyph;
+
+    #[test]
+    fn cmap_coverage_without_a_supported_outline_is_not_a_drawable_fallback() {
+        let blank = include_bytes!("../testing/fonts/metrics-blank.ttf");
+        let outline = include_bytes!("../testing/fonts/metrics-primary.ttf");
+        assert!(!has_drawable_glyph(blank, 0, 'A'));
+        assert!(has_drawable_glyph(outline, 0, 'A'));
+        assert!(has_drawable_glyph(blank, 0, ' '));
+        assert!(!has_drawable_glyph(outline, 0, '⏻'));
     }
 }
 

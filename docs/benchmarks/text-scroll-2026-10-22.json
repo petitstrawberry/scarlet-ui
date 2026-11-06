@@ -1,0 +1,804 @@
+{
+  "date": "2026-10-22",
+  "source_manifest": [
+    "before commit=ec25336241e70d2fcdad186b3b50f8aa449d303a Cargo.lock_sha256=6485d5cc75622256007d3a02031b124de68f1f428957c1393a2e876470afa8fd",
+    "after commit=21b75b5ff4e7408154fa2eb9503cda40534bb9ea Cargo.lock_sha256=6485d5cc75622256007d3a02031b124de68f1f428957c1393a2e876470afa8fd",
+    "current commit=0c09ab24fb90e111fadbf05131a94aacfcab458b Cargo.lock_sha256=6485d5cc75622256007d3a02031b124de68f1f428957c1393a2e876470afa8fd",
+    "harness_sha256=6d0154a85b18a0417a5c9a3465f89001d3043115e9985ee8a47f604daf238549"
+  ],
+  "toolchain_and_fonts": [
+    "rustc 1.94.0-nightly (26d00a8a3 2026-10-13) (built from a source tarball)",
+    "binary: rustc",
+    "commit-hash: 26d00a8a3a8489d73f5ae3575880e9f915dfd0f2",
+    "commit-date: 2026-10-13",
+    "host: x86_64-unknown-linux-gnu",
+    "release: 1.94.0-nightly",
+    "LLVM version: 21.1.8",
+    "cargo 1.94.0-nightly (built from a source tarball)",
+    "Linux 06303eefb2ea 6.18.55 #1 SMP Wed Oct 14 19:45:18 UTC 2026 x86_64 GNU/Linux",
+    "launcher_default_CARGO_TARGET_DIR=/workspace/cloud-setup/targets/scarlet-ui/scarlet-host; overridden per snapshot during compilation",
+    "FONTCONFIG_FILE=/nix/store/mbvb71d3samm27n8h2vyl0qywdhy3lj5-fonts.conf",
+    "81c723a512cc8497e1941312b8057f6a3419a434d13f3bde637f5e88a6843214  /workspace/Scarlet/bundles/desktop/fs/share/fonts/Mplus1-Regular.ttf",
+    "7d5fb73b7ca67a6798101741f5d280a3d016a56a197afcd4199dbb57b4b82a21  /workspace/Scarlet/bundles/desktop/fs/share/fonts/NotoSansSymbols2-Regular.ttf",
+    "de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551  /workspace/Scarlet/bundles/desktop/fs/share/fonts/NotoEmoji-Variable.ttf"
+  ],
+  "machine": {
+    "model name": "INTEL(R) XEON(R) PLATINUM 8573C",
+    "siblings": "5",
+    "cpu cores": "5",
+    "cpu.max": "400000 100000",
+    "memory.max": "17179869184"
+  },
+  "artifacts": {
+    "before": {
+      "executable": "/workspace/cloud-setup/targets/scarlet-ui/text-scroll-reconciliation-before/release/deps/scarlet_ui_core-dcda43713be14269",
+      "executable_sha256": "8e4ebee88a40c14c35b2c3cb9c66f7c2e1e6922307ad94efc3c67dae6982e795",
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 0,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": true
+      },
+      "features": [
+        "default",
+        "std"
+      ]
+    },
+    "after": {
+      "executable": "/workspace/cloud-setup/targets/scarlet-ui/text-scroll-reconciliation-after/release/deps/scarlet_ui_core-dcda43713be14269",
+      "executable_sha256": "0a31fd021cffc25a1536f76fb326a96e509c7317af43361eb9e45d5806ed60c9",
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 0,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": true
+      },
+      "features": [
+        "default",
+        "std"
+      ]
+    },
+    "current": {
+      "executable": "/workspace/cloud-setup/targets/scarlet-ui/text-scroll-reconciliation-current/release/deps/scarlet_ui_core-dcda43713be14269",
+      "executable_sha256": "a4f89434f091d0b1425570cf8ca5682149126e10e179310788ec4794c5df08d1",
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 0,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": true
+      },
+      "features": [
+        "default",
+        "std"
+      ]
+    }
+  },
+  "equivalence": {
+    "before_after_samples_matching": 10,
+    "matched_fields": [
+      "lines",
+      "mode",
+      "sample",
+      "before_y",
+      "after_y",
+      "visible_start",
+      "visible_end",
+      "visual_rows",
+      "commands",
+      "draw_text",
+      "body_text",
+      "text_hash"
+    ],
+    "hash": "FNV-1a64 over ordered DrawText x/y/font-size f32 bits, UTF-8 byte length and UTF-8 content"
+  },
+  "cases": {
+    "before": {
+      "environment": {
+        "compiled_manifest": "/workspace/scratch/text-scroll-reconciliation/before/crates/scarlet-ui-core",
+        "debug_assertions": "false"
+      },
+      "samples": [
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "0",
+          "before_y": "0",
+          "after_y": "31",
+          "visible_start": "1",
+          "visible_end": "34",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "20424896466fe95c",
+          "elapsed_ms": "1823.420992"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "1",
+          "before_y": "31",
+          "after_y": "2",
+          "visible_start": "0",
+          "visible_end": "32",
+          "visual_rows": "3001",
+          "commands": "71",
+          "draw_text": "64",
+          "body_text": "32",
+          "text_hash": "428b37e6a88be386",
+          "elapsed_ms": "1822.945111"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "2",
+          "before_y": "2",
+          "after_y": "33",
+          "visible_start": "1",
+          "visible_end": "34",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "3e31eb8fa2c31af2",
+          "elapsed_ms": "1822.955422"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "3",
+          "before_y": "33",
+          "after_y": "4",
+          "visible_start": "0",
+          "visible_end": "32",
+          "visual_rows": "3001",
+          "commands": "71",
+          "draw_text": "64",
+          "body_text": "32",
+          "text_hash": "6a91944b4cd8bbaa",
+          "elapsed_ms": "1832.785192"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "4",
+          "before_y": "4",
+          "after_y": "35",
+          "visible_start": "1",
+          "visible_end": "34",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "09f0300ab6a0782c",
+          "elapsed_ms": "1821.352354"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "0",
+          "before_y": "35",
+          "after_y": "66",
+          "visible_start": "3",
+          "visible_end": "36",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "3ed4394df56709ae",
+          "elapsed_ms": "6607.933146"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "1",
+          "before_y": "66",
+          "after_y": "37",
+          "visible_start": "1",
+          "visible_end": "34",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "186ed409f9c8963e",
+          "elapsed_ms": "7008.990224"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "2",
+          "before_y": "37",
+          "after_y": "68",
+          "visible_start": "3",
+          "visible_end": "36",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "f94f5cfd9d95816c",
+          "elapsed_ms": "6956.852787"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "3",
+          "before_y": "68",
+          "after_y": "39",
+          "visible_start": "1",
+          "visible_end": "34",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "0c88f7fc2aad7788",
+          "elapsed_ms": "6902.559349"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "4",
+          "before_y": "39",
+          "after_y": "70",
+          "visible_start": "3",
+          "visible_end": "36",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "2107f2b18d7fc742",
+          "elapsed_ms": "6809.864029"
+        }
+      ],
+      "summaries": [
+        {
+          "lines": "3000",
+          "bytes": "249000",
+          "mode": "wheel_only",
+          "initial_ms": "2820.959",
+          "samples": "5",
+          "median_ms": "1822.955422",
+          "max_ms": "1832.785192",
+          "p95_nearest_rank_ms": 1832.785192
+        },
+        {
+          "lines": "3000",
+          "bytes": "249000",
+          "mode": "wheel_update_layout_record",
+          "initial_ms": "2820.959",
+          "samples": "5",
+          "median_ms": "6902.559349",
+          "max_ms": "7008.990224",
+          "p95_nearest_rank_ms": 7008.990224
+        }
+      ],
+      "log_sha256": "ae10cd77caf7ab0821bcb3a4f858a9f15aa326713fbd551cdbbc3c46d57ad87b",
+      "source_commit": "ec25336241e70d2fcdad186b3b50f8aa449d303a",
+      "unchanged_archived_blobs_verified": 6355,
+      "injected_test_files": [
+        "crates/scarlet-ui-core/src/views/text_view/performance.rs",
+        "crates/scarlet-ui-core/src/views/text_view/tests.rs"
+      ],
+      "build_command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "/workspace/scratch/text-scroll-reconciliation/before/Cargo.toml",
+        "-p",
+        "scarlet-ui-core",
+        "--release",
+        "text_view_verified_scroll_benchmark",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "build_target_dir": "/workspace/cloud-setup/targets/scarlet-ui/text-scroll-reconciliation-before",
+      "run_command": [
+        "/workspace/cloud-setup/targets/scarlet-ui/text-scroll-reconciliation-before/release/deps/scarlet_ui_core-dcda43713be14269",
+        "text_view_verified_scroll_benchmark",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    "after": {
+      "environment": {
+        "compiled_manifest": "/workspace/scratch/text-scroll-reconciliation/after/crates/scarlet-ui-core",
+        "debug_assertions": "false"
+      },
+      "samples": [
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "0",
+          "before_y": "0",
+          "after_y": "31",
+          "visible_start": "1",
+          "visible_end": "34",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "20424896466fe95c",
+          "elapsed_ms": "0.004827"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "1",
+          "before_y": "31",
+          "after_y": "2",
+          "visible_start": "0",
+          "visible_end": "32",
+          "visual_rows": "3001",
+          "commands": "71",
+          "draw_text": "64",
+          "body_text": "32",
+          "text_hash": "428b37e6a88be386",
+          "elapsed_ms": "0.004133"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "2",
+          "before_y": "2",
+          "after_y": "33",
+          "visible_start": "1",
+          "visible_end": "34",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "3e31eb8fa2c31af2",
+          "elapsed_ms": "0.003652"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "3",
+          "before_y": "33",
+          "after_y": "4",
+          "visible_start": "0",
+          "visible_end": "32",
+          "visual_rows": "3001",
+          "commands": "71",
+          "draw_text": "64",
+          "body_text": "32",
+          "text_hash": "6a91944b4cd8bbaa",
+          "elapsed_ms": "0.003579"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "4",
+          "before_y": "4",
+          "after_y": "35",
+          "visible_start": "1",
+          "visible_end": "34",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "09f0300ab6a0782c",
+          "elapsed_ms": "0.003595"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "0",
+          "before_y": "35",
+          "after_y": "66",
+          "visible_start": "3",
+          "visible_end": "36",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "3ed4394df56709ae",
+          "elapsed_ms": "0.183547"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "1",
+          "before_y": "66",
+          "after_y": "37",
+          "visible_start": "1",
+          "visible_end": "34",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "186ed409f9c8963e",
+          "elapsed_ms": "0.046956"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "2",
+          "before_y": "37",
+          "after_y": "68",
+          "visible_start": "3",
+          "visible_end": "36",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "f94f5cfd9d95816c",
+          "elapsed_ms": "0.037585"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "3",
+          "before_y": "68",
+          "after_y": "39",
+          "visible_start": "1",
+          "visible_end": "34",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "0c88f7fc2aad7788",
+          "elapsed_ms": "0.031294"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "4",
+          "before_y": "39",
+          "after_y": "70",
+          "visible_start": "3",
+          "visible_end": "36",
+          "visual_rows": "3001",
+          "commands": "73",
+          "draw_text": "66",
+          "body_text": "33",
+          "text_hash": "2107f2b18d7fc742",
+          "elapsed_ms": "0.030182"
+        }
+      ],
+      "summaries": [
+        {
+          "lines": "3000",
+          "bytes": "249000",
+          "mode": "wheel_only",
+          "initial_ms": "84.448",
+          "samples": "5",
+          "median_ms": "0.003652",
+          "max_ms": "0.004827",
+          "p95_nearest_rank_ms": 0.004827
+        },
+        {
+          "lines": "3000",
+          "bytes": "249000",
+          "mode": "wheel_update_layout_record",
+          "initial_ms": "84.448",
+          "samples": "5",
+          "median_ms": "0.037585",
+          "max_ms": "0.183547",
+          "p95_nearest_rank_ms": 0.183547
+        }
+      ],
+      "log_sha256": "a3dd9fb58a864eb1925c16f04dd88e60c33c133ae17b766ebab09cf7ceccb14e",
+      "source_commit": "21b75b5ff4e7408154fa2eb9503cda40534bb9ea",
+      "unchanged_archived_blobs_verified": 6357,
+      "injected_test_files": [
+        "crates/scarlet-ui-core/src/views/text_view/performance.rs",
+        "crates/scarlet-ui-core/src/views/text_view/tests.rs"
+      ],
+      "build_command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "/workspace/scratch/text-scroll-reconciliation/after/Cargo.toml",
+        "-p",
+        "scarlet-ui-core",
+        "--release",
+        "text_view_verified_scroll_benchmark",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "build_target_dir": "/workspace/cloud-setup/targets/scarlet-ui/text-scroll-reconciliation-after",
+      "run_command": [
+        "/workspace/cloud-setup/targets/scarlet-ui/text-scroll-reconciliation-after/release/deps/scarlet_ui_core-dcda43713be14269",
+        "text_view_verified_scroll_benchmark",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    "current": {
+      "environment": {
+        "compiled_manifest": "/workspace/scratch/text-scroll-reconciliation/current/crates/scarlet-ui-core",
+        "debug_assertions": "false"
+      },
+      "samples": [
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "0",
+          "before_y": "0",
+          "after_y": "31",
+          "visible_start": "0",
+          "visible_end": "23",
+          "visual_rows": "3001",
+          "commands": "53",
+          "draw_text": "46",
+          "body_text": "23",
+          "text_hash": "abf12d3f261af92d",
+          "elapsed_ms": "0.009257"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "1",
+          "before_y": "31",
+          "after_y": "2",
+          "visible_start": "0",
+          "visible_end": "22",
+          "visual_rows": "3001",
+          "commands": "51",
+          "draw_text": "44",
+          "body_text": "22",
+          "text_hash": "0345b6594a41cd90",
+          "elapsed_ms": "0.003670"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "2",
+          "before_y": "2",
+          "after_y": "33",
+          "visible_start": "1",
+          "visible_end": "23",
+          "visual_rows": "3001",
+          "commands": "51",
+          "draw_text": "44",
+          "body_text": "22",
+          "text_hash": "432d33b8e5047395",
+          "elapsed_ms": "0.003585"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "3",
+          "before_y": "33",
+          "after_y": "4",
+          "visible_start": "0",
+          "visible_end": "22",
+          "visual_rows": "3001",
+          "commands": "51",
+          "draw_text": "44",
+          "body_text": "22",
+          "text_hash": "14a7ca6dd1da32fc",
+          "elapsed_ms": "0.003644"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_only",
+          "sample": "4",
+          "before_y": "4",
+          "after_y": "35",
+          "visible_start": "1",
+          "visible_end": "23",
+          "visual_rows": "3001",
+          "commands": "51",
+          "draw_text": "44",
+          "body_text": "22",
+          "text_hash": "6661385ca8efcf2b",
+          "elapsed_ms": "0.003576"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "0",
+          "before_y": "35",
+          "after_y": "66",
+          "visible_start": "2",
+          "visible_end": "25",
+          "visual_rows": "3001",
+          "commands": "53",
+          "draw_text": "46",
+          "body_text": "23",
+          "text_hash": "e4ed2a0b6d9eed55",
+          "elapsed_ms": "0.241199"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "1",
+          "before_y": "66",
+          "after_y": "37",
+          "visible_start": "1",
+          "visible_end": "23",
+          "visual_rows": "3001",
+          "commands": "51",
+          "draw_text": "44",
+          "body_text": "22",
+          "text_hash": "093ceb15b8496481",
+          "elapsed_ms": "0.030148"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "2",
+          "before_y": "37",
+          "after_y": "68",
+          "visible_start": "2",
+          "visible_end": "25",
+          "visual_rows": "3001",
+          "commands": "53",
+          "draw_text": "46",
+          "body_text": "23",
+          "text_hash": "c3b0e1a2eac6c12f",
+          "elapsed_ms": "0.028298"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "3",
+          "before_y": "68",
+          "after_y": "39",
+          "visible_start": "1",
+          "visible_end": "23",
+          "visual_rows": "3001",
+          "commands": "51",
+          "draw_text": "44",
+          "body_text": "22",
+          "text_hash": "9f74a236f65dfac3",
+          "elapsed_ms": "0.049039"
+        },
+        {
+          "lines": "3000",
+          "mode": "wheel_update_layout_record",
+          "sample": "4",
+          "before_y": "39",
+          "after_y": "70",
+          "visible_start": "2",
+          "visible_end": "25",
+          "visual_rows": "3001",
+          "commands": "53",
+          "draw_text": "46",
+          "body_text": "23",
+          "text_hash": "551672120e8c8fc7",
+          "elapsed_ms": "0.029851"
+        }
+      ],
+      "summaries": [
+        {
+          "lines": "3000",
+          "bytes": "249000",
+          "mode": "wheel_only",
+          "initial_ms": "75.333",
+          "samples": "5",
+          "median_ms": "0.003644",
+          "max_ms": "0.009257",
+          "p95_nearest_rank_ms": 0.009257
+        },
+        {
+          "lines": "3000",
+          "bytes": "249000",
+          "mode": "wheel_update_layout_record",
+          "initial_ms": "75.333",
+          "samples": "5",
+          "median_ms": "0.030148",
+          "max_ms": "0.241199",
+          "p95_nearest_rank_ms": 0.241199
+        }
+      ],
+      "log_sha256": "a4b3fdfb189441977dcc6f75cf1264eb46f71eba5e40a3ac7da9ab9a8926e643",
+      "source_commit": "0c09ab24fb90e111fadbf05131a94aacfcab458b",
+      "unchanged_archived_blobs_verified": 6368,
+      "injected_test_files": [
+        "crates/scarlet-ui-core/src/views/text_view/performance.rs",
+        "crates/scarlet-ui-core/src/views/text_view/tests.rs"
+      ],
+      "build_command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "/workspace/scratch/text-scroll-reconciliation/current/Cargo.toml",
+        "-p",
+        "scarlet-ui-core",
+        "--release",
+        "text_view_verified_scroll_benchmark",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "build_target_dir": "/workspace/cloud-setup/targets/scarlet-ui/text-scroll-reconciliation-current",
+      "run_command": [
+        "/workspace/cloud-setup/targets/scarlet-ui/text-scroll-reconciliation-current/release/deps/scarlet_ui_core-dcda43713be14269",
+        "text_view_verified_scroll_benchmark",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    }
+  },
+  "aggregation": {
+    "samples_per_mode": 5,
+    "median_sorted_zero_based_index": 2,
+    "p95_method": "nearest-rank; ceil(0.95*N)-1; with N=5 this is the maximum, not a reliable tail-latency estimate",
+    "initial_ms": "one render-object construction plus initial sized-layout observation, not a median"
+  },
+  "timing_contract": {
+    "included_wheel_only": [
+      "direct TextView wheel handler",
+      "black_box(layout)"
+    ],
+    "included_wheel_update_layout_record": [
+      "direct TextView wheel handler",
+      "render-object update using existing view",
+      "same-size layout",
+      "paint-command recording",
+      "black_box(layout)"
+    ],
+    "excluded": [
+      "assertions",
+      "paint-command witness inspection",
+      "PaintContext construction and destruction",
+      "font loading/warm-up",
+      "initial layout",
+      "whole application/element-tree rebuild",
+      "glyph rasterization",
+      "renderer lowering and draw submission",
+      "GPU/compositor work",
+      "presentation",
+      "input-to-screen latency"
+    ],
+    "original_harness_difference": "historical harness constructed and destroyed PaintContext inside its timed combined interval; verified harness excludes both"
+  },
+  "workload": {
+    "lines": 3000,
+    "utf8_bytes": 249000,
+    "viewport": [
+      640,
+      480
+    ],
+    "font_size": 15,
+    "padding": 12,
+    "wrap": "Soft",
+    "line_numbers": true,
+    "state": "String with external scroll state",
+    "selection": "collapsed at byte 0, unfocused",
+    "ime": "inactive",
+    "font_files": [
+      "81c723a512cc8497e1941312b8057f6a3419a434d13f3bde637f5e88a6843214  /workspace/Scarlet/bundles/desktop/fs/share/fonts/Mplus1-Regular.ttf",
+      "7d5fb73b7ca67a6798101741f5d280a3d016a56a197afcd4199dbb57b4b82a21  /workspace/Scarlet/bundles/desktop/fs/share/fonts/NotoSansSymbols2-Regular.ttf",
+      "de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551  /workspace/Scarlet/bundles/desktop/fs/share/fonts/NotoEmoji-Variable.ttf"
+    ],
+    "mode_sequence": [
+      "wheel_only",
+      "wheel_update_layout_record"
+    ],
+    "font_warmup": true,
+    "scroll_warmup_iterations": 0,
+    "untimed_paint_before_first_sample": true,
+    "wheel_event_delta_y": [
+      -31,
+      29,
+      -31,
+      29,
+      -31
+    ],
+    "scroll_displacement_y": [
+      31,
+      -29,
+      31,
+      -29,
+      31
+    ],
+    "line_format": "{line:06}: A unique editor row, \u65e5\u672c\u8a9e e\u0301 \ud83d\udc69\u200d\ud83d\udcbb\tand more text for wrapping.\n"
+  },
+  "execution_notes": [
+    "All three binaries were compiled before the final pass.",
+    "The final pass ran exact executables back-to-back after other CPU builds finished; no rustc processes were present at start.",
+    "A preliminary shared-target archive attempt was discarded because Cargo reused an executable; the accepted pass used independent target directories and compiled-manifest runtime assertions.",
+    "The current typography snapshot paints22\u201323 body rows instead of32\u201333; it is not an identical-output before/after comparison."
+  ]
+}

@@ -845,6 +845,7 @@ mod tests {
         let _ = field.bridge.element.blur();
         let mut state = TextInputElementState {
             editor_id: None,
+            automatic_software_keyboard: true,
             input_rect: Rect::new(Point::new(10.0, 20.0), Size::new(100.0, 30.0)),
             cursor_rect: Rect::new(Point::new(40.0, 22.0), Size::new(1.0, 20.0)),
             surrounding_text: "日本😀".into(),
@@ -909,6 +910,13 @@ mod tests {
         let field = Field::new("old");
         let app = crate::WebApp {
             state: field._runner.clone(),
+            safe_area: Rc::new(
+                crate::safe_area::SafeArea::new(
+                    field.bridge.canvas.clone(),
+                    crate::safe_area::SafeAreaMode::Contained,
+                )
+                .unwrap(),
+            ),
         };
         field.bridge.element.set_value("pending");
         field.bridge.element.set_selection_range(7, 7).unwrap();
@@ -1243,6 +1251,14 @@ mod tests {
             hover_handoff: Default::default(),
             menu_touch: Default::default(),
             text_input: field.bridge.clone(),
+            safe_area: Rc::new(
+                crate::safe_area::SafeArea::new(
+                    field.bridge.canvas.clone(),
+                    crate::safe_area::SafeAreaMode::Contained,
+                )
+                .unwrap(),
+            ),
+            applied_safe_area: scarlet_ui_core::geometry::EdgeInsets::ZERO,
         };
         window.install_keyboard_and_wheel().unwrap();
         field.bridge.focus_canvas();

@@ -35,6 +35,7 @@ fn slider_dragging_state(value_state: &State<f32>) -> State<bool> {
 #[derive(Clone)]
 pub struct Slider {
     value: State<f32>,
+    enabled: bool,
     min: f32,
     max: f32,
     dragging: State<bool>,
@@ -47,11 +48,21 @@ impl Slider {
         let dragging = slider_dragging_state(&value);
         Self {
             value,
+            enabled: true,
             min: 0.0,
             max: 1.0,
             dragging,
             on_change: None,
         }
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Set minimum value
@@ -135,10 +146,12 @@ impl Slider {
 
 impl View for Slider {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
-            self.clone(),
-            SliderRenderObject::new(self.value.get(), self.min, self.max, self.dragging.get()),
-        ))
+        Box::new(RenderElement::new(self.clone(), {
+            let mut object =
+                SliderRenderObject::new(self.value.get(), self.min, self.max, self.dragging.get());
+            object.enabled = self.enabled;
+            object
+        }))
     }
 
     fn listenables(&self) -> Vec<&dyn crate::state::Listenable> {
@@ -160,6 +173,8 @@ impl View for Slider {
 /// - Thumb: 20×16px frosted pill with a uniform semantic tint
 pub struct SliderRenderObject {
     value: f32,
+    enabled: bool,
+    focused: bool,
     min: f32,
     max: f32,
     size: Size,
@@ -170,6 +185,14 @@ pub struct SliderRenderObject {
 }
 
 impl SliderRenderObject {
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused && self.enabled;
+    }
+
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
     fn thumb_diameter(&self) -> f32 {
         style::metrics().slider_thumb_diameter + 4.0
     }
@@ -186,6 +209,8 @@ impl SliderRenderObject {
         let metrics = style::metrics();
         Self {
             value: value.clamp(min, max),
+            enabled: true,
+            focused: false,
             min,
             max,
             size: Size::new(200.0, metrics.slider_height),
@@ -457,7 +482,14 @@ impl ElementRenderObject for SliderRenderObject {
 
     fn update(&mut self, new_view: &dyn crate::view::View) -> crate::element::UpdateResult {
         if let Some(slider) = new_view.as_any().downcast_ref::<Slider>() {
-            let mut changed = false;
+            let mut changed = self.enabled != slider.enabled;
+            self.enabled = slider.enabled;
+            if !self.enabled {
+                self.focused = false;
+                self.mouse_dragging = false;
+                self.active_touch_id = None;
+                self.dragging = false;
+            }
             let new_min = slider.min;
             let new_max = slider.max;
             if (self.min - new_min).abs() > 0.001 || (self.max - new_max).abs() > 0.001 {
@@ -470,8 +502,8 @@ impl ElementRenderObject for SliderRenderObject {
                 self.value = new_value;
                 changed = true;
             }
-            let dragging =
-                slider.dragging.get() || self.mouse_dragging || self.active_touch_id.is_some();
+            let dragging = self.enabled
+                && (slider.dragging.get() || self.mouse_dragging || self.active_touch_id.is_some());
             if self.dragging != dragging {
                 self.dragging = dragging;
                 changed = true;
@@ -492,6 +524,60 @@ mod tests {
     use super::*;
     use crate::element::LayoutConstraints;
     use crate::renderer::PaintCommand;
+
+    #[test]
+    fn focus_does_not_add_chrome() {
+        for value in [0.0, 0.5, 1.0] {
+            for dragging in [false, true] {
+                let mut slider = SliderRenderObject::new(value, 0.0, 1.0, false);
+                slider.set_dragging(dragging);
+                let mut unfocused = PaintContext::new();
+                slider.paint(&mut unfocused, Point::ZERO);
+                let unfocused = unfocused.into_display_list();
+                for focused in [true, false] {
+                    slider.set_focused(focused);
+                    assert_eq!(slider.is_focused(), focused);
+                    let mut paint = PaintContext::new();
+                    slider.paint(&mut paint, Point::ZERO);
+                    assert_eq!(paint.commands(), unfocused.context().commands());
+                    assert_eq!(slider.get_value(), value);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keyboard_adjustment_retains_focus_and_clamps_values() {
+        use crate::event::{Event, FocusEvent, KeyCode, KeyEvent, KeyModifiers, Phase};
+        let state = State::new(crate::state::generate_state_id(), 50.0);
+        let mut element = Slider::new(state.clone())
+            .min(0.0)
+            .max(100.0)
+            .create_element();
+        let key = |keycode| {
+            Event::Keyboard(KeyEvent::Pressed {
+                keycode,
+                modifiers: KeyModifiers::empty(),
+            })
+        };
+        assert!(!element.handle_event(&key(KeyCode::Right), Phase::Target));
+        assert!(element.handle_event(&Event::Focus(FocusEvent::Gained), Phase::Target));
+        for (code, expected) in [
+            (KeyCode::Right, 51.0),
+            (KeyCode::PageDown, 41.0),
+            (KeyCode::End, 100.0),
+            (KeyCode::Up, 100.0),
+            (KeyCode::Home, 0.0),
+            (KeyCode::Left, 0.0),
+        ] {
+            assert!(element.handle_event(&key(code), Phase::Target));
+            assert_eq!(state.get(), expected);
+            assert!(element.wants_keyboard_focus());
+        }
+        element.handle_event(&Event::Focus(FocusEvent::Lost), Phase::Target);
+        assert!(!element.handle_event(&key(KeyCode::Right), Phase::Target));
+        assert_eq!(state.get(), 0.0);
+    }
 
     #[test]
     fn thumb_material_is_uniform_backdrop_only_and_preserves_center() {

@@ -7,7 +7,10 @@ use core::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{BORDER_WIDTH, TabMode, TextPosition, TextSelection, TextView, TextViewRenderObject};
-use crate::event::{Event, FocusEvent, KeyCode, KeyEvent, MouseButton, MouseEvent};
+use crate::element::ElementRenderObject;
+use crate::event::{
+    Event, FocusEvent, GesturePhase, KeyCode, KeyEvent, MouseButton, MouseEvent, TouchGesture,
+};
 use crate::geometry::Point;
 
 enum CaretMove {
@@ -229,6 +232,7 @@ pub(crate) fn handle_text_view_text_input(
             ..
         } => {
             render_object.set_preedit_state(text, *cursor_byte, *anchor_byte, spans);
+            ensure_caret_visible(view, render_object);
             true
         }
         Event::TextInputDeleteSurroundingText {
@@ -262,12 +266,38 @@ pub(crate) fn handle_text_view_mouse(
     event: &MouseEvent,
 ) -> bool {
     match *event {
+        MouseEvent::Moved { x, y } | MouseEvent::Entered { x, y } if !render_object.dragging => {
+            if let Some(callback) = &view.on_hover {
+                callback(render_object.hit_at_point(Point::new(x as f32, y as f32)));
+            }
+        }
+        MouseEvent::Exited { .. } => {
+            if let Some(callback) = &view.on_hover {
+                callback(None);
+            }
+        }
+        _ => {}
+    }
+    match *event {
         MouseEvent::ButtonPressed {
             button: MouseButton::Left,
             x,
             y,
             click_count,
-        } => handle_primary_click(view, render_object, x, y, click_count),
+        } => {
+            if let Some(callback) = &view.on_hover {
+                callback(None);
+            }
+            if render_object.pointer_modifiers.primary()
+                && let Some(callback) = &view.on_modified_click
+                && let Some(hit) = render_object.hit_at_point(Point::new(x as f32, y as f32))
+            {
+                render_object.dragging = false;
+                callback(hit);
+                return true;
+            }
+            handle_primary_click(view, render_object, x, y, click_count)
+        }
         MouseEvent::Moved { x, y } => handle_drag_selection(view, render_object, x, y),
         MouseEvent::ButtonReleased {
             button: MouseButton::Left,
@@ -338,6 +368,7 @@ fn handle_primary_shortcut(
         'a' | 'A' => {
             select_all(render_object);
             view.selection_state().set(render_object.selection);
+            render_object.publish_caret_rect();
             true
         }
         'c' | 'C' => {
@@ -398,6 +429,7 @@ fn handle_primary_click(
     }
     update_desired_x(render_object);
     view.selection_state().set(render_object.selection);
+    render_object.publish_caret_rect();
     true
 }
 
@@ -414,8 +446,45 @@ fn handle_drag_selection(
         render_object.selection.caret = position;
         update_desired_x(render_object);
         view.selection_state().set(render_object.selection);
+        render_object.publish_caret_rect();
     }
     true
+}
+
+/// Apply direct-touch motion through the same cached scroll path as the wheel.
+pub(crate) fn handle_text_view_scroll_gesture(
+    view: &TextView,
+    render_object: &mut TextViewRenderObject,
+    gesture: &TouchGesture,
+) -> bool {
+    let (phase, delta_x, delta_y) = match *gesture {
+        TouchGesture::Scroll {
+            phase,
+            delta_x,
+            delta_y,
+            ..
+        }
+        | TouchGesture::ScrollMomentum {
+            phase,
+            delta_x,
+            delta_y,
+            ..
+        } => (phase, delta_x, delta_y),
+        _ => return false,
+    };
+    if matches!(phase, GesturePhase::Ended | GesturePhase::Cancelled) {
+        return false;
+    }
+    // The dispatcher starts momentum with zero delta before sending movement.
+    // Acknowledge that handshake, but let clamped movement bubble at an edge.
+    let momentum_start = matches!(
+        gesture,
+        TouchGesture::ScrollMomentum {
+            phase: GesturePhase::Started,
+            ..
+        }
+    ) && render_object.accepts_touch_scroll();
+    scroll_view(view, render_object, delta_x, delta_y) || momentum_start
 }
 
 fn scroll_view(
@@ -424,25 +493,32 @@ fn scroll_view(
     delta_x: i32,
     delta_y: i32,
 ) -> bool {
+    let previous = render_object.scroll;
     let requested = super::TextViewScroll {
         x: render_object.scroll.x - delta_x as f32,
         y: render_object.scroll.y - delta_y as f32,
     };
     set_scroll(view, render_object, requested);
-    true
+    render_object.scroll != previous
 }
 
 fn finish_caret_change(view: &TextView, render_object: &mut TextViewRenderObject) {
     ensure_caret_visible(view, render_object);
     view.selection_state().set(render_object.selection);
+    render_object.publish_caret_rect();
 }
 
-fn ensure_caret_visible(view: &TextView, render_object: &mut TextViewRenderObject) {
-    let caret = render_object.cursor_rect();
+pub(super) fn ensure_caret_visible(view: &TextView, render_object: &mut TextViewRenderObject) {
+    let mut caret = render_object.cursor_rect();
+    if !render_object.preedit.is_empty() {
+        let prefix =
+            super::preedit_prefix(&render_object.preedit, render_object.preedit_cursor_byte);
+        caret.origin.x += render_object.layout.measure_text(prefix).0 as f32;
+    }
     let clip_left = BORDER_WIDTH;
     let clip_top = BORDER_WIDTH;
     let clip_right = (render_object.size.width - BORDER_WIDTH).max(clip_left);
-    let clip_bottom = (render_object.size.height - BORDER_WIDTH).max(clip_top);
+    let clip_bottom = (render_object.visible_bottom() - BORDER_WIDTH).max(clip_top);
     let reveal_left = render_object
         .layout
         .text_origin_x
@@ -451,7 +527,7 @@ fn ensure_caret_visible(view: &TextView, render_object: &mut TextViewRenderObjec
     let reveal_right =
         (render_object.size.width - render_object.padding).clamp(reveal_left, clip_right);
     let reveal_bottom =
-        (render_object.size.height - render_object.padding).clamp(reveal_top, clip_bottom);
+        (render_object.visible_bottom() - render_object.padding).clamp(reveal_top, clip_bottom);
     let mut requested = render_object.scroll;
 
     if caret.origin.x < reveal_left {
@@ -475,21 +551,22 @@ fn set_scroll(
     requested: super::TextViewScroll,
 ) {
     let clamped = render_object.layout.clamp_scroll(requested);
+    render_object.requested_scroll = clamped;
     if clamped == render_object.scroll {
         return;
     }
-    render_object.scroll = clamped;
-    render_object.compute_layout();
+    render_object.scroll = render_object.layout.set_scroll(clamped);
     if let Some(scroll) = view.scroll.as_ref() {
         scroll.set(clamped);
     }
+    render_object.publish_caret_rect();
 }
 
 fn hit_test_mouse(render_object: &TextViewRenderObject, x: i32, y: i32) -> Option<TextPosition> {
     let point = Point::new(x as f32, y as f32);
     render_object
         .hit_test(point)
-        .map(|position| position.clamp_to_grapheme(&render_object.text_document.as_str()))
+        .map(|position| render_object.text_document.clamp_position(position))
 }
 
 fn word_selection(render_object: &TextViewRenderObject, byte: usize) -> TextSelection {
@@ -553,7 +630,7 @@ fn previous_grapheme(byte: usize, text: &str) -> Option<(usize, &str)> {
     text[..byte]
         .grapheme_indices(true)
         .map(|(offset, grapheme)| (offset, grapheme))
-        .last()
+        .next_back()
 }
 
 fn next_grapheme(byte: usize, text: &str) -> Option<(usize, &str)> {
@@ -702,8 +779,9 @@ fn copy_selection(view: &TextView, render_object: &TextViewRenderObject) -> bool
 }
 
 fn set_caret(render_object: &mut TextViewRenderObject, byte: usize, extend_selection: bool) {
-    let text = render_object.text_document.as_str();
-    let position = TextPosition::new(byte.min(text.len())).clamp_to_grapheme(&text);
+    let position = render_object
+        .text_document
+        .clamp_position(TextPosition::new(byte));
     if extend_selection {
         render_object.selection.caret = position;
     } else {
@@ -768,9 +846,8 @@ fn visual_line_index(render_object: &TextViewRenderObject, byte: usize) -> usize
     render_object
         .layout
         .visual_lines
-        .iter()
-        .position(|line| line.contains_byte(byte))
-        .unwrap_or_else(|| render_object.layout.visual_lines.len().saturating_sub(1))
+        .partition_point(|line| line.text_range.end < byte)
+        .min(render_object.layout.visual_lines.len().saturating_sub(1))
 }
 
 fn update_desired_x(render_object: &mut TextViewRenderObject) {
@@ -782,7 +859,7 @@ fn previous_grapheme_boundary(text: &str, byte: usize) -> Option<usize> {
     text[..byte]
         .grapheme_indices(true)
         .map(|(offset, _)| offset)
-        .last()
+        .next_back()
 }
 
 fn next_grapheme_boundary(text: &str, byte: usize) -> Option<usize> {

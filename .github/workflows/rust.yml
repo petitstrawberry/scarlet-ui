@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "feat/native-controls-text-and-windowing" ]
   workflow_dispatch:
 
 permissions:
@@ -141,6 +141,10 @@ jobs:
       - name: Check std-enabled SWS integration
         run: cargo check --locked -p scarlet-ui --no-default-features --features std,platform-sws --target '${{ matrix.target }}'
 
+      - name: Build native window C ABI
+        if: matrix.target == 'aarch64-unknown-scarlet'
+        run: cargo build --locked -p scarlet-ui-window-c --release --target '${{ matrix.target }}'
+
   wasm:
     name: Web logic and wasm
     runs-on: ubuntu-latest
@@ -167,3 +171,5 @@ jobs:
         run: cargo build --locked --verbose --target wasm32-unknown-unknown --lib -p scarlet-ui-web-counter
       - name: Build Widget Factory for WebAssembly
         run: cargo build --locked --verbose --target wasm32-unknown-unknown --lib -p scarlet-ui-widget-factory
+      - name: Check browser text-input test fixtures for WebAssembly
+        run: cargo check --locked -p scarlet-ui-platform-web --tests --target wasm32-unknown-unknown

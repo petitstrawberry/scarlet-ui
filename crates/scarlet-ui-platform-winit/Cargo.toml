@@ -19,8 +19,10 @@ raw-window-handle = { version = "0.6", optional = true }
 sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "0ee6b41669904ced227f01cc435933c646a60c75", package = "sgfx", default-features = false, features = ["std", "backend-wgpu"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSView", "NSWindow", "NSPanel", "NSResponder", "NSApplication", "NSOpenPanel", "NSSavePanel", "block2", "objc2-quartz-core"] }
+objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSView", "NSWindow", "NSPanel", "NSResponder", "NSApplication", "NSOpenPanel", "NSSavePanel", "NSMenu", "NSMenuItem", "NSEvent", "NSCell", "block2", "objc2-quartz-core"] }
 objc2-quartz-core = { version = "0.2.2", default-features = false, features = ["CALayer"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 objc2 = "0.5.2"
 objc2-foundation = { version = "0.2.2", features = ["NSArray", "NSString", "NSURL"] }

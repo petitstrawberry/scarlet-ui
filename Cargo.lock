@@ -1969,6 +1969,7 @@ dependencies = [
  "inventory",
  "libloading 0.9.0",
  "libm",
+ "once_cell",
  "proc-macro2",
  "quote",
  "raw-window-handle",
@@ -2040,6 +2041,8 @@ dependencies = [
  "raw-window-handle",
  "scarlet-ui-core",
  "scarlet-ui-renderer-sgfx",
+ "serde",
+ "serde_json",
  "sgfx",
  "softbuffer",
  "winit",
@@ -2110,6 +2113,13 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "web-time",
+]
+
+[[package]]
+name = "scarlet-ui-window-c"
+version = "1.0.0"
+dependencies = [
+ "scarlet-ui-core",
 ]
 
 [[package]]

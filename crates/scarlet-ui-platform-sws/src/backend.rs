@@ -181,6 +181,7 @@ pub struct SgfxPaintBackend<S> {
     backend_kind: BackendKind,
     render_failed: bool,
     full_redraw_required: bool,
+    backing_invalidated: bool,
     #[cfg(feature = "std")]
     profiling: bool,
 }
@@ -247,6 +248,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             backend_kind,
             render_failed: false,
             full_redraw_required: false,
+            backing_invalidated: false,
             #[cfg(feature = "std")]
             profiling: std::env::var("SCARLET_UI_PROFILE").as_deref() == Ok("1"),
         };
@@ -495,13 +497,30 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         let slot = self.next_slot;
         let identity = self.identity(slot)?;
         if let Some(retained) = self.slots[slot].retained {
-            self.sink
-                .wait_until_released(retained)
-                .map_err(|source| Error::Sink {
-                    stage: Stage::WaitForRelease,
-                    source,
-                })?;
-            self.slots[slot].retained = None;
+            match self.sink.wait_until_released(retained) {
+                Ok(()) => self.slots[slot].retained = None,
+                // The sink has consumed an asynchronous rejection of this
+                // exact commit. Its GPU work already completed before commit;
+                // SWS never accepted this use, so the slot is safe to reuse.
+                // Report admission pressure without poisoning the renderer.
+                Err(SgfxSinkError::BufferBusy) => {
+                    self.slots[slot].retained = None;
+                    self.slots[slot].content_valid = false;
+                    self.slots[slot].needs_full_commit = true;
+                    self.full_redraw_required = true;
+                    return Err(Error::FrameNotPresented(RenderFailure {
+                        kind: RenderFailureKind::Busy,
+                        reason: "SWS rejected a queued frame while its presentation queue was full"
+                            .into(),
+                    }));
+                }
+                Err(source) => {
+                    return Err(Error::Sink {
+                        stage: Stage::WaitForRelease,
+                        source,
+                    });
+                }
+            }
         }
         #[cfg(feature = "std")]
         let profile_released = self.profiling.then(Instant::now);
@@ -717,11 +736,18 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         Ok(())
     }
 
+    /// Replace the shared images after a native backing handshake, including
+    /// same-extent decoration changes. Retain old images until SWS releases them.
+    pub(super) fn invalidate_backing(&mut self) {
+        self.backing_invalidated = true;
+        self.full_redraw_required = true;
+    }
+
     fn ensure_session(&mut self) -> Result<()> {
         let matches = self.encoder.as_ref().is_some_and(|encoder| {
             encoder.width() == self.physical_width && encoder.height() == self.physical_height
         });
-        if matches && self.session.is_some() {
+        if matches && self.session.is_some() && !self.backing_invalidated {
             return Ok(());
         }
 
@@ -765,6 +791,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         }
         self.encoder = Some(encoder);
         self.generation = next_generation;
+        self.backing_invalidated = false;
         self.slots = [SlotState::new(); PRESENTATION_SLOT_COUNT];
         self.next_slot = 0;
         self.front_slot = None;
@@ -790,7 +817,9 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                 if let Some(identity) = retired.identities[slot] {
                     if let Some(retained) = retired.retained[slot] {
                         match self.sink.wait_until_released(retained) {
-                            Ok(()) | Err(SgfxSinkError::BackendLost { .. }) => {
+                            Ok(())
+                            | Err(SgfxSinkError::BufferBusy)
+                            | Err(SgfxSinkError::BackendLost { .. }) => {
                                 retired.retained[slot] = None;
                             }
                             Err(source) => {

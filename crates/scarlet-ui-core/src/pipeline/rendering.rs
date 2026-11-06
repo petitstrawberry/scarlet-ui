@@ -25,6 +25,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 const MAX_PRESENT_DAMAGE_RECTS: usize = 4;
+
+#[path = "input_panel.rs"]
+mod input_panel;
 const MAX_REPAINT_BOUNDARY_CACHE_PIXELS: u64 = 16_000_000;
 
 struct PaintCache {
@@ -89,6 +92,7 @@ pub struct RenderingPipeline {
     window_size: Size,
     scale_milli: u32,
     event_dispatcher: EventDispatcher,
+    overlays: input_panel::OverlayState,
     paint_renderer: Option<CpuPaintRenderer>,
     paint_backend: Box<dyn PaintBackend>,
     last_paint_bounds: BTreeMap<ElementId, Rect>,
@@ -127,6 +131,7 @@ impl RenderingPipeline {
             window_size: Size::new(800.0, 600.0),
             scale_milli: 1000,
             event_dispatcher: EventDispatcher::new(),
+            overlays: Default::default(),
             paint_renderer: None,
             paint_backend: Box::new(CpuPaintBackend::new(
                 Size::new(800.0, 600.0),
@@ -662,10 +667,14 @@ impl RenderingPipeline {
         }
         // Flush all dirty phases (build, layout, paint)
         crate::graphics::set_current_scale_milli(self.scale_milli);
-        self.pipeline_owner.flush_with_legacy_paint(
+        self.pipeline_owner.flush_before_paint(
             &mut self.element_tree,
             self.window_size,
             !self.paint_enabled,
+            |tree| {
+                self.event_dispatcher.reconcile_keyboard_focus(tree);
+                self.overlays.apply(tree);
+            },
         );
         if crate::debug::is_enabled() {
             crate::logln!("[RenderingPipeline] flush() completed");
@@ -3362,10 +3371,14 @@ impl RenderingPipeline {
 
         let started = crate::debug::frame_log_enabled().then(crate::clock::Instant::now);
         crate::graphics::set_current_scale_milli(self.scale_milli);
-        self.pipeline_owner.flush_with_legacy_paint(
+        self.pipeline_owner.flush_before_paint(
             &mut self.element_tree,
             self.window_size,
             false,
+            |tree| {
+                self.event_dispatcher.reconcile_keyboard_focus(tree);
+                self.overlays.apply(tree);
+            },
         );
         self.sync_select_popup_viewports();
         let layout_us = started.map(|start| start.elapsed().as_micros());
@@ -3402,6 +3415,11 @@ impl RenderingPipeline {
     /// EventDispatcher to the target elements.
     pub fn handle_event(&mut self, _event: &crate::event::Event) -> bool {
         self.sync_select_popup_viewports();
+        if self.overlays.handle_event(_event) {
+            self.overlays.apply_presentation(&mut self.element_tree);
+            self.request_redraw();
+            return true;
+        }
         let started = (crate::debug::frame_log_enabled()
             && matches!(
                 _event,
@@ -6295,6 +6313,14 @@ mod tests {
         let click_x = (toggle_origin.x + toggle_size.width * 0.5) as i32;
         let click_y = (toggle_origin.y + toggle_size.height * 0.5) as i32;
 
+        assert!(
+            pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: click_x,
+                y: click_y,
+                click_count: 1,
+            }))
+        );
         assert!(
             pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
                 button: MouseButton::Left,

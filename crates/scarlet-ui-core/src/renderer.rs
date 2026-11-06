@@ -62,6 +62,7 @@ pub fn path_circle(center: Point, radius: f32) -> Path {
 
 pub fn path_rounded_rect(rect: Rect, corner_radius: f32) -> Path {
     let r = corner_radius
+        .max(0.0)
         .min(rect.size.width / 2.0)
         .min(rect.size.height / 2.0);
     let corner_segments = (libm::ceilf(r * 0.75) as usize).clamp(8, 32);
@@ -191,6 +192,8 @@ pub enum PaintCommand {
         text: String,
         color: Color,
         font_size_px: f32,
+        /// Explicit primary/fallback stack, or the global default when absent.
+        font_stack: Option<Arc<crate::graphics::FontStack>>,
     },
     /// Draw a typed icon as a theme-tinted alpha mask.
     DrawIcon {
@@ -642,8 +645,8 @@ impl<'a> PaintContext<'a> {
                     text_positions.push((
                         index,
                         Point::new(
-                            (position.x + scene_origin.x) as i32 as f32 - base.x + offset.x,
-                            (position.y + scene_origin.y) as i32 as f32 - base.y + offset.y,
+                            crate::graphics::text_origin_physical(position.x + scene_origin.x, scale_milli) as f32 / scale - base.x + offset.x,
+                            crate::graphics::text_origin_physical(position.y + scene_origin.y, scale_milli) as f32 / scale - base.y + offset.y,
                         ),
                     ));
                 }
@@ -658,7 +661,7 @@ impl<'a> PaintContext<'a> {
         }
         // Bake the fractional scene phase into the tile's geometry, then
         // composite at an integer logical origin. Text keeps its exact global
-        // logical-pixel snap; the cached image is never fractionally resampled.
+        // physical-pixel snap; the cached image is never fractionally resampled.
         result.translate(Point::new(offset.x + phase.x, offset.y + phase.y));
         for (index, snapped) in text_positions {
             if let PaintCommand::DrawText { position, .. } = &mut result.commands[index] {
@@ -884,6 +887,26 @@ impl<'a> PaintContext<'a> {
             text: text.into(),
             color,
             font_size_px,
+            font_stack: None,
+        });
+    }
+
+    /// Record text with its own font stack, without changing the global font.
+    /// Font size is logical pixels per em. The stack survives retained replay.
+    pub fn draw_text_with_font_stack(
+        &mut self,
+        position: Point,
+        text: impl Into<String>,
+        color: Color,
+        font_size_px: f32,
+        font_stack: Arc<crate::graphics::FontStack>,
+    ) {
+        self.commands.push(PaintCommand::DrawText {
+            position,
+            text: text.into(),
+            color,
+            font_size_px,
+            font_stack: Some(font_stack),
         });
     }
 
@@ -1124,13 +1147,25 @@ impl<'a> PaintContext<'a> {
                     position,
                     text,
                     font_size_px,
+                    font_stack,
                     ..
                 } => {
                     // Use the same glyph masks and integer origins as Canvas;
                     // font advance alone misses italic and fallback overhangs.
-                    let x = libm::floorf(position.x as i32 as f32 * scale);
-                    let y = libm::floorf(position.y as i32 as f32 * scale);
-                    for glyph in crate::graphics::rasterize_text(text, *font_size_px, scale_milli) {
+                    let x = crate::graphics::text_origin_physical(position.x, scale_milli) as f32;
+                    let y = crate::graphics::text_origin_physical(position.y, scale_milli) as f32;
+                    let glyphs = match font_stack {
+                        Some(stack) => crate::graphics::rasterize_text_cached_with_font_stack(
+                            text,
+                            *font_size_px,
+                            scale_milli,
+                            stack,
+                        ),
+                        None => {
+                            crate::graphics::rasterize_text_cached(text, *font_size_px, scale_milli)
+                        }
+                    };
+                    for glyph in glyphs.iter() {
                         include(Rect::from_xywh(
                             (x + glyph.x as f32) / scale,
                             (y + glyph.y as f32) / scale,
@@ -1181,8 +1216,7 @@ impl<'a> PaintContext<'a> {
                     }
                 }
                 PaintCommand::DrawText { position, .. } => {
-                    position.x = position.x as i32 as f32 + offset.x;
-                    position.y = position.y as i32 as f32 + offset.y;
+                    shift(position);
                 }
                 PaintCommand::DrawDisplayList { origin, .. } => shift(origin),
                 PaintCommand::DrawBuffer { dst, .. } | PaintCommand::DrawBufferRect { dst, .. } => {
@@ -1667,14 +1701,19 @@ fn command_paint_bounds(
             position,
             text,
             font_size_px,
+            font_stack,
             ..
         } => {
-            let x = libm::floorf(position.x as i32 as f32 * scale);
-            let y = libm::floorf(position.y as i32 as f32 * scale);
+            let x = crate::graphics::text_origin_physical(position.x, scale_milli) as f32;
+            let y = crate::graphics::text_origin_physical(position.y, scale_milli) as f32;
             let mut bounds = None;
-            for glyph in
-                crate::graphics::rasterize_text_cached(text, *font_size_px, scale_milli).iter()
-            {
+            let glyphs = match font_stack {
+                Some(stack) => crate::graphics::rasterize_text_cached_with_font_stack(
+                    text, *font_size_px, scale_milli, stack,
+                ),
+                None => crate::graphics::rasterize_text_cached(text, *font_size_px, scale_milli),
+            };
+            for glyph in glyphs.iter() {
                 bounds = Some(union_rect(
                     bounds,
                     Rect::from_xywh(
@@ -2998,18 +3037,15 @@ impl CpuPaintRenderer {
                     text,
                     color,
                     font_size_px,
+                    font_stack,
                 } => {
                     let color = color.with_opacity(color.a * opacity);
                     match self.rebuild_effective_clip_rects(damage_rects) {
                         EffectiveClipRects::Unclipped => {
                             let mut canvas =
                                 crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
-                            canvas.draw_text_sized(
-                                position.x as i32,
-                                position.y as i32,
-                                text,
-                                color,
-                                *font_size_px,
+                            canvas.draw_text_at(
+                                *position, text, color, *font_size_px, font_stack.as_deref(), None,
                             );
                         }
                         EffectiveClipRects::Empty => {}
@@ -3018,14 +3054,9 @@ impl CpuPaintRenderer {
                                 let rect = self.scratch.clip_rects[index];
                                 let mut canvas =
                                     crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
-                                canvas.draw_text_sized_clipped(
-                                    position.x as i32,
-                                    position.y as i32,
-                                    text,
-                                    color,
-                                    *font_size_px,
-                                    rect,
-                                    0.0,
+                                canvas.draw_text_at(
+                                    *position, text, color, *font_size_px, font_stack.as_deref(),
+                                    Some((rect, 0.0)),
                                 );
                             }
                         }
@@ -5153,6 +5184,152 @@ mod tests {
     }
 
     #[test]
+    fn retained_fractional_text_keeps_its_centered_origin_and_damage_bounds() {
+        let font = Arc::new(
+            crate::graphics::FontStack::new(include_bytes!("testing/fonts/metrics-primary.ttf"))
+                .unwrap(),
+        );
+        for scale in [1000, 1250, 2000] {
+            let mut child = PaintContext::new();
+            child.draw_text_with_font_stack(
+                Point::new(9.5, 9.5),
+                "A",
+                Color::BLACK,
+                12.,
+                font.clone(),
+            );
+            let mut retained = PaintContext::new();
+            retained.draw_display_list(Point::new(4.25, 6.25), child.into_display_list());
+            let flat = retained.flattened();
+            assert!(
+                matches!(flat.commands()[0], PaintCommand::DrawText { position, .. }
+                if position == Point::new(13.75, 15.75))
+            );
+            let mut partial = CpuPaintRenderer::new(Size::new(80., 60.), scale, Color::WHITE);
+            let mut expected = CpuPaintRenderer::new(Size::new(80., 60.), scale, Color::WHITE);
+            expected.execute(&flat);
+            partial.execute(&PaintContext::new());
+            let bounds = retained.raster_bounds(Size::new(80., 60.), scale);
+            partial.execute_with_damage(&retained, Some(&[bounds]));
+            assert_eq!(partial.buffer().as_slice(), expected.buffer().as_slice());
+            let glyph =
+                &crate::graphics::rasterize_text_cached_with_font_stack("A", 12., scale, &font)[0];
+            let factor = scale as f32 / 1000.;
+            let expected_y = libm::floorf(15.75 * factor + 0.5) as u32 + glyph.y as u32;
+            let first_ink_row = (0..expected.buffer().height())
+                .find(|y| {
+                    (0..expected.buffer().width())
+                        .any(|x| expected.buffer().get_pixel(x, *y) != Some(Color::WHITE.to_bgra()))
+                })
+                .unwrap();
+            assert_eq!(first_ink_row, expected_y);
+        }
+    }
+
+    #[test]
+    fn explicit_stack_cpu_retained_paint_matches_canvas_with_clip_opacity_and_damage() {
+        use crate::graphics::{Canvas, FontStack};
+        let stack = FontStack::new(include_bytes!("testing/fonts/metrics-primary.ttf"))
+            .unwrap()
+            .with_fallback(include_bytes!("testing/fonts/metrics-fallback.ttf"))
+            .unwrap();
+        let size = Size::new(100., 70.);
+        for scale in [1000, 1250, 2000] {
+            for clipped in [false, true] {
+                let mut recording = PaintContext::new();
+                recording.draw_text_with_font_stack(
+                    Point::new(4., 2.),
+                    "Ai日☃",
+                    Color::BLACK,
+                    20.,
+                    Arc::new(stack.clone()),
+                );
+                let mut ctx = PaintContext::new();
+                let clip = Rect::from_xywh(15., 8., 40., 20.);
+                if clipped {
+                    ctx.push_clip(clip);
+                }
+                ctx.set_opacity(0.5);
+                ctx.draw_display_list(Point::new(7., 5.), recording.into_display_list());
+                if clipped {
+                    ctx.pop_clip();
+                }
+
+                let flat = ctx.flattened();
+                assert!(flat.commands().iter().any(|command| matches!(command,
+                    PaintCommand::DrawText { position, font_stack: Some(font), .. }
+                        if *position == Point::new(11., 7.) && font.cache_id() == stack.cache_id()
+                )));
+                let mut expected = Buffer::from_logical_dimensions_with_scale(100, 70, scale);
+                expected.clear(Color::WHITE);
+                let mut canvas = Canvas::for_buffer(&mut expected);
+                if clipped {
+                    canvas.draw_text_sized_with_font_stack_clipped(
+                        11,
+                        7,
+                        "Ai日☃",
+                        Color::BLACK.with_opacity(0.5),
+                        20.,
+                        &stack,
+                        clip,
+                        0.,
+                    );
+                } else {
+                    canvas.draw_text_sized_with_font_stack(
+                        11,
+                        7,
+                        "Ai日☃",
+                        Color::BLACK.with_opacity(0.5),
+                        20.,
+                        &stack,
+                    );
+                }
+                let mut renderer = CpuPaintRenderer::new(size, scale, Color::WHITE);
+                renderer.execute(&ctx);
+                assert_eq!(renderer.buffer().as_slice(), expected.as_slice());
+                assert!(
+                    expected
+                        .as_slice()
+                        .iter()
+                        .any(|pixel| *pixel != Color::WHITE.to_bgra())
+                );
+
+                // Damage clips go through the same explicit stack path even without a view clip.
+                let mut damaged = CpuPaintRenderer::new(size, scale, Color::WHITE);
+                damaged.execute(&PaintContext::new());
+                damaged.execute_with_damage(&ctx, Some(&[clip]));
+                let mut expected_damage =
+                    Buffer::from_logical_dimensions_with_scale(100, 70, scale);
+                expected_damage.clear(Color::WHITE);
+                Canvas::for_buffer(&mut expected_damage).draw_text_sized_with_font_stack_clipped(
+                    11,
+                    7,
+                    "Ai日☃",
+                    Color::BLACK.with_opacity(0.5),
+                    20.,
+                    &stack,
+                    clip,
+                    0.,
+                );
+                assert_eq!(damaged.buffer().as_slice(), expected_damage.as_slice());
+
+                let bounds = ctx.raster_bounds(size, scale);
+                for y in 0..expected.height() {
+                    for x in 0..expected.width() {
+                        if expected.get_pixel(x, y) != Some(Color::WHITE.to_bgra()) {
+                            let factor = scale as f32 / 1000.;
+                            assert!(bounds.contains(Point::new(
+                                (x as f32 + 0.5) / factor,
+                                (y as f32 + 0.5) / factor
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn draw_text_respects_clip() {
         if crate::graphics::default_font_stack().is_none() {
             return;
@@ -5245,3 +5422,7 @@ mod tests {
         eprintln!("visual dump written to {}", path.display());
     }
 }
+
+#[cfg(test)]
+#[path = "renderer/rounded_geometry_tests.rs"]
+mod rounded_geometry_tests;

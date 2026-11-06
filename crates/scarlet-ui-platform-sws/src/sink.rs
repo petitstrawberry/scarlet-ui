@@ -132,6 +132,10 @@ pub trait SgfxFrameSink {
     /// # Returns
     ///
     /// Success when the image may be rendered again, or a sink error.
+    /// `BufferBusy` here reports a consumed asynchronous rejection of this
+    /// exact commit, rather than a timeout: SWS did not accept that use and
+    /// the sink no longer retains its token. Other operations may return
+    /// `BufferBusy` while an image is still retained.
     fn wait_until_released(&mut self, token: SgfxCommitToken) -> SgfxSinkResult<()>;
 
     /// Atomically attach an image and commit all damage in one request.

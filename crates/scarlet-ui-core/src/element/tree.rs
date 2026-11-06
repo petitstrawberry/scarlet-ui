@@ -237,6 +237,81 @@ impl ElementTree {
         }
     }
 
+    /// Mounted elements requesting focus, in declaration order. Reconciliation
+    /// uses this to adopt autofocus requests and clear competing focus state.
+    pub(crate) fn keyboard_focus_claims(&self) -> Vec<ElementId> {
+        fn collect(element: &dyn Element, claims: &mut Vec<ElementId>) {
+            if element.wants_keyboard_focus() {
+                claims.push(element.id());
+            }
+            for child in element.children() {
+                collect(child.as_ref(), claims);
+            }
+        }
+        let mut claims = Vec::new();
+        if let Some(root) = self.root.as_deref() {
+            collect(root, &mut claims);
+        }
+        claims
+    }
+
+    /// Return visible, enabled focus targets in declaration order. Only the
+    /// currently mounted branch participates; clipped virtual rows are skipped.
+    pub(crate) fn keyboard_focus_candidates(&self) -> Vec<ElementId> {
+        let mut candidates = Vec::new();
+        if let Some(root) = self.root.as_deref() {
+            Self::collect_keyboard_focus_candidates(
+                root,
+                Point::ZERO,
+                root.bounds(),
+                &mut candidates,
+            );
+        }
+        candidates
+    }
+
+    fn collect_keyboard_focus_candidates(
+        element: &dyn Element,
+        parent_origin: Point,
+        viewport: Rect,
+        candidates: &mut Vec<ElementId>,
+    ) {
+        let bounds = element.bounds();
+        let origin = Point::new(
+            parent_origin.x + bounds.origin.x,
+            parent_origin.y + bounds.origin.y,
+        );
+        let bounds = Rect::new(origin, bounds.size);
+        if !bounds.size.width.is_finite()
+            || !bounds.size.height.is_finite()
+            || bounds.size.width <= 0.0
+            || bounds.size.height <= 0.0
+        {
+            return;
+        }
+        let viewport = if let Some((clip, _)) = element
+            .render_object()
+            .and_then(|render| render.clip_bounds(origin))
+        {
+            let left = viewport.left().max(clip.left());
+            let top = viewport.top().max(clip.top());
+            let right = viewport.right().min(clip.right());
+            let bottom = viewport.bottom().min(clip.bottom());
+            if right <= left || bottom <= top {
+                return;
+            }
+            Rect::from_xywh(left, top, right - left, bottom - top)
+        } else {
+            viewport
+        };
+        if element.accepts_keyboard_focus() && bounds.overlaps(&viewport) {
+            candidates.push(element.id());
+        }
+        for child in element.children() {
+            Self::collect_keyboard_focus_candidates(child.as_ref(), origin, viewport, candidates);
+        }
+    }
+
     /// Return text-input state for the focused editable element, if any.
     pub fn focused_text_input_state(&self) -> Option<TextInputElementState> {
         let root = self.root.as_deref()?;

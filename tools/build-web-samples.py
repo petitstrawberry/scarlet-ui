@@ -155,19 +155,30 @@ def normalize_api_docs(docs: Path) -> None:
     """Repair only known upstream rustdoc artifacts, before strict link checks.
 
     tracing's blanket impl snippets retain module-relative Markdown links when
-    inlined into unrelated crates. Rustdoc also emits optional implementor script
-    references for these four traits even when no implementor data was generated.
-    Never skip validation of arbitrary missing API links or script assets.
+    inlined into unrelated crates. Rustdoc references implementor scripts even
+    for traits absent from its implementor map. Package empty data for the known
+    cases below, only while their canonical pages have no public implementors.
+    Keep the script references and strict validation of all other missing assets.
     """
     lock = tomllib.loads((ROOT / 'Cargo.lock').read_text())
     tracing = next(package['version'] for package in lock['package'] if package['name'] == 'tracing')
     upstream = f'https://docs.rs/tracing/{tracing}/tracing'
     empty_traits = {
         'trait.impl/scarlet_ui_core/application/trait.Application.js',
+        'trait.impl/scarlet_ui_core/clipboard/trait.ClipboardProvider.js',
         'trait.impl/scarlet_ui_core/file_dialog/trait.FileDialogSession.js',
         'trait.impl/scarlet_ui_core/preview/trait.PreviewSession.js',
         'trait.impl/scarlet_ui_core/preview/trait.PreviewLibrary.js',
     }
+    empty_implementors = '''(function() {
+    const implementors = {};
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+'''
     root = docs.resolve()
     for file in docs.rglob('*.html'):
         original = file.read_text()
@@ -175,13 +186,18 @@ def normalize_api_docs(docs: Path) -> None:
                                 f'href="{upstream}/dispatcher/index.html#setting-the-default-subscriber"')
         html = html.replace('href="super::Subscriber"', f'href="{upstream}/trait.Subscriber.html"')
 
-        def optional_implementors(match: re.Match) -> str:
-            target = (file.parent / match.group(1)).resolve()
-            if target.is_relative_to(root) and target.relative_to(root).as_posix() in empty_traits and not target.exists():
-                return ''
-            return match.group(0)
-
-        html = re.sub(r'<script src="([^"<>]+)" async></script>', optional_implementors, html)
+        for source in re.findall(r'<script src="([^"<>]+)" async></script>', html):
+            target = (file.parent / source).resolve()
+            if not target.is_relative_to(root) or target.exists():
+                continue
+            relative = target.relative_to(root)
+            if relative.as_posix() not in empty_traits:
+                continue
+            canonical = root.joinpath(*relative.parts[1:]).with_suffix('.html')
+            if not canonical.is_file() or '<div id="implementors-list"></div>' not in canonical.read_text():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(empty_implementors)
         if html != original:
             file.write_text(html)
 
