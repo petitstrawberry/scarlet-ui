@@ -606,7 +606,30 @@ impl<'a> PaintContext<'a> {
         offset: Point,
         scale_milli: u32,
     ) -> PaintContext<'_> {
-        let mut result = self.flattened();
+        self.raster_tile_context_impl(scene_origin, offset, scale_milli, false)
+    }
+
+    /// Prepare a tile while preserving independently cached child pictures.
+    /// Backends must retain window-space raster snapping when descending into them.
+    #[doc(hidden)]
+    pub fn raster_tile_composite_context(
+        &self,
+        scene_origin: Point,
+        offset: Point,
+        scale_milli: u32,
+    ) -> PaintContext<'_> {
+        self.raster_tile_context_impl(scene_origin, offset, scale_milli, true)
+    }
+
+    fn raster_tile_context_impl(
+        &self,
+        scene_origin: Point,
+        offset: Point,
+        scale_milli: u32,
+        preserve_cached: bool,
+    ) -> PaintContext<'_> {
+        let mut result = PaintContext::new();
+        self.append_commands_at(&mut result, Point::ZERO, true, preserve_cached);
         let scale = scale_milli.max(1) as f32 / 1000.;
         let base = Point::new(libm::floorf(scene_origin.x), libm::floorf(scene_origin.y));
         let phase = Point::new(scene_origin.x - base.x, scene_origin.y - base.y);
@@ -646,7 +669,7 @@ impl<'a> PaintContext<'a> {
     }
 
     fn append_flattened<'b>(&'b self, result: &mut PaintContext<'b>, offset: Point) {
-        self.append_commands_at(result, offset, true);
+        self.append_commands_at(result, offset, true, false);
     }
 
     fn append_commands_at<'b>(
@@ -654,12 +677,14 @@ impl<'a> PaintContext<'a> {
         result: &mut PaintContext<'b>,
         offset: Point,
         flatten: bool,
+        preserve_cached: bool,
     ) {
         for command in &self.commands {
             if let PaintCommand::DrawDisplayList { origin, list } = command {
                 let origin = Point::new(offset.x + origin.x, offset.y + origin.y);
-                if flatten {
-                    list.context.append_commands_at(result, origin, true);
+                if flatten && !(preserve_cached && list.raster_cache_bounds().is_some()) {
+                    list.context
+                        .append_commands_at(result, origin, true, preserve_cached);
                 } else {
                     result.draw_display_list(origin, Arc::clone(list));
                 }
@@ -1230,7 +1255,7 @@ impl<'a> PaintContext<'a> {
     /// and raster-cache hints. Ordinary commands and buffer handles are
     /// translated/remapped as with [`Self::append_at`].
     pub fn append_retained_at(&mut self, other: &'a PaintContext<'_>, origin: Point) {
-        other.append_commands_at(self, origin, false);
+        other.append_commands_at(self, origin, false, false);
     }
 
     pub fn commands(&self) -> &[PaintCommand] {

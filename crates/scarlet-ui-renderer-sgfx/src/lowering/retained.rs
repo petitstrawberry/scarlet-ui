@@ -80,10 +80,11 @@ impl SgfxPaintEncoder {
         );
         match self.try_lower_retained(executor, paint, scale, area) {
             Err(FrameError::Lowering(Error::FrameTooComplex))
-                if self.glyph_atlas_rebuild_required =>
+                if self.tile_depth == 0 && self.glyph_atlas_rebuild_required =>
             {
                 // A reset would invalidate draws already prepared this frame.
-                // Rebuild the entire current frame atomically with the flat path.
+                // Propagate nested failures to the outermost frame before
+                // rebuilding atomically; enclosing draws can reference atlases too.
                 for atlas in &mut self.glyph_atlases {
                     atlas.reset(self.frame_serial);
                 }
@@ -178,7 +179,12 @@ impl SgfxPaintEncoder {
                             }
                         }
                     }
-                    if let Some(offsets) = replay_offset(list, *origin, scale) {
+                    // Mesh replay snaps in window coordinates. Nested tile
+                    // fallbacks must take the corrected raster path below.
+                    let offsets = (self.tile_depth == 0)
+                        .then(|| replay_offset(list, *origin, scale))
+                        .flatten();
+                    if let Some(offsets) = offsets {
                         let cached = self.retained_meshes.iter().position(|mesh| {
                             mesh.list_id == list.identity()
                                 && mesh.scale == scale
@@ -264,7 +270,24 @@ impl SgfxPaintEncoder {
             // Keep precise rounded clipping, nested lists, extensions, opacity,
             // fractional-DPI rasterization and oversized recordings on the
             // existing path. Every command retains its original paint order.
-            let one = paint.command_context(index);
+            let one = if self.tile_depth > 0 {
+                if let PaintCommand::DrawDisplayList { origin, list } = command {
+                    // Flat fallback must use the same window-space snapping as
+                    // a cached child, even at negative/fractional scroll offsets.
+                    list.context().raster_tile_context(
+                        Point::new(
+                            origin.x - self.tile_translation.x,
+                            origin.y - self.tile_translation.y,
+                        ),
+                        Point::new(libm::floorf(origin.x), libm::floorf(origin.y)),
+                        scale,
+                    )
+                } else {
+                    paint.command_context(index)
+                }
+            } else {
+                paint.command_context(index)
+            };
             let mut context = PaintContext::new();
             for (rect, radius) in &clips {
                 context.push_rounded_clip(*rect, *radius);
@@ -433,7 +456,7 @@ impl SgfxPaintEncoder {
         Ok(Some(slot))
     }
 }
-fn owned_frame(frame: LoweredFrame<'_>) -> LoweredFrame<'static> {
+pub(super) fn owned_frame(frame: LoweredFrame<'_>) -> LoweredFrame<'static> {
     LoweredFrame {
         vertex_bytes: frame.vertex_bytes,
         draws: frame.draws,
@@ -912,6 +935,61 @@ mod tests {
             "rounded geometry crossing the clip edge needs precise clipping"
         );
     }
+    #[test]
+    fn nested_atlas_exhaustion_defers_rebuild_to_the_complete_frame() {
+        let mut encoder = encoder();
+        let mut executor = Executor::default();
+        encoder.glyph_atlases.clear();
+        for _ in 0..MAX_GLYPH_ATLASES {
+            let texture = define_sampled_texture(
+                &encoder.table,
+                TextureFormat::R8Unorm,
+                GLYPH_ATLAS_SIZE,
+                GLYPH_ATLAS_SIZE,
+            )
+            .unwrap();
+            let mut atlas = GlyphAtlas::new(texture);
+            atlas.cursor_y = GLYPH_ATLAS_SIZE;
+            atlas.used_frame = encoder.frame_serial;
+            encoder.glyph_atlases.push(atlas);
+        }
+        let generations: Vec<_> = encoder.glyph_atlases.iter().map(|a| a.generation).collect();
+        let mut paint = PaintContext::new();
+        paint.draw_text(Point::new(10., 20.), "Nested", UiColor::BLACK, 14.);
+        let area = PixelBounds {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 120,
+        };
+        encoder.tile_depth = 1;
+        assert!(matches!(
+            encoder.lower_retained(&mut executor, &paint, 1000, area),
+            Err(FrameError::Lowering(Error::FrameTooComplex))
+        ));
+        assert!(encoder.glyph_atlas_rebuild_required);
+        assert_eq!(
+            encoder
+                .glyph_atlases
+                .iter()
+                .map(|a| a.generation)
+                .collect::<Vec<_>>(),
+            generations,
+            "a nested retry must not reset atlases referenced by pending enclosing draws"
+        );
+        encoder.tile_depth = 0;
+        encoder
+            .lower_retained(&mut executor, &paint, 1000, area)
+            .unwrap();
+        assert!(
+            encoder
+                .glyph_atlases
+                .iter()
+                .zip(generations)
+                .all(|(a, old)| a.generation > old)
+        );
+    }
+
     #[test]
     fn atlas_reset_and_recycled_image_texture_invalidate_meshes() {
         let mut encoder = encoder();

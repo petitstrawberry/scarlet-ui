@@ -98,7 +98,8 @@ clips; paint changes replace affected recordings, and virtualization reconciles
 mounted children without rerecording clean rows. Virtual rows are grouped into
 one recording to preserve batching. Removed rows release their recordings, and
 an offscreen content update commits even when it produces no visible damage.
-Nested scrollers invalidate their enclosing grouped row. Content, layout and
+Nested scrollers revise their enclosing grouped row while retaining independent
+child pictures and raster tiles. Content, layout and
 scroll metadata are reconciled on the UI thread before submission; this is not
 an independent compositor thread.
 
@@ -271,3 +272,31 @@ and GPU comparisons against complete redraw at 1×/2×/3×. The GPU fixture incl
 overlapping filters, later foreground, fractional scrolling and changed kernel
 support. These checks establish retained work and pixel correctness; they do not
 promise constant total CPU cost or eliminate application rebuild/layout work.
+
+## Nested scroll pictures
+
+Scroll pictures preserve independently cached descendants instead of flattening
+the whole nested viewport into the parent's raster work. A local content stamp
+is separate from placement in the parent: moving an outer viewport reuses its
+complete picture, including a stopped inner viewport. A gesture-end notification
+with no geometry or overlay change leaves the recordings intact.
+
+When the inner viewport moves, the enclosing picture gets a new revision and
+repairs affected tile regions by compositing the child's cached pixels in paint
+order. Static siblings and unchanged child tiles are retained. Newly exposed
+tiles, changed content and new exact subpixel phases still require raster work;
+the cache does not promise constant work for arbitrary content.
+
+Tile composition keeps window-space text/image snapping through nested targets,
+including negative and fractional origins. Backdrop scratch resources are reused
+per active depth; the shared tile pool retains its existing 64–128 slot bound.
+In-flight parent targets cannot be recycled by a child. Eight cached levels are
+supported; deeper levels, pool exhaustion and ineligible pictures use the normal
+rendering path. Failed submissions restore the enclosing target state and do not
+commit incomplete tiles. No raster resolution or material parameters change.
+
+Regression coverage drives actual two- and three-level ScrollViews through inner
+motion, outer-only motion, direction reversals and gesture boundaries, checking
+recording identities and CPU pixels against non-retained redraws. GPU tests check
+child-tile reuse and compare three nested pictures, text, rounded clips and
+overlapping glass against full redraw at 1×/2×/3×.
