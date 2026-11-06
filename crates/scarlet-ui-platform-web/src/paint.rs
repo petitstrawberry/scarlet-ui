@@ -113,13 +113,21 @@ impl PaintBackend for WebPaint {
                 self.scale,
                 &areas,
             )
-            .map_err(|_| Error::RenderError)?;
+            .map_err(|error| {
+                web_sys::console::error_1(
+                    &format!("ScarletUI WebGPU encode_frame: {error:?}").into(),
+                );
+                Error::RenderError
+            })?;
         self.window
             .present(
                 &self.session,
                 self.encoder.target_texture(0).ok_or(Error::RenderError)?,
             )
-            .map_err(|_| Error::RenderError)?;
+            .map_err(|error| {
+                web_sys::console::error_1(&format!("ScarletUI WebGPU present: {error:?}").into());
+                Error::RenderError
+            })?;
         Ok(BackendFrame::External)
     }
 }

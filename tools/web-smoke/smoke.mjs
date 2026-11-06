@@ -92,6 +92,53 @@ async function visibleToggle(name) {
   return {frame,toggle:togglePixels(frame,factoryContentArea())};
 }
 
+async function monitoredContext(options) {
+  const context=await browser.newContext(options);
+  await context.route('**/*',route=>{
+    if(localRequest(route.request().url(),origin)) return route.continue();
+    errors.push(`Blocked non-local runtime request: ${new URL(route.request().url()).origin}`);
+    return route.abort('blockedbyclient');
+  });
+  await context.routeWebSocket('**/*', socket => {
+    errors.push('Blocked unexpected runtime WebSocket');
+    socket.close();
+  });
+  // Observe native WebGPU loss before wgpu's own callback, without changing
+  // application code or swallowing a rejection. Include destroyed probe devices.
+  await context.addInitScript(() => {
+    if(!globalThis.GPUAdapter) return;
+    const requestDevice=GPUAdapter.prototype.requestDevice;
+    let nextDevice=0;
+    GPUAdapter.prototype.requestDevice=async function(...args) {
+      const device=await requestDevice.apply(this,args);
+      const id=++nextDevice;
+      const log=value=>console.info('SCARLET_GPU_DIAGNOSTIC '+JSON.stringify({device:id,at:new Date().toISOString(),...value}));
+      let explicitlyDestroyed=false;
+      const destroy=device.destroy.bind(device);
+      device.destroy=()=>{explicitlyDestroyed=true;destroy();};
+      const info=this.info;
+      log({kind:'device-created',adapter:info ? {vendor:info.vendor,architecture:info.architecture,device:info.device,description:info.description,isFallbackAdapter:info.isFallbackAdapter} : null,maxBufferSize:device.limits.maxBufferSize,maxTextureDimension2D:device.limits.maxTextureDimension2D});
+      device.lost.then(info=>log({kind:'device-lost',reason:info.reason,message:info.message,expected:explicitlyDestroyed && info.reason==='destroyed'}));
+      device.addEventListener('uncapturederror',event=>log({kind:'uncaptured-error',message:event.error.message}));
+      return device;
+    };
+  });
+  return context;
+}
+function monitorPage(page) {
+  page.on('pageerror',error=>failure('pageerror',error.stack??error.message));
+  page.on('console',message=>{
+    if(message.type()==='error') failure('console',message.text());
+    if(message.type()==='info' && message.text().startsWith('SCARLET_GPU_DIAGNOSTIC ')) {
+      const diagnostic=JSON.parse(message.text().slice('SCARLET_GPU_DIAGNOSTIC '.length));
+      event('gpu-diagnostic',diagnostic);
+      if(diagnostic.kind==='device-lost' && !diagnostic.expected && phase!=='teardown')
+        failure('unexpected-device-lost',`${diagnostic.reason}: ${diagnostic.message}`);
+    }
+  });
+  page.on('crash',()=>failure('crash','Browser page crashed'));
+}
+
 try {
   browser=await chromium.launch({
     // Exercise the headed compositor under CI Xvfb, matching local GPU QA.
@@ -124,48 +171,9 @@ try {
     assert(/Seccomp-BPF sandbox\s+Yes/i.test(sandboxText), 'Renderer seccomp-BPF sandbox is not confirmed');
     assert(/PID namespaces\s+Yes/i.test(sandboxText), 'Renderer namespace sandbox is not confirmed');
   } finally { await diagnostics.close(); }
-  context=await browser.newContext({viewport:{width:960,height:640},deviceScaleFactor:1,serviceWorkers:'block'});
-  await context.route('**/*',route=>{
-    if(localRequest(route.request().url(),origin)) return route.continue();
-    errors.push(`Blocked non-local runtime request: ${new URL(route.request().url()).origin}`);
-    return route.abort('blockedbyclient');
-  });
-  await context.routeWebSocket('**/*', socket => {
-    errors.push('Blocked unexpected runtime WebSocket');
-    socket.close();
-  });
-  // Observe native WebGPU loss before wgpu's own callback, without changing
-  // application code or swallowing a rejection. Include destroyed probe devices.
-  await context.addInitScript(() => {
-    if(!globalThis.GPUAdapter) return;
-    const requestDevice=GPUAdapter.prototype.requestDevice;
-    let nextDevice=0;
-    GPUAdapter.prototype.requestDevice=async function(...args) {
-      const device=await requestDevice.apply(this,args);
-      const id=++nextDevice;
-      const log=value=>console.info('SCARLET_GPU_DIAGNOSTIC '+JSON.stringify({device:id,at:new Date().toISOString(),...value}));
-      let explicitlyDestroyed=false;
-      const destroy=device.destroy.bind(device);
-      device.destroy=()=>{explicitlyDestroyed=true;destroy();};
-      const info=this.info;
-      log({kind:'device-created',adapter:info ? {vendor:info.vendor,architecture:info.architecture,device:info.device,description:info.description,isFallbackAdapter:info.isFallbackAdapter} : null,maxBufferSize:device.limits.maxBufferSize,maxTextureDimension2D:device.limits.maxTextureDimension2D});
-      device.lost.then(info=>log({kind:'device-lost',reason:info.reason,message:info.message,expected:explicitlyDestroyed && info.reason==='destroyed'}));
-      device.addEventListener('uncapturederror',event=>log({kind:'uncaptured-error',message:event.error.message}));
-      return device;
-    };
-  });
+  context=await monitoredContext({viewport:{width:960,height:640},deviceScaleFactor:1,serviceWorkers:'block'});
   page=await context.newPage();
-  page.on('pageerror',error=>failure('pageerror',error.stack??error.message));
-  page.on('console',message=>{
-    if(message.type()==='error') failure('console',message.text());
-    if(message.type()==='info' && message.text().startsWith('SCARLET_GPU_DIAGNOSTIC ')) {
-      const diagnostic=JSON.parse(message.text().slice('SCARLET_GPU_DIAGNOSTIC '.length));
-      event('gpu-diagnostic',diagnostic);
-      if(diagnostic.kind==='device-lost' && !diagnostic.expected && phase!=='teardown')
-        failure('unexpected-device-lost',`${diagnostic.reason}: ${diagnostic.message}`);
-    }
-  });
-  page.on('crash',()=>failure('crash','Browser page crashed'));
+  monitorPage(page);
   setPhase('GPU-independent safe-area API');
   const areaApiSession=await context.newCDPSession(page);
   const deviceCount=()=>report.events.filter(entry=>entry.kind==='gpu-diagnostic'&&entry.detail.kind==='device-created').length;
@@ -735,6 +743,53 @@ try {
   } finally {
     await applySafeArea({});
     await safeAreaSession.detach();
+  }
+  setPhase('HiDPI Controls optics and nested menus');
+  const originalPage=page;
+  try {
+    for(const {width,height,dpr} of [
+      {width:500,height:800,dpr:2},
+      {width:390,height:844,dpr:3},
+    ]) {
+      const denseContext=await monitoredContext({viewport:{width,height},deviceScaleFactor:dpr,serviceWorkers:'block'});
+      try {
+        page=await denseContext.newPage();
+        monitorPage(page);
+        await ready('/widget-factory/','scarlet_ui_widget_factory');
+        assert.equal(await page.evaluate(()=>devicePixelRatio),dpr);
+        const scaled=area=>Object.fromEntries(Object.entries(area).map(([key,value])=>[key,value*dpr]));
+        const heading=scaled({x:16,y:44,width:300,height:42});
+        const overview=await untilPixels(`factory-hidpi-${dpr}-overview`,frame=>hasTextOnWhite(frame,heading,100));
+        await page.mouse.click(width*.3,height-36);
+        await page.mouse.move(width-2,30);
+        const controls=await untilPixels(`factory-hidpi-${dpr}-controls`,frame=>changedPixels(overview,frame,heading)>100);
+        // The neutral, narrow side contour must survive the dense Controls
+        // scene. A blur-only budget fallback has no dark line at this edge.
+        const rim=scaled({x:11,y:height-38,width:3,height:4});
+        assert(coloredPixels(controls,rim,(r,g,b)=>Math.max(r,g,b)-Math.min(r,g,b)<10&&r<225).count>=2,
+          `Controls navigation lost its optical contour at DPR ${dpr}`);
+        await page.mouse.click(145,14);
+        const menu=await untilPixels(`factory-hidpi-${dpr}-menu`,frame=>
+          changedPixels(controls,frame,scaled({x:150,y:32,width:230,height:70}))>100);
+        await page.mouse.move(190,48);
+        await untilPixels(`factory-hidpi-${dpr}-submenu`,frame=>
+          changedPixels(menu,frame,scaled({x:width>450?340:4,y:32,width:110,height:70}))>100);
+        await page.keyboard.press('Escape');
+        await page.keyboard.press('Escape');
+        await page.mouse.move(width*.6,height*.5);
+        for(let step=0;step<6;step++) {
+          await page.mouse.wheel(0,70);
+          await sleep(50);
+        }
+        await untilPixels(`factory-hidpi-${dpr}-scrolled`,frame=>changedPixels(controls,frame,heading)>100);
+        assert.equal(await page.evaluate(async()=>
+          (await import('/widget-factory/pkg/scarlet_ui_widget_factory.js')).runtime_error()),undefined);
+        event('hidpi-controls',{width,height,dpr,contourPixels:coloredPixels(controls,rim,(r,g,b)=>Math.max(r,g,b)-Math.min(r,g,b)<10&&r<225).count});
+      } finally { await denseContext.close(); }
+    }
+    report.checks.push('Controls retains navigation optics and survives Tools submenu plus scrolling at DPR 2 and 3');
+  } finally {
+    page=originalPage;
   }
   setPhase('Factory textarea-backed editing');
   await page.setViewportSize({width:960,height:640});

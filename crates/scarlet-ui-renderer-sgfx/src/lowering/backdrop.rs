@@ -292,6 +292,17 @@ impl SgfxPaintEncoder {
         if refraction > 0.0 && !analytic {
             // The rim carries its own half-pixel coverage fringe. Preserve
             // ancestor clips, but do not cut that fringe at the glass boundary.
+            if let Some(draw) = self.cached_glass_rim(
+                tessellator,
+                rect,
+                corner_radius,
+                opacity * refraction,
+                scale,
+            )? {
+                draws.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
+                draws.push(draw);
+                return Ok(());
+            }
             let rim =
                 tessellator.glass_rim(rect, corner_radius, opacity * refraction.clamp(0.0, 1.0));
             if let Some(geometry) = rim? {
