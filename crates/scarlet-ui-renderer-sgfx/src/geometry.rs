@@ -49,6 +49,14 @@ pub(crate) struct Vertex {
     pub(crate) tex_coord: [f32; 2],
 }
 
+// Exact area test: no pixel-sized epsilon that could erase a thin contour.
+// Evaluate the determinant in f64 so cancellation in f32 cannot discard a
+// genuine narrow triangle at large window coordinates.
+fn triangle_has_area(vertices: &[Vertex; 3]) -> bool {
+    let [a, b, c] = vertices.map(|vertex| vertex.position.map(f64::from));
+    (b[0] - a[0]) * (c[1] - a[1]) != (b[1] - a[1]) * (c[0] - a[0])
+}
+
 impl Vertex {
     const fn solid(point: Point2) -> Self {
         Self {
@@ -245,7 +253,11 @@ struct FillEdge {
 /// Stateful tessellator for one paint list.
 // Local meshes survive frame lowering. Translation, color and clip are applied
 // on replay, so scrolling/hover does not rebuild identical shadow layers.
-const MAX_SHAPE_CACHE_VERTICES: usize = 65_536;
+// Keep a frame-sized working set warm. The three optical layers can occupy
+// most of a visible frame; the former 64K cache evicted them in drawing order
+// and regenerated every mesh on the next scroll frame. Memory remains bounded
+// by the existing frame geometry limit (6 MiB of Vertex data) and 64 entries.
+const MAX_SHAPE_CACHE_VERTICES: usize = MAX_FRAME_VERTICES;
 #[derive(Default)]
 pub(crate) struct ShapeCache {
     entries: Vec<([u32; 6], Rc<Vec<Vertex>>)>,
@@ -495,6 +507,64 @@ impl Tessellator {
         let vertices = self.shape(rect, radius, 1, strength)?;
         self.replay_shape(rect, &vertices, Some(source), 1.0)
     }
+
+    pub(crate) fn rim_clip_mode(&self, rect: Rect, radius: f32) -> Option<bool> {
+        let bounds = FloatRect::from_logical(rect, self.scale);
+        // Include the half-device-pixel coverage fringe and rounding. The
+        // straight core of a rounded ancestor needs only a GPU scissor.
+        let corners = [
+            (bounds.x - 1., bounds.y - 1.),
+            (bounds.right() + 1., bounds.y - 1.),
+            (bounds.right() + 1., bounds.bottom() + 1.),
+            (bounds.x - 1., bounds.bottom() + 1.),
+        ]
+        .map(|(x, y)| Vertex::solid(Point2::new(x, y)));
+        let radius = (radius.max(0.) * self.scale)
+            .min(bounds.width * 0.5)
+            .min(bounds.height * 0.5);
+        let mut clip_material = false;
+        for clip in &self.clip_stack {
+            if clip.corner_radius == 0. || clip.contains_in_rounded_core(&corners) {
+                continue;
+            }
+            // A material-sized clip is translation invariant too. Cache its
+            // precisely clipped mesh instead of clipping every contour triangle
+            // again while scrolling a floating navigation bar.
+            if !clip_material && clip.bounds == bounds && clip.corner_radius == radius {
+                clip_material = true;
+            } else {
+                return None;
+            }
+        }
+        Some(clip_material)
+    }
+
+    pub(crate) fn rim_template(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        clip_material: bool,
+    ) -> Result<Rc<Vec<Vertex>>> {
+        let vertices = self.shape(rect, radius, 2, 0.)?;
+        if !clip_material {
+            return Ok(vertices);
+        }
+        let local_rect = Rect::from_xywh(0., 0., rect.size.width, rect.size.height);
+        let bounds = FloatRect::from_logical(local_rect, self.scale);
+        let mut local = Self::new(
+            (self.scale * 1000.) as u32,
+            self.frame_width,
+            self.frame_height,
+            FloatRect::new(-1., -1., bounds.width + 2., bounds.height + 2.),
+        )?;
+        // Preserve the caller's exact scale when milli -> f32 -> milli would
+        // truncate (for example 1333). The clip must match the live path.
+        local.scale = self.scale;
+        local.push_clip(local_rect, radius)?;
+        local.replay_shape(local_rect, &vertices, None, 1.)?;
+        Ok(Rc::new(local.vertices))
+    }
+
     pub(crate) fn glass_rim(
         &mut self,
         rect: Rect,
@@ -1013,17 +1083,23 @@ impl Tessellator {
     }
 
     fn push_triangle(&mut self, triangle: [Vertex; 3]) -> Result<()> {
+        if !triangle_has_area(&triangle) {
+            return Ok(());
+        }
         let mut polygon: Option<Vec<Vertex>> = None;
         for clip in &self.clip_stack {
+            let vertices = polygon.as_deref().unwrap_or(&triangle);
+            // Rectangular clips are applied by the GPU scissor. Reject whole
+            // invisible triangles here too, before they spend the bounded CPU
+            // and upload budget. Keep intersecting triangles unchanged.
+            if clip.excludes(vertices) {
+                return Ok(());
+            }
             let Some(rounded) = clip.rounded_polygon.as_ref() else {
                 continue;
             };
-            let vertices = polygon.as_deref().unwrap_or(&triangle);
             if clip.contains_in_rounded_core(vertices) {
                 continue;
-            }
-            if clip.excludes(vertices) {
-                return Ok(());
             }
             let clipped = clip_to_convex_polygon(vertices, rounded)?;
             if clipped.len() < 3 {
@@ -1032,7 +1108,12 @@ impl Tessellator {
             polygon = Some(clipped);
         }
         let additional = polygon.as_ref().map_or(3, |vertices| {
-            vertices.len().saturating_sub(2).saturating_mul(3)
+            (1..vertices.len() - 1)
+                .filter(|&index| {
+                    triangle_has_area(&[vertices[0], vertices[index], vertices[index + 1]])
+                })
+                .count()
+                .saturating_mul(3)
         });
         if self.vertices.len().saturating_add(additional) > MAX_FRAME_VERTICES {
             return Err(Error::FrameTooComplex);
@@ -1042,9 +1123,10 @@ impl Tessellator {
             .map_err(|_| Error::FrameTooComplex)?;
         if let Some(polygon) = polygon {
             for index in 1..polygon.len() - 1 {
-                self.vertices.push(polygon[0]);
-                self.vertices.push(polygon[index]);
-                self.vertices.push(polygon[index + 1]);
+                let triangle = [polygon[0], polygon[index], polygon[index + 1]];
+                if triangle_has_area(&triangle) {
+                    self.vertices.extend_from_slice(&triangle);
+                }
             }
         } else {
             self.vertices.extend_from_slice(&triangle);
@@ -1407,5 +1489,84 @@ mod tests {
                     .all(|value| (0.0..=1.0).contains(value))
             );
         }
+    }
+
+    #[test]
+    fn zero_area_triangles_do_not_spend_the_frame_vertex_budget() {
+        let mut tess =
+            Tessellator::new(1000, 100, 100, FloatRect::new(0., 0., 100., 100.)).unwrap();
+        let at = |x, y| Vertex::solid(Point2::new(x, y));
+        tess.push_triangle([at(0., 0.), at(1., 1.), at(2., 2.)])
+            .unwrap();
+        tess.push_triangle([at(1., 1.), at(1., 1.), at(2., 3.)])
+            .unwrap();
+        assert!(
+            tess.vertices.is_empty(),
+            "invisible degenerate bands must not consume geometry capacity"
+        );
+        tess.push_triangle([at(0., 0.), at(0.001, 0.), at(0., 0.001)])
+            .unwrap();
+        assert_eq!(
+            tess.vertices.len(),
+            3,
+            "retain arbitrarily thin nonzero-area triangles"
+        );
+    }
+
+    #[test]
+    fn rectangular_clip_rejects_invisible_triangles_without_cutting_visible_ones() {
+        let mut tess =
+            Tessellator::new(2000, 200, 200, FloatRect::new(0., 0., 200., 200.)).unwrap();
+        tess.push_clip(Rect::from_xywh(10., 10., 20., 20.), 0.)
+            .unwrap();
+        let at = |x, y| Vertex::solid(Point2::new(x, y));
+        for _ in 0..MAX_FRAME_VERTICES {
+            tess.push_triangle([at(1., 1.), at(2., 1.), at(1., 2.)])
+                .unwrap();
+        }
+        assert!(tess.vertices.is_empty());
+        let crossing = [at(19., 19.), at(25., 19.), at(19., 25.)];
+        tess.push_triangle(crossing).unwrap();
+        assert_eq!(
+            tess.vertices.iter().map(|v| v.position).collect::<Vec<_>>(),
+            crossing.iter().map(|v| v.position).collect::<Vec<_>>(),
+            "the GPU scissor still clips intersecting triangles with the original interpolants"
+        );
+    }
+
+    #[test]
+    fn dense_optics_working_set_stays_warm_with_bounded_cache_memory() {
+        let mut tess =
+            Tessellator::new(2000, 2400, 1800, FloatRect::new(0., 0., 2400., 1800.)).unwrap();
+        let controls = [
+            (130., 36., 12.),
+            (354., 36., 12.),
+            (174., 780., 16.),
+            (160., 36., 12.),
+            (20., 20., 10.),
+            (280., 36., 12.),
+        ];
+        for frame in 0..3 {
+            let before = tess.shape_cache.hits;
+            for (width, height, radius) in controls {
+                for kind in 0..3 {
+                    tess.shape(
+                        Rect::from_xywh(0., 0., width, height),
+                        radius,
+                        kind,
+                        if kind == 1 { 1. } else { 0. },
+                    )
+                    .unwrap();
+                }
+            }
+            if frame > 0 {
+                assert_eq!(
+                    tess.shape_cache.hits - before,
+                    controls.len() * 3,
+                    "a stable visible scene must not regenerate its optical meshes on scroll"
+                );
+            }
+        }
+        assert!(tess.shape_cache.vertices <= MAX_SHAPE_CACHE_VERTICES);
     }
 }

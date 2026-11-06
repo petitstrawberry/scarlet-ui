@@ -1,5 +1,6 @@
 //! Paint-command to persistent SGFX IR lowering.
 mod backdrop;
+mod optical_cache;
 mod retained;
 mod shadow_cache;
 mod tiles;
@@ -462,6 +463,7 @@ pub struct SgfxPaintEncoder {
     recording_mesh: bool,
     shadow_cache: Option<shadow_cache::ShadowCache>,
     shape_cache: crate::geometry::ShapeCache,
+    optical_cache: optical_cache::OpticalCache,
     backdrop: Option<backdrop::Resources>,
     backdrop_pixels: u64,
     backdrop_filters: u32,
@@ -612,6 +614,7 @@ impl SgfxPaintEncoder {
             tile_backdrop: None,
             shadow_cache: None,
             shape_cache: crate::geometry::ShapeCache::default(),
+            optical_cache: optical_cache::OpticalCache::default(),
             backdrop: None,
             backdrop_pixels: 0,
             backdrop_filters: 0,
@@ -2623,6 +2626,7 @@ impl SgfxPaintEncoder {
             return Ok(());
         }
         self.submit_texture_uploads(executor, frame)?;
+        self.submit_optical_uploads(executor)?;
 
         let table = Rc::clone(&self.table);
         let target = table
@@ -3169,6 +3173,7 @@ fn push_draw_phase(
             .first_vertex
             .checked_add(previous.geometry.vertex_count);
         if !matches!(source, DrawSource::Backdrop(_) | DrawSource::ClearOnly)
+            && previous.vertex_buffer.is_none()
             && previous.source == source
             && previous.snap_phase == snap_phase
             && previous.geometry.scissor == geometry.scissor

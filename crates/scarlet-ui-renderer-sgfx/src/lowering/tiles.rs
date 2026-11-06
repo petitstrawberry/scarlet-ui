@@ -1,5 +1,6 @@
-//! Full-resolution retained scroll layers. Cold/changed/exposed tiles are drawn
-//! on the GPU; warm scrolls only composite their textures. No CPU raster upload.
+//! Full-resolution retained scroll layers. Cold/changed/exposed exact-phase
+//! tiles are drawn on the GPU; warm interiors only composite their textures.
+//! Viewport-boundary dependencies replay in paint order. No CPU raster upload.
 use super::*;
 use scarlet_ui_core::{
     geometry::{Point, Rect},
@@ -8,13 +9,18 @@ use scarlet_ui_core::{
 use sgfx::ir::{BlendComponent, BlendFactor, BlendOp};
 
 const SIDE: u32 = 512;
-const MAX_TILES: usize = 64; // 64 MiB, recycled without growing resource slots.
+const BASE_TILES: usize = 64;
+// Full-resolution exact-phase variants need a larger visible working set on
+// Retina displays. Allocate lazily from 64..128 MiB; reuse immutable resource
+// slots instead of cycling through whole phases on each subpixel scroll.
+const MAX_TILES: usize = 128;
 
 pub(super) struct Tile {
     list: u64,
     source: Weak<DisplayList>,
     scale: u32,
     snap: [usize; 2],
+    phase: [u32; 2],
     x: i32,
     y: i32,
     texture: TextureId,
@@ -82,6 +88,201 @@ fn eligible(list: &DisplayList) -> bool {
         })
 }
 
+fn contains_rect(outer: PixelBounds, inner: FloatRect) -> bool {
+    outer.x as f32 <= inner.x
+        && outer.y as f32 <= inner.y
+        && (outer.x + outer.width) as f32 >= inner.right()
+        && (outer.y + outer.height) as f32 >= inner.bottom()
+}
+
+// Expand to a dependency closure, not a fixed-width edge strip: another glass
+// intersecting this region may sample across its edge too. A rectangle
+// per connected component avoids joining unrelated top/bottom boundaries.
+// The bounded recording makes this traversal finite.
+fn live_boundary(
+    list: &DisplayList,
+    origin: Point,
+    factor: f32,
+    visible: FloatRect,
+    clips: &[(Rect, f32)],
+    full: PixelBounds,
+) -> Vec<PixelBounds> {
+    let filters = list
+        .context()
+        .commands()
+        .iter()
+        .filter_map(|command| {
+            let PaintCommand::BackdropFilterRoundedRect {
+                rect, blur_radius, ..
+            } = command
+            else {
+                return None;
+            };
+            let glass = FloatRect::new(
+                (rect.left() + origin.x) * factor,
+                (rect.top() + origin.y) * factor,
+                rect.size.width * factor,
+                rect.size.height * factor,
+            );
+            let r = (blur_radius.max(0.) * factor).min(64.);
+            // Refraction bends inward into the material; only the blur
+            // footprint reaches outside it. Match backdrop::source_bounds.
+            let h = libm::ceilf(r + (r / 4.).max(1.)) + 1.;
+            let x = libm::floorf(glass.x - h);
+            let y = libm::floorf(glass.y - h);
+            Some((
+                // Include the optical geometry's half-pixel coverage fringe.
+                FloatRect::new(
+                    glass.x - 1.,
+                    glass.y - 1.,
+                    glass.width + 2.,
+                    glass.height + 2.,
+                ),
+                FloatRect::new(
+                    x,
+                    y,
+                    libm::ceilf(glass.right() + h) - x,
+                    libm::ceilf(glass.bottom() + h) - y,
+                ),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let full = FloatRect::new(
+        full.x as f32,
+        full.y as f32,
+        full.width as f32,
+        full.height as f32,
+    );
+    let mut regions: Vec<FloatRect> = Vec::new();
+    let union = |a: FloatRect, b: FloatRect| {
+        let x = a.x.min(b.x);
+        let y = a.y.min(b.y);
+        FloatRect::new(
+            x,
+            y,
+            a.right().max(b.right()) - x,
+            a.bottom().max(b.bottom()) - y,
+        )
+    };
+    for (glass, capture) in &filters {
+        if glass.intersect(visible).is_some()
+            && (capture.x < visible.x
+                || capture.y < visible.y
+                || capture.right() > visible.right()
+                || capture.bottom() > visible.bottom()
+                || clips.iter().any(|(clip, radius)| {
+                    if *radius <= 0. {
+                        return false;
+                    }
+                    let clip = FloatRect::from_logical(*clip, factor);
+                    let r = (*radius * factor)
+                        .min(clip.width * 0.5)
+                        .min(clip.height * 0.5);
+                    let inside = capture.x >= clip.x
+                        && capture.y >= clip.y
+                        && capture.right() <= clip.right()
+                        && capture.bottom() <= clip.bottom();
+                    let band = (capture.x >= clip.x + r && capture.right() <= clip.right() - r)
+                        || (capture.y >= clip.y + r && capture.bottom() <= clip.bottom() - r);
+                    !(inside && band)
+                }))
+        {
+            if let Some(capture) = capture.intersect(full) {
+                regions.push(capture);
+            }
+        }
+    }
+    loop {
+        let old = regions.clone();
+        for live in &mut regions {
+            for (glass, capture) in &filters {
+                if glass.intersect(*live).is_some() && glass.intersect(visible).is_some() {
+                    if let Some(capture) = capture.intersect(full) {
+                        *live = union(*live, capture);
+                    }
+                }
+            }
+        }
+        let mut i = 0;
+        while i < regions.len() {
+            let mut j = i + 1;
+            while j < regions.len() {
+                if regions[i].intersect(regions[j]).is_some() {
+                    let other = regions.remove(j);
+                    regions[i] = union(regions[i], other);
+                } else {
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        if old == regions {
+            break;
+        }
+    }
+    regions
+        .into_iter()
+        .map(|live| {
+            let x = libm::floorf(live.x) as u32;
+            let y = libm::floorf(live.y) as u32;
+            PixelBounds {
+                x,
+                y,
+                width: libm::ceilf(live.right()) as u32 - x,
+                height: libm::ceilf(live.bottom()) as u32 - y,
+            }
+        })
+        .collect()
+}
+
+fn subtract_region(scissor: PixelBounds, live: PixelBounds) -> Vec<PixelBounds> {
+    let Some(live) = intersect_bounds(scissor, live) else {
+        return alloc::vec![scissor];
+    };
+    let right = scissor.x + scissor.width;
+    let bottom = scissor.y + scissor.height;
+    [
+        PixelBounds {
+            x: scissor.x,
+            y: scissor.y,
+            width: scissor.width,
+            height: live.y - scissor.y,
+        },
+        PixelBounds {
+            x: scissor.x,
+            y: live.y + live.height,
+            width: scissor.width,
+            height: bottom - live.y - live.height,
+        },
+        PixelBounds {
+            x: scissor.x,
+            y: live.y,
+            width: live.x - scissor.x,
+            height: live.height,
+        },
+        PixelBounds {
+            x: live.x + live.width,
+            y: live.y,
+            width: right - live.x - live.width,
+            height: live.height,
+        },
+    ]
+    .into_iter()
+    .filter(|area| area.width > 0 && area.height > 0)
+    .collect()
+}
+
+fn subtract_regions(scissor: PixelBounds, regions: &[PixelBounds]) -> Vec<PixelBounds> {
+    let mut remaining = alloc::vec![scissor];
+    for region in regions {
+        remaining = remaining
+            .into_iter()
+            .flat_map(|area| subtract_region(area, *region))
+            .collect();
+    }
+    remaining
+}
+
 impl SgfxPaintEncoder {
     pub(super) fn lower_cached_layer<E: CommandExecutor>(
         &mut self,
@@ -95,15 +296,14 @@ impl SgfxPaintEncoder {
         let Some(bounds) = list.raster_cache_bounds() else {
             return Ok(None);
         };
-        // Raster text has logical-pixel snapping semantics. Do not resample it
-        // at fractional offsets/DPI: retain the precise normal path there.
+        // Raster text has logical-pixel snapping semantics. Bake fractional
+        // offset phases into separate tiles and composite on the integer grid.
+        // Fractional DPI retains the precise normal path.
         if scale % 1000 != 0
             || scale == 0
             || scale > 8000
             || !origin.x.is_finite()
             || !origin.y.is_finite()
-            || origin.x != libm::roundf(origin.x)
-            || origin.y != libm::roundf(origin.y)
             || (!self
                 .raster_tiles
                 .iter()
@@ -113,6 +313,9 @@ impl SgfxPaintEncoder {
             return Ok(None);
         }
         let factor = scale as f32 / 1000.;
+        let base = Point::new(libm::floorf(origin.x), libm::floorf(origin.y));
+        let phase_values = [origin.x - base.x, origin.y - base.y];
+        let phase = phase_values.map(f32::to_bits);
         // Truncation towards zero changes phase when a fractional raster origin
         // crosses the window origin. Counts uniquely identify those monotone
         // threshold sets for an immutable list; no lossy hash or image resampling.
@@ -127,7 +330,8 @@ impl SgfxPaintEncoder {
                 _ => continue,
             };
             for (axis, value, origin) in [(0, point.x, origin.x), (1, point.y, origin.y)] {
-                if value * unit != libm::truncf(value * unit) && value + origin < 0. {
+                let phased = (value + phase_values[axis]) * unit;
+                if phased != libm::truncf(phased) && value + origin < 0. {
                     snap[axis] += 1;
                 }
             }
@@ -160,7 +364,7 @@ impl SgfxPaintEncoder {
             return Ok(None);
         }
         let side = (SIDE - 2 * padding) / unit * unit;
-        let offset = [origin.x * factor, origin.y * factor];
+        let offset = [base.x * factor, base.y * factor];
         let bounds = FloatRect::new(
             (bounds.left() + origin.x) * factor,
             (bounds.top() + origin.y) * factor,
@@ -183,55 +387,29 @@ impl SgfxPaintEncoder {
                 uploads: Vec::new(),
             }));
         };
-        if list.reads_backdrop() {
-            // The scrollport clips preceding content, not just final glass.
-            // A filter touching that boundary reads the outside scene: it is
-            // not an isolated layer even if its local recording has a backing.
-            for command in list.context().commands() {
-                if let PaintCommand::BackdropFilterRoundedRect {
-                    rect, blur_radius, ..
-                } = command
-                {
-                    let glass = FloatRect::new(
-                        (rect.left() + origin.x) * factor,
-                        (rect.top() + origin.y) * factor,
-                        rect.size.width * factor,
-                        rect.size.height * factor,
-                    );
-                    if glass.intersect(visible).is_none() {
-                        continue;
-                    }
-                    let r = (blur_radius.max(0.) * factor).min(64.);
-                    let h = libm::ceilf(r + (r / 4.).max(1.)) + 1.;
-                    let capture = FloatRect::new(
-                        glass.x - h,
-                        glass.y - h,
-                        glass.width + 2. * h,
-                        glass.height + 2. * h,
-                    );
-                    if capture.x < visible.x
-                        || capture.y < visible.y
-                        || capture.right() > visible.right()
-                        || capture.bottom() > visible.bottom()
-                        || clips.iter().any(|(_, radius)| *radius > 0.)
-                    {
-                        return Ok(None);
-                    }
-                }
-            }
+        let live = if list.reads_backdrop() {
+            live_boundary(list, origin, factor, visible, clips, full)
+        } else {
+            Vec::new()
+        };
+        if live.iter().any(|area| contains_rect(*area, visible)) {
+            return Ok(None);
         }
         let x0 = libm::floorf((visible.x - offset[0]) / side as f32) as i32;
         let y0 = libm::floorf((visible.y - offset[1]) / side as f32) as i32;
         let x1 = libm::ceilf((visible.right() - offset[0]) / side as f32) as i32;
         let y1 = libm::ceilf((visible.bottom() - offset[1]) / side as f32) as i32;
-        if i64::from(x1 - x0) * i64::from(y1 - y0) > MAX_TILES as i64 {
+        let visible_tiles = i64::from(x1 - x0) * i64::from(y1 - y0);
+        if visible_tiles > BASE_TILES as i64 {
             return Ok(None);
         }
+        let pool_limit = (visible_tiles as usize * 4).clamp(BASE_TILES, MAX_TILES);
         // Reserve visible warm tiles before allocating cold exposed tiles.
         for tile in &mut self.raster_tiles {
             if tile.list == list.identity()
                 && tile.scale == scale
                 && tile.snap == snap
+                && tile.phase == phase
                 && tile.x >= x0
                 && tile.x < x1
                 && tile.y >= y0
@@ -257,10 +435,25 @@ impl SgfxPaintEncoder {
         let mut draws = Vec::new();
         for y in y0..y1 {
             for x in x0..x1 {
+                let tile_rect = FloatRect::new(
+                    offset[0] + x as f32 * side as f32,
+                    offset[1] + y as f32 * side as f32,
+                    side as f32,
+                    side as f32,
+                );
+                if live.iter().any(|area| {
+                    tile_rect
+                        .intersect(visible)
+                        .is_some_and(|rect| contains_rect(*area, rect))
+                }) {
+                    continue;
+                }
+
                 let existing = self.raster_tiles.iter().position(|tile| {
                     tile.list == list.identity()
                         && tile.scale == scale
                         && tile.snap == snap
+                        && tile.phase == phase
                         && tile.x == x
                         && tile.y == y
                 });
@@ -274,7 +467,7 @@ impl SgfxPaintEncoder {
                         .filter(|(_, tile)| tile.used != self.frame_serial)
                         .min_by_key(|(_, tile)| (tile.source.strong_count() != 0, tile.used))
                         .map(|(slot, _)| slot);
-                    let slot = if self.raster_tiles.len() < MAX_TILES
+                    let slot = if self.raster_tiles.len() < pool_limit
                         && candidate.is_none_or(|i| self.raster_tiles[i].source.strong_count() != 0)
                     {
                         let stage = |_| Error::sgfx(Stage::DefineResources);
@@ -297,6 +490,7 @@ impl SgfxPaintEncoder {
                             source: Weak::new(),
                             scale,
                             snap,
+                            phase,
                             x,
                             y,
                             texture,
@@ -359,6 +553,7 @@ impl SgfxPaintEncoder {
                         source: Arc::downgrade(list),
                         scale,
                         snap,
+                        phase,
                         x,
                         y,
                         texture,
@@ -379,21 +574,50 @@ impl SgfxPaintEncoder {
                 if let Some(geometry) =
                     tessellator.textured_rect(rect, [[lo, lo], [hi, lo], [hi, hi], [lo, hi]])?
                 {
-                    push_draw(
-                        &mut draws,
-                        &mut tessellator,
-                        geometry,
-                        [1.; 4],
-                        DrawSource::PremultipliedTexture(tile.texture),
-                    )?;
+                    for scissor in subtract_regions(geometry.scissor, &live) {
+                        push_draw(
+                            &mut draws,
+                            &mut tessellator,
+                            GeometryRange {
+                                scissor,
+                                ..geometry
+                            },
+                            [1.; 4],
+                            DrawSource::PremultipliedTexture(tile.texture),
+                        )?;
+                    }
                 }
             }
         }
-        Ok(Some(LoweredFrame {
+        let mut frame = LoweredFrame {
             vertex_bytes: encode_paint_vertices(tessellator.vertices())?,
             draws,
             uploads: Vec::new(),
-        }))
+        };
+        for area in live {
+            // Cached output is absent throughout the dependency closure. Replay
+            // the original order there, with the original viewport clips, so a
+            // filter never samples cached pixels from later foreground paint.
+            let mut context = PaintContext::new();
+            for (clip, radius) in clips {
+                context.push_rounded_clip(*clip, *radius);
+            }
+            context.push_clip(Rect::from_xywh(
+                area.x as f32 / factor,
+                area.y as f32 / factor,
+                area.width as f32 / factor,
+                area.height as f32 / factor,
+            ));
+            context.draw_display_list(origin, Arc::clone(list));
+            context.pop_clip();
+            for _ in clips {
+                context.pop_clip();
+            }
+            let flat = context.flattened();
+            let live_frame = self.lower_once(&flat, scale, full)?;
+            retained::append_frame(&mut frame, live_frame)?;
+        }
+        Ok(Some(frame))
     }
 }
 
@@ -404,6 +628,7 @@ mod tests {
     #[derive(Default)]
     struct Trace {
         targets: Vec<TextureId>,
+        sampled: Vec<TextureId>,
         fail: bool,
     }
     impl CommandExecutor for Trace {
@@ -418,6 +643,9 @@ mod tests {
             for command in commands.commands() {
                 if let Command::BeginRenderPass(pass) = command {
                     self.targets.push(pass.target().id());
+                }
+                if let Command::SetTexture(texture) = command {
+                    self.sampled.push(texture.id());
                 }
                 assert!(
                     !matches!(command, Command::WriteTexture { .. }),
@@ -490,13 +718,33 @@ mod tests {
         );
     }
     #[test]
+    fn repeated_fractional_scroll_phase_reuses_tiles_without_resampling() {
+        let mut renderer = SgfxPaintEncoder::new(200, 120, false).unwrap();
+        let list = layer(UiColor::RED);
+        let mut trace = Trace::default();
+        frame(&mut renderer, &mut trace, &list, -0.5).unwrap();
+        assert!(
+            !renderer.raster_tiles.is_empty(),
+            "a fractional offset must not bypass the layer cache"
+        );
+        let target = renderer.target_texture(0).unwrap();
+        trace.targets.clear();
+        frame(&mut renderer, &mut trace, &list, -1.5).unwrap();
+        assert_eq!(
+            trace.targets,
+            [target],
+            "a repeated exact fractional phase reuses existing GPU pixels"
+        );
+    }
+
+    #[test]
     fn long_scroll_recycles_a_bounded_tile_pool() {
         let mut renderer = SgfxPaintEncoder::new(200, 120, false).unwrap();
         let mut paint = PaintContext::new();
         paint.fill_rounded_rect(Rect::from_xywh(0., 0., 200., 100000.), 0., UiColor::WHITE);
         let list = paint.into_cached_layer(Rect::from_xywh(0., 0., 200., 100000.));
         let mut trace = Trace::default();
-        for row in 0..MAX_TILES + 16 {
+        for row in 0..BASE_TILES + 16 {
             frame(
                 &mut renderer,
                 &mut trace,
@@ -504,9 +752,109 @@ mod tests {
                 -(row as f32 * SIDE as f32),
             )
             .unwrap();
-            assert!(renderer.raster_tiles.len() <= MAX_TILES);
+            assert!(renderer.raster_tiles.len() <= BASE_TILES);
         }
-        assert_eq!(renderer.raster_tiles.len(), MAX_TILES);
+        assert_eq!(renderer.raster_tiles.len(), BASE_TILES);
+    }
+
+    #[test]
+    fn boundary_closure_includes_rounded_capture_pixels_and_neighbor_coverage() {
+        let mut paint = PaintContext::new();
+        for rect in [
+            Rect::from_xywh(0.25, 20.25, 20., 20.),
+            Rect::from_xywh(20., 46.5, 30., 20.),
+        ] {
+            paint.refractive_glass_rounded_rect(rect, 4., 2.52, UiColor::WHITE, 1.);
+        }
+        let list = paint.into_display_list();
+        let area = live_boundary(
+            &list,
+            Point::ZERO,
+            1.,
+            FloatRect::new(0., 0., 200., 200.),
+            &[],
+            PixelBounds {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 200,
+            },
+        )[0];
+        assert!(
+            area.y + area.height >= 72,
+            "an adjacent lens's half-pixel coverage enters the rounded live region, so its complete source footprint must be replayed too"
+        );
+    }
+
+    #[test]
+    fn distant_top_and_bottom_lenses_leave_the_static_middle_cached() {
+        let mut paint = PaintContext::new();
+        for y in [-2., 190.] {
+            paint.refractive_glass_rounded_rect(
+                Rect::from_xywh(20., y, 160., 16.),
+                8.,
+                2.52,
+                UiColor::WHITE,
+                1.,
+            );
+        }
+        let list = paint.into_display_list();
+        let full = PixelBounds {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 200,
+        };
+        let regions = live_boundary(
+            &list,
+            Point::ZERO,
+            1.,
+            FloatRect::new(0., 0., 200., 200.),
+            &[],
+            full,
+        );
+        assert_eq!(
+            regions.len(),
+            2,
+            "independent edge dependencies must not become a full-viewport replay"
+        );
+        assert!(
+            subtract_regions(full, &regions)
+                .iter()
+                .any(|area| area.y <= 80 && area.y + area.height >= 120),
+            "the unchanged middle remains a cached composite"
+        );
+    }
+
+    #[test]
+    fn rounded_window_does_not_make_interior_glass_live() {
+        let mut paint = PaintContext::new();
+        paint.refractive_glass_rounded_rect(
+            Rect::from_xywh(20., 30., 160., 50.),
+            12.,
+            2.52,
+            UiColor::WHITE,
+            1.,
+        );
+        let list = paint.into_display_list();
+        let bounds = Rect::from_xywh(0., 0., 200., 200.);
+        let regions = live_boundary(
+            &list,
+            Point::ZERO,
+            1.,
+            FloatRect::from_logical(bounds, 1.),
+            &[(bounds, 20.)],
+            PixelBounds {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 200,
+            },
+        );
+        assert!(
+            regions.is_empty(),
+            "a rounded Window must not disable caching for lenses well inside its straight core"
+        );
     }
 
     #[test]
@@ -515,8 +863,8 @@ mod tests {
         renderer.set_analytic_glass(true);
         let target = renderer.target_texture(0).unwrap();
         let mut paint = PaintContext::new();
-        paint.fill_rounded_rect(Rect::from_xywh(0., -100., 200., 1200.), 0., UiColor::WHITE);
-        paint.fill_rounded_rect(Rect::from_xywh(20., 40., 100., 10.), 0., UiColor::RED);
+        paint.fill_rect(Rect::from_xywh(0., -100., 200., 1200.), UiColor::WHITE);
+        paint.fill_rect(Rect::from_xywh(20., 40., 100., 10.), UiColor::RED);
         paint.refractive_glass_rounded_rect(
             Rect::from_xywh(20., 30., 160., 50.),
             12.,
@@ -536,11 +884,26 @@ mod tests {
             [target],
             "unchanged local refraction is not recomputed"
         );
+        let cached_texture = renderer
+            .raster_tiles
+            .iter()
+            .find(|tile| tile.list == list.identity())
+            .unwrap()
+            .texture;
         trace.targets.clear();
+        trace.sampled.clear();
         frame(&mut renderer, &mut trace, &list, -30.).unwrap();
         assert!(
             trace.targets.len() > 1,
             "outside backdrop dependency is live at the scrollport edge"
+        );
+        assert!(
+            trace.sampled.contains(&cached_texture),
+            "the unaffected interior still composites its cached texture"
+        );
+        assert!(
+            !trace.targets.contains(&cached_texture),
+            "a boundary dependency must not rerasterize the static interior"
         );
     }
 

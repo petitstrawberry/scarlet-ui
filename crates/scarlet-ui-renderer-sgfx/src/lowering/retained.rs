@@ -455,7 +455,7 @@ fn owned_frame(frame: LoweredFrame<'_>) -> LoweredFrame<'static> {
             .collect(),
     }
 }
-fn append_frame(target: &mut LoweredFrame<'_>, frame: LoweredFrame<'_>) -> Result<()> {
+pub(super) fn append_frame(target: &mut LoweredFrame<'_>, frame: LoweredFrame<'_>) -> Result<()> {
     let mut frame = owned_frame(frame);
     let first = u32::try_from(target.vertex_bytes.len() / PAINT_VERTEX_STRIDE as usize)
         .map_err(|_| Error::FrameTooComplex)?;
@@ -465,6 +465,9 @@ fn append_frame(target: &mut LoweredFrame<'_>, frame: LoweredFrame<'_>) -> Resul
         return Err(Error::FrameTooComplex);
     }
     for draw in &mut frame.draws {
+        if draw.vertex_buffer.is_some() {
+            continue;
+        }
         draw.geometry.first_vertex = draw
             .geometry
             .first_vertex

@@ -575,6 +575,16 @@ impl scarlet_ui::element::ElementRenderObject for FactoryPageLayout {
         self.0
     }
     fn render(&mut self) {}
+    fn paint(&self, ctx: &mut scarlet_ui::renderer::PaintContext<'_>, origin: Point) -> bool {
+        // The page owns the same opaque surface as its Window, so its static
+        // glass and backdrop can be retained together as one scroll layer.
+        ctx.fill_rect(
+            Rect::new(origin, self.0),
+            ColorPalette::light().window_background(),
+        );
+        true
+    }
+
     fn as_any(&self) -> &dyn core::any::Any {
         self
     }
@@ -2429,5 +2439,88 @@ mod tests {
                 scale, milliseconds[10], milliseconds[19]
             );
         }
+    }
+    #[test]
+    fn static_controls_retains_one_background_backed_scroll_recording() {
+        use scarlet_ui::event::{Event, MouseEvent, ScrollSource, WheelPhase};
+        use scarlet_ui::renderer::{BackendFrame, PaintBackend, PaintCommand, PaintContext};
+        use scarlet_ui::{ComponentElement, RenderingPipeline};
+        use std::{cell::RefCell, rc::Rc};
+        struct Capture(Rc<RefCell<Vec<(u64, Rect)>>>);
+        impl PaintBackend for Capture {
+            fn supports_retained_display_lists(&self) -> bool {
+                true
+            }
+            fn resize(&mut self, _: Size, _: u32) {}
+            fn render<'a>(
+                &'a mut self,
+                ctx: &PaintContext<'_>,
+                _: Color,
+                _: Option<&[Rect]>,
+                _: Option<&[scarlet_ui::compositor::DamageRect]>,
+            ) -> scarlet_ui::Result<BackendFrame<'a>> {
+                let mut lists = self.0.borrow_mut();
+                lists.clear();
+                for command in ctx.commands() {
+                    if let PaintCommand::DrawDisplayList { list, .. } = command {
+                        if list.reads_backdrop() {
+                            if let Some(bounds) = list.raster_cache_bounds() {
+                                lists.push((list.identity(), bounds));
+                            }
+                        }
+                    }
+                }
+                Ok(BackendFrame::External)
+            }
+        }
+        let app = WidgetFactory::new();
+        let size = Size::new(500., 800.);
+        app.viewport.set(size);
+        let lists = Rc::new(RefCell::new(Vec::new()));
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(Box::new(ComponentElement::new_with_builder(
+            app.clone(),
+            |app| Box::new(app.controls_page().frame(500., 800.)),
+        )));
+        pipeline.set_paint_backend(Box::new(Capture(Rc::clone(&lists))));
+        pipeline.set_scale_milli(2000);
+        pipeline.resize(size);
+        pipeline.layout_initial();
+        pipeline.render_for_present().unwrap();
+        let original = lists.borrow().clone();
+        assert_eq!(
+            original.len(),
+            1,
+            "the static page and its glass background must remain a single cacheable layer"
+        );
+        assert_eq!(original[0].1.size.width, size.width);
+        assert!(
+            original[0].1.size.height > size.height,
+            "the layer covers the entire scroll content"
+        );
+        for delta in [-4, -4, -40] {
+            pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+                x: 100,
+                y: 100,
+                delta_x: 0,
+                delta_y: delta,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Trackpad,
+            }));
+            pipeline.render_for_present().unwrap();
+            assert_eq!(
+                *lists.borrow(),
+                original,
+                "scrolling must reuse the immutable page recording"
+            );
+        }
+        app.study_count.set(1);
+        pipeline.render_for_present().unwrap();
+        assert_eq!(lists.borrow().len(), 1);
+        assert_ne!(
+            lists.borrow()[0].0,
+            original[0].0,
+            "a changed backdrop must replace the cached recording"
+        );
     }
 }
