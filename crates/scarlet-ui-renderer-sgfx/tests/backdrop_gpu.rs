@@ -7,6 +7,15 @@ use sgfx_backend_wgpu::{Context, Device};
 use std::time::Instant;
 
 fn context() -> Option<Context> {
+    // Parallel GPU fixtures must not change the global font after another
+    // fixture has retained text pixels. Install one deterministic font first.
+    static FONT: std::sync::Once = std::sync::Once::new();
+    FONT.call_once(|| {
+        scarlet_ui_core::graphics::set_default_font(include_bytes!(
+            "../../../examples/web-counter/assets/DejaVuSans.ttf"
+        ))
+        .unwrap();
+    });
     let context = try_context();
     if context.is_none() {
         assert!(
@@ -346,19 +355,22 @@ fn batched_materials_keep_independent_capture_and_work_buffer_contents() {
 #[test]
 fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
     use scarlet_ui_core::geometry::Point;
-    scarlet_ui_core::graphics::set_default_font(include_bytes!(
-        "../../../examples/web-counter/assets/DejaVuSans.ttf"
-    ))
-    .unwrap();
     let Some(context) = context() else {
         return;
     };
-    for scale in [1, 2] {
+    for (scale, analytic) in [
+        (1, false),
+        (2, false),
+        (3, false),
+        (1, true),
+        (2, true),
+        (3, true),
+    ] {
         let (width, height) = (240 * scale, 180 * scale);
         let mut cached = SgfxPaintEncoder::new(width, height, false).unwrap();
-        cached.set_analytic_glass(true);
+        cached.set_analytic_glass(analytic);
         let mut direct = SgfxPaintEncoder::new(width, height, false).unwrap();
-        direct.set_analytic_glass(true);
+        direct.set_analytic_glass(analytic);
         let cached_target = cached.target_texture(0).unwrap();
         let direct_target = direct.target_texture(0).unwrap();
         let mut cached_resources = context.create_resources(cached.resource_table());
@@ -382,7 +394,7 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
         let queue = context.create_queue();
         for glass_height in [0., 70., 1100.] {
             let mut content = PaintContext::new();
-            content.fill_rounded_rect(Rect::from_xywh(-100., -100., 440., 1400.), 0., Color::WHITE);
+            content.fill_rect(Rect::from_xywh(-100., -100., 440., 1400.), Color::WHITE);
             for row in 0..60 {
                 content.fill_rounded_rect(
                     Rect::from_xywh(10.5, row as f32 * 20., 190., 12.),
@@ -396,6 +408,12 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
                     12.,
                 );
             }
+            content.draw_icon(
+                Rect::from_xywh(16.25, 102.5, 18., 18.),
+                scarlet_ui_core::icon::Icon::Home,
+                scarlet_ui_core::icon::IconStyle::outline(),
+                Color::BLACK,
+            );
             if glass_height > 0. {
                 content.refractive_glass_rounded_rect(
                     Rect::from_xywh(12., 12., 216., glass_height),
@@ -405,12 +423,35 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
                     1.,
                 );
             }
+            if glass_height > 0. {
+                // At offset -20 the first lens crosses the scrollport and
+                // its capture overlaps this otherwise interior lens. Later
+                // foreground must never leak from a cached final image into
+                // either lens's earlier backdrop sample.
+                content.refractive_glass_rounded_rect(
+                    Rect::from_xywh(32., 84., 160., 40.),
+                    12.,
+                    2.52,
+                    Color::WHITE.with_opacity(0.35),
+                    1.,
+                );
+                content.refractive_glass_rounded_rect(
+                    Rect::from_xywh(20., 170., 100., 30.),
+                    12.,
+                    2.52,
+                    Color::WHITE.with_opacity(0.35),
+                    1.,
+                );
+                content.fill_rect(Rect::from_xywh(48., 90., 60., 4.), Color::rgb(0., 0., 1.));
+            }
             let layer = content.into_cached_layer(Rect::from_xywh(-100., -100., 440., 1400.));
             assert!(
                 layer.raster_cache_bounds().is_some(),
                 "glass and its opaque backing form one retained layer"
             );
-            for offset in [0., -1., -211., -425., -630., -20., -20.25] {
+            for offset in [
+                0., -0.5, -1.5, -1., -211., -425., -630., -20., -20.25, -31.25, -51.25, -91.25,
+            ] {
                 let mut paint = PaintContext::new();
                 paint.push_rounded_clip(
                     Rect::from_xywh(0., 0., 240., 180.),
@@ -445,7 +486,7 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
                 let max = a.iter().zip(&b).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
                 assert!(
                     max <= 2,
-                    "tile seam or changed paint: scale={scale}, glass_height={glass_height}, offset={offset}, max error={max}"
+                    "tile seam or changed paint: analytic={analytic}, scale={scale}, glass_height={glass_height}, offset={offset}, max error={max}"
                 );
             }
         }
@@ -793,5 +834,404 @@ fn wide_blur_does_not_alias_fine_background_stripes() {
                 "sparse blur leaves periodic stripes: analytic={analytic}, period={period}, contrast={contrast}"
             );
         }
+    }
+}
+
+#[test]
+fn retained_revisions_and_partial_backdrop_reconstruction_match_full_frames() {
+    use scarlet_ui_core::{geometry::Point, renderer::DisplayList};
+    use std::sync::Arc;
+    let Some(context) = context() else {
+        return;
+    };
+    for (scale, analytic) in [(1, false), (2, false), (3, false), (2, true)] {
+        let (width, height) = (200 * scale, 720 * scale);
+        let mut cached = SgfxPaintEncoder::new(width, height, false).unwrap();
+        cached.set_analytic_glass(analytic);
+        let mut direct = SgfxPaintEncoder::new(width, height, false).unwrap();
+        direct.set_analytic_glass(analytic);
+        let a_target = cached.target_texture(0).unwrap();
+        let b_target = direct.target_texture(0).unwrap();
+        let mut a_resources = context.create_resources(cached.resource_table());
+        let mut b_resources = context.create_resources(direct.resource_table());
+        a_resources
+            .map_image(
+                a_target,
+                context
+                    .create_image(width, height, TextureFormat::Bgra8Unorm)
+                    .unwrap(),
+            )
+            .unwrap();
+        b_resources
+            .map_image(
+                b_target,
+                context
+                    .create_image(width, height, TextureFormat::Bgra8Unorm)
+                    .unwrap(),
+            )
+            .unwrap();
+        let queue = context.create_queue();
+        let mut bg = PaintContext::new();
+        bg.fill_rect(Rect::from_xywh(-50., -50., 300., 900.), Color::WHITE);
+        for row in 0..80 {
+            bg.fill_rect(
+                Rect::from_xywh(12., row as f32 * 10., 176., 2.),
+                Color::rgba(0.1, 0.2, 0.8, 0.6),
+            );
+        }
+        let bg = bg.into_display_list();
+        let mut glass = PaintContext::new();
+        for y in [40., 100., 540.] {
+            glass.refractive_glass_rounded_rect(
+                Rect::from_xywh(20., y, 160., 70.),
+                16.,
+                6.,
+                Color::WHITE.with_opacity(0.3),
+                1.,
+            );
+        }
+        let glass = glass.into_display_list();
+        let mut foreground = PaintContext::new();
+        foreground.fill_rect(Rect::from_xywh(50., 80., 100., 3.), Color::BLACK);
+        let foreground = foreground.into_display_list();
+        let mut previous: Option<Arc<DisplayList>> = None;
+        for step in 0..7 {
+            let mut changing = PaintContext::new();
+            // The changed strip reaches the first lens through its blur halo,
+            // then the overlapping second lens; the distant lens is unchanged.
+            changing.fill_rect(
+                Rect::from_xywh(30., 32., 50. + step as f32 * 5., 5.),
+                Color::rgba(0.8, step as f32 * 0.15, 0.2, 0.7),
+            );
+            // Changing kernel support changes the tile grid/padding. A prior
+            // revision's texture must not be interpreted using the new grid.
+            let glass = if step >= 5 {
+                let mut glass = PaintContext::new();
+                for y in [40., 100., 540.] {
+                    glass.refractive_glass_rounded_rect(
+                        Rect::from_xywh(20., y, 160., 70.),
+                        16.,
+                        if step == 5 { 10. } else { 2. },
+                        Color::WHITE.with_opacity(0.3),
+                        1.,
+                    );
+                }
+                glass.into_display_list()
+            } else {
+                glass.clone()
+            };
+            let mut content = PaintContext::new();
+            content.draw_display_list(Point::ZERO, bg.clone());
+            content.draw_display_list(Point::ZERO, changing.into_display_list());
+            content.draw_display_list(Point::ZERO, glass.clone());
+            content.draw_display_list(Point::ZERO, foreground.clone());
+            let bounds = Rect::from_xywh(-50., -50., 300., 900.);
+            let layer = if let Some(old) = &previous {
+                content.into_cached_layer_revision(bounds, old)
+            } else {
+                content.into_cached_layer(bounds)
+            };
+            assert!(layer.raster_cache_bounds().is_some());
+            let mut paint = PaintContext::new();
+            paint.push_rounded_clip(Rect::from_xywh(0., 0., 200., 720.), 9.);
+            paint.draw_display_list(Point::new(0., -0.25), layer.clone());
+            paint.pop_clip();
+            let areas = if step == 0 || step >= 5 {
+                vec![(0, 0, width, height)]
+            } else {
+                vec![(28 * scale, 29 * scale, 90 * scale, 12 * scale)]
+            };
+            cached
+                .encode_frame(
+                    &mut queue.executor(&mut a_resources),
+                    0,
+                    None,
+                    &paint,
+                    Color::WHITE,
+                    scale * 1000,
+                    &areas,
+                )
+                .unwrap();
+            direct
+                .encode_frame(
+                    &mut queue.executor(&mut b_resources),
+                    0,
+                    None,
+                    &paint.flattened(),
+                    Color::WHITE,
+                    scale * 1000,
+                    &[(0, 0, width, height)],
+                )
+                .unwrap();
+            let a = a_resources.read_texture(a_target).unwrap();
+            let b = b_resources.read_texture(b_target).unwrap();
+            let max = a.iter().zip(&b).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+            assert!(
+                max <= 2,
+                "revision or partial replay changed pixels: scale={scale} analytic={analytic} step={step} max={max}"
+            );
+            previous = Some(layer);
+        }
+    }
+}
+
+#[test]
+fn nested_cached_scroll_pictures_match_full_frames_in_window_space() {
+    use scarlet_ui_core::{geometry::Point, renderer::DisplayList};
+    use std::sync::Arc;
+    let font = Arc::new(
+        scarlet_ui_core::graphics::FontStack::new(include_bytes!(
+            "../../scarlet-ui-core/src/testing/fonts/metrics-primary.ttf"
+        ))
+        .unwrap()
+        .with_fallback(include_bytes!(
+            "../../scarlet-ui-core/src/testing/fonts/metrics-fallback.ttf"
+        ))
+        .unwrap(),
+    );
+    let Some(context) = context() else {
+        return;
+    };
+    for (scale, analytic) in [(1, false), (2, false), (3, false), (2, true)] {
+        let (width, height) = (240 * scale, 480 * scale);
+        let mut cached = SgfxPaintEncoder::new(width, height, false).unwrap();
+        cached.set_analytic_glass(analytic);
+        let mut direct = SgfxPaintEncoder::new(width, height, false).unwrap();
+        direct.set_analytic_glass(analytic);
+        let a_target = cached.target_texture(0).unwrap();
+        let b_target = direct.target_texture(0).unwrap();
+        let mut a_resources = context.create_resources(cached.resource_table());
+        let mut b_resources = context.create_resources(direct.resource_table());
+        a_resources
+            .map_image(
+                a_target,
+                context
+                    .create_image(width, height, TextureFormat::Bgra8Unorm)
+                    .unwrap(),
+            )
+            .unwrap();
+        b_resources
+            .map_image(
+                b_target,
+                context
+                    .create_image(width, height, TextureFormat::Bgra8Unorm)
+                    .unwrap(),
+            )
+            .unwrap();
+        let queue = context.create_queue();
+        let backdrop = |ctx: &mut PaintContext<'_>, bounds: Rect| {
+            ctx.fill_rect(bounds, Color::WHITE);
+            for row in 0..70 {
+                ctx.fill_rect(
+                    Rect::from_xywh(4., row as f32 * 10., 210., 2.),
+                    Color::rgba(0.2, 0.3, 0.8, 0.5),
+                );
+            }
+        };
+        let bounds = Rect::from_xywh(-50., -50., 340., 850.);
+        let mut inner = PaintContext::new();
+        backdrop(&mut inner, bounds);
+        for row in 0..16 {
+            inner.draw_text(
+                Point::new(12.25, row as f32 * 35. + 2.5),
+                format!("Track {row}"),
+                Color::BLACK,
+                15.,
+            );
+            // Explicit editor fonts must follow the same window-space snap and
+            // nested tile rules as default UI text, including fallback ink.
+            inner.draw_text_with_font_stack(
+                Point::new(95.25, row as f32 * 35. + 2.5),
+                "日☃",
+                Color::BLACK,
+                15.25,
+                font.clone(),
+            );
+        }
+        inner.refractive_glass_rounded_rect(
+            Rect::from_xywh(20., 90., 160., 60.),
+            12.,
+            5.,
+            Color::WHITE.with_opacity(0.3),
+            1.,
+        );
+        let inner = inner.into_cached_layer(bounds);
+        let mut old_middle: Option<Arc<DisplayList>> = None;
+        let mut old_outer: Option<Arc<DisplayList>> = None;
+        for (step, (inside_x, inside, middle_offset, outer_offset)) in [
+            (0., 0.25, 0.25, 0.25),
+            (0., 8.25, 0.25, 0.25),
+            (64., 20.25, 0.25, 0.25),
+            (64., 20.25, 14.25, 0.25),
+            (64., 20.25, 14.25, 28.25),
+            (0., 4.25, 2.25, 0.25),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut middle = PaintContext::new();
+            backdrop(&mut middle, bounds);
+            middle.push_rounded_clip(Rect::from_xywh(18., 24., 150., 130.), 7.);
+            middle.draw_display_list(Point::new(18. - inside_x, 24. - inside), inner.clone());
+            middle.pop_clip();
+            middle.fill_rect(Rect::from_xywh(8., 30., 175., 2.), Color::BLACK);
+            middle.refractive_glass_rounded_rect(
+                Rect::from_xywh(20., 170., 150., 60.),
+                12.,
+                4.,
+                Color::WHITE.with_opacity(0.3),
+                1.,
+            );
+            let middle = if let Some(old) = &old_middle {
+                middle.into_cached_layer_revision(bounds, old)
+            } else {
+                middle.into_cached_layer(bounds)
+            };
+            let mut outer = PaintContext::new();
+            backdrop(&mut outer, bounds);
+            outer.push_rounded_clip(Rect::from_xywh(10., 30., 190., 240.), 9.);
+            outer.draw_display_list(Point::new(10., 30. - middle_offset), middle.clone());
+            outer.pop_clip();
+            outer.refractive_glass_rounded_rect(
+                Rect::from_xywh(20., 400., 180., 60.),
+                16.,
+                5.,
+                Color::WHITE.with_opacity(0.3),
+                1.,
+            );
+            let outer = if let Some(old) = &old_outer {
+                outer.into_cached_layer_revision(bounds, old)
+            } else {
+                outer.into_cached_layer(bounds)
+            };
+            assert!(
+                inner.raster_cache_bounds().is_some()
+                    && middle.raster_cache_bounds().is_some()
+                    && outer.raster_cache_bounds().is_some()
+            );
+            let mut paint = PaintContext::new();
+            paint.push_rounded_clip(Rect::from_xywh(0., 0., 240., 480.), 10.);
+            paint.draw_display_list(Point::new(-0.25, -outer_offset), outer.clone());
+            paint.pop_clip();
+            cached
+                .encode_frame(
+                    &mut queue.executor(&mut a_resources),
+                    0,
+                    None,
+                    &paint,
+                    Color::WHITE,
+                    scale * 1000,
+                    &[(0, 0, width, height)],
+                )
+                .unwrap();
+            direct
+                .encode_frame(
+                    &mut queue.executor(&mut b_resources),
+                    0,
+                    None,
+                    &paint.flattened(),
+                    Color::WHITE,
+                    scale * 1000,
+                    &[(0, 0, width, height)],
+                )
+                .unwrap();
+            let a = a_resources.read_texture(a_target).unwrap();
+            let b = b_resources.read_texture(b_target).unwrap();
+            let max = a.iter().zip(&b).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+            assert!(
+                max <= 3,
+                "nested cached pixels diverged: scale={scale} analytic={analytic} step={step} max={max}"
+            );
+            old_middle = Some(middle);
+            old_outer = Some(outer);
+        }
+    }
+}
+
+#[test]
+fn nested_cache_depth_fallback_preserves_window_space_text() {
+    use scarlet_ui_core::geometry::Point;
+    let Some(context) = context() else { return };
+    let (width, height, scale) = (240, 200, 2000);
+    let mut cached = SgfxPaintEncoder::new(width, height, false).unwrap();
+    let mut direct = SgfxPaintEncoder::new(width, height, false).unwrap();
+    let a_target = cached.target_texture(0).unwrap();
+    let b_target = direct.target_texture(0).unwrap();
+    let mut a_resources = context.create_resources(cached.resource_table());
+    let mut b_resources = context.create_resources(direct.resource_table());
+    a_resources
+        .map_image(
+            a_target,
+            context
+                .create_image(width, height, TextureFormat::Bgra8Unorm)
+                .unwrap(),
+        )
+        .unwrap();
+    b_resources
+        .map_image(
+            b_target,
+            context
+                .create_image(width, height, TextureFormat::Bgra8Unorm)
+                .unwrap(),
+        )
+        .unwrap();
+    let queue = context.create_queue();
+    let bounds = Rect::from_xywh(0., 0., 180., 180.);
+    let mut leaf = PaintContext::new();
+    leaf.fill_rect(bounds, Color::WHITE);
+    for row in 0..5 {
+        leaf.draw_text(
+            Point::new(10.25, 10.25 + row as f32 * 20.),
+            "Nested fallback",
+            Color::BLACK,
+            15.,
+        );
+    }
+    let mut picture = leaf.into_cached_layer(bounds);
+    // The ninth picture crosses the encoder's eight-target recursion limit.
+    // Its raw text would otherwise enter the mesh fallback in tile coordinates.
+    for _ in 0..8 {
+        let mut parent = PaintContext::new();
+        parent.draw_display_list(Point::ZERO, picture);
+        picture = parent.into_cached_layer(bounds);
+    }
+    for origin in [
+        Point::new(-20.5, -25.5),
+        Point::new(-20.25, -25.25),
+        Point::new(0.25, 0.25),
+    ] {
+        let mut paint = PaintContext::new();
+        paint.draw_display_list(origin, picture.clone());
+        cached
+            .encode_frame(
+                &mut queue.executor(&mut a_resources),
+                0,
+                None,
+                &paint,
+                Color::WHITE,
+                scale,
+                &[(0, 0, width, height)],
+            )
+            .unwrap();
+        direct
+            .encode_frame(
+                &mut queue.executor(&mut b_resources),
+                0,
+                None,
+                &paint.flattened(),
+                Color::WHITE,
+                scale,
+                &[(0, 0, width, height)],
+            )
+            .unwrap();
+        let a = a_resources.read_texture(a_target).unwrap();
+        let b = b_resources.read_texture(b_target).unwrap();
+        assert!(
+            b.chunks_exact(4)
+                .any(|pixel| pixel[..3].iter().all(|c| *c < 200)),
+            "the depth-fallback fixture must contain visible text"
+        );
+        let max = a.iter().zip(&b).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+        assert_eq!(max, 0, "depth fallback shifted text at {origin:?}");
     }
 }

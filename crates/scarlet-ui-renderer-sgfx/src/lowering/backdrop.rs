@@ -116,14 +116,6 @@ pub(super) struct Resources {
     analytic: Option<analytic::Resources>,
 }
 
-pub(super) fn contains_backdrop(paint: &PaintContext<'_>) -> bool {
-    paint.commands().iter().any(|command| match command {
-        PaintCommand::BackdropFilterRoundedRect { .. } => true,
-        PaintCommand::DrawDisplayList { list, .. } => list.reads_backdrop(),
-        _ => false,
-    })
-}
-
 impl SgfxPaintEncoder {
     /// Enable per-pixel glass on backends supporting SGFX WGSL pipelines.
     /// Portable fixed-pipeline backends keep the mesh implementation by default.
@@ -292,6 +284,17 @@ impl SgfxPaintEncoder {
         if refraction > 0.0 && !analytic {
             // The rim carries its own half-pixel coverage fringe. Preserve
             // ancestor clips, but do not cut that fringe at the glass boundary.
+            if let Some(draw) = self.cached_glass_rim(
+                tessellator,
+                rect,
+                corner_radius,
+                opacity * refraction,
+                scale,
+            )? {
+                draws.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
+                draws.push(draw);
+                return Ok(());
+            }
             let rim =
                 tessellator.glass_rim(rect, corner_radius, opacity * refraction.clamp(0.0, 1.0));
             if let Some(geometry) = rim? {
@@ -760,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn backdrop_is_an_ordered_barrier_and_forces_full_replay() {
+    fn backdrop_is_an_ordered_barrier_and_reconstructs_only_its_read_closure() {
         let mut renderer = SgfxPaintEncoder::new(200, 120, false).unwrap();
         let mut paint = PaintContext::new();
         paint.fill_rounded_rect(Rect::from_xywh(0., 0., 200., 120.), 0., UiColor::WHITE);
@@ -795,7 +798,7 @@ mod tests {
         );
         assert_eq!(
             executor.render_areas[0],
-            PixelRect::new(0, 0, 200, 120).unwrap()
+            PixelRect::new(3, 3, 114, 74).unwrap()
         );
         assert!(!kinds.contains(&"set-programmable-pipeline"));
         assert_eq!(renderer.backdrop_fallback_count(), 0);

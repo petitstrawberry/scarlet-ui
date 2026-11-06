@@ -98,7 +98,8 @@ clips; paint changes replace affected recordings, and virtualization reconciles
 mounted children without rerecording clean rows. Virtual rows are grouped into
 one recording to preserve batching. Removed rows release their recordings, and
 an offscreen content update commits even when it produces no visible damage.
-Nested scrollers invalidate their enclosing grouped row. Content, layout and
+Nested scrollers revise their enclosing grouped row while retaining independent
+child pictures and raster tiles. Content, layout and
 scroll metadata are reconciled on the UI thread before submission; this is not
 an independent compositor thread.
 
@@ -221,3 +222,81 @@ Grouped recordings also preserve the original shared image `Arc<Buffer>` through
 flattening. A resource-identity regression test prevents grouping from turning
 shared covers back into copied borrowed snapshots. The recorded comparisons
 precede this last sharing fix; it does not change geometry or the cache limits.
+
+## Independent paint revisions and read dependencies
+
+A state notification, a paint recording and a raster tile are different units.
+A broad notification can still rebuild/layout a page, but recording equal
+commands and immutable resources preserves its existing `DisplayList` identity.
+Scroll pictures retain their child recordings in paint order instead of replacing
+them with one flattened recording. `into_cached_layer_revision` keeps a stable
+cache lineage while each immutable revision has a distinct content identity.
+The flat command view and per-scale footprints are computed lazily and reused.
+Application subscription scope remains the application's responsibility.
+
+`PaintDependencies` describes two conservative logical-coordinate regions:
+`writes` is the output coverage; `reads` is the preceding scene pixels sampled by
+the operation. This is a renderer contract, independent of widgets and materials.
+Ordinary source-over paint has no nonlocal read region, but is still replayed over
+cleared pixels in its original order. Blur declares its kernel halo; a custom
+paint extension can use `draw_extension_with_dependencies` to declare its own
+footprint. Clipping restricts writes, not the input pixels an effect may sample.
+Include antialiasing, filtering and every possible sample in declared regions.
+Unknown effects use `PaintDependencies::UNKNOWN` and full reconstruction. Existing
+`draw_extension` callers retain this conservative default. Literal
+`PaintCommand::Extension` construction now also requires `dependencies`.
+
+`damage_since` compares leaf recording identities, transforms, clips and image
+resources. Changed/removed output becomes the invalidation seed. Ordered
+read-to-write propagation adds dependent output; clean-prefix reconstruction
+then expands through connected input/output regions. Regions are rounded outward
+to physical pixels before this closure, and disconnected components remain
+separate. Each component replays the original paint order from a cleared
+background, so filters never sample the previous frame's foreground. Unknown
+coverage or cross-record opacity/clip state falls back to complete replay.
+A declared footprint does not by itself enable raster caching for an unsupported
+extension: backend eligibility and isolation checks still apply.
+
+SGFX retains the revision represented by each tile. On a new revision it repairs
+only intersecting dependency components; unchanged tiles and static effects
+outside those components keep their pixels. Cache keys include scale, exact
+scroll phase, origin-sensitive raster snapping and tile padding. Changing kernel
+support therefore cannot reinterpret an old texture using a different tile grid.
+Snapshots have no predecessor chain and leave with their bounded LRU slots.
+Raster resolution, optical parameters and pool limits are unchanged.
+
+Regression coverage includes a root-subscribed Widget Factory slider preserving
+unrelated child identities, repeated updates preserving static glass tiles,
+arbitrary extension read chains, image replacement, physical-pixel rounding,
+and GPU comparisons against complete redraw at 1×/2×/3×. The GPU fixture includes
+overlapping filters, later foreground, fractional scrolling and changed kernel
+support. These checks establish retained work and pixel correctness; they do not
+promise constant total CPU cost or eliminate application rebuild/layout work.
+
+## Nested scroll pictures
+
+Scroll pictures preserve independently cached descendants instead of flattening
+the whole nested viewport into the parent's raster work. A local content stamp
+is separate from placement in the parent: moving an outer viewport reuses its
+complete picture, including a stopped inner viewport. A gesture-end notification
+with no geometry or overlay change leaves the recordings intact.
+
+When the inner viewport moves, the enclosing picture gets a new revision and
+repairs affected tile regions by compositing the child's cached pixels in paint
+order. Static siblings and unchanged child tiles are retained. Newly exposed
+tiles, changed content and new exact subpixel phases still require raster work;
+the cache does not promise constant work for arbitrary content.
+
+Tile composition keeps window-space text/image snapping through nested targets,
+including negative and fractional origins. Backdrop scratch resources are reused
+per active depth; the shared tile pool retains its existing 64–128 slot bound.
+In-flight parent targets cannot be recycled by a child. Eight cached levels are
+supported; deeper levels, pool exhaustion and ineligible pictures use the normal
+rendering path. Failed submissions restore the enclosing target state and do not
+commit incomplete tiles. No raster resolution or material parameters change.
+
+Regression coverage drives actual two- and three-level ScrollViews through inner
+motion, outer-only motion, direction reversals and gesture boundaries, checking
+recording identities and CPU pixels against non-retained redraws. GPU tests check
+child-tile reuse and compare three nested pictures, text, rounded clips and
+overlapping glass against full redraw at 1×/2×/3×.

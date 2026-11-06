@@ -667,16 +667,23 @@ fn paging_nested_scrolls_moves_the_nearest_viewport_then_bubbles_at_its_edge() {
     );
     pipeline.render_for_present().unwrap();
     assert!(tab(&mut pipeline, false));
+    pipeline.render_for_present().unwrap();
     assert!(press(&mut pipeline, KeyCode::End));
     assert_eq!(
         offsets(&pipeline),
         vec![Point::ZERO, Point::new(0.0, -120.0)]
     );
+    pipeline.render_for_present().unwrap();
+    assert!(pipeline.pipeline_owner().last_paint_ids().is_empty());
+    assert_eq!(pipeline.pipeline_owner().last_composite_ids().len(), 1);
     assert!(press(&mut pipeline, KeyCode::End));
     assert_eq!(
         offsets(&pipeline),
         vec![Point::new(0.0, -300.0), Point::new(0.0, -120.0)]
     );
+    pipeline.render_for_present().unwrap();
+    assert!(pipeline.pipeline_owner().last_paint_ids().is_empty());
+    assert_eq!(pipeline.pipeline_owner().last_composite_ids().len(), 1);
     assert!(!press(&mut pipeline, KeyCode::End));
 }
 

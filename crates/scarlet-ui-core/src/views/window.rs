@@ -1320,7 +1320,8 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
         }
         self.content_pan_y = pan;
         if self.mounted {
-            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+            // Only the child's placement changed. Its immutable paint and
+            // the Window background remain valid through keyboard avoidance.
             crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id);
         }
         true

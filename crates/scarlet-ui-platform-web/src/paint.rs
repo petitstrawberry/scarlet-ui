@@ -44,6 +44,10 @@ impl WebPaint {
     }
 }
 impl PaintBackend for WebPaint {
+    fn supports_retained_display_lists(&self) -> bool {
+        true
+    }
+
     fn resize(&mut self, size: Size, scale: u32) {
         self.scale = scale.max(1);
         let width = (size.width * self.scale as f32 / 1000.0).ceil().max(1.0) as u32;
@@ -98,7 +102,7 @@ impl PaintBackend for WebPaint {
             shifted_damage.as_deref(),
         );
         let mut composed = PaintContext::new();
-        composed.append_at(context, Point::new(0.0, offset));
+        composed.append_retained_at(context, Point::new(0.0, offset));
         menus.paint(&mut composed);
         if areas.is_empty() {
             return Err(Error::RenderError);
@@ -113,13 +117,21 @@ impl PaintBackend for WebPaint {
                 self.scale,
                 &areas,
             )
-            .map_err(|_| Error::RenderError)?;
+            .map_err(|error| {
+                web_sys::console::error_1(
+                    &format!("ScarletUI WebGPU encode_frame: {error:?}").into(),
+                );
+                Error::RenderError
+            })?;
         self.window
             .present(
                 &self.session,
                 self.encoder.target_texture(0).ok_or(Error::RenderError)?,
             )
-            .map_err(|_| Error::RenderError)?;
+            .map_err(|error| {
+                web_sys::console::error_1(&format!("ScarletUI WebGPU present: {error:?}").into());
+                Error::RenderError
+            })?;
         Ok(BackendFrame::External)
     }
 }

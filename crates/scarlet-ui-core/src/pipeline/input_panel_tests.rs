@@ -270,3 +270,133 @@ fn rebuilt_window_has_tablet_content_bounds_in_its_first_painted_frame() {
     assert_eq!(content(&pipeline).id(), id);
     assert_eq!(content(&pipeline).bounds(), Rect::new(Point::ZERO, SURFACE));
 }
+
+#[test]
+fn native_keyboard_reveal_first_reveals_inside_a_fully_occluded_nested_scroll() {
+    let inner = ScrollView::new(
+        VStack::new((
+            Rectangle::new().frame(400.0, 250.0),
+            TextField::new(state(String::from("nested")))
+                .autofocus(true)
+                .frame(400.0, 40.0),
+            Rectangle::new().frame(400.0, 100.0),
+        ))
+        .spacing(0.0),
+    )
+    .vertical()
+    .content_size(400.0, 390.0)
+    .frame(400.0, 200.0);
+    let mut pipeline = mounted(
+        ScrollView::new(
+            VStack::new((
+                Rectangle::new().frame(480.0, 400.0),
+                inner,
+                Rectangle::new().frame(480.0, 500.0),
+            ))
+            .spacing(0.0),
+        )
+        .vertical()
+        .content_size(480.0, 1100.0),
+    );
+    panel(&mut pipeline, Some(KEYBOARD));
+    let caret = visible_caret(&pipeline);
+    fn check_viewports(element: &dyn Element, parent: Point, caret: Rect) {
+        let position = element.position();
+        let origin = Point::new(parent.x + position.x, parent.y + position.y);
+        if element
+            .render_object()
+            .is_some_and(|r| r.owns_child_viewport())
+        {
+            let bounds = Rect::new(origin, element.bounds().size);
+            assert!(
+                caret.top() >= bounds.top() && caret.bottom() <= bounds.bottom() + 0.01,
+                "the caret must be visible inside every nested viewport: {caret:?}, {bounds:?}"
+            );
+        }
+        for child in element.children() {
+            check_viewports(child.as_ref(), origin, caret);
+        }
+    }
+    for _ in 0..3 {
+        check_viewports(pipeline.element_tree().root().unwrap(), Point::ZERO, caret);
+        frame(&mut pipeline);
+        assert_eq!(visible_caret(&pipeline), caret);
+    }
+    assert_eq!(content(&pipeline).position(), Point::ZERO, "no Window pan");
+}
+
+#[test]
+fn native_keyboard_reveal_keeps_the_caret_below_the_scroll_safe_area() {
+    use crate::geometry::{EdgeInsets, SafeAreaEdges};
+    let form = VStack::new((
+        Rectangle::new().frame(480.0, 100.0),
+        TextField::new(state(String::from("safe")))
+            .autofocus(true)
+            .frame(480.0, 40.0),
+        Rectangle::new().frame(480.0, 1000.0),
+    ))
+    .spacing(0.0);
+    let mut pipeline = RenderingPipeline::new();
+    pipeline.set_root(
+        Window::new(
+            "Safe keyboard",
+            ScrollView::new(form).vertical().wheel_sensitivity(1.0),
+        )
+        .content_safe_area(SafeAreaEdges::NONE)
+        .decoration(WindowDecoration::NONE)
+        .shadow(false)
+        .size(SURFACE)
+        .create_element(),
+    );
+    pipeline.layout_initial();
+    pipeline.set_safe_area_insets(EdgeInsets::new(0.0, 47.0, 0.0, 29.0));
+    pipeline.handle_event(&Event::TabletPresentationChanged { active: true });
+    panel(&mut pipeline, Some(KEYBOARD));
+    assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+        delta_x: 0,
+        delta_y: -140,
+        x: 450,
+        y: 100,
+        phase: WheelPhase::Moved,
+        source: ScrollSource::Wheel,
+    })));
+    frame(&mut pipeline);
+    let manual_caret = visible_caret(&pipeline);
+    assert!(
+        manual_caret.top() < 47.0,
+        "fixture must scroll under the top inset"
+    );
+    assert!(pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c: '!' })));
+    frame(&mut pipeline);
+    assert!(
+        visible_caret(&pipeline).top() >= 47.0,
+        "native reveal must honor the same safe top as Web reveal"
+    );
+    assert_eq!(content(&pipeline).bounds(), Rect::new(Point::ZERO, SURFACE));
+}
+
+#[test]
+fn native_window_pan_only_invalidates_composition() {
+    let mut pipeline = mounted(VStack::new((
+        Rectangle::new().frame(480.0, 500.0),
+        TextField::new(state(String::from("static")))
+            .autofocus(true)
+            .frame(480.0, 40.0),
+    )));
+    // Drain presentation/layout work before measuring a position-only reveal.
+    frame(&mut pipeline);
+    let root_id = pipeline.element_tree().root().unwrap().id();
+    for occlusion in [Some(KEYBOARD), None, Some(KEYBOARD)] {
+        panel(&mut pipeline, occlusion);
+        assert!(
+            pipeline.pipeline_owner.last_paint_ids().is_empty(),
+            "moving the Window's content must not repaint its static subtree"
+        );
+        assert!(
+            pipeline
+                .pipeline_owner
+                .last_composite_ids()
+                .contains(&root_id)
+        );
+    }
+}

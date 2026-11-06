@@ -1,5 +1,6 @@
 //! Paint-command to persistent SGFX IR lowering.
 mod backdrop;
+mod optical_cache;
 mod retained;
 mod shadow_cache;
 mod tiles;
@@ -466,13 +467,17 @@ pub struct SgfxPaintEncoder {
     recording_mesh: bool,
     shadow_cache: Option<shadow_cache::ShadowCache>,
     shape_cache: crate::geometry::ShapeCache,
+    optical_cache: optical_cache::OpticalCache,
     backdrop: Option<backdrop::Resources>,
     backdrop_pixels: u64,
     backdrop_filters: u32,
     backdrop_fallbacks: u32,
     analytic_glass: bool,
     raster_tiles: Vec<tiles::Tile>,
-    tile_backdrop: Option<backdrop::Resources>,
+    tile_backdrops: Vec<Option<backdrop::Resources>>,
+    tile_depth: usize,
+    // Logical translation from window coordinates into the current raster tile.
+    tile_translation: scarlet_ui_core::geometry::Point,
 }
 
 impl SgfxPaintEncoder {
@@ -613,9 +618,12 @@ impl SgfxPaintEncoder {
             retained_meshes: Vec::new(),
             analytic_glass: false,
             raster_tiles: Vec::new(),
-            tile_backdrop: None,
+            tile_backdrops: Vec::new(),
+            tile_depth: 0,
+            tile_translation: scarlet_ui_core::geometry::Point::ZERO,
             shadow_cache: None,
             shape_cache: crate::geometry::ShapeCache::default(),
+            optical_cache: optical_cache::OpticalCache::default(),
             backdrop: None,
             backdrop_pixels: 0,
             backdrop_filters: 0,
@@ -890,17 +898,57 @@ impl SgfxPaintEncoder {
         #[cfg(feature = "std")]
         let started = scarlet_ui_core::debug::frame_log_enabled().then(Instant::now);
         let render_areas = self.validate_render_areas(render_areas)?;
-        // A filter reads earlier painting beyond its output damage rectangle.
-        // Full replay prevents stale/previously filtered pixels in its halo.
-        let render_areas = if backdrop::contains_backdrop(paint) {
-            alloc::vec![PixelBounds {
-                x: 0,
-                y: 0,
-                width: self.width,
-                height: self.height,
-            }]
-        } else {
+        let factor = scale_milli.max(1) as f32 / 1000.;
+        let full = PixelBounds {
+            x: 0,
+            y: 0,
+            width: self.width,
+            height: self.height,
+        };
+        let dependency_passes = !(render_areas.len() == 1 && render_areas[0] == full)
+            && paint
+                .paint_dependencies(scale_milli)
+                .iter()
+                .any(|dep| dep.reads != scarlet_ui_core::renderer::PaintRegion::Empty);
+        let render_areas = if !dependency_passes {
             render_areas
+        } else {
+            let logical = render_areas
+                .iter()
+                .map(|r| {
+                    scarlet_ui_core::geometry::Rect::from_xywh(
+                        r.x as f32 / factor,
+                        r.y as f32 / factor,
+                        r.width as f32 / factor,
+                        r.height as f32 / factor,
+                    )
+                })
+                .collect::<Vec<_>>();
+            paint
+                .reconstruction_regions(
+                    &logical,
+                    scarlet_ui_core::geometry::Rect::from_xywh(
+                        0.,
+                        0.,
+                        self.width as f32 / factor,
+                        self.height as f32 / factor,
+                    ),
+                    scale_milli,
+                )
+                .into_iter()
+                .filter_map(|r| {
+                    let x = libm::floorf(r.left() * factor).max(0.) as u32;
+                    let y = libm::floorf(r.top() * factor).max(0.) as u32;
+                    let right = (libm::ceilf(r.right() * factor) as u32).min(self.width);
+                    let bottom = (libm::ceilf(r.bottom() * factor) as u32).min(self.height);
+                    (right > x && bottom > y).then_some(PixelBounds {
+                        x,
+                        y,
+                        width: right - x,
+                        height: bottom - y,
+                    })
+                })
+                .collect()
         };
         self.backdrop_pixels = 0;
         self.backdrop_filters = 0;
@@ -920,6 +968,28 @@ impl SgfxPaintEncoder {
             self.prepare_canvases(executor, &extension_context(paint), scale_milli)?;
         } else {
             self.prepare_canvases(executor, paint, scale_milli)?;
+        }
+        if dependency_passes && (render_areas.len() != 1 || render_areas[0] != full) {
+            // Reconstruct disjoint dependency closures separately. Filters cannot
+            // sample last frame's foreground in a gap between damage rectangles.
+            for area in &render_areas {
+                let mut clipped = PaintContext::new();
+                clipped.push_clip(scarlet_ui_core::geometry::Rect::from_xywh(
+                    area.x as f32 / factor,
+                    area.y as f32 / factor,
+                    area.width as f32 / factor,
+                    area.height as f32 / factor,
+                ));
+                clipped.append_retained_at(paint, scarlet_ui_core::geometry::Point::ZERO);
+                clipped.pop_clip();
+                let frame = if retained {
+                    self.lower_retained(executor, &clipped, scale_milli, *area)?
+                } else {
+                    self.lower(&clipped, scale_milli, *area)?
+                };
+                self.submit(executor, target, background, &[*area], &frame)?;
+            }
+            return Ok(());
         }
         let lowered = if retained {
             self.lower_retained(executor, paint, scale_milli, render_bounds)?
@@ -1498,7 +1568,7 @@ impl SgfxPaintEncoder {
                 } => {
                     opacity = finite_unit(*next_opacity)?;
                 }
-                PaintCommand::Extension { rect, payload } => {
+                PaintCommand::Extension { rect, payload, .. } => {
                     if let Some(image) = payload
                         .as_ref()
                         .as_any()
@@ -1645,7 +1715,7 @@ impl SgfxPaintEncoder {
         // Exact sizes are protected too: an earlier resize must not steal a
         // target that a later command will still sample at its original size.
         for command in paint.commands() {
-            let PaintCommand::Extension { rect, payload } = command else {
+            let PaintCommand::Extension { rect, payload, .. } = command else {
                 continue;
             };
             let Some(canvas) = payload.as_ref().as_any().downcast_ref::<SgfxCanvasPaint>() else {
@@ -1672,7 +1742,7 @@ impl SgfxPaintEncoder {
             }
         }
         for command in paint.commands() {
-            let PaintCommand::Extension { rect, payload } = command else {
+            let PaintCommand::Extension { rect, payload, .. } = command else {
                 continue;
             };
             let Some(canvas) = payload.as_ref().as_any().downcast_ref::<SgfxCanvasPaint>() else {
@@ -2727,6 +2797,7 @@ impl SgfxPaintEncoder {
             return Ok(());
         }
         self.submit_texture_uploads(executor, frame)?;
+        self.submit_optical_uploads(executor)?;
 
         let table = Rc::clone(&self.table);
         let target = table
@@ -3032,7 +3103,7 @@ fn extension_context(paint: &PaintContext<'_>) -> PaintContext<'static> {
         use scarlet_ui_core::geometry::{Point, Rect};
         for command in paint.commands() {
             match command {
-                PaintCommand::Extension { rect, payload } => out.draw_extension(
+                PaintCommand::Extension { rect, payload, .. } => out.draw_extension(
                     Rect::new(
                         Point::new(rect.origin.x + origin.x, rect.origin.y + origin.y),
                         rect.size,
@@ -3273,6 +3344,7 @@ fn push_draw_phase(
             .first_vertex
             .checked_add(previous.geometry.vertex_count);
         if !matches!(source, DrawSource::Backdrop(_) | DrawSource::ClearOnly)
+            && previous.vertex_buffer.is_none()
             && previous.source == source
             && previous.snap_phase == snap_phase
             && previous.geometry.scissor == geometry.scissor

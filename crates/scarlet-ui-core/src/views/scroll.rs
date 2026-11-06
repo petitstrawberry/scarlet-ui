@@ -1140,6 +1140,7 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         reveal: bool,
     ) -> bool {
         let before = (self.keyboard_bottom_inset, self.offset());
+        let safe = crate::geometry::safe_area_rect(self.viewport_size, self.safe_area_insets);
         self.keyboard_bottom_inset = occlusion
             .filter(|area| {
                 caret.is_some()
@@ -1148,21 +1149,27 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
                     && area.size.width > 0.
                     && area.origin.x < self.viewport_size.width
                     && area.origin.x + area.size.width > 0.
-                    && area.origin.y > 0.
+                    && area.origin.y > safe.top()
                     && area.origin.y < self.viewport_size.height
             })
             .map_or(0., |area| self.viewport_size.height - area.origin.y);
         self.clamp_offsets();
-        if self.keyboard_bottom_inset > 0. && (reveal || before.0 != self.keyboard_bottom_inset) {
+        if occlusion.is_some() && (reveal || before.0 != self.keyboard_bottom_inset) {
             if let Some(caret) = caret {
-                let bottom = self.viewport_size.height - self.keyboard_bottom_inset;
+                // A fully covered inner viewport must reveal within itself
+                // before an outer viewport moves it above the keyboard. Use
+                // the ordinary safe viewport when no usable keyboard edge
+                // intersects it, just as the Web reveal route does.
+                let bottom = (self.viewport_size.height - self.bottom_overlay_inset())
+                    .min(safe.bottom())
+                    .max(safe.top());
                 if caret.origin.y + caret.size.height > bottom {
                     self.set_offset(
                         self.offset_x,
                         self.offset_y + caret.origin.y + caret.size.height - bottom,
                     );
-                } else if caret.origin.y < 0. {
-                    self.set_offset(self.offset_x, self.offset_y + caret.origin.y);
+                } else if caret.origin.y < safe.top() {
+                    self.set_offset(self.offset_x, self.offset_y + caret.origin.y - safe.top());
                 }
             }
         }

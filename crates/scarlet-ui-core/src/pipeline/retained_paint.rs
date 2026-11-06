@@ -13,6 +13,9 @@ struct Node {
     generation: u64,
     parent: Option<ElementId>,
     subtree_stamp: u64,
+    // A picture is in local coordinates. Moving it changes its parent's
+    // contents, but does not invalidate this node's own retained picture.
+    content_stamp: u64,
     position: Point,
     bounds: Rect,
     clip: Option<(Rect, f32)>,
@@ -70,6 +73,7 @@ impl RetainedPaint {
             generation: 0,
             parent,
             subtree_stamp: 0,
+            content_stamp: 0,
             position: Point::ZERO,
             bounds: Rect::default(),
             clip: None,
@@ -82,8 +86,8 @@ impl RetainedPaint {
         let position = element.position();
         let bounds = RenderingPipeline::element_paint_bounds(element, Point::ZERO);
         let clip = RenderingPipeline::clip_for_element(element, Point::ZERO);
-        let changed = node.position != position
-            || node.bounds != bounds
+        let moved = node.position != position;
+        let changed = node.bounds != bounds
             || node.clip != clip
             || !node
                 .children
@@ -103,18 +107,33 @@ impl RetainedPaint {
         if own_dirty {
             let mut context = PaintContext::new();
             RenderingPipeline::paint_element_self(&mut context, element, Point::ZERO);
-            node.paint = (!context.is_empty()).then(|| context.into_display_list());
+            if node
+                .paint
+                .as_ref()
+                .is_none_or(|old| !context.same_recording(old))
+            {
+                node.paint = (!context.is_empty()).then(|| context.into_display_list());
+            }
         }
         // Overlays include scrollbar thumbs and can change on a composite-only frame.
         if own_dirty || structural_ids.contains(&id) {
             let mut context = PaintContext::new();
             RenderingPipeline::paint_element_overlay(&mut context, element, Point::ZERO);
-            node.overlay = (!context.is_empty()).then(|| context.into_display_list());
+            if node
+                .overlay
+                .as_ref()
+                .is_none_or(|old| !context.same_recording(old))
+            {
+                node.overlay = (!context.is_empty()).then(|| context.into_display_list());
+            }
         }
         if changed
             || old_paint != node.paint.as_ref().map_or(0, |list| list.identity())
             || old_overlay != node.overlay.as_ref().map_or(0, |list| list.identity())
         {
+            node.content_stamp = self.generation;
+        }
+        if moved {
             node.subtree_stamp = self.generation;
         }
         for child in element.children() {
@@ -134,10 +153,12 @@ impl RetainedPaint {
         let stamp = self.nodes[&id]
             .children
             .iter()
-            .fold(self.nodes[&id].subtree_stamp, |stamp, child| {
+            .fold(self.nodes[&id].content_stamp, |stamp, child| {
                 stamp.max(self.nodes[child].subtree_stamp)
             });
-        self.nodes.get_mut(&id).unwrap().subtree_stamp = stamp;
+        let node = self.nodes.get_mut(&id).unwrap();
+        node.content_stamp = stamp;
+        node.subtree_stamp = node.subtree_stamp.max(stamp);
         let reads_backdrop = element.render_object().is_some_and(|r| r.reads_backdrop())
             || self.nodes[&id]
                 .children
@@ -165,7 +186,7 @@ impl RetainedPaint {
     }
     fn refresh_group(&mut self, id: ElementId) {
         let node = &self.nodes[&id];
-        let stamp = node.subtree_stamp;
+        let stamp = node.content_stamp;
         if node.group.as_ref().is_none_or(|(old, _)| *old != stamp) {
             let position = node.position;
             let mut context = PaintContext::new();
@@ -177,9 +198,12 @@ impl RetainedPaint {
                 None,
                 false,
             );
-            let context = context.flattened();
             let list = if context.commands().len() > 1 {
-                context.into_cached_layer(self.group_bounds(id))
+                if let Some((_, previous)) = &self.nodes[&id].group {
+                    context.into_cached_layer_revision(self.group_bounds(id), previous)
+                } else {
+                    context.into_cached_layer(self.group_bounds(id))
+                }
             } else {
                 context.into_display_list()
             };
@@ -220,35 +244,60 @@ impl RetainedPaint {
     /// virtualization mounts more children. This never visits sibling panes.
     pub fn sync_composite(&mut self, element: &dyn Element) {
         self.generation = self.generation.wrapping_add(1);
-        if let Some(node) = self.nodes.get_mut(&element.id()) {
-            node.subtree_stamp = self.generation;
-            node.position = element.position();
-            node.bounds = RenderingPipeline::element_paint_bounds(element, Point::ZERO);
-            node.clip = RenderingPipeline::clip_for_element(element, Point::ZERO);
-            let mut context = PaintContext::new();
-            RenderingPipeline::paint_element_overlay(&mut context, element, Point::ZERO);
+        let Some(node) = self.nodes.get_mut(&element.id()) else {
+            return;
+        };
+        let moved = node.position != element.position();
+        let bounds = RenderingPipeline::element_paint_bounds(element, Point::ZERO);
+        let clip = RenderingPipeline::clip_for_element(element, Point::ZERO);
+        let mut changed = node.bounds != bounds || node.clip != clip;
+        node.position = element.position();
+        node.bounds = bounds;
+        node.clip = clip;
+        let mut context = PaintContext::new();
+        RenderingPipeline::paint_element_overlay(&mut context, element, Point::ZERO);
+        let same_overlay = node.overlay.as_ref().map_or_else(
+            || context.is_empty(),
+            |old| context.same_recording(old),
+        );
+        if !same_overlay {
             node.overlay = (!context.is_empty()).then(|| context.into_display_list());
+            changed = true;
         }
         for child in element.children() {
             if let Some(node) = self.nodes.get_mut(&child.id()) {
-                node.position = child.position();
-                node.subtree_stamp = self.generation;
+                if node.position != child.position() {
+                    node.position = child.position();
+                    node.subtree_stamp = self.generation;
+                    changed = true;
+                }
             }
         }
-        // A nested scroller may live inside a grouped virtual row. Update
-        // that row's recording as well, without walking unrelated panes.
+        // Ending a gesture can notify composition without changing pixels.
+        if !moved && !changed {
+            return;
+        }
+        if changed {
+            self.nodes.get_mut(&element.id()).unwrap().content_stamp = self.generation;
+        }
+        // Update enclosing pictures without walking unrelated panes. The
+        // moving node's own picture changes only when its local contents do.
         let mut current = Some(element.id());
         while let Some(id) = current {
             let Some(node) = self.nodes.get_mut(&id) else {
                 break;
             };
             node.subtree_stamp = self.generation;
+            if id != element.id() {
+                node.content_stamp = self.generation;
+            }
             current = node.parent;
             if node.group.is_some() {
                 self.refresh_group(id);
             }
         }
     }
+
     pub fn collect_bounds(&self, result: &mut BTreeMap<ElementId, Rect>) {
         if let Some(root) = self.root {
             self.bounds_node(root, Point::ZERO, None, result);
@@ -350,7 +399,9 @@ impl RetainedPaint {
         };
         if !(active_clip.is_some() && node.clip.is_some() && next_clip.is_none()) {
             for child in &node.children {
-                self.replay_node(*child, context, abs, next_clip, damage, use_groups);
+                // Suppress only the group being recorded, not independently
+                // retained descendants such as nested scrolling content.
+                self.replay_node(*child, context, abs, next_clip, damage, true);
             }
         }
         if let Some(list) = &node.overlay {

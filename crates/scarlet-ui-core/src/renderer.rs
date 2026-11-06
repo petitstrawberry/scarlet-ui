@@ -21,6 +21,10 @@ pub struct FrameSize {
 
 pub type Path = Vec<Point>;
 
+#[path = "paint_dependencies.rs"]
+mod dependencies;
+pub use dependencies::{PaintDependencies, PaintRegion};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClipRegion {
     pub rect: Rect,
@@ -117,7 +121,7 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PaintCommand {
     /// Replay an immutable local-coordinate display list at a new position.
     DrawDisplayList {
@@ -226,6 +230,7 @@ pub enum PaintCommand {
         rect: Rect,
         /// Type-erased backend payload.
         payload: Arc<dyn PaintExtension>,
+        dependencies: PaintDependencies,
     },
 }
 
@@ -236,11 +241,25 @@ pub struct BufferHandle(pub usize);
 /// A new identity is allocated only when the recorded content changes.
 pub struct DisplayList {
     identity: u64,
+    cache_identity: u64,
+    flat: core::cell::OnceCell<PaintContext<'static>>,
+    footprints: core::cell::RefCell<Vec<(u32, Arc<[PaintDependencies]>)>>,
     context: PaintContext<'static>,
     self_contained: bool,
     raster_bounds: Option<Rect>,
     reads_backdrop: bool,
     has_extensions: bool,
+}
+
+impl PartialEq for dyn PaintExtension {
+    fn eq(&self, other: &Self) -> bool {
+        core::ptr::eq(self, other)
+    }
+}
+impl PartialEq for DisplayList {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
 }
 
 impl Debug for DisplayList {
@@ -266,6 +285,31 @@ impl DisplayList {
     pub fn raster_cache_bounds(&self) -> Option<Rect> {
         self.raster_bounds
     }
+    /// Stable lineage for successive immutable revisions of one cached picture.
+    pub fn cache_identity(&self) -> u64 {
+        if self.cache_identity == 0 {
+            self.identity
+        } else {
+            self.cache_identity
+        }
+    }
+
+    /// Flat command view, materialized once per revision for raster backends.
+    /// The original context keeps the identities of unchanged child recordings.
+    pub fn flat_context(&self) -> &PaintContext<'static> {
+        if self
+            .context
+            .commands
+            .iter()
+            .any(|c| matches!(c, PaintCommand::DrawDisplayList { .. }))
+        {
+            self.flat
+                .get_or_init(|| self.context.flattened().into_owned())
+        } else {
+            &self.context
+        }
+    }
+
     /// Stable identity of this immutable recording.
     pub fn identity(&self) -> u64 {
         self.identity
@@ -360,6 +404,9 @@ impl<'a> PaintContext<'a> {
             raster_bounds: None,
             self_contained: self_contained && depth == 0,
             identity: NEXT_LIST_ID.allocate(),
+            cache_identity: 0,
+            flat: core::cell::OnceCell::new(),
+            footprints: core::cell::RefCell::new(Vec::new()),
             context: PaintContext {
                 commands: self.commands,
                 buffers: self
@@ -382,15 +429,81 @@ impl<'a> PaintContext<'a> {
     /// Backdrop reads must be covered by earlier opaque paint in this recording;
     /// otherwise the result remains a normal display list without a raster hint.
     pub fn into_cached_layer(self, bounds: Rect) -> Arc<DisplayList> {
-        let isolated = self.backdrop_is_local();
+        let isolated = self.flattened().backdrop_is_local();
         let mut list = self.into_display_list();
         Arc::get_mut(&mut list).unwrap().raster_bounds = isolated.then_some(bounds);
         list
     }
 
+    /// Retain the cache lineage while replacing an immutable picture's children.
+    /// Backends compare revisions and redraw only affected regions; earlier
+    /// snapshots remain immutable while an in-flight frame still references them.
+    pub fn into_cached_layer_revision(
+        self,
+        bounds: Rect,
+        previous: &DisplayList,
+    ) -> Arc<DisplayList> {
+        let mut list = self.into_cached_layer(bounds);
+        Arc::get_mut(&mut list).unwrap().cache_identity = previous.cache_identity();
+        list
+    }
+
+    /// Whether painting again produced the same commands and immutable resources.
+    /// This does not suppress state notifications, builds or layout.
+    pub fn same_recording(&self, previous: &DisplayList) -> bool {
+        // Extension payloads may contain interior-mutable GPU resources. Pointer
+        // equality is not a content revision, even with known spatial footprints.
+        !self
+            .commands
+            .iter()
+            .any(|c| matches!(c, PaintCommand::Extension { .. }))
+            && self.commands == previous.context.commands
+            && self.buffers.len() == previous.context.buffers.len()
+            && self
+                .buffers
+                .iter()
+                .zip(&previous.context.buffers)
+                .all(|(a, b)| {
+                    let (a, b) = (a.as_buffer(), b.as_buffer());
+                    (a.identity() == b.identity() && a.revision() == b.revision())
+                        || (a.width() == b.width()
+                            && a.height() == b.height()
+                            && a.scale_milli() == b.scale_milli()
+                            && a.as_slice() == b.as_slice())
+                })
+    }
+
+    fn into_owned(self) -> PaintContext<'static> {
+        PaintContext {
+            commands: self.commands,
+            buffers: self
+                .buffers
+                .into_iter()
+                .map(|buffer| match buffer {
+                    PaintBuffer::Shared(b) => PaintBuffer::Shared(b),
+                    PaintBuffer::Temporary(b) => PaintBuffer::Shared(Arc::new(b)),
+                    PaintBuffer::Borrowed(b) => PaintBuffer::Shared(Arc::new(b.clone())),
+                })
+                .collect(),
+        }
+    }
+
     // Prove that each filter reads only earlier opaque paint in this recording.
     // A glass label alone is not isolated; a card including its opaque backing is.
     fn backdrop_is_local(&self) -> bool {
+        fn add_backing(opaque: &mut Vec<Rect>, clips: &[Rect], mut bounds: Rect) {
+            for clip in clips {
+                let left = bounds.left().max(clip.left());
+                let top = bounds.top().max(clip.top());
+                bounds = Rect::from_xywh(
+                    left,
+                    top,
+                    (bounds.right().min(clip.right()) - left).max(0.),
+                    (bounds.bottom().min(clip.bottom()) - top).max(0.),
+                );
+            }
+            opaque.push(bounds);
+        }
         let mut opaque: Vec<Rect> = Vec::new();
         let mut clips: Vec<Rect> = Vec::new();
         for command in &self.commands {
@@ -422,23 +535,35 @@ impl<'a> PaintContext<'a> {
                         .max(0.)
                         .min(rect.size.width * 0.5)
                         .min(rect.size.height * 0.5);
-                    let mut bounds = Rect::from_xywh(
+                    let bounds = Rect::from_xywh(
                         rect.left() + r,
                         rect.top() + r,
                         (rect.size.width - 2. * r).max(0.),
                         (rect.size.height - 2. * r).max(0.),
                     );
-                    for clip in &clips {
-                        let left = bounds.left().max(clip.left());
-                        let top = bounds.top().max(clip.top());
-                        bounds = Rect::from_xywh(
-                            left,
-                            top,
-                            (bounds.right().min(clip.right()) - left).max(0.),
-                            (bounds.bottom().min(clip.bottom()) - top).max(0.),
-                        );
+                    add_backing(&mut opaque, &clips, bounds);
+                }
+                PaintCommand::FillPath { path, color } if color.a >= 1. => {
+                    // fill_rect, including the standard Background modifier,
+                    // records an axis-aligned rectangle as a four-point path.
+                    // Prove the actual edges, never assume a path's bounding
+                    // box is opaque (triangles and crossed paths have holes).
+                    if let [a, b, c, d] = path.as_slice() {
+                        if a.y == b.y
+                            && b.x == c.x
+                            && c.y == d.y
+                            && d.x == a.x
+                            && b.x > a.x
+                            && c.y > b.y
+                            && [a.x, a.y, b.x, c.y].iter().all(|value| value.is_finite())
+                        {
+                            add_backing(
+                                &mut opaque,
+                                &clips,
+                                Rect::from_xywh(a.x, a.y, b.x - a.x, c.y - a.y),
+                            );
+                        }
                     }
-                    opaque.push(bounds);
                 }
                 PaintCommand::BackdropFilterRoundedRect {
                     rect, blur_radius, ..
@@ -484,16 +609,46 @@ impl<'a> PaintContext<'a> {
         offset: Point,
         scale_milli: u32,
     ) -> PaintContext<'_> {
-        let mut result = self.flattened();
+        self.raster_tile_context_impl(scene_origin, offset, scale_milli, false)
+    }
+
+    /// Prepare a tile while preserving independently cached child pictures.
+    /// Backends must retain window-space raster snapping when descending into them.
+    #[doc(hidden)]
+    pub fn raster_tile_composite_context(
+        &self,
+        scene_origin: Point,
+        offset: Point,
+        scale_milli: u32,
+    ) -> PaintContext<'_> {
+        self.raster_tile_context_impl(scene_origin, offset, scale_milli, true)
+    }
+
+    fn raster_tile_context_impl(
+        &self,
+        scene_origin: Point,
+        offset: Point,
+        scale_milli: u32,
+        preserve_cached: bool,
+    ) -> PaintContext<'_> {
+        let mut result = PaintContext::new();
+        self.append_commands_at(&mut result, Point::ZERO, true, preserve_cached);
         let scale = scale_milli.max(1) as f32 / 1000.;
-        let text_snap = |value: f32, origin: f32| (value + origin) as i32 as f32 - origin;
+        let base = Point::new(libm::floorf(scene_origin.x), libm::floorf(scene_origin.y));
+        let phase = Point::new(scene_origin.x - base.x, scene_origin.y - base.y);
+        let mut text_positions = Vec::new();
         let pixel_snap =
             |value: f32, origin: f32| ((value + origin) * scale) as i32 as f32 / scale - origin;
-        for command in &mut result.commands {
+        for (index, command) in result.commands.iter_mut().enumerate() {
             match command {
                 PaintCommand::DrawText { position, .. } => {
-                    position.x = text_snap(position.x, scene_origin.x);
-                    position.y = text_snap(position.y, scene_origin.y);
+                    text_positions.push((
+                        index,
+                        Point::new(
+                            (position.x + scene_origin.x) as i32 as f32 - base.x + offset.x,
+                            (position.y + scene_origin.y) as i32 as f32 - base.y + offset.y,
+                        ),
+                    ));
                 }
                 PaintCommand::DrawBuffer { dst: rect, .. }
                 | PaintCommand::DrawBufferRect { dst: rect, .. }
@@ -504,15 +659,38 @@ impl<'a> PaintContext<'a> {
                 _ => {}
             }
         }
-        result.translate(offset);
+        // Bake the fractional scene phase into the tile's geometry, then
+        // composite at an integer logical origin. Text keeps its exact global
+        // logical-pixel snap; the cached image is never fractionally resampled.
+        result.translate(Point::new(offset.x + phase.x, offset.y + phase.y));
+        for (index, snapped) in text_positions {
+            if let PaintCommand::DrawText { position, .. } = &mut result.commands[index] {
+                *position = snapped;
+            }
+        }
         result
     }
 
     fn append_flattened<'b>(&'b self, result: &mut PaintContext<'b>, offset: Point) {
+        self.append_commands_at(result, offset, true, false);
+    }
+
+    fn append_commands_at<'b>(
+        &'b self,
+        result: &mut PaintContext<'b>,
+        offset: Point,
+        flatten: bool,
+        preserve_cached: bool,
+    ) {
         for command in &self.commands {
             if let PaintCommand::DrawDisplayList { origin, list } = command {
-                list.context
-                    .append_flattened(result, Point::new(offset.x + origin.x, offset.y + origin.y));
+                let origin = Point::new(offset.x + origin.x, offset.y + origin.y);
+                if flatten && !(preserve_cached && list.raster_cache_bounds().is_some()) {
+                    list.context
+                        .append_commands_at(result, origin, true, preserve_cached);
+                } else {
+                    result.draw_display_list(origin, Arc::clone(list));
+                }
                 continue;
             }
             let mut translated = PaintContext::new();
@@ -878,8 +1056,26 @@ impl<'a> PaintContext<'a> {
     /// * `rect` - Logical destination rectangle occupied by the extension.
     /// * `payload` - Backend payload shared with the synchronous render pass.
     pub fn draw_extension(&mut self, rect: Rect, payload: Arc<dyn PaintExtension>) {
-        self.commands
-            .push(PaintCommand::Extension { rect, payload });
+        self.commands.push(PaintCommand::Extension {
+            rect,
+            payload,
+            dependencies: PaintDependencies::UNKNOWN,
+        });
+    }
+
+    /// Declare a renderer extension's conservative output and preceding-pixel
+    /// reads in logical coordinates. Undeclared extensions use full invalidation.
+    pub fn draw_extension_with_dependencies(
+        &mut self,
+        rect: Rect,
+        payload: Arc<dyn PaintExtension>,
+        dependencies: PaintDependencies,
+    ) {
+        self.commands.push(PaintCommand::Extension {
+            rect,
+            payload,
+            dependencies,
+        });
     }
 
     /// Bound CPU raster work by the painted geometry, not a virtual list's
@@ -1034,8 +1230,13 @@ impl<'a> PaintContext<'a> {
                 | PaintCommand::StrokeRect { rect, .. }
                 | PaintCommand::StrokeRoundedRect { rect, .. }
                 | PaintCommand::DrawIcon { rect, .. }
-                | PaintCommand::PushClip { rect, .. }
-                | PaintCommand::Extension { rect, .. } => shift(&mut rect.origin),
+                | PaintCommand::PushClip { rect, .. } => shift(&mut rect.origin),
+                PaintCommand::Extension {
+                    rect, dependencies, ..
+                } => {
+                    shift(&mut rect.origin);
+                    *dependencies = dependencies.translated(offset);
+                }
                 _ => {}
             }
         }
@@ -1083,6 +1284,13 @@ impl<'a> PaintContext<'a> {
     /// Append commands at a logical offset, remapping buffers and retained lists.
     pub fn append_at(&mut self, other: &'a PaintContext<'_>, origin: Point) {
         other.append_flattened(self, origin);
+    }
+
+    /// Append at an offset while preserving immutable display-list identities
+    /// and raster-cache hints. Ordinary commands and buffer handles are
+    /// translated/remapped as with [`Self::append_at`].
+    pub fn append_retained_at(&mut self, other: &'a PaintContext<'_>, origin: Point) {
+        other.append_commands_at(self, origin, false, false);
     }
 
     pub fn commands(&self) -> &[PaintCommand] {
@@ -1494,14 +1702,19 @@ fn command_paint_bounds(
             position,
             text,
             font_size_px,
+            font_stack,
             ..
         } => {
             let x = libm::floorf(position.x as i32 as f32 * scale);
             let y = libm::floorf(position.y as i32 as f32 * scale);
             let mut bounds = None;
-            for glyph in
-                crate::graphics::rasterize_text_cached(text, *font_size_px, scale_milli).iter()
-            {
+            let glyphs = match font_stack {
+                Some(stack) => crate::graphics::rasterize_text_cached_with_font_stack(
+                    text, *font_size_px, scale_milli, stack,
+                ),
+                None => crate::graphics::rasterize_text_cached(text, *font_size_px, scale_milli),
+            };
+            for glyph in glyphs.iter() {
                 bounds = Some(union_rect(
                     bounds,
                     Rect::from_xywh(
@@ -2493,30 +2706,49 @@ impl CpuPaintRenderer {
     }
 
     pub fn execute_with_damage(&mut self, ctx: &PaintContext<'_>, damage_rects: Option<&[Rect]>) {
+        self.execute_damage_impl(ctx, damage_rects, false);
+    }
+
+    fn execute_damage_impl(
+        &mut self,
+        ctx: &PaintContext<'_>,
+        damage_rects: Option<&[Rect]>,
+        reconstructing: bool,
+    ) {
         if ctx
             .commands()
             .iter()
-            .any(|command| matches!(command, PaintCommand::DrawDisplayList { .. }))
+            .any(|c| matches!(c, PaintCommand::DrawDisplayList { .. }))
         {
-            return self.execute_with_damage(&ctx.flattened(), damage_rects);
+            return self.execute_damage_impl(&ctx.flattened(), damage_rects, reconstructing);
         }
         self.backdrop.fallback_count = 0;
         let uses_backdrop = ctx
             .commands()
             .iter()
             .any(|command| matches!(command, PaintCommand::BackdropFilterRoundedRect { .. }));
-        if uses_backdrop {
+        if uses_backdrop && !reconstructing {
             if let Some(rects) = damage_rects {
                 if rects.is_empty() {
                     return;
                 }
-                // Pixels outside damage contain last frame's foreground and
-                // cannot be a blur source. Reconstruct a clean scene, then copy
-                // only requested damage. The scene pipeline expands dependent
-                // damage to the full frame; this also makes direct callers safe.
+                // Reconstruct only the dependency closure into a clean surface.
+                // Preserve the direct caller's requested output area; the scene
+                // pipeline separately propagates output damage to later readers.
                 let clean = self.acquire_layer_buffer();
                 let mut previous = core::mem::replace(&mut self.buffer, clean);
-                self.execute_with_damage(ctx, None);
+                let factor = self.scale_milli.max(1) as f32 / 1000.;
+                let regions = ctx.reconstruction_regions(
+                    rects,
+                    Rect::from_xywh(
+                        0.,
+                        0.,
+                        previous.width() as f32 / factor,
+                        previous.height() as f32 / factor,
+                    ),
+                    self.scale_milli,
+                );
+                self.execute_damage_impl(ctx, Some(&regions), true);
                 let width = previous.width() as usize;
                 for rect in rects {
                     let (x, y, w, h) = self.rect_to_u32(*rect);
@@ -2651,6 +2883,22 @@ impl CpuPaintRenderer {
                     tint,
                     refraction,
                 } => {
+                    if damage_rects.is_some_and(|damage| {
+                        !damage.iter().any(|area| {
+                            intersect_rect(
+                                *area,
+                                Rect::from_xywh(
+                                    rect.left() - 1.,
+                                    rect.top() - 1.,
+                                    rect.size.width + 2.,
+                                    rect.size.height + 2.,
+                                ),
+                            )
+                            .is_some()
+                        })
+                    }) {
+                        continue;
+                    }
                     self.paint_backdrop(
                         *rect,
                         *corner_radius,
@@ -2986,6 +3234,7 @@ impl CpuPaintRenderer {
                 PaintCommand::Extension {
                     rect: _,
                     payload: _,
+                    ..
                 } => {}
             }
         }
@@ -3494,6 +3743,100 @@ fn inset_rect(rect: Rect, inset: f32) -> Rect {
 mod tests {
     use super::*;
     use crate::testing::alloc_counter::measure_allocations;
+
+    #[test]
+    fn retained_composition_preserves_cache_identity_and_fractional_offset() {
+        let bounds = Rect::from_xywh(0., 0., 100., 300.);
+        let mut paint = PaintContext::new();
+        paint.fill_rect(bounds, Color::WHITE);
+        let list = paint.into_cached_layer(bounds);
+        let mut scene = PaintContext::new();
+        scene.draw_display_list(Point::new(2.25, -20.5), Arc::clone(&list));
+        let mut composed = PaintContext::new();
+        composed.append_retained_at(&scene, Point::new(13., 28.));
+        assert!(
+            matches!(&composed.commands()[0], PaintCommand::DrawDisplayList { origin, list: replayed }
+            if *origin == Point::new(15.25, 7.5) && Arc::ptr_eq(replayed, &list)
+                && replayed.raster_cache_bounds() == Some(bounds))
+        );
+        assert!(
+            matches!(&composed.flattened().commands()[0], PaintCommand::FillPath { path, .. }
+            if path[0] == Point::new(15.25, 7.5))
+        );
+    }
+
+    #[test]
+    fn cached_glass_recognizes_opaque_rect_paths_but_not_their_bounding_boxes() {
+        let bounds = Rect::from_xywh(0., 0., 120., 80.);
+        let glass = |ctx: &mut PaintContext<'_>| {
+            ctx.refractive_glass_rounded_rect(
+                Rect::from_xywh(20., 20., 80., 40.),
+                12.,
+                4.,
+                Color::WHITE.with_opacity(0.5),
+                1.,
+            )
+        };
+        let mut opaque = PaintContext::new();
+        opaque.fill_rect(bounds, Color::WHITE);
+        glass(&mut opaque);
+        assert_eq!(
+            opaque.into_cached_layer(bounds).raster_cache_bounds(),
+            Some(bounds)
+        );
+        for (path, color) in [
+            (path_rect(bounds), Color::WHITE.with_opacity(0.9)),
+            (
+                path_triangle(
+                    Point::new(0., 0.),
+                    Point::new(120., 0.),
+                    Point::new(0., 80.),
+                ),
+                Color::WHITE,
+            ),
+            (
+                alloc::vec![
+                    Point::new(0., 0.),
+                    Point::new(120., 80.),
+                    Point::new(120., 0.),
+                    Point::new(0., 80.)
+                ],
+                Color::WHITE,
+            ),
+        ] {
+            let mut paint = PaintContext::new();
+            paint.fill_path(path, color);
+            glass(&mut paint);
+            assert!(
+                paint
+                    .into_cached_layer(bounds)
+                    .raster_cache_bounds()
+                    .is_none(),
+                "translucent, triangular and self-intersecting backings are not opaque rectangles"
+            );
+        }
+        let mut clipped = PaintContext::new();
+        clipped.push_clip(Rect::from_xywh(30., 30., 50., 20.));
+        clipped.fill_rect(bounds, Color::WHITE);
+        clipped.pop_clip();
+        glass(&mut clipped);
+        assert!(
+            clipped
+                .into_cached_layer(bounds)
+                .raster_cache_bounds()
+                .is_none(),
+            "the backing must include the filter halo after clipping"
+        );
+        let mut late = PaintContext::new();
+        glass(&mut late);
+        late.fill_rect(bounds, Color::WHITE);
+        assert!(
+            late.into_cached_layer(bounds)
+                .raster_cache_bounds()
+                .is_none(),
+            "later paint cannot back an earlier filter"
+        );
+    }
 
     fn aa_pixels(ctx: &PaintContext<'_>, scale: u32, background: Color) -> Buffer {
         let mut renderer = CpuPaintRenderer::new(Size::new(40.0, 40.0), scale, background);

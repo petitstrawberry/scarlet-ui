@@ -101,8 +101,8 @@ pub struct RenderingPipeline {
     paint_background_color: Option<crate::color::Color>,
     paint_enabled: bool,
     // Backdrop filters depend on preceding scene pixels, not just their own
-    // retained picture. Changed frames replay the scene until dependency-aware
-    // damage propagation is available.
+    // retained picture. Use ordered dependency-aware replay for those scenes,
+    // rather than the isolated CPU picture compositor.
     scene_reads_backdrop: bool,
     paint_caches: BTreeMap<ElementId, PaintCache>,
     window_backdrop_cache: Option<WindowBackdropCache>,
@@ -111,6 +111,7 @@ pub struct RenderingPipeline {
     dirty_scratch: DirtyScratch,
     retained_paint: super::retained_paint::RetainedPaint,
     retained_backdrop: Option<RetainedWindowBackdrop>,
+    last_direct_scene: Option<alloc::sync::Arc<crate::renderer::DisplayList>>,
     #[cfg(test)]
     paint_test_counters: PaintTestCounters,
 }
@@ -150,6 +151,7 @@ impl RenderingPipeline {
             dirty_scratch: DirtyScratch::default(),
             retained_paint: Default::default(),
             retained_backdrop: None,
+            last_direct_scene: None,
             #[cfg(test)]
             paint_test_counters: PaintTestCounters::default(),
         }
@@ -185,6 +187,7 @@ impl RenderingPipeline {
         self.retained_ctx.clear();
         self.retained_paint.clear();
         self.retained_backdrop = None;
+        self.last_direct_scene = None;
     }
 
     /// Return this pipeline's owner ID.
@@ -228,6 +231,7 @@ impl RenderingPipeline {
         self.retained_ctx.clear();
         self.retained_paint.clear();
         self.retained_backdrop = None;
+        self.last_direct_scene = None;
     }
 
     /// Set the output scale in milli-units.
@@ -255,6 +259,7 @@ impl RenderingPipeline {
         self.retained_ctx.clear();
         self.retained_paint.clear();
         self.retained_backdrop = None;
+        self.last_direct_scene = None;
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
         }
@@ -293,6 +298,7 @@ impl RenderingPipeline {
         self.element_tree.set_root(root_element);
         self.retained_paint.clear();
         self.retained_backdrop = None;
+        self.last_direct_scene = None;
         self.paint_needs_full = true;
         self.paint_caches.clear();
         self.window_backdrop_cache = None;
@@ -361,6 +367,7 @@ impl RenderingPipeline {
         self.retained_ctx.clear();
         self.retained_paint.clear();
         self.retained_backdrop = None;
+        self.last_direct_scene = None;
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
         }
@@ -603,6 +610,7 @@ impl RenderingPipeline {
         self.retained_ctx.clear();
         self.retained_paint.clear();
         self.retained_backdrop = None;
+        self.last_direct_scene = None;
 
         if let Some(root) = self.element_tree.root_mut() {
             root.clear_buffers();
@@ -991,8 +999,7 @@ impl RenderingPipeline {
             .extend_from_slice(self.pipeline_owner.last_composite_ids());
         self.dirty_scratch.ids.sort_unstable();
         self.dirty_scratch.ids.dedup();
-        let force_full = force_recording_rebuild
-            || (self.scene_reads_backdrop && !self.dirty_scratch.ids.is_empty());
+        let force_full = force_recording_rebuild;
         if !force_full && self.dirty_scratch.ids.is_empty() {
             return Ok(PresentedFrame::Idle);
         }
@@ -1038,10 +1045,9 @@ impl RenderingPipeline {
             return Ok(PresentedFrame::Idle);
         }
         let mut ctx = PaintContext::new();
-        let damage = self
-            .paint_damage
-            .as_ref()
-            .map(|_| self.dirty_scratch.rects.as_slice());
+        // Record the complete ordered scene. Damage limits raster work, not
+        // which earlier paint is available to a destination-reading operation.
+        let damage = None;
         if let Some(root) = self.element_tree.root() {
             if let Some((backdrop, origin)) = Self::find_deferred_window_backdrop(root, Point::ZERO)
             {
@@ -1080,6 +1086,41 @@ impl RenderingPipeline {
             }
             Self::paint_select_overlays(&mut ctx, root, Point::ZERO, damage);
         }
+        let scene = ctx.into_display_list();
+        let ctx = scene.context();
+        if !force_full {
+            let changes = if self.paint_backend.supports_retained_display_lists() {
+                self.last_direct_scene
+                    .as_ref()
+                    .and_then(|old| scene.damage_since(old, self.scale_milli))
+            } else {
+                Some(self.dirty_scratch.rects.clone())
+            };
+            if let Some(changes) = changes {
+                let viewport =
+                    Rect::from_xywh(0., 0., self.window_size.width, self.window_size.height);
+                self.paint_damage =
+                    Self::dependency_damage_rects(ctx, &changes, viewport, self.scale_milli);
+                self.dirty_scratch.rects =
+                    self.paint_damage.as_ref().map_or_else(Vec::new, |damage| {
+                        let scale = self.scale_milli.max(1) as f32 / 1000.;
+                        damage
+                            .iter()
+                            .map(|&(x, y, w, h)| {
+                                Rect::from_xywh(
+                                    x as f32 / scale,
+                                    y as f32 / scale,
+                                    w as f32 / scale,
+                                    h as f32 / scale,
+                                )
+                            })
+                            .collect()
+                    });
+            } else {
+                self.paint_damage = None;
+            }
+        }
+        self.last_direct_scene = Some(alloc::sync::Arc::clone(&scene));
         self.last_paint_bounds.clear();
         if self.paint_backend.supports_retained_display_lists() {
             self.retained_paint
@@ -1092,6 +1133,13 @@ impl RenderingPipeline {
         }
         self.paint_needs_full = false;
         self.paint_background_color = Some(background_color);
+        if self.paint_damage.as_ref().is_some_and(Vec::is_empty) {
+            return Ok(PresentedFrame::Idle);
+        }
+        let damage = self
+            .paint_damage
+            .as_ref()
+            .map(|_| self.dirty_scratch.rects.as_slice());
         let physical_damage = self.paint_damage.as_deref();
         let prepare_us = started.map(|start| start.elapsed().as_micros());
         let backend_started = started.map(|_| crate::clock::Instant::now());
@@ -3097,6 +3145,48 @@ impl RenderingPipeline {
         }
     }
 
+    // Presentation coalescing can bridge a gap containing another reader.
+    // Close over the actual clear/present regions, not only the original seeds.
+    fn dependency_damage_rects(
+        ctx: &PaintContext<'_>,
+        changes: &[Rect],
+        viewport: Rect,
+        scale_milli: u32,
+    ) -> Option<Vec<DamageRect>> {
+        let factor = scale_milli.max(1) as f32 / 1000.;
+        let width = Self::scale_len(viewport.size.width as u32, scale_milli);
+        let height = Self::scale_len(viewport.size.height as u32, scale_milli);
+        let mut regions = ctx.dependent_damage(changes, viewport, scale_milli);
+        loop {
+            regions = ctx.reconstruction_regions(&regions, viewport, scale_milli);
+            let mut before = regions
+                .iter()
+                .map(|r| Self::rect_to_damage(*r, scale_milli, width, height))
+                .filter(|r| r.2 != 0 && r.3 != 0)
+                .collect::<Vec<_>>();
+            before.sort_unstable();
+            let mut damage = Vec::new();
+            if !Self::present_damage_rects_into(&regions, viewport.size, scale_milli, &mut damage) {
+                return None;
+            }
+            damage.sort_unstable();
+            if damage == before {
+                return Some(damage);
+            }
+            regions = damage
+                .iter()
+                .map(|&(x, y, w, h)| {
+                    Rect::from_xywh(
+                        x as f32 / factor,
+                        y as f32 / factor,
+                        w as f32 / factor,
+                        h as f32 / factor,
+                    )
+                })
+                .collect();
+        }
+    }
+
     fn present_damage_rects_into(
         rects: &[Rect],
         window_size: Size,
@@ -3415,6 +3505,37 @@ mod tests {
     };
     use core::cell::Cell;
     use std::rc::Rc;
+
+    #[test]
+    fn presentation_coalescing_recloses_nonlocal_read_dependencies() {
+        use crate::renderer::{PaintDependencies, PaintRegion};
+        let mut ctx = PaintContext::new();
+        // Two rectangles touch at a corner. Presentation merges their bounds,
+        // which introduces a previously clean gap containing this reader.
+        ctx.draw_extension_with_dependencies(
+            Rect::from_xywh(60., 0., 10., 10.),
+            alloc::sync::Arc::new(1u32),
+            PaintDependencies::new(
+                PaintRegion::Rect(Rect::from_xywh(60., 0., 10., 10.)),
+                PaintRegion::Rect(Rect::from_xywh(5., 20., 5., 5.)),
+            ),
+        );
+        let damage = RenderingPipeline::dependency_damage_rects(
+            &ctx,
+            &[
+                Rect::from_xywh(0., 0., 20., 20.),
+                Rect::from_xywh(20., 20., 20., 20.),
+            ],
+            Rect::from_xywh(0., 0., 100., 100.),
+            1000,
+        )
+        .unwrap();
+        assert!(
+            damage
+                .iter()
+                .any(|&(x, y, w, h)| x <= 60 && y == 0 && x + w >= 70 && y + h >= 10)
+        );
+    }
 
     #[test]
     fn direct_backend_scrolls_virtual_rows_without_cpu_raster_pictures() {
@@ -4365,8 +4486,8 @@ mod tests {
             .expect("changed backdrop frame");
         let changed = buffer.get_pixel(20, 20).unwrap();
         assert!(
-            damage.is_none(),
-            "changed backdrop dependencies require a full frame"
+            damage.is_some(),
+            "backdrop dependencies remain a bounded output update"
         );
         assert_ne!(
             first, changed,
@@ -4391,8 +4512,8 @@ mod tests {
             .render_with_damage()
             .expect("material scroll frame");
         assert!(
-            damage.is_none(),
-            "composite-only scroll also invalidates backdrop reads"
+            damage.is_some(),
+            "composite-only scroll invalidates the affected backdrop reads"
         );
 
         pipeline.set_root(PaintOnlyComponentHarness { color }.create_element());

@@ -93,6 +93,9 @@ class PackageValidation(unittest.TestCase):
         page = self.api / 'scarlet_ui/index.html'
         missing = '../trait.impl/scarlet_ui_core/application/trait.Application.js'
         present = '../trait.impl/scarlet_ui_core/preview/trait.PreviewSession.js'
+        canonical = self.api / 'scarlet_ui_core/application/trait.Application.html'
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text('<div id="implementors-list"></div>')
         actual = (page.parent / present).resolve()
         actual.parent.mkdir(parents=True)
         actual.write_text('window.pending_implementors = {existing: true};')
@@ -104,12 +107,53 @@ class PackageValidation(unittest.TestCase):
         html = page.read_text()
         self.assertIn('/tracing/dispatcher/index.html#setting-the-default-subscriber', html)
         self.assertIn('/tracing/trait.Subscriber.html', html)
-        self.assertNotIn(missing, html)
+        self.assertIn(missing, html)
+        generated = (page.parent / missing).resolve()
+        data = generated.read_text()
+        self.assertIn('window.register_implementors(implementors)', data)
+        self.assertIn('window.pending_implementors = implementors', data)
         self.assertIn(present, html)
         self.assertEqual(actual.read_text(), 'window.pending_implementors = {existing: true};')
         builder.normalize_api_docs(self.api)
         self.assertEqual(page.read_text(), html)
+        self.assertEqual(generated.read_text(), data)
         builder.validate(self.root)
+
+    def test_empty_clipboard_implementors_are_packaged_for_canonical_and_reexported_traits(self):
+        source = '../../trait.impl/scarlet_ui_core/clipboard/trait.ClipboardProvider.js'
+        html = f'<div id="implementors-list"></div><script src="{source}" async></script>'
+        for crate in ('scarlet_ui_core', 'scarlet_ui'):
+            page = self.api / crate / 'clipboard/trait.ClipboardProvider.html'
+            page.parent.mkdir(parents=True)
+            page.write_text(html)
+        with self.assertRaisesRegex(ValueError, 'Missing local link'):
+            builder.validate(self.root)
+        with tempfile.TemporaryDirectory() as temporary:
+            stage = Path(temporary)
+            builder.stage_api_docs(stage, self.api)
+            for crate in ('scarlet_ui_core', 'scarlet_ui'):
+                page = stage / 'docs' / crate / 'clipboard/trait.ClipboardProvider.html'
+                self.assertEqual(page.read_text(), html)
+                self.assertTrue((page.parent / source).is_file())
+        # Staging repairs the package, not Cargo's generated output.
+        self.assertFalse((self.api / 'trait.impl/scarlet_ui_core/clipboard/trait.ClipboardProvider.js').exists())
+        builder.normalize_api_docs(self.api)
+        builder.validate(self.root)
+
+    def test_known_trait_with_missing_or_nonempty_canonical_page_is_not_filled(self):
+        source = '../trait.impl/scarlet_ui_core/clipboard/trait.ClipboardProvider.js'
+        page = self.api / 'scarlet_ui/index.html'
+        page.write_text(f'<script src="{source}" async></script>')
+        canonical = self.api / 'scarlet_ui_core/clipboard/trait.ClipboardProvider.html'
+        for html in (None, '<div id="implementors-list"><section class="impl">Provider</section></div>'):
+            with self.subTest(canonical=html):
+                if html is not None:
+                    canonical.parent.mkdir(parents=True)
+                    canonical.write_text(html)
+                builder.normalize_api_docs(self.api)
+                self.assertFalse((page.parent / source).exists())
+                with self.assertRaisesRegex(ValueError, 'Missing local link'):
+                    builder.validate(self.root)
 
     def test_unexpected_missing_implementation_script_still_fails(self):
         page = self.api / 'scarlet_ui/index.html'

@@ -416,6 +416,15 @@ pub struct FontStack {
     cache_id: usize,
 }
 
+// Clones describe the same immutable font sequence. Adding a fallback assigns
+// a new identity, so retained paint can compare stacks without comparing fonts.
+impl PartialEq for FontStack {
+    fn eq(&self, other: &Self) -> bool {
+        self.cache_id == other.cache_id
+    }
+}
+impl Eq for FontStack {}
+
 impl FontStack {
     /// Create a font stack with a primary font.
     ///
