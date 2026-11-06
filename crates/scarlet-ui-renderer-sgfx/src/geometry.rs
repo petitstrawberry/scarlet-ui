@@ -494,6 +494,39 @@ impl Tessellator {
         if FloatRect::from_logical(rect, self.scale).is_empty() {
             return Ok(None);
         }
+        if ![
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+            radius,
+        ]
+        .iter()
+        .all(|v| v.is_finite())
+        {
+            return Err(Error::InvalidFrame);
+        }
+        let bounds = FloatRect::from_logical(rect, self.scale);
+        let visible = self.effective_scissor().is_some_and(|clip| {
+            // Include the coverage fringe before rejecting the complete shape.
+            // Cold tiles should not look up/tessellate/replay off-tile shadows.
+            FloatRect::new(
+                bounds.x - 1.,
+                bounds.y - 1.,
+                bounds.width + 2.,
+                bounds.height + 2.,
+            )
+            .intersect(FloatRect::new(
+                clip.x as f32,
+                clip.y as f32,
+                clip.width as f32,
+                clip.height as f32,
+            ))
+            .is_some()
+        });
+        if !visible {
+            return Ok(None);
+        }
         let vertices = self.shape(rect, radius, 0, 0.0)?;
         self.replay_shape(rect, &vertices, None, 1.0)
     }
@@ -1379,6 +1412,31 @@ fn cosine(angle: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fully_clipped_shapes_do_not_generate_or_evict_cached_meshes() {
+        let mut tessellator =
+            Tessellator::new(2000, 200, 200, FloatRect::new(0., 0., 200., 200.)).unwrap();
+        for row in 0..100 {
+            assert!(
+                tessellator
+                    .fill_rounded_rect(
+                        Rect::from_xywh(10., 200. + row as f32 * 20., 80., 10.),
+                        2. + row as f32,
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(tessellator.shape_cache.entries.is_empty());
+        assert!(
+            tessellator
+                .fill_rounded_rect(Rect::from_xywh(10., 99.75, 80., 10.), 4.)
+                .unwrap()
+                .is_some(),
+            "the visible edge's antialiasing must survive"
+        );
+    }
 
     #[test]
     fn translated_capsule_clip_preserves_both_halves() {
