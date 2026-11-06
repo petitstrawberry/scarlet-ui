@@ -831,3 +831,141 @@ fn wide_blur_does_not_alias_fine_background_stripes() {
         }
     }
 }
+
+#[test]
+fn retained_revisions_and_partial_backdrop_reconstruction_match_full_frames() {
+    use scarlet_ui_core::{geometry::Point, renderer::DisplayList};
+    use std::sync::Arc;
+    let Some(context) = context() else {
+        return;
+    };
+    for (scale, analytic) in [(1, false), (2, false), (3, false), (2, true)] {
+        let (width, height) = (200 * scale, 720 * scale);
+        let mut cached = SgfxPaintEncoder::new(width, height, false).unwrap();
+        cached.set_analytic_glass(analytic);
+        let mut direct = SgfxPaintEncoder::new(width, height, false).unwrap();
+        direct.set_analytic_glass(analytic);
+        let a_target = cached.target_texture(0).unwrap();
+        let b_target = direct.target_texture(0).unwrap();
+        let mut a_resources = context.create_resources(cached.resource_table());
+        let mut b_resources = context.create_resources(direct.resource_table());
+        a_resources
+            .map_image(
+                a_target,
+                context
+                    .create_image(width, height, TextureFormat::Bgra8Unorm)
+                    .unwrap(),
+            )
+            .unwrap();
+        b_resources
+            .map_image(
+                b_target,
+                context
+                    .create_image(width, height, TextureFormat::Bgra8Unorm)
+                    .unwrap(),
+            )
+            .unwrap();
+        let queue = context.create_queue();
+        let mut bg = PaintContext::new();
+        bg.fill_rect(Rect::from_xywh(-50., -50., 300., 900.), Color::WHITE);
+        for row in 0..80 {
+            bg.fill_rect(
+                Rect::from_xywh(12., row as f32 * 10., 176., 2.),
+                Color::rgba(0.1, 0.2, 0.8, 0.6),
+            );
+        }
+        let bg = bg.into_display_list();
+        let mut glass = PaintContext::new();
+        for y in [40., 100., 540.] {
+            glass.refractive_glass_rounded_rect(
+                Rect::from_xywh(20., y, 160., 70.),
+                16.,
+                6.,
+                Color::WHITE.with_opacity(0.3),
+                1.,
+            );
+        }
+        let glass = glass.into_display_list();
+        let mut foreground = PaintContext::new();
+        foreground.fill_rect(Rect::from_xywh(50., 80., 100., 3.), Color::BLACK);
+        let foreground = foreground.into_display_list();
+        let mut previous: Option<Arc<DisplayList>> = None;
+        for step in 0..7 {
+            let mut changing = PaintContext::new();
+            // The changed strip reaches the first lens through its blur halo,
+            // then the overlapping second lens; the distant lens is unchanged.
+            changing.fill_rect(
+                Rect::from_xywh(30., 32., 50. + step as f32 * 5., 5.),
+                Color::rgba(0.8, step as f32 * 0.15, 0.2, 0.7),
+            );
+            // Changing kernel support changes the tile grid/padding. A prior
+            // revision's texture must not be interpreted using the new grid.
+            let glass = if step >= 5 {
+                let mut glass = PaintContext::new();
+                for y in [40., 100., 540.] {
+                    glass.refractive_glass_rounded_rect(
+                        Rect::from_xywh(20., y, 160., 70.),
+                        16.,
+                        if step == 5 { 10. } else { 2. },
+                        Color::WHITE.with_opacity(0.3),
+                        1.,
+                    );
+                }
+                glass.into_display_list()
+            } else {
+                glass.clone()
+            };
+            let mut content = PaintContext::new();
+            content.draw_display_list(Point::ZERO, bg.clone());
+            content.draw_display_list(Point::ZERO, changing.into_display_list());
+            content.draw_display_list(Point::ZERO, glass.clone());
+            content.draw_display_list(Point::ZERO, foreground.clone());
+            let bounds = Rect::from_xywh(-50., -50., 300., 900.);
+            let layer = if let Some(old) = &previous {
+                content.into_cached_layer_revision(bounds, old)
+            } else {
+                content.into_cached_layer(bounds)
+            };
+            assert!(layer.raster_cache_bounds().is_some());
+            let mut paint = PaintContext::new();
+            paint.push_rounded_clip(Rect::from_xywh(0., 0., 200., 720.), 9.);
+            paint.draw_display_list(Point::new(0., -0.25), layer.clone());
+            paint.pop_clip();
+            let areas = if step == 0 || step >= 5 {
+                vec![(0, 0, width, height)]
+            } else {
+                vec![(28 * scale, 29 * scale, 90 * scale, 12 * scale)]
+            };
+            cached
+                .encode_frame(
+                    &mut queue.executor(&mut a_resources),
+                    0,
+                    None,
+                    &paint,
+                    Color::WHITE,
+                    scale * 1000,
+                    &areas,
+                )
+                .unwrap();
+            direct
+                .encode_frame(
+                    &mut queue.executor(&mut b_resources),
+                    0,
+                    None,
+                    &paint.flattened(),
+                    Color::WHITE,
+                    scale * 1000,
+                    &[(0, 0, width, height)],
+                )
+                .unwrap();
+            let a = a_resources.read_texture(a_target).unwrap();
+            let b = b_resources.read_texture(b_target).unwrap();
+            let max = a.iter().zip(&b).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+            assert!(
+                max <= 2,
+                "revision or partial replay changed pixels: scale={scale} analytic={analytic} step={step} max={max}"
+            );
+            previous = Some(layer);
+        }
+    }
+}

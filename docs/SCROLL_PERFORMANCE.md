@@ -221,3 +221,53 @@ Grouped recordings also preserve the original shared image `Arc<Buffer>` through
 flattening. A resource-identity regression test prevents grouping from turning
 shared covers back into copied borrowed snapshots. The recorded comparisons
 precede this last sharing fix; it does not change geometry or the cache limits.
+
+## Independent paint revisions and read dependencies
+
+A state notification, a paint recording and a raster tile are different units.
+A broad notification can still rebuild/layout a page, but recording equal
+commands and immutable resources preserves its existing `DisplayList` identity.
+Scroll pictures retain their child recordings in paint order instead of replacing
+them with one flattened recording. `into_cached_layer_revision` keeps a stable
+cache lineage while each immutable revision has a distinct content identity.
+The flat command view and per-scale footprints are computed lazily and reused.
+Application subscription scope remains the application's responsibility.
+
+`PaintDependencies` describes two conservative logical-coordinate regions:
+`writes` is the output coverage; `reads` is the preceding scene pixels sampled by
+the operation. This is a renderer contract, independent of widgets and materials.
+Ordinary source-over paint has no nonlocal read region, but is still replayed over
+cleared pixels in its original order. Blur declares its kernel halo; a custom
+paint extension can use `draw_extension_with_dependencies` to declare its own
+footprint. Clipping restricts writes, not the input pixels an effect may sample.
+Include antialiasing, filtering and every possible sample in declared regions.
+Unknown effects use `PaintDependencies::UNKNOWN` and full reconstruction. Existing
+`draw_extension` callers retain this conservative default. Literal
+`PaintCommand::Extension` construction now also requires `dependencies`.
+
+`damage_since` compares leaf recording identities, transforms, clips and image
+resources. Changed/removed output becomes the invalidation seed. Ordered
+read-to-write propagation adds dependent output; clean-prefix reconstruction
+then expands through connected input/output regions. Regions are rounded outward
+to physical pixels before this closure, and disconnected components remain
+separate. Each component replays the original paint order from a cleared
+background, so filters never sample the previous frame's foreground. Unknown
+coverage or cross-record opacity/clip state falls back to complete replay.
+A declared footprint does not by itself enable raster caching for an unsupported
+extension: backend eligibility and isolation checks still apply.
+
+SGFX retains the revision represented by each tile. On a new revision it repairs
+only intersecting dependency components; unchanged tiles and static effects
+outside those components keep their pixels. Cache keys include scale, exact
+scroll phase, origin-sensitive raster snapping and tile padding. Changing kernel
+support therefore cannot reinterpret an old texture using a different tile grid.
+Snapshots have no predecessor chain and leave with their bounded LRU slots.
+Raster resolution, optical parameters and pool limits are unchanged.
+
+Regression coverage includes a root-subscribed Widget Factory slider preserving
+unrelated child identities, repeated updates preserving static glass tiles,
+arbitrary extension read chains, image replacement, physical-pixel rounding,
+and GPU comparisons against complete redraw at 1×/2×/3×. The GPU fixture includes
+overlapping filters, later foreground, fractional scrolling and changed kernel
+support. These checks establish retained work and pixel correctness; they do not
+promise constant total CPU cost or eliminate application rebuild/layout work.

@@ -21,6 +21,10 @@ pub struct FrameSize {
 
 pub type Path = Vec<Point>;
 
+#[path = "paint_dependencies.rs"]
+mod dependencies;
+pub use dependencies::{PaintDependencies, PaintRegion};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClipRegion {
     pub rect: Rect,
@@ -116,7 +120,7 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PaintCommand {
     /// Replay an immutable local-coordinate display list at a new position.
     DrawDisplayList {
@@ -223,6 +227,7 @@ pub enum PaintCommand {
         rect: Rect,
         /// Type-erased backend payload.
         payload: Arc<dyn PaintExtension>,
+        dependencies: PaintDependencies,
     },
 }
 
@@ -233,11 +238,25 @@ pub struct BufferHandle(pub usize);
 /// A new identity is allocated only when the recorded content changes.
 pub struct DisplayList {
     identity: u64,
+    cache_identity: u64,
+    flat: core::cell::OnceCell<PaintContext<'static>>,
+    footprints: core::cell::RefCell<Vec<(u32, Arc<[PaintDependencies]>)>>,
     context: PaintContext<'static>,
     self_contained: bool,
     raster_bounds: Option<Rect>,
     reads_backdrop: bool,
     has_extensions: bool,
+}
+
+impl PartialEq for dyn PaintExtension {
+    fn eq(&self, other: &Self) -> bool {
+        core::ptr::eq(self, other)
+    }
+}
+impl PartialEq for DisplayList {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
 }
 
 impl Debug for DisplayList {
@@ -263,6 +282,31 @@ impl DisplayList {
     pub fn raster_cache_bounds(&self) -> Option<Rect> {
         self.raster_bounds
     }
+    /// Stable lineage for successive immutable revisions of one cached picture.
+    pub fn cache_identity(&self) -> u64 {
+        if self.cache_identity == 0 {
+            self.identity
+        } else {
+            self.cache_identity
+        }
+    }
+
+    /// Flat command view, materialized once per revision for raster backends.
+    /// The original context keeps the identities of unchanged child recordings.
+    pub fn flat_context(&self) -> &PaintContext<'static> {
+        if self
+            .context
+            .commands
+            .iter()
+            .any(|c| matches!(c, PaintCommand::DrawDisplayList { .. }))
+        {
+            self.flat
+                .get_or_init(|| self.context.flattened().into_owned())
+        } else {
+            &self.context
+        }
+    }
+
     /// Stable identity of this immutable recording.
     pub fn identity(&self) -> u64 {
         self.identity
@@ -357,6 +401,9 @@ impl<'a> PaintContext<'a> {
             raster_bounds: None,
             self_contained: self_contained && depth == 0,
             identity: NEXT_LIST_ID.allocate(),
+            cache_identity: 0,
+            flat: core::cell::OnceCell::new(),
+            footprints: core::cell::RefCell::new(Vec::new()),
             context: PaintContext {
                 commands: self.commands,
                 buffers: self
@@ -379,10 +426,63 @@ impl<'a> PaintContext<'a> {
     /// Backdrop reads must be covered by earlier opaque paint in this recording;
     /// otherwise the result remains a normal display list without a raster hint.
     pub fn into_cached_layer(self, bounds: Rect) -> Arc<DisplayList> {
-        let isolated = self.backdrop_is_local();
+        let isolated = self.flattened().backdrop_is_local();
         let mut list = self.into_display_list();
         Arc::get_mut(&mut list).unwrap().raster_bounds = isolated.then_some(bounds);
         list
+    }
+
+    /// Retain the cache lineage while replacing an immutable picture's children.
+    /// Backends compare revisions and redraw only affected regions; earlier
+    /// snapshots remain immutable while an in-flight frame still references them.
+    pub fn into_cached_layer_revision(
+        self,
+        bounds: Rect,
+        previous: &DisplayList,
+    ) -> Arc<DisplayList> {
+        let mut list = self.into_cached_layer(bounds);
+        Arc::get_mut(&mut list).unwrap().cache_identity = previous.cache_identity();
+        list
+    }
+
+    /// Whether painting again produced the same commands and immutable resources.
+    /// This does not suppress state notifications, builds or layout.
+    pub fn same_recording(&self, previous: &DisplayList) -> bool {
+        // Extension payloads may contain interior-mutable GPU resources. Pointer
+        // equality is not a content revision, even with known spatial footprints.
+        !self
+            .commands
+            .iter()
+            .any(|c| matches!(c, PaintCommand::Extension { .. }))
+            && self.commands == previous.context.commands
+            && self.buffers.len() == previous.context.buffers.len()
+            && self
+                .buffers
+                .iter()
+                .zip(&previous.context.buffers)
+                .all(|(a, b)| {
+                    let (a, b) = (a.as_buffer(), b.as_buffer());
+                    (a.identity() == b.identity() && a.revision() == b.revision())
+                        || (a.width() == b.width()
+                            && a.height() == b.height()
+                            && a.scale_milli() == b.scale_milli()
+                            && a.as_slice() == b.as_slice())
+                })
+    }
+
+    fn into_owned(self) -> PaintContext<'static> {
+        PaintContext {
+            commands: self.commands,
+            buffers: self
+                .buffers
+                .into_iter()
+                .map(|buffer| match buffer {
+                    PaintBuffer::Shared(b) => PaintBuffer::Shared(b),
+                    PaintBuffer::Temporary(b) => PaintBuffer::Shared(Arc::new(b)),
+                    PaintBuffer::Borrowed(b) => PaintBuffer::Shared(Arc::new(b.clone())),
+                })
+                .collect(),
+        }
     }
 
     // Prove that each filter reads only earlier opaque paint in this recording.
@@ -908,8 +1008,26 @@ impl<'a> PaintContext<'a> {
     /// * `rect` - Logical destination rectangle occupied by the extension.
     /// * `payload` - Backend payload shared with the synchronous render pass.
     pub fn draw_extension(&mut self, rect: Rect, payload: Arc<dyn PaintExtension>) {
-        self.commands
-            .push(PaintCommand::Extension { rect, payload });
+        self.commands.push(PaintCommand::Extension {
+            rect,
+            payload,
+            dependencies: PaintDependencies::UNKNOWN,
+        });
+    }
+
+    /// Declare a renderer extension's conservative output and preceding-pixel
+    /// reads in logical coordinates. Undeclared extensions use full invalidation.
+    pub fn draw_extension_with_dependencies(
+        &mut self,
+        rect: Rect,
+        payload: Arc<dyn PaintExtension>,
+        dependencies: PaintDependencies,
+    ) {
+        self.commands.push(PaintCommand::Extension {
+            rect,
+            payload,
+            dependencies,
+        });
     }
 
     /// Bound CPU raster work by the painted geometry, not a virtual list's
@@ -1052,8 +1170,13 @@ impl<'a> PaintContext<'a> {
                 | PaintCommand::StrokeRect { rect, .. }
                 | PaintCommand::StrokeRoundedRect { rect, .. }
                 | PaintCommand::DrawIcon { rect, .. }
-                | PaintCommand::PushClip { rect, .. }
-                | PaintCommand::Extension { rect, .. } => shift(&mut rect.origin),
+                | PaintCommand::PushClip { rect, .. } => shift(&mut rect.origin),
+                PaintCommand::Extension {
+                    rect, dependencies, ..
+                } => {
+                    shift(&mut rect.origin);
+                    *dependencies = dependencies.translated(offset);
+                }
                 _ => {}
             }
         }
@@ -2518,30 +2641,49 @@ impl CpuPaintRenderer {
     }
 
     pub fn execute_with_damage(&mut self, ctx: &PaintContext<'_>, damage_rects: Option<&[Rect]>) {
+        self.execute_damage_impl(ctx, damage_rects, false);
+    }
+
+    fn execute_damage_impl(
+        &mut self,
+        ctx: &PaintContext<'_>,
+        damage_rects: Option<&[Rect]>,
+        reconstructing: bool,
+    ) {
         if ctx
             .commands()
             .iter()
-            .any(|command| matches!(command, PaintCommand::DrawDisplayList { .. }))
+            .any(|c| matches!(c, PaintCommand::DrawDisplayList { .. }))
         {
-            return self.execute_with_damage(&ctx.flattened(), damage_rects);
+            return self.execute_damage_impl(&ctx.flattened(), damage_rects, reconstructing);
         }
         self.backdrop.fallback_count = 0;
         let uses_backdrop = ctx
             .commands()
             .iter()
             .any(|command| matches!(command, PaintCommand::BackdropFilterRoundedRect { .. }));
-        if uses_backdrop {
+        if uses_backdrop && !reconstructing {
             if let Some(rects) = damage_rects {
                 if rects.is_empty() {
                     return;
                 }
-                // Pixels outside damage contain last frame's foreground and
-                // cannot be a blur source. Reconstruct a clean scene, then copy
-                // only requested damage. The scene pipeline expands dependent
-                // damage to the full frame; this also makes direct callers safe.
+                // Reconstruct only the dependency closure into a clean surface.
+                // Preserve the direct caller's requested output area; the scene
+                // pipeline separately propagates output damage to later readers.
                 let clean = self.acquire_layer_buffer();
                 let mut previous = core::mem::replace(&mut self.buffer, clean);
-                self.execute_with_damage(ctx, None);
+                let factor = self.scale_milli.max(1) as f32 / 1000.;
+                let regions = ctx.reconstruction_regions(
+                    rects,
+                    Rect::from_xywh(
+                        0.,
+                        0.,
+                        previous.width() as f32 / factor,
+                        previous.height() as f32 / factor,
+                    ),
+                    self.scale_milli,
+                );
+                self.execute_damage_impl(ctx, Some(&regions), true);
                 let width = previous.width() as usize;
                 for rect in rects {
                     let (x, y, w, h) = self.rect_to_u32(*rect);
@@ -2676,6 +2818,22 @@ impl CpuPaintRenderer {
                     tint,
                     refraction,
                 } => {
+                    if damage_rects.is_some_and(|damage| {
+                        !damage.iter().any(|area| {
+                            intersect_rect(
+                                *area,
+                                Rect::from_xywh(
+                                    rect.left() - 1.,
+                                    rect.top() - 1.,
+                                    rect.size.width + 2.,
+                                    rect.size.height + 2.,
+                                ),
+                            )
+                            .is_some()
+                        })
+                    }) {
+                        continue;
+                    }
                     self.paint_backdrop(
                         *rect,
                         *corner_radius,
@@ -2986,6 +3144,7 @@ impl CpuPaintRenderer {
                 PaintCommand::Extension {
                     rect: _,
                     payload: _,
+                    ..
                 } => {}
             }
         }

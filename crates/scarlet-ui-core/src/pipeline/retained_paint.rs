@@ -103,13 +103,25 @@ impl RetainedPaint {
         if own_dirty {
             let mut context = PaintContext::new();
             RenderingPipeline::paint_element_self(&mut context, element, Point::ZERO);
-            node.paint = (!context.is_empty()).then(|| context.into_display_list());
+            if node
+                .paint
+                .as_ref()
+                .is_none_or(|old| !context.same_recording(old))
+            {
+                node.paint = (!context.is_empty()).then(|| context.into_display_list());
+            }
         }
         // Overlays include scrollbar thumbs and can change on a composite-only frame.
         if own_dirty || structural_ids.contains(&id) {
             let mut context = PaintContext::new();
             RenderingPipeline::paint_element_overlay(&mut context, element, Point::ZERO);
-            node.overlay = (!context.is_empty()).then(|| context.into_display_list());
+            if node
+                .overlay
+                .as_ref()
+                .is_none_or(|old| !context.same_recording(old))
+            {
+                node.overlay = (!context.is_empty()).then(|| context.into_display_list());
+            }
         }
         if changed
             || old_paint != node.paint.as_ref().map_or(0, |list| list.identity())
@@ -177,9 +189,12 @@ impl RetainedPaint {
                 None,
                 false,
             );
-            let context = context.flattened();
             let list = if context.commands().len() > 1 {
-                context.into_cached_layer(self.group_bounds(id))
+                if let Some((_, previous)) = &self.nodes[&id].group {
+                    context.into_cached_layer_revision(self.group_bounds(id), previous)
+                } else {
+                    context.into_cached_layer(self.group_bounds(id))
+                }
             } else {
                 context.into_display_list()
             };
@@ -227,7 +242,13 @@ impl RetainedPaint {
             node.clip = RenderingPipeline::clip_for_element(element, Point::ZERO);
             let mut context = PaintContext::new();
             RenderingPipeline::paint_element_overlay(&mut context, element, Point::ZERO);
-            node.overlay = (!context.is_empty()).then(|| context.into_display_list());
+            if node
+                .overlay
+                .as_ref()
+                .is_none_or(|old| !context.same_recording(old))
+            {
+                node.overlay = (!context.is_empty()).then(|| context.into_display_list());
+            }
         }
         for child in element.children() {
             if let Some(node) = self.nodes.get_mut(&child.id()) {
