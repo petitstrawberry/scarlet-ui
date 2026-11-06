@@ -168,3 +168,50 @@ Idle thumbs deliberately have no fixed gloss line, outline or specular decoratio
 CPU shadows make the white slider thumb visible on white; the earlier preview
 without shadow rendering is obsolete. The material direction remains under
 review rather than accepted as complete.
+
+## Factory navigation headers
+
+Each Widget Factory destination owns a `NavigationHeader` containing a stock
+`HeaderBar`, with an icon and title. The bar uses the default Bubble Glass
+appearance, a 48-point height and an explicit 8-point outer margin; navigation
+measures the resulting 64-point slot. Page bodies contain the demonstrations
+and supporting copy rather than a second page title.
+
+`overlay_header(true)` keeps the title fixed while the page scrolls beneath it.
+The page's `ScrollView` consumes the forwarded safe-area reservation once, so
+its first row starts below the header and its last row stays reachable above
+bottom navigation. The same structure supports narrow bottom navigation and
+wide sidebars. The 8-point leading overlap shares only transparent header and
+sidebar spacing. No extra `ContentShell` or manual header-height subtraction is
+needed.
+
+## Current API coverage
+
+The Factory follows the native-controls and layered-chrome changes through
+`4b7af2c` (PRs #73 and #81), in addition to the retained-scroll/rendering fixes.
+
+- Navigation, tabs and headers use the new default Bubble Glass appearance.
+  Header ownership, safe areas, and responsive page widths are exercised together.
+- Controls includes disabled Toggle and Slider alongside disabled Button,
+  TextField and Select. The disabled toggle has its own off state, while the
+  disabled slider mirrors the live slider without accepting input.
+- The Inputs TextView colors `# ` heading lines and underlines `TODO` markers
+  with `TextStyleSpan` and `TextDiagnosticSpan`. Byte ranges are regenerated
+  from the current document on edits, including non-ASCII text; these are a
+  decoration demonstration, not a Markdown parser or diagnostic engine.
+- Display compares `SurfaceStyle::bubble_glass()`, `.glass(...)` and
+  `.surface_shadow(...)` over the same backdrop. Material opacity/blur,
+  corner radius and shadow are composed independently.
+- Existing Button/Toggle/Slider/Select, menus, TextField/TextView, nested scrolling,
+  Split/Tab layouts automatically inherit their updated input,
+  text metrics, focus and retained rendering behavior. The Factory keeps its
+  existing menu model and native/Web entry points.
+
+Specialized APIs are not all separate Factory controls. Window management,
+file-dialog/clipboard platform bridges and the C window ABI remain covered by
+platform and dedicated native smoke tests. TextView hover/modified-click hit
+callbacks, caret geometry, software-keyboard policy and font fallback are
+application/editor integration APIs with core/platform tests. A standalone
+ContentShell remains useful for independent panes; it must not wrap the same
+navigation header and reserve it twice. Physical native/iOS and WebGPU validation
+remain distinct from headless layout and CPU-render checks.

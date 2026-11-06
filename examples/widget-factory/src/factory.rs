@@ -2,12 +2,12 @@
 //!
 //! A standalone widget showcase application built with ScarletUI.
 //! Displays all available widgets across multiple navigation pages
-//! (Overview, Controls, Inputs, Display).
+//! (Overview, Controls, Inputs, Display, SGFX).
 
-use scarlet_ui::NavigationLink;
 use scarlet_ui::hstack;
 use scarlet_ui::prelude::*;
 use scarlet_ui::vstack;
+use scarlet_ui::{NavigationLink, NavigationView};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -127,6 +127,31 @@ fn tab_bar_placement_for_selection(selection: usize) -> TabBarPlacement {
         2 => TabBarPlacement::Automatic,
         _ => TabBarPlacement::Top,
     }
+}
+
+// Decorations use current UTF-8 byte offsets, not stale positions from the
+// initial document. Editing or deleting a heading/TODO updates its paint only.
+fn text_decorations(text: &str) -> (Vec<TextStyleSpan>, Vec<TextDiagnosticSpan>) {
+    let mut headings = Vec::new();
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\r', '\n']);
+        if content.starts_with("# ") {
+            headings.push(TextStyleSpan {
+                range: offset..offset + content.len(),
+                color: Color::rgb(52u8, 100u8, 180u8),
+            });
+        }
+        offset += line.len();
+    }
+    let diagnostics = text
+        .match_indices("TODO")
+        .map(|(start, word)| TextDiagnosticSpan {
+            range: start..start + word.len(),
+            color: Color::rgb(200u8, 75u8, 40u8),
+        })
+        .collect();
+    (headings, diagnostics)
 }
 
 /// A small drawing app using the shared GPU canvas and ordinary UI controls.
@@ -603,6 +628,7 @@ pub(crate) struct WidgetFactory {
     study_count: State<u32>,
     glass_quality: State<usize>,
     study_disabled_text: State<String>,
+    study_disabled_toggle: State<bool>,
     study_disabled_selected: State<usize>,
     selected: State<usize>,
     split_layout: State<usize>,
@@ -629,13 +655,14 @@ impl WidgetFactory {
             study_count: State::new(StateId::new(30), 0),
             glass_quality: State::new(StateId::new(34), 2),
             study_disabled_text: State::new(StateId::new(31), String::from("Project name")),
+            study_disabled_toggle: State::new(StateId::new(35), false),
             study_disabled_selected: State::new(StateId::new(32), 0),
             split_layout: State::new(StateId::new(27), 0usize),
             tab_bar_placement: State::new(StateId::new(28), 0usize),
             text_document: State::new(
                 StateId::new(24),
                 TextDocument::from_str(
-                    "# Hello TextView\n\nType here...\n\n- Item 1\n- Item 2\n- Item 3\n",
+                    "# Hello TextView\n\nEdit headings and TODO markers.\n\n- Item 1\n- Item 2\n- Item 3\n",
                 ),
             ),
             text_selection: State::new(StateId::new(25), TextSelection::collapsed(0)),
@@ -823,8 +850,12 @@ impl WidgetFactory {
     }
 
     fn text_view(&self) -> impl View + Clone + use<> {
+        let document = self.text_document.get();
+        let (headings, diagnostics) = text_decorations(&document.as_str());
         TextView::with_document(self.text_document.clone(), self.text_selection.clone())
             .placeholder("Type something...")
+            .text_spans(headings)
+            .diagnostic_spans(diagnostics)
             .font_size(14.0)
             .padding(8.0)
             .frame(self.demo_width(320.0), 200.0)
@@ -977,10 +1008,71 @@ impl WidgetFactory {
         .alignment(Alignment::Leading)
     }
 
+    fn page_header(title: &'static str, icon: Icon) -> NavigationHeader {
+        NavigationHeader::new(move || {
+            HeaderBar::new(
+                hstack![
+                    IconView::new(icon).size(IconSize::Medium),
+                    Text::new(title).text_style(TextStyle::Headline),
+                    Spacer::new(),
+                ]
+                .spacing(10.0)
+                .padding(12.0),
+            )
+            .height(48.0)
+            .padding(8.0)
+        })
+        .automatic_height()
+    }
+
+    fn navigation(
+        &self,
+    ) -> NavigationView<(
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+        NavigationLink,
+    )> {
+        let overview = self.clone();
+        let sgfx = self.clone();
+        let controls = self.clone();
+        let inputs = self.clone();
+        let display = self.clone();
+        scarlet_ui::navigation! {
+            NavigationLink::new("Overview", move || overview.overview_page())
+                .icon(Icon::Home)
+                .custom_header(Self::page_header("Widget Factory", Icon::Home)),
+            NavigationLink::new("Controls", move || controls.controls_page())
+                .icon(Icon::Adjustments)
+                .custom_header(Self::page_header("Controls", Icon::Adjustments)),
+            NavigationLink::new("Inputs", move || inputs.inputs_page())
+                .icon(Icon::FileText)
+                .custom_header(Self::page_header("Inputs", Icon::FileText)),
+            NavigationLink::new("Display", move || display.display_page())
+                .icon(Icon::Photo)
+                .custom_header(Self::page_header("Display", Icon::Photo)),
+            NavigationLink::new("SGFX", move || sgfx.sgfx_page())
+                .icon(Icon::Package)
+                .custom_header(Self::page_header("SGFX", Icon::Package)),
+        }
+        .presentation(NavigationPresentation::Automatic)
+        .floating_bar_bottom_overlap(if cfg!(target_arch = "wasm32") {
+            12.0
+        } else {
+            0.0
+        })
+        .shows_icons(true)
+        .sidebar_width(Self::SIDEBAR_WIDTH)
+        .minimum_content_size(Size::new(Self::MIN_CONTENT_WIDTH, 0.0))
+        // ScrollView consumes this reservation once; do not add page top insets.
+        .overlay_header(true)
+        .header_leading_overlap(8.0)
+    }
+
     fn overview_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
-            Text::new("Widget Factory").text_style(TextStyle::Title),
-            Text::new("PaintCommand default rendering").text_style(TextStyle::Callout).tone(TextTone::Secondary),
+            Text::new("Native controls and Bubble Glass.").text_style(TextStyle::Callout).tone(TextTone::Secondary),
             self.row("ProgressView", self.progress()),
             self.row("Rectangle", self.rectangle()),
             self.row("Divider", self.divider()),
@@ -995,7 +1087,6 @@ impl WidgetFactory {
 
     fn sgfx_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
-            Text::new("SGFX").text_style(TextStyle::Title),
             Text::new("SGFX retained canvas").text_style(TextStyle::Callout).tone(TextTone::Secondary),
             self.sgfx_cube(),
         }
@@ -1062,7 +1153,6 @@ impl WidgetFactory {
             )
         };
         vstack![
-            Text::new("Control study").text_style(TextStyle::Title),
             Text::new("Buttons, inputs and menus with a shared material.")
                 .text_style(TextStyle::Callout)
                 .tone(TextTone::Secondary),
@@ -1102,6 +1192,10 @@ impl WidgetFactory {
                 "Disabled",
                 vstack![
                     Button::new("Save changes").enabled(false),
+                    Toggle::new(self.study_disabled_toggle.clone()).enabled(false),
+                    Slider::new(self.slider_value.clone())
+                        .enabled(false)
+                        .frame(self.demo_width(280.0), 26.0),
                     TextField::new(self.study_disabled_text.clone())
                         .enabled(false)
                         .frame_width(self.demo_width(280.0)),
@@ -1139,7 +1233,6 @@ impl WidgetFactory {
 
     fn inputs_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
-            Text::new("Inputs").text_style(TextStyle::Title),
             self.row("TextField", self.text_field()),
             self.row("Select", self.select()),
             self.row("Slider", self.slider()),
@@ -1177,9 +1270,34 @@ impl WidgetFactory {
         .spacing(14.0)
     }
 
+    fn surface_styles(&self) -> impl View + Clone + use<> {
+        let width = self.demo_width(320.0);
+        let material = GlassMaterial::regular().opacity(0.55).blur_radius(12.0);
+        let card = |label| {
+            Text::new(label)
+                .text_style(TextStyle::Callout)
+                .padding(12.0)
+                .frame((width - 24.0).max(0.0), 44.0)
+        };
+        ZStack::new((
+            MaterialBackdrop { phase: 0 }.frame(width, 180.0),
+            vstack![
+                card("Bubble Glass")
+                    .surface_style(SurfaceStyle::bubble_glass().material(material))
+                    .corner_radius(12.0),
+                card("Glass only").glass(material).corner_radius(12.0),
+                card("Shadow only")
+                    .surface_shadow(ElevationRole::Raised)
+                    .fill(Color::WHITE)
+                    .corner_radius(12.0),
+            ]
+            .spacing(12.0)
+            .padding(12.0),
+        ))
+    }
+
     fn display_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
-            Text::new("Display").text_style(TextStyle::Title),
             self.row(
                 "Text",
                 vstack![
@@ -1195,6 +1313,7 @@ impl WidgetFactory {
             self.row("Rectangle", self.rectangle()),
             self.row("Divider", self.divider()),
             self.row("Tabler Icons", self.icons()),
+            self.row("Surface styles", self.surface_styles()),
             self.row("ScrollView both", self.scroll_view()),
             self.row("ScrollView x", self.horizontal_scroll_view()),
             self.row("ScrollView y", self.vertical_scroll_view()),
@@ -1251,39 +1370,13 @@ impl Application for WidgetFactory {
     }
 
     fn scenes(&self) -> impl Scene {
-        let overview = self.clone();
-        let sgfx = self.clone();
-        let controls = self.clone();
-        let inputs = self.clone();
-        let display = self.clone();
         let viewport = self.viewport.clone();
 
         WindowGroup::new(
             "main",
             Window::new(
                 "Widget Factory",
-                scarlet_ui::navigation! {
-                    NavigationLink::new("Overview", move || overview.overview_page())
-                        .icon(Icon::Home),
-                    NavigationLink::new("Controls", move || controls.controls_page())
-                        .icon(Icon::Adjustments),
-                    NavigationLink::new("Inputs", move || inputs.inputs_page())
-                        .icon(Icon::FileText),
-                    NavigationLink::new("Display", move || display.display_page())
-                        .icon(Icon::Photo),
-                    NavigationLink::new("SGFX", move || sgfx.sgfx_page())
-                        .icon(Icon::Package),
-                }
-                .presentation(NavigationPresentation::Automatic)
-                .floating_bar_bottom_overlap(if cfg!(target_arch = "wasm32") {
-                    12.0
-                } else {
-                    0.0
-                })
-                .shows_icons(true)
-                .sidebar_width(Self::SIDEBAR_WIDTH)
-                .minimum_content_size(Size::new(Self::MIN_CONTENT_WIDTH, 0.0))
-                .on_geometry_change(
+                self.navigation().on_geometry_change(
                     |geometry| {
                         let size = geometry.size();
                         let safe = geometry.safe_area_insets();
@@ -1470,6 +1563,169 @@ mod tests {
     use super::*;
     use scarlet_ui::event::Phase;
     use scarlet_ui::views::SplitViewRenderObject;
+
+    #[test]
+    fn text_decorations_follow_edits_and_utf8_byte_ranges() {
+        let text = "前置き\n# 見出し\r\nTODO: fix\n# Another\nTODO";
+        let (headings, diagnostics) = text_decorations(text);
+        assert_eq!(
+            headings
+                .iter()
+                .map(|s| &text[s.range.clone()])
+                .collect::<Vec<_>>(),
+            ["# 見出し", "# Another"]
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|s| &text[s.range.clone()])
+                .collect::<Vec<_>>(),
+            ["TODO", "TODO"]
+        );
+        let edited = text
+            .replace("# 見出し", "Plain title")
+            .replace("TODO", "Done");
+        let (headings, diagnostics) = text_decorations(&edited);
+        assert_eq!(headings.len(), 1);
+        assert_eq!(&edited[headings[0].range.clone()], "# Another");
+        assert!(diagnostics.is_empty());
+        assert_eq!(text_decorations(""), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn disabled_toggle_and_slider_do_not_modify_live_values() {
+        let app = WidgetFactory::new();
+        let controls: Vec<Box<dyn View>> = vec![
+            Box::new(Toggle::new(app.study_disabled_toggle.clone()).enabled(false)),
+            Box::new(Slider::new(app.slider_value.clone()).enabled(false)),
+        ];
+        for control in controls {
+            let mut element = control.create_element();
+            element.layout(LayoutConstraints::tight(200., 32.));
+            for event in [
+                MouseEvent::ButtonPressed {
+                    button: MouseButton::Left,
+                    x: 180,
+                    y: 16,
+                    click_count: 1,
+                },
+                MouseEvent::ButtonReleased {
+                    button: MouseButton::Left,
+                    x: 180,
+                    y: 16,
+                    click_count: 1,
+                },
+            ] {
+                element.handle_event(&Event::Mouse(event), Phase::Target);
+            }
+        }
+        assert!(!app.study_disabled_toggle.get());
+        assert_eq!(app.slider_value.get(), 0.42);
+    }
+
+    #[test]
+    fn navigation_headers_fit_safe_areas_and_stay_fixed_while_pages_scroll() {
+        use scarlet_ui::views::{HeaderBarRenderObject, navigation::NavigationViewRenderObject};
+        fn find<T: 'static>(element: &dyn Element) -> Option<&dyn Element> {
+            if element
+                .render_object()
+                .is_some_and(|r| r.as_any().is::<T>())
+            {
+                return Some(element);
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| find::<T>(child.as_ref()))
+        }
+        fn bounds<T: 'static>(element: &dyn Element, parent: Point) -> Option<Rect> {
+            let origin = Point::new(
+                parent.x + element.position().x,
+                parent.y + element.position().y,
+            );
+            if element
+                .render_object()
+                .is_some_and(|r| r.as_any().is::<T>())
+            {
+                return Some(Rect::new(origin, element.bounds().size));
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| bounds::<T>(child.as_ref(), origin))
+        }
+        let app = WidgetFactory::new();
+        for width in [375., 390., 549., 550., 562., 860., 1200.] {
+            for safe in [EdgeInsets::ZERO, EdgeInsets::new(12., 32., 18., 34.)] {
+                app.viewport.set(Size::new(
+                    width - safe.left - safe.right,
+                    640. - safe.top - safe.bottom,
+                ));
+                for selected in 0..5 {
+                    let navigation = app.navigation();
+                    navigation.selected_index_state().set(selected);
+                    let mut root = navigation.create_element();
+                    root.set_safe_area_insets(safe);
+                    root.layout(LayoutConstraints::tight(width, 640.));
+                    let header =
+                        bounds::<HeaderBarRenderObject>(root.as_ref(), Point::ZERO).unwrap();
+                    assert_eq!(header.top(), safe.top + 8.);
+                    assert_eq!(header.size.height, 48.);
+                    let sidebar = app.viewport.get().width
+                        >= WidgetFactory::SIDEBAR_WIDTH + WidgetFactory::MIN_CONTENT_WIDTH;
+                    let expected_left = safe.left
+                        + if sidebar {
+                            WidgetFactory::SIDEBAR_WIDTH
+                        } else {
+                            8.
+                        };
+                    assert_eq!(header.left(), expected_left);
+                    assert_eq!(header.right(), width - safe.right - 8.);
+                    let page = bounds::<FactoryPageLayout>(root.as_ref(), Point::ZERO).unwrap();
+                    assert_eq!(
+                        page.top(),
+                        safe.top + 64.,
+                        "reserve the measured header exactly once"
+                    );
+                    assert_eq!(page.size.width, app.content_width());
+                    let nav = find::<NavigationViewRenderObject>(root.as_ref()).unwrap();
+                    // Content, header, navigation: chrome stays on a separate plane.
+                    assert_eq!(nav.children().len(), 3);
+                    let nav_id = nav.id();
+                    fn scroll(element: &mut dyn Element, nav_id: scarlet_ui::ElementId) {
+                        if element.id() == nav_id {
+                            element.children_mut()[0].handle_event(
+                                &Event::Mouse(MouseEvent::Wheel {
+                                    delta_x: 0,
+                                    delta_y: -10_000,
+                                    x: 4,
+                                    y: 120,
+                                    phase: scarlet_ui::event::WheelPhase::Started,
+                                    source: scarlet_ui::event::ScrollSource::Trackpad,
+                                }),
+                                Phase::Target,
+                            );
+                        } else {
+                            for child in element.children_mut() {
+                                scroll(child.as_mut(), nav_id);
+                            }
+                        }
+                    }
+                    scroll(root.as_mut(), nav_id);
+                    let after = bounds::<FactoryPageLayout>(root.as_ref(), Point::ZERO).unwrap();
+                    assert!(after.top() <= page.top());
+                    assert!(
+                        after.bottom() <= 640. - safe.bottom + 0.5,
+                        "last row remains reachable"
+                    );
+                    assert_eq!(
+                        bounds::<HeaderBarRenderObject>(root.as_ref(), Point::ZERO),
+                        Some(header)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn layout_gallery_keeps_glass_tabs_without_the_diagnostic_backdrop() {
@@ -1713,6 +1969,7 @@ mod tests {
                         "Rectangle",
                         "Divider",
                         "Tabler Icons",
+                        "Surface styles",
                         "ScrollView both",
                         "ScrollView x",
                         "ScrollView y",
@@ -2208,6 +2465,14 @@ mod tests {
             editor_id(&pipeline).is_none(),
             "first click must replace Inputs with Display"
         );
+        let document = app.text_document.get().as_str().into_owned();
+        let inputs = sidebar_label(&pipeline, "Inputs");
+        click(&mut pipeline, inputs);
+        assert!(
+            editor_id(&pipeline).is_some(),
+            "return navigation restores Inputs"
+        );
+        assert_eq!(app.text_document.get().as_str().into_owned(), document);
     }
 
     #[test]

@@ -92,7 +92,9 @@ async function visibleToggle(name) {
   return {frame,toggle:togglePixels(frame,factoryContentArea())};
 }
 
-function inputsGeometry(frame, x, top=60) {
+// The 28px menu and measured 64px navigation header precede page controls.
+const factoryBodyTop=28+64;
+function inputsGeometry(frame, x, top=factoryBodyTop) {
   // Probe the empty trailing column of the three Inputs surfaces. Deriving
   // their vertical bands from rendered pixels avoids old font-height offsets.
   const probe=x+200, bands=[];
@@ -743,7 +745,7 @@ try {
     await safeNavigate(2,'factory-safe-area-inputs');
     const beforeSelect=await screenshot('factory-safe-area-before-select');
     const selectX=insets.left+16;
-    const select=inputsGeometry(beforeSelect,selectX,insets.top+60).select;
+    const select=inputsGeometry(beforeSelect,selectX,insets.top+factoryBodyTop).select;
     const selectY=select.y;
     await page.mouse.click(selectX+80,selectY+select.height/2);
     await untilPixels('factory-safe-area-select',frame=>
@@ -833,7 +835,9 @@ try {
           await page.mouse.wheel(0,70);
           await sleep(50);
         }
-        await untilPixels(`factory-hidpi-${dpr}-scrolled`,frame=>changedPixels(controls,frame,heading)>100);
+        // Navigation owns the pinned title now; scrolling must change the body.
+        const body=scaled({x:16,y:factoryBodyTop+16,width:width-32,height:200});
+        await untilPixels(`factory-hidpi-${dpr}-scrolled`,frame=>changedPixels(controls,frame,body)>100);
         assert.equal(await page.evaluate(async()=>
           (await import('/widget-factory/pkg/scarlet_ui_widget_factory.js')).runtime_error()),undefined);
         event('hidpi-controls',{width,height,dpr,contourPixels:coloredPixels(controls,rim,(r,g,b)=>Math.max(r,g,b)-Math.min(r,g,b)<10&&r<225).count});
