@@ -171,3 +171,5 @@ jobs:
         run: cargo build --locked --verbose --target wasm32-unknown-unknown --lib -p scarlet-ui-web-counter
       - name: Build Widget Factory for WebAssembly
         run: cargo build --locked --verbose --target wasm32-unknown-unknown --lib -p scarlet-ui-widget-factory
+      - name: Check browser text-input test fixtures for WebAssembly
+        run: cargo check --locked -p scarlet-ui-platform-web --tests --target wasm32-unknown-unknown

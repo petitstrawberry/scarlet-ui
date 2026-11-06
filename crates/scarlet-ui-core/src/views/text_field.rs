@@ -228,6 +228,12 @@ impl TextField {
         self
     }
 
+    /// Set the placeholder color without changing the entered text or glass material.
+    pub fn placeholder_color(mut self, color: Color) -> Self {
+        self.placeholder_color = color;
+        self
+    }
+
     /// Return the bound text state.
     pub fn text_state(&self) -> &State<String> {
         &self.text
