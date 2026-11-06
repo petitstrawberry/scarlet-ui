@@ -125,6 +125,34 @@ impl Clone for Box<dyn View> {
 ///     .frame(200.0, 50.0);
 /// ```
 pub trait ViewExt: View {
+    /// Apply a shared appearance to rectangular bounds without adding padding.
+    /// Set the returned surface's corner radius or clipping separately.
+    fn surface_style(self, style: crate::views::SurfaceStyle) -> crate::views::Surface<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::Surface::new(self, crate::views::SurfaceRole::Structural).surface_style(style)
+    }
+
+    /// Apply only a glass material. Does not add a cast shadow or round corners.
+    fn glass(self, material: crate::views::GlassMaterial) -> crate::views::Surface<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::Surface::new(self, crate::views::SurfaceRole::Structural).material(material)
+    }
+
+    /// Apply only a cast shadow around rectangular bounds, with no fill.
+    /// Customize the returned surface's radius to match the content's shape.
+    fn surface_shadow(self, elevation: crate::views::ElevationRole) -> crate::views::Surface<Self>
+    where
+        Self: Sized,
+    {
+        crate::views::Surface::new(self, crate::views::SurfaceRole::Structural)
+            .fill(crate::color::Color::CLEAR)
+            .elevation(elevation)
+    }
+
     /// Observe a value derived from this view's laid-out geometry.
     ///
     /// `action` runs after the initial layout and whenever the projected value

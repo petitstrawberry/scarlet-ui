@@ -156,6 +156,36 @@ pub struct GlassMaterial {
 }
 
 impl GlassMaterial {
+    /// Change diffusion in logical pixels (not Gaussian sigma).
+    /// Refractive quality uses a shorter kernel to preserve background detail.
+    /// Negative or non-finite input disables blur; renderers bound large kernels.
+    pub fn blur_radius(mut self, radius: f32) -> Self {
+        self.blur_radius = if radius.is_finite() {
+            radius.max(0.0)
+        } else {
+            0.0
+        };
+        self
+    }
+
+    /// Replace the tint, including its alpha. Foreground content stays sharp.
+    pub fn tint(mut self, tint: Color) -> Self {
+        self.tint = tint;
+        self
+    }
+
+    /// Set tint opacity in 0..=1, without fading the foreground or the rim.
+    /// Zero leaves clear glass; one hides the backdrop under an opaque tint.
+    /// TintOnly quality retains its readability floor of 0.88.
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.tint.a = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self
+    }
+
     /// A readable light/dark semantic material for buttons and menus.
     pub fn regular() -> Self {
         Self {

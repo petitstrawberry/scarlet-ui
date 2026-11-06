@@ -1,5 +1,42 @@
 # Shared glass material trial
 
+## Bubble Glass composition
+
+`SurfaceStyle::bubble_glass()` packages the shared glass appearance, including
+its directional rim response. It imposes neither a corner radius nor a cast
+shadow. Shape, clipping and layout remain separate choices:
+
+```rust
+use scarlet_ui::prelude::*;
+
+let material = GlassMaterial::regular().opacity(0.55).blur_radius(12.0);
+let appearance = SurfaceStyle::bubble_glass().material(material);
+let toolbar = Text::new("Library")
+    .padding(12.0)
+    .surface_style(appearance)
+    .corner_radius(16.0); // the application chooses the shape
+
+let glass_only = Text::new("Glass").glass(material).corner_radius(6.0);
+let shadow_only = Text::new("Shadow")
+    .surface_shadow(ElevationRole::Raised).corner_radius(6.0);
+let shaped = Surface::section(Text::new("Section"))
+    .corner_radius(4.0).surface_style(appearance);
+```
+
+These modifiers currently paint rectangular or rounded-rectangular bounds;
+they do not infer the silhouette of arbitrary child content. Applying a style
+to an existing `Surface` preserves its radius, clipping and tonal role.
+`.material(...)`, `.elevation(...)` and `.corner_radius(...)` remain available
+individually. Shadows use paint outsets and do not enlarge the layout/hit bounds.
+Styles add no padding or safe-area reservation.
+
+`GlassMaterial::tint(color)` replaces the tint including its alpha;
+`.opacity(alpha)` sets only that tint's opacity, leaving foreground and optical
+rim intact. `.blur_radius(radius)` controls diffusion independently. Refractive
+quality uses 14% of this radius; Frosted uses the full radius. TintOnly keeps
+its 0.88 opacity floor for readability. These controls affect in-app backdrop
+sampling, not operating-system window transparency.
+
 ## Navigation and shoulder tuning
 
 Floating navigation and material-backed content tabs use a lighter neutral

@@ -171,8 +171,8 @@ pub use views::{
 };
 pub use views::{
     Button, ElevationRole, GlassMaterial, HStack, LazyVStack, Rectangle, Spacer, SplitAxis,
-    SplitAxisPolicy, SplitView, Surface, SurfaceRole, Text, TextField, TextStyle, TextTone, VStack,
-    Window, WindowContentLayout, WindowShadow, ZStack,
+    SplitAxisPolicy, SplitView, Surface, SurfaceRole, SurfaceStyle, Text, TextField, TextStyle,
+    TextTone, VStack, Window, WindowContentLayout, WindowShadow, ZStack,
 };
 pub use views::{
     EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,
@@ -235,8 +235,8 @@ pub mod prelude {
     pub use crate::views::{
         Button, Either, Either3, Either4, Either5, Either6, ElevationRole, GlassMaterial, HStack,
         LazyVStack, NavigationPresentation, NavigationSidebarStyle, Rectangle, Spacer, SplitAxis,
-        SplitAxisPolicy, SplitView, Surface, SurfaceRole, Text, TextField, TextStyle, TextTone,
-        VStack, Window, WindowContentLayout, WindowShadow, ZStack,
+        SplitAxisPolicy, SplitView, Surface, SurfaceRole, SurfaceStyle, Text, TextField, TextStyle,
+        TextTone, VStack, Window, WindowContentLayout, WindowShadow, ZStack,
     };
     pub use crate::views::{
         EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,
