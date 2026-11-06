@@ -1,4 +1,4 @@
-const CONTOUR_SHADOW_GAIN: f32 = 1.0;
+const CONTOUR_SHADOW_GAIN: f32 = 1.25;
 struct Parameters {
     rect: vec4<f32>,
     extent: vec4<f32>,
