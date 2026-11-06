@@ -101,7 +101,7 @@ fn specular_lobe(cosine: f32) -> f32 {
     let near = clamp(1.0 - max(e.x, 0.0) / near_width, 0.0, 1.0);
     let near_shadow = CONTOUR_NEAR_STRENGTH * near * near * (3.0 - 2.0 * near);
     let top_pixels = max(floor(scale * 0.5 + 0.5), 1.0);
-    let side_pixels = max(floor(scale + 0.5), top_pixels + 1.0);
+    let side_pixels = max(max(floor(scale + 0.5), top_pixels + 1.0) - 1.0, 1.0);
     let line_width = min(top_pixels + (side_pixels - top_pixels) * side, bezel);
     let line = clamp(line_width - max(e.x, 0.0) + 0.5, 0.0, 1.0);
     // Same narrow light and strength, translated one device pixel inward.
