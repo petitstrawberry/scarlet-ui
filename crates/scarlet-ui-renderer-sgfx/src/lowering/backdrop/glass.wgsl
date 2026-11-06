@@ -111,8 +111,9 @@ fn specular_lobe(cosine: f32) -> f32 {
     let rim_fade = clamp(1.0 - max(rim_distance, 0.0) / rim_width, 0.0, 1.0);
     let rim_light = (0.34 - 0.06 * max(-e.z, 0.0)) * e.z * e.z
         * rim_fade * rim_fade * (3.0 - 2.0 * rim_fade) * rim_entry;
-    let reflection = (surface + rim_light - near_shadow - opacity * line) * p.optics.y;
-    let light = vec4(select(vec3(0.0), vec3(1.0), reflection >= 0.0), 1.0);
-    material += (light - material) * abs(reflection);
+    let shadow = vec4(0.0, 0.0, 0.0, 1.0);
+    material += (shadow - material) * near_shadow * p.optics.y;
+    material += (vec4(1.0) - material) * (surface + rim_light) * p.optics.y;
+    material += (shadow - material) * opacity * line * p.optics.y;
     return material * coverage(position.xy);
 }

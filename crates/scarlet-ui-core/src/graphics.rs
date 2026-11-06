@@ -5,7 +5,9 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+#[cfg(not(feature = "std"))]
+use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use ab_glyph::{Font, FontRef, Glyph, InvalidFont, PxScale, PxScaleFont, ScaleFont, point};
 
@@ -24,16 +26,60 @@ mod font_discovery;
 #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
 use font_discovery::{DiscoveredFont, FontDiscovery};
 
+// Ambient scale belongs to the rendering thread. Sharing it across pipelines
+// on different threads can rasterize a retained buffer at another window's DPI.
+#[cfg(feature = "std")]
+std::thread_local! {
+    static CURRENT_SCALE_MILLI: core::cell::Cell<u32> = const { core::cell::Cell::new(1000) };
+}
+#[cfg(not(feature = "std"))]
 static CURRENT_SCALE_MILLI: AtomicU32 = AtomicU32::new(1000);
 
-/// Return the current UI scale in milli-units.
+/// Return the current rendering thread's UI scale in milli-units.
 pub fn current_scale_milli() -> u32 {
-    CURRENT_SCALE_MILLI.load(Ordering::Relaxed).max(1)
+    #[cfg(feature = "std")]
+    {
+        CURRENT_SCALE_MILLI.with(|scale| scale.get())
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        CURRENT_SCALE_MILLI.load(Ordering::Relaxed).max(1)
+    }
 }
 
-/// Set the current UI scale in milli-units.
+/// Set the current rendering thread's UI scale in milli-units.
+/// Without `std`, the rendering context remains process-wide.
 pub fn set_current_scale_milli(scale_milli: u32) {
+    #[cfg(feature = "std")]
+    CURRENT_SCALE_MILLI.with(|scale| scale.set(scale_milli.max(1)));
+    #[cfg(not(feature = "std"))]
     CURRENT_SCALE_MILLI.store(scale_milli.max(1), Ordering::Relaxed);
+}
+
+#[cfg(all(test, feature = "std"))]
+mod scale_context_tests {
+    #[test]
+    fn concurrent_render_threads_keep_their_buffer_scale() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let first = barrier.clone();
+        let worker = std::thread::spawn(move || {
+            super::set_current_scale_milli(2000);
+            first.wait();
+            first.wait();
+            assert_eq!(
+                crate::buffer::Buffer::from_logical_dimensions(8, 8).scale_milli(),
+                2000
+            );
+        });
+        barrier.wait();
+        super::set_current_scale_milli(1500);
+        barrier.wait();
+        worker.join().unwrap();
+        assert_eq!(
+            crate::buffer::Buffer::from_logical_dimensions(8, 8).scale_milli(),
+            1500
+        );
+    }
 }
 
 /// Stable cache key for a rasterized glyph mask.
@@ -584,6 +630,15 @@ fn read_font_file(path: &str) -> Option<Vec<u8>> {
 
 #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
 fn load_fonts_from_rootfs_once() {
+    // A caller must not observe `load_attempted` before discovery finishes:
+    // otherwise it can retain an empty text picture while another thread loads
+    // the font, and later full renders produce different pixels.
+    static INITIALIZE: std::sync::Once = std::sync::Once::new();
+    INITIALIZE.call_once(load_fonts_from_rootfs);
+}
+
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
+fn load_fonts_from_rootfs() {
     let should_try = {
         let mut state = DEFAULT_FONT.lock();
         if state.font.is_some() || state.load_attempted {
