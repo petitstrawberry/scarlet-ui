@@ -3,6 +3,7 @@
 //! NavigationView provides sidebar and bottom-bar presentations where users can
 //! select different items to display different content views.
 
+use super::NavigationHeader;
 use crate::os::Mutex;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -204,6 +205,9 @@ where
     header_builder: Option<Rc<dyn Fn() -> Box<dyn View>>>,
     /// Height reserved for the content header.
     header_height: f32,
+    automatic_header_height: bool,
+    overlay_header: bool,
+    header_leading_overlap: f32,
 }
 
 impl<T> NavigationView<T>
@@ -246,6 +250,9 @@ where
             icon_color: None,
             header_builder: None,
             header_height: 0.0,
+            automatic_header_height: false,
+            overlay_header: false,
+            header_leading_overlap: 0.,
         }
     }
 
@@ -281,6 +288,9 @@ where
             icon_color: None,
             header_builder: None,
             header_height: 0.0,
+            automatic_header_height: false,
+            overlay_header: false,
+            header_leading_overlap: 0.,
         }
     }
 
@@ -518,8 +528,69 @@ where
     ///
     /// Navigation view with the requested header height.
     pub fn header_height(mut self, height: f32) -> Self {
-        self.header_height = height.max(0.0);
+        self.header_height = if height.is_finite() {
+            height.max(0.)
+        } else {
+            0.
+        };
+        self.automatic_header_height = false;
         self
+    }
+
+    /// Replace the shared header with a configured slot. Destinations may
+    /// override it via `NavigationLink::custom_header`.
+    pub fn custom_header(mut self, header: NavigationHeader) -> Self {
+        self.header_builder = header.builder;
+        self.header_height = header.height.unwrap_or(0.);
+        self.automatic_header_height = header.height.is_none();
+        self
+    }
+
+    /// Measure the custom header, including extension rows, at the available
+    /// width. The header view should have a finite preferred height.
+    pub fn automatic_header_height(mut self) -> Self {
+        self.automatic_header_height = true;
+        self
+    }
+
+    /// Paint content behind the header and reserve its height as a safe inset.
+    /// This applies to both sidebar and bottom-bar navigation. Fixed content
+    /// must consume safe areas; ScrollView does so automatically.
+    pub fn overlay_header(mut self, overlay: bool) -> Self {
+        self.overlay_header = overlay;
+        self
+    }
+
+    /// Share a custom header's leading margin with a floating sidebar's
+    /// trailing margin. Only that transparent margin should overlap; shadows
+    /// do not contribute to layout. Other presentations keep zero overlap.
+    pub fn header_leading_overlap(mut self, points: f32) -> Self {
+        self.header_leading_overlap = if points.is_finite() {
+            points.max(0.)
+        } else {
+            0.
+        };
+        self
+    }
+
+    pub(crate) fn resolved_header(&self) -> NavigationHeader {
+        self.links
+            .get_header(self.selected_index.get())
+            .unwrap_or_else(|| NavigationHeader {
+                builder: self.header_builder.clone(),
+                height: if self.automatic_header_height {
+                    None
+                } else {
+                    Some(self.header_height)
+                },
+            })
+    }
+
+    pub(crate) fn get_overlay_header(&self) -> bool {
+        self.overlay_header
+    }
+    pub(crate) fn get_header_leading_overlap(&self) -> f32 {
+        self.header_leading_overlap
     }
 
     /// Get the sidebar width
@@ -596,15 +667,26 @@ where
     }
 
     pub(crate) fn header_builder(&self) -> Option<Rc<dyn Fn() -> Box<dyn View>>> {
-        self.header_builder.clone()
+        let header = self.resolved_header();
+        if header.is_visible() {
+            header.builder
+        } else {
+            None
+        }
     }
 
     pub(crate) fn get_header_height(&self) -> f32 {
-        if self.header_builder.is_some() {
-            self.header_height
+        let header = self.resolved_header();
+        if header.is_visible() {
+            header.height.unwrap_or(0.)
         } else {
-            0.0
+            0.
         }
+    }
+
+    pub(crate) fn get_automatic_header_height(&self) -> bool {
+        let header = self.resolved_header();
+        header.is_visible() && header.height.is_none()
     }
 }
 
@@ -629,6 +711,9 @@ where
             icon_color: self.icon_color,
             header_builder: self.header_builder.clone(),
             header_height: self.header_height,
+            automatic_header_height: self.automatic_header_height,
+            overlay_header: self.overlay_header,
+            header_leading_overlap: self.header_leading_overlap,
         }
     }
 }

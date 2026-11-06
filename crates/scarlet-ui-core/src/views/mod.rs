@@ -55,7 +55,8 @@ pub use lazy_vstack::LazyVStack;
 pub use list::ListView;
 pub use menu::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};
 pub use navigation::{
-    NavigationLink, NavigationPresentation, NavigationSidebarStyle, NavigationView,
+    NavigationHeader, NavigationLink, NavigationPresentation, NavigationSidebarStyle,
+    NavigationView,
 };
 pub use progress::{ProgressView, ProgressViewRenderObject};
 pub use rectangle::{Rectangle, RectangleRenderObject};

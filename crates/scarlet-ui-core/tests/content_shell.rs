@@ -208,3 +208,151 @@ fn header_controls_receive_hits_before_scrolled_content_beneath_them() {
     assert_eq!(header_clicks.get(), 1);
     assert_eq!(content_clicks.get(), 0);
 }
+
+#[test]
+fn navigation_switches_custom_shared_and_hidden_headers_without_stacking_insets() {
+    let content = || {
+        ScrollView::new(Rectangle::new())
+            .vertical()
+            .content_size(0., 1000.)
+    };
+    let nav = NavigationView::new((
+        NavigationLink::new("Shared", content),
+        NavigationLink::new("Custom", content).custom_header(
+            NavigationHeader::new(|| Rectangle::new().frame_height(72.)).automatic_height(),
+        ),
+        NavigationLink::new("Hidden", content).custom_header(NavigationHeader::hidden()),
+    ))
+    .header(|| Rectangle::new().frame_height(40.))
+    .automatic_header_height()
+    .sidebar_width(80.)
+    .presentation(NavigationPresentation::Sidebar)
+    .content_underlap(80.)
+    .overlay_header(true)
+    .header_leading_overlap(8.);
+    let selected = nav.selected_index_state().clone();
+    let mut p = pipeline(nav);
+    for (index, height) in [(0, 40.), (1, 72.), (2, 0.), (0, 40.)] {
+        selected.set(index);
+        p.render_for_present().unwrap();
+        let navigation = &shell(&p).children()[0];
+        assert_eq!(navigation.children().len(), if height > 0. { 3 } else { 2 });
+        let scroll = &navigation.children()[0];
+        assert_eq!(scroll.bounds(), Rect::from_xywh(0., 0., 400., 300.));
+        assert_eq!(scroll.children()[0].position(), Point::new(80., height));
+        if height > 0. {
+            assert_eq!(
+                navigation.children()[1].bounds(),
+                Rect::from_xywh(72., 0., 328., height)
+            );
+        }
+    }
+    p.set_safe_area_insets(EdgeInsets::new(10., 20., 12., 14.));
+    p.resize(Size::new(600., 400.));
+    p.render_for_present().unwrap();
+    let navigation = &shell(&p).children()[0];
+    assert_eq!(
+        navigation.children()[1].bounds(),
+        Rect::from_xywh(82., 20., 506., 40.)
+    );
+    assert_eq!(
+        navigation.children()[0].children()[0].position(),
+        Point::new(80., 60.)
+    );
+}
+
+#[derive(Clone)]
+struct LiveNavigationHeader {
+    expanded: State<bool>,
+    clicks: State<usize>,
+}
+impl View for LiveNavigationHeader {
+    fn create_element(&self) -> Box<dyn Element> {
+        Box::new(scarlet_ui_core::ComponentElement::new_with_builder(
+            self.clone(),
+            |v| {
+                let clicks = v.clicks.clone();
+                Box::new(scarlet_ui_core::vstack! {
+                Button::new("Custom control").on_click(move || clicks.set(clicks.get() + 1)).frame_height(40.),
+                Rectangle::new().frame_height(if v.expanded.get() { 32. } else { 0. }),
+            }.spacing(0.))
+            },
+        ))
+    }
+    fn listenables(&self) -> Vec<&dyn Listenable> {
+        vec![&self.expanded]
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[test]
+fn live_header_extensions_relayout_in_both_presentations_preserving_scrolled_content() {
+    use scarlet_ui_core::MouseButton;
+    for presentation in [
+        NavigationPresentation::Sidebar,
+        NavigationPresentation::BottomBar,
+    ] {
+        let expanded = State::new(scarlet_ui_core::state::generate_state_id(), false);
+        let clicks = State::new(scarlet_ui_core::state::generate_state_id(), 0);
+        let header = LiveNavigationHeader {
+            expanded: expanded.clone(),
+            clicks: clicks.clone(),
+        };
+        let mut p = pipeline(
+            NavigationView::new((NavigationLink::new("Page", || {
+                ScrollView::new(Rectangle::new())
+                    .vertical()
+                    .content_size(0., 1000.)
+                    .wheel_sensitivity(1.)
+            }),))
+            .header(move || header.clone())
+            .automatic_header_height()
+            .overlay_header(true)
+            .presentation(presentation)
+            .sidebar_width(80.)
+            .content_underlap(80.),
+        );
+        p.render_for_present().unwrap();
+        wheel(&mut p, 80);
+        p.render_for_present().unwrap();
+        let nav = &shell(&p).children()[0];
+        let content_id = nav.children()[0].id();
+        let scrolled_y = nav.children()[0].children()[0].position().y;
+        assert_eq!(nav.children()[1].bounds().size.height, 40.);
+        for (is_expanded, height) in [(true, 72.), (false, 40.)] {
+            expanded.set(is_expanded);
+            p.render_for_present().unwrap();
+            let nav = &shell(&p).children()[0];
+            assert_eq!(nav.children()[1].bounds().size.height, height);
+            assert_eq!(nav.children()[0].id(), content_id);
+            assert_eq!(
+                nav.children()[0].children()[0].position().y,
+                scrolled_y + height - 40.
+            );
+        }
+        p.handle_event(&Event::Mouse(MouseEvent::Moved { x: 240, y: 20 }));
+        for event in [
+            MouseEvent::ButtonPressed {
+                button: MouseButton::Left,
+                x: 240,
+                y: 20,
+                click_count: 1,
+            },
+            MouseEvent::ButtonReleased {
+                button: MouseButton::Left,
+                x: 240,
+                y: 20,
+                click_count: 1,
+            },
+        ] {
+            p.handle_event(&Event::Mouse(event));
+        }
+        assert_eq!(
+            clicks.get(),
+            1,
+            "custom controls remain interactive above scrolled content"
+        );
+    }
+}

@@ -4,12 +4,14 @@
 //! sidebar or bottom-bar navigation with dynamic content switching based on
 //! user selection.
 
+mod header;
 mod link;
 mod render;
 mod tuple;
 mod view;
 mod view_impl;
 
+pub use header::NavigationHeader;
 pub use link::NavigationLink;
 pub(crate) use render::NavigationSidebarRenderObject;
 pub use render::NavigationViewRenderObject;

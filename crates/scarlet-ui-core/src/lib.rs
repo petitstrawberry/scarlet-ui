@@ -178,7 +178,10 @@ pub use views::{
     EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,
     TextStyleSpan, TextView, TextViewHit, TextViewRenderObject, TextViewScroll, WrapMode,
 };
-pub use views::{NavigationLink, NavigationPresentation, NavigationSidebarStyle, NavigationView};
+pub use views::{
+    NavigationHeader, NavigationLink, NavigationPresentation, NavigationSidebarStyle,
+    NavigationView,
+};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
 
 pub use scarlet_ui_macros::preview;
@@ -234,10 +237,10 @@ pub mod prelude {
     };
     pub use crate::views::{
         Button, ChromeStyle, Either, Either3, Either4, Either5, Either6, ElevationRole,
-        GlassMaterial, HStack, LazyVStack, NavigationPresentation, NavigationSidebarStyle,
-        Rectangle, Spacer, SplitAxis, SplitAxisPolicy, SplitView, Surface, SurfaceRole,
-        SurfaceStyle, Text, TextField, TextStyle, TextTone, VStack, Window, WindowContentLayout,
-        WindowShadow, ZStack,
+        GlassMaterial, HStack, LazyVStack, NavigationHeader, NavigationPresentation,
+        NavigationSidebarStyle, Rectangle, Spacer, SplitAxis, SplitAxisPolicy, SplitView, Surface,
+        SurfaceRole, SurfaceStyle, Text, TextField, TextStyle, TextTone, VStack, Window,
+        WindowContentLayout, WindowShadow, ZStack,
     };
     pub use crate::views::{
         EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,

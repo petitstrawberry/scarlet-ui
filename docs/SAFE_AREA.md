@@ -123,10 +123,55 @@ scroll composition and the existing GlassMaterial backdrop dependency.
 `NavigationView::content_underlap(points)` similarly opts a floating sidebar and its header
 chrome into a slightly larger selected-content viewport. Its default is zero;
 Simple navigation and the existing floating bottom bar retain their behavior.
-The selected page owns the forwarded reservations: use ContentShell for the
-page header, ScrollView for a document, or `.safe_area_padding(...)` for fixed
-content. Multiple sibling branches handle their own reservations independently.
-A header height of zero removes the header slot entirely.
+The selected page consumes the forwarded reservations using ScrollView or
+`.safe_area_padding(...)` for fixed content. Multiple sibling branches handle
+their own reservations independently. A header height of zero removes the slot.
+
+### Replaceable navigation headers
+
+`NavigationView::header(|| view)` installs a shared custom header. The supplied
+view receives the available width through normal layout constraints and owns
+its appearance, shape and internal margins. Navigation adds no material or
+padding around it. `HeaderBar` remains available as a standalone styled view.
+
+A destination can override the shared slot, including suppressing it entirely:
+
+```rust
+use scarlet_ui_core::{NavigationHeader, NavigationLink, NavigationView, ScrollView, Text};
+use scarlet_ui_core::prelude::*;
+
+let nav = NavigationView::new((
+    NavigationLink::new("Library", || ScrollView::new(Text::new("Songs")))
+        .custom_header(NavigationHeader::new(|| {
+            scarlet_ui_core::vstack! {
+                HeaderBar::new(Text::new("Library")).height(48.),
+                HeaderBar::new(Text::new("Name / Artist / Album")).height(28.),
+            }.spacing(8.)
+        }).automatic_height()),
+    NavigationLink::new("Canvas", || Text::new("Canvas").safe_area_padding(SafeAreaEdges::ALL))
+        .custom_header(NavigationHeader::hidden()),
+))
+.header(|| HeaderBar::new(Text::new("Shared header")))
+.overlay_header(true);
+```
+
+The compatibility height is 48px; `header_height(points)` changes the shared
+height. `automatic_header_height()` or `NavigationHeader::automatic_height()`
+measures the view, including live extension rows, on layout. Give such views a
+finite preferred height. Header state changes retain the content element and
+scroll offset. Each destination's header keeps its own view subscriptions.
+
+`overlay_header(true)` extends the content viewport behind the complete header
+in either sidebar or bottom-bar presentation. Its measured height becomes one
+safe-area reservation; do not subtract that height again or put a second
+ContentShell around the same page header. The default remains partitioned,
+except for the existing explicit `content_underlap` behavior.
+
+For custom chrome which already includes an outer leading margin,
+`header_leading_overlap(margin)` shares that transparent margin with a floating
+sidebar's trailing margin. It is ignored by Simple and bottom-bar navigation.
+Only transparent spacing should overlap; shadows are excluded from geometry.
+Standalone content shells remain useful for independent panes without navigation.
 
 ## Observation and lifecycle
 

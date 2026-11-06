@@ -67,6 +67,11 @@ where
         content.nav.get_presentation(),
         content.nav.get_minimum_content_size(),
     );
+    render_object.set_header_layout(
+        content.nav.get_automatic_header_height(),
+        content.nav.get_overlay_header(),
+        content.nav.get_header_leading_overlap(),
+    );
     render_object.set_content_underlap(content.nav.get_content_underlap());
     render_object.set_floating_bar_bottom_overlap(content.nav.get_floating_bar_bottom_overlap());
     crate::element::UpdateResult::Updated
@@ -81,6 +86,11 @@ where
         content.nav.get_header_height(),
         content.nav.get_presentation(),
         content.nav.get_minimum_content_size(),
+    );
+    render.set_header_layout(
+        content.nav.get_automatic_header_height(),
+        content.nav.get_overlay_header(),
+        content.nav.get_header_leading_overlap(),
     );
     render.set_content_underlap(content.nav.get_content_underlap());
     render.set_floating_bar_bottom_overlap(content.nav.get_floating_bar_bottom_overlap());
@@ -120,9 +130,7 @@ where
     let selected = content.nav.selected_index_state().get();
     let mut children: Vec<Box<dyn View>> = Vec::new();
     children.push(content.nav.links().build_content(selected));
-    if content.nav.get_header_height() > 0.
-        && let Some(header_builder) = content.nav.header_builder()
-    {
+    if let Some(header_builder) = content.nav.header_builder() {
         children.push(header_builder());
     }
     // Chrome paints after the content it samples, and receives hits first.

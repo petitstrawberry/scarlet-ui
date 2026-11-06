@@ -61,8 +61,8 @@ renderer is removed.
 
 The language should extend to tables, scrollbars and window chrome. Those
 still need their own state, density and layout review; a palette or radius change
-alone is not a full redesign. Automatic navigation headers and scroll-linked
-large titles are a separate API design effort.
+alone is not a full redesign. Replaceable navigation headers now support measured extension rows (see
+SAFE_AREA.md). Scroll-linked large titles remain a separate API design effort.
 
 ## Try it
 

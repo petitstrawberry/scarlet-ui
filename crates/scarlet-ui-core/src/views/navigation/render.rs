@@ -31,6 +31,9 @@ pub struct NavigationViewRenderObject {
     floating_bar_bottom_overlap: f32,
     sidebar_width: f32,
     header_height: f32,
+    automatic_header_height: bool,
+    overlay_header: bool,
+    header_leading_overlap: f32,
     content_underlap: f32,
     presentation: NavigationPresentation,
     minimum_content_size: Size,
@@ -235,6 +238,9 @@ impl NavigationViewRenderObject {
         Self {
             sidebar_width,
             header_height: header_height.max(0.0),
+            automatic_header_height: false,
+            overlay_header: false,
+            header_leading_overlap: 0.,
             safe_area_insets: EdgeInsets::ZERO,
             content_underlap: 0.,
             floating_bar_bottom_overlap: 0.0,
@@ -242,6 +248,17 @@ impl NavigationViewRenderObject {
             minimum_content_size,
             size: Size::ZERO,
         }
+    }
+
+    pub(crate) fn set_header_layout(
+        &mut self,
+        automatic: bool,
+        overlay: bool,
+        leading_overlap: f32,
+    ) {
+        self.automatic_header_height = automatic;
+        self.overlay_header = overlay;
+        self.header_leading_overlap = leading_overlap;
     }
 
     pub(crate) fn set_content_underlap(&mut self, underlap: f32) {
@@ -293,7 +310,7 @@ impl ElementRenderObject for NavigationViewRenderObject {
         constraints: LayoutConstraints,
         children: &mut [Box<dyn Element>],
     ) -> Size {
-        let has_header = self.header_height > 0.0;
+        let has_header = self.automatic_header_height || self.header_height > 0.0;
         let content_index = 0;
         let navigation_index = if has_header { 2 } else { 1 };
         if children.len() != navigation_index + 1 {
@@ -333,11 +350,43 @@ impl ElementRenderObject for NavigationViewRenderObject {
             .and_then(|r| r.as_any().downcast_ref::<NavigationSidebarRenderObject>())
             .is_some_and(|r| r.sidebar_style == NavigationSidebarStyle::Floating);
         let overlay = floating && presentation == NavigationPresentation::BottomBar;
+        let sidebar_header = presentation == NavigationPresentation::Sidebar;
+        let leading_overlap = if floating && sidebar_header {
+            self.header_leading_overlap
+                .min(self.sidebar_width.min(safe.size.width))
+        } else {
+            0.
+        };
+        let header_left = safe.left()
+            + if sidebar_header {
+                self.sidebar_width.min(safe.size.width) - leading_overlap
+            } else {
+                0.
+            };
+        let header_height = if self.automatic_header_height {
+            children.get_mut(1).map_or(0., |header| {
+                header.set_safe_area_insets(EdgeInsets::ZERO);
+                let measured = header.layout(LayoutConstraints::new(
+                    (safe.right() - header_left).max(0.),
+                    (safe.right() - header_left).max(0.),
+                    0.,
+                    safe.size.height,
+                ));
+                if measured.height.is_finite() {
+                    measured.height.clamp(0., safe.size.height)
+                } else {
+                    0.
+                }
+            })
+        } else {
+            self.header_height.min(safe.size.height)
+        };
+
         let mut geometry = navigation_geometry(
             size,
             presentation,
             self.sidebar_width,
-            self.header_height,
+            header_height,
             resolved_bottom_bar_height,
         );
         if overlay {
@@ -396,7 +445,7 @@ impl ElementRenderObject for NavigationViewRenderObject {
             }
         }
         if let Some(header) = &mut geometry.header {
-            header.origin.x = header.origin.x.max(safe.left());
+            header.origin.x = header_left;
             header.origin.y = safe.top();
             header.size.width = (safe.right() - header.left()).max(0.0);
             header.size.height = header.size.height.min(safe.size.height);
@@ -413,12 +462,16 @@ impl ElementRenderObject for NavigationViewRenderObject {
                 geometry.content.size.width += left;
                 content_insets.left += left;
             }
-            if let Some(header) = geometry.header {
-                let top = underlap.min(header.size.height);
-                geometry.content.origin.y -= top;
-                geometry.content.size.height += top;
-                content_insets.top += top;
-            }
+        }
+        if let Some(header) = geometry.header {
+            let top = if self.overlay_header {
+                header.size.height
+            } else {
+                underlap.min(header.size.height)
+            };
+            geometry.content.origin.y -= top;
+            geometry.content.size.height += top;
+            content_insets.top += top;
         }
         if let Some(navigation) = children.get_mut(navigation_index) {
             if let Some(render_object) = navigation.render_object_mut()
@@ -440,10 +493,16 @@ impl ElementRenderObject for NavigationViewRenderObject {
             let header_geometry = geometry
                 .header
                 .unwrap_or_else(|| Rect::from_xywh(0.0, 0.0, 0.0, 0.0));
-            header.layout(LayoutConstraints::tight(
-                header_geometry.size.width,
-                header_geometry.size.height,
-            ));
+            if !self.automatic_header_height {
+                header.set_safe_area_insets(EdgeInsets::ZERO);
+                header.layout(LayoutConstraints::tight(
+                    header_geometry.size.width,
+                    header_geometry.size.height,
+                ));
+            }
+            // Keep automatic headers' loose height constraint. Tightening it
+            // here would turn the measured height into a relayout boundary,
+            // hiding later intrinsic-size changes from navigation.
             header.set_position(header_geometry.origin);
         }
 
