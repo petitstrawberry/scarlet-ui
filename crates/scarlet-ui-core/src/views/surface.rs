@@ -18,7 +18,40 @@ use crate::renderer::PaintContext;
 use crate::view::View;
 
 use super::style;
-pub use super::style::{ElevationRole, GlassMaterial, SurfaceRole};
+pub use super::style::{ChromeStyle, ElevationRole, GlassMaterial, SurfaceRole};
+
+/// Reusable surface appearance, independent of geometry and layout.
+///
+/// Applying a style preserves the surface's radius, clipping, role and padding.
+/// Bubble Glass uses the renderer's shared directional rim and refraction;
+/// a separate elevation adds a cast shadow when needed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceStyle {
+    material: GlassMaterial,
+    elevation: ElevationRole,
+}
+
+impl SurfaceStyle {
+    /// Bubble Glass appearance without imposing rounded corners or a shadow.
+    pub fn bubble_glass() -> Self {
+        Self {
+            material: GlassMaterial::regular(),
+            elevation: ElevationRole::Flat,
+        }
+    }
+
+    /// Customize the material independently from the cast shadow.
+    pub fn material(mut self, material: GlassMaterial) -> Self {
+        self.material = material;
+        self
+    }
+
+    /// Set a shared cast-shadow preset without affecting geometry.
+    pub fn elevation(mut self, elevation: ElevationRole) -> Self {
+        self.elevation = elevation;
+        self
+    }
+}
 
 /// A semantic background surface that does not add padding or move its child.
 ///
@@ -39,6 +72,12 @@ pub struct Surface<V: View> {
 }
 
 impl<V: View> Surface<V> {
+    /// Apply a reusable appearance while preserving this surface's shape.
+    pub fn surface_style(mut self, style: SurfaceStyle) -> Self {
+        self.elevation = style.elevation;
+        self.material(style.material)
+    }
+
     /// Create a flat semantic surface around `inner`.
     pub fn new(inner: V, role: SurfaceRole) -> Self {
         Self {
@@ -353,6 +392,62 @@ mod tests {
             [PaintCommand::FillRoundedRect { .. }]
         ));
         assert_eq!(render.paint_outsets(), EdgeInsets::ZERO);
+    }
+
+    #[test]
+    fn reusable_appearance_preserves_shape_and_layout() {
+        let material = GlassMaterial::regular().blur_radius(10.0).opacity(0.35);
+        let style = SurfaceStyle::bubble_glass().material(material);
+        let surface = Surface::section(Spacer::new().frame(120.0, 40.0))
+            .corner_radius(3.0)
+            .surface_style(style);
+        let render = laid_out(&surface);
+        assert_eq!(render.corner_radius, 3.0);
+        assert!(render.clip_content);
+        assert_eq!(render.material, Some(material));
+        assert_eq!(render.elevation, ElevationRole::Flat);
+        assert_eq!(
+            surface
+                .create_element()
+                .layout(LayoutConstraints::new(0.0, 200.0, 0.0, 100.0)),
+            Size::new(120.0, 40.0)
+        );
+
+        let square = Spacer::new().surface_style(style);
+        assert_eq!(square.corner_radius, 0.0);
+        assert!(!square.clip_content);
+        let shadow = Spacer::new()
+            .surface_shadow(ElevationRole::Raised)
+            .corner_radius(3.0);
+        assert_eq!(shadow.material, None);
+        assert_eq!(shadow.fill, Some(Color::CLEAR));
+        assert_eq!(shadow.elevation, ElevationRole::Raised);
+    }
+
+    #[test]
+    fn material_controls_update_existing_render_objects() {
+        let old = Spacer::new().glass(GlassMaterial::regular());
+        let new = Spacer::new().glass(
+            GlassMaterial::regular()
+                .tint(Color::RED)
+                .opacity(0.25)
+                .blur_radius(4.0),
+        );
+        let mut render = laid_out(&old);
+        assert!(matches!(render.update(&new), UpdateResult::Updated));
+        assert_eq!(render.material.unwrap().blur_radius, 4.0);
+        assert_eq!(render.material.unwrap().tint, Color::RED.with_opacity(0.25));
+        assert!(matches!(render.update(&new), UpdateResult::NoChange));
+        let bounded = GlassMaterial::regular().opacity(2.0).blur_radius(-1.0);
+        assert_eq!(bounded.tint.a, 1.0);
+        assert_eq!(bounded.blur_radius, 0.0);
+        assert_eq!(GlassMaterial::regular().opacity(f32::NAN).tint.a, 0.0);
+        assert_eq!(
+            GlassMaterial::regular()
+                .blur_radius(f32::INFINITY)
+                .blur_radius,
+            0.0
+        );
     }
 
     #[test]

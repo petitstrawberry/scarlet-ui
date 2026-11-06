@@ -228,6 +228,19 @@ impl TabView {
             style: TabStyle::default(),
             material: None,
         }
+        .material(style::GlassMaterial::regular())
+    }
+
+    /// Select shared Bubble Glass (default) or the original solid tab strip.
+    /// Resets appearance colors; placement, dimensions and selection are retained.
+    /// Apply `.style(...)` afterward to customize the chosen appearance.
+    pub fn chrome_style(mut self, appearance: style::ChromeStyle) -> Self {
+        self.style = TabStyle::default();
+        self.material = None;
+        match appearance {
+            style::ChromeStyle::BubbleGlass => self.material(style::GlassMaterial::regular()),
+            style::ChromeStyle::Simple => self,
+        }
     }
 
     /// Set the colors and selected indicator of the tab bar.
@@ -1364,6 +1377,7 @@ mod tests {
                 TabItem::new("Mixer", Spacer::new),
                 TabItem::new("Editor", Spacer::new),
             ])
+            .chrome_style(style::ChromeStyle::Simple)
             .tab_bar_height(30.0)
             .tab_bar_placement(placement)
             .style(style),
@@ -1473,9 +1487,42 @@ mod tests {
     }
 
     #[test]
-    fn default_style_uses_rounded_material_without_lines() {
+    fn bubble_glass_is_default_for_both_tab_constructors_and_switches_live() {
+        let selected = State::new(crate::state::generate_state_id(), 1);
+        for tabs in [
+            TabView::new(vec![TabItem::new("One", Spacer::new)]),
+            TabView::with_selected_index(
+                vec![
+                    TabItem::new("One", Spacer::new),
+                    TabItem::new("Two", Spacer::new),
+                ],
+                selected.clone(),
+            ),
+        ] {
+            assert_eq!(tabs.material, Some(style::GlassMaterial::regular()));
+            assert_eq!(tabs.style.background_color, Color::CLEAR);
+            assert_eq!(tabs.style.indicator_height, 0.0);
+            let mut render = tab_render_object(&TabViewContent { tabs: tabs.clone() });
+            render.layout(LayoutConstraints::tight(300., 180.));
+            assert!(render.reads_backdrop());
+            let selection = tabs.selected_index.get();
+            let simple = tabs.chrome_style(style::ChromeStyle::Simple);
+            render.update(&TabViewContent {
+                tabs: simple.clone(),
+            });
+            assert!(!render.reads_backdrop());
+            assert_eq!(simple.selected_index.get(), selection);
+            render.update(&TabViewContent {
+                tabs: simple.chrome_style(style::ChromeStyle::BubbleGlass),
+            });
+            assert!(render.reads_backdrop());
+        }
+    }
+
+    #[test]
+    fn simple_style_retains_original_colors_and_selection() {
         let palette = ColorPalette::default();
-        let tabs = TabView::new(vec![]);
+        let tabs = TabView::new(vec![]).chrome_style(style::ChromeStyle::Simple);
         assert_eq!(
             tabs.style.background_color,
             style::surface_color(&palette, style::SurfaceRole::Structural)
@@ -1582,7 +1629,7 @@ mod tests {
     }
 
     #[test]
-    fn default_selection_is_an_inset_rounded_face_at_both_edges() {
+    fn simple_selection_is_an_inset_rounded_face_at_both_edges() {
         for placement in [TabBarPlacement::Top, TabBarPlacement::Bottom] {
             let mut tabs = tab_render_object(&styled_tabs(TabStyle::default(), placement));
             tabs.layout(LayoutConstraints::tight(300.0, 180.0));

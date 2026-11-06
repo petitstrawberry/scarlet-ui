@@ -163,22 +163,25 @@ pub use views::modifiers::{
     Padding, SafeArea, SetSize,
 };
 pub use views::{
-    BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar, HorizontalSizeClass,
-    IconView, Image, ImageFit, ImageSource, ListView, ProgressView, ScrollAxis, ScrollView,
-    ScrollWheelDirection, ScrollbarVisibility, Select, SelectStyle, Slider, TabBarPlacement,
-    TabBarPosition, TabItem, TabStyle, TabView, Toggle, VectorImageData, VectorTriangle,
-    VerticalSizeClass, WindowSizeClass,
+    BitmapImage, CanvasView, ContentShell, Divider, DividerOrientation, GridView, HeaderBar,
+    HorizontalSizeClass, IconView, Image, ImageFit, ImageSource, ListView, ProgressView,
+    ScrollAxis, ScrollView, ScrollWheelDirection, ScrollbarVisibility, Select, SelectStyle, Slider,
+    TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, Toggle, VectorImageData,
+    VectorTriangle, VerticalSizeClass, WindowSizeClass,
 };
 pub use views::{
-    Button, ElevationRole, GlassMaterial, HStack, LazyVStack, Rectangle, Spacer, SplitAxis,
-    SplitAxisPolicy, SplitView, Surface, SurfaceRole, Text, TextField, TextStyle, TextTone, VStack,
-    Window, WindowContentLayout, WindowShadow, ZStack,
+    Button, ChromeStyle, ElevationRole, GlassMaterial, HStack, LazyVStack, Rectangle, Spacer,
+    SplitAxis, SplitAxisPolicy, SplitView, Surface, SurfaceRole, SurfaceStyle, Text, TextField,
+    TextStyle, TextTone, VStack, Window, WindowContentLayout, WindowShadow, ZStack,
 };
 pub use views::{
     EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,
     TextStyleSpan, TextView, TextViewHit, TextViewRenderObject, TextViewScroll, WrapMode,
 };
-pub use views::{NavigationLink, NavigationPresentation, NavigationSidebarStyle, NavigationView};
+pub use views::{
+    NavigationHeader, NavigationLink, NavigationPresentation, NavigationSidebarStyle,
+    NavigationView,
+};
 pub use views::{TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, text_grid_cell_width};
 
 pub use scarlet_ui_macros::preview;
@@ -226,17 +229,18 @@ pub mod prelude {
         OnMouseMove, Padding,
     };
     pub use crate::views::{
-        BitmapImage, CanvasView, Divider, DividerOrientation, GridView, HeaderBar,
+        BitmapImage, CanvasView, ContentShell, Divider, DividerOrientation, GridView, HeaderBar,
         HorizontalSizeClass, IconView, Image, ImageFit, ImageSource, ListView, ProgressView,
         ScrollAxis, ScrollView, ScrollWheelDirection, ScrollbarVisibility, Select, SelectStyle,
         Slider, TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, Toggle,
         VectorImageData, VectorTriangle, VerticalSizeClass, WindowSizeClass,
     };
     pub use crate::views::{
-        Button, Either, Either3, Either4, Either5, Either6, ElevationRole, GlassMaterial, HStack,
-        LazyVStack, NavigationPresentation, NavigationSidebarStyle, Rectangle, Spacer, SplitAxis,
-        SplitAxisPolicy, SplitView, Surface, SurfaceRole, Text, TextField, TextStyle, TextTone,
-        VStack, Window, WindowContentLayout, WindowShadow, ZStack,
+        Button, ChromeStyle, Either, Either3, Either4, Either5, Either6, ElevationRole,
+        GlassMaterial, HStack, LazyVStack, NavigationHeader, NavigationPresentation,
+        NavigationSidebarStyle, Rectangle, Spacer, SplitAxis, SplitAxisPolicy, SplitView, Surface,
+        SurfaceRole, SurfaceStyle, Text, TextField, TextStyle, TextTone, VStack, Window,
+        WindowContentLayout, WindowShadow, ZStack,
     };
     pub use crate::views::{
         EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,

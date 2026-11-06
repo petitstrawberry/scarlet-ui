@@ -6,6 +6,7 @@ mod adaptive;
 mod button;
 mod canvas;
 pub mod containers;
+mod content_shell;
 mod divider;
 mod either;
 mod grid;
@@ -40,6 +41,7 @@ mod window;
 pub use adaptive::{HorizontalSizeClass, VerticalSizeClass, WindowSizeClass};
 pub use button::{Button, ButtonCallback, ButtonRenderObject};
 pub use canvas::{CanvasEventHandler, CanvasRenderCallback, CanvasRenderObject, CanvasView};
+pub use content_shell::ContentShell;
 pub use divider::{Divider, DividerOrientation, DividerRenderObject};
 pub use either::{Either, Either3, Either4, Either5, Either6};
 pub use grid::GridView;
@@ -53,7 +55,8 @@ pub use lazy_vstack::LazyVStack;
 pub use list::ListView;
 pub use menu::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};
 pub use navigation::{
-    NavigationLink, NavigationPresentation, NavigationSidebarStyle, NavigationView,
+    NavigationHeader, NavigationLink, NavigationPresentation, NavigationSidebarStyle,
+    NavigationView,
 };
 pub use progress::{ProgressView, ProgressViewRenderObject};
 pub use rectangle::{Rectangle, RectangleRenderObject};
@@ -64,7 +67,7 @@ pub use select::{Select, SelectChangeCallback, SelectRenderObject, SelectStyle};
 pub use slider::{Slider, SliderRenderObject};
 pub use spacer::{Spacer, SpacerRenderObject};
 pub use split::{SplitAxis, SplitAxisPolicy, SplitView, SplitViewRenderObject};
-pub use surface::{ElevationRole, GlassMaterial, Surface, SurfaceRole};
+pub use surface::{ChromeStyle, ElevationRole, GlassMaterial, Surface, SurfaceRole, SurfaceStyle};
 pub use tab::{TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, TabViewRenderObject};
 pub use text::{Text, TextRenderObject, TextStyle, TextTone};
 pub use text_field::{TextField, TextFieldRenderObject};

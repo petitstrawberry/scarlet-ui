@@ -340,6 +340,17 @@ impl SgfxPaintEncoder {
         let Some(bounds) = list.raster_cache_bounds() else {
             return Ok(None);
         };
+        // Virtual rows already live inside their scroll layer's tiles. Giving
+        // every short row another row of 512px textures wastes most of each
+        // texture and can evict the enclosing viewport's working set on Retina
+        // displays. Replay simple rows into that layer; retain independent
+        // pictures for tall subviews and expensive backdrop materials.
+        if self.tile_depth > 0
+            && !list.reads_backdrop()
+            && bounds.size.height * scale as f32 / 1000. <= SIDE as f32 / 2.
+        {
+            return Ok(None);
+        }
         // Bake fractional offset phases into separate tiles and composite on
         // the integer grid, preserving window-space physical text snapping.
         // Fractional DPI retains the precise normal path.
@@ -832,6 +843,54 @@ mod tests {
             &[(0, 0, 200, 120)],
         )
     }
+    #[test]
+    fn short_virtual_rows_share_parent_tiles_on_retina() {
+        let mut renderer = SgfxPaintEncoder::new(1600, 1200, false).unwrap();
+        let target = renderer.target_texture(0).unwrap();
+        let mut content = PaintContext::new();
+        for row in 0..40 {
+            let mut paint = PaintContext::new();
+            paint.fill_rounded_rect(Rect::from_xywh(0., 0., 800., 40.), 0., UiColor::WHITE);
+            paint.fill_rounded_rect(Rect::from_xywh(12., 8., 250., 24.), 3., UiColor::RED);
+            let row_list = paint.into_cached_layer(Rect::from_xywh(0., 0., 800., 40.));
+            content.draw_display_list(Point::new(0., row as f32 * 40.), row_list);
+        }
+        let list = content.into_cached_layer(Rect::from_xywh(0., 0., 800., 1600.));
+        let mut trace = Trace::default();
+        for offset in [0., -10., -20.] {
+            trace.targets.clear();
+            let mut paint = PaintContext::new();
+            paint.draw_display_list(Point::new(0., offset), list.clone());
+            renderer
+                .encode_frame(
+                    &mut trace,
+                    0,
+                    None,
+                    &paint,
+                    UiColor::WHITE,
+                    2000,
+                    &[(0, 0, 1600, 1200)],
+                )
+                .unwrap();
+            assert!(
+                renderer
+                    .raster_tiles
+                    .iter()
+                    .all(|tile| tile.cache_identity == list.cache_identity()),
+                "short rows must not allocate independent textures inside the parent layer"
+            );
+            if offset == 0. {
+                assert_eq!(trace.targets.iter().filter(|id| **id != target).count(), 12);
+            } else {
+                assert_eq!(
+                    trace.targets,
+                    [target],
+                    "warm scrolling should only composite the parent tiles"
+                );
+            }
+        }
+    }
+
     #[test]
     fn warm_scroll_only_composites_tiles_and_exposure_draws_only_new_tiles() {
         let mut renderer = SgfxPaintEncoder::new(200, 120, false).unwrap();

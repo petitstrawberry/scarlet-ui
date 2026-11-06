@@ -3,6 +3,7 @@
 //! This module defines the trait for tuples of NavigationLinks and provides
 //! implementations for tuples of size 0-16.
 
+use super::NavigationHeader;
 use crate::view::View;
 use crate::views::navigation::link::NavigationLink;
 use alloc::boxed::Box;
@@ -92,6 +93,11 @@ pub trait NavigationLinkTuple {
     ///
     /// Shared selection callback, if configured.
     fn get_on_select(&self, index: usize) -> Option<Rc<dyn Fn()>>;
+
+    /// Destination override for the shared header. `None` inherits it.
+    fn get_header(&self, _index: usize) -> Option<NavigationHeader> {
+        None
+    }
 }
 
 // Import Icon type for use in trait methods
@@ -124,6 +130,10 @@ impl NavigationLinkTuple for () {
 impl NavigationLinkTuple for (NavigationLink,) {
     fn count(&self) -> usize {
         1
+    }
+
+    fn get_header(&self, index: usize) -> Option<NavigationHeader> {
+        [&self.0][index].header.clone()
     }
 
     fn get_label(&self, index: usize) -> &str {
@@ -159,6 +169,10 @@ impl NavigationLinkTuple for (NavigationLink,) {
 impl NavigationLinkTuple for (NavigationLink, NavigationLink) {
     fn count(&self) -> usize {
         2
+    }
+
+    fn get_header(&self, index: usize) -> Option<NavigationHeader> {
+        [&self.0, &self.1][index].header.clone()
     }
 
     fn get_label(&self, index: usize) -> &str {
@@ -198,6 +212,10 @@ impl NavigationLinkTuple for (NavigationLink, NavigationLink) {
 impl NavigationLinkTuple for (NavigationLink, NavigationLink, NavigationLink) {
     fn count(&self) -> usize {
         3
+    }
+
+    fn get_header(&self, index: usize) -> Option<NavigationHeader> {
+        [&self.0, &self.1, &self.2][index].header.clone()
     }
 
     fn get_label(&self, index: usize) -> &str {
@@ -248,6 +266,10 @@ impl NavigationLinkTuple
 {
     fn count(&self) -> usize {
         4
+    }
+
+    fn get_header(&self, index: usize) -> Option<NavigationHeader> {
+        [&self.0, &self.1, &self.2, &self.3][index].header.clone()
     }
 
     fn get_label(&self, index: usize) -> &str {
@@ -304,6 +326,12 @@ impl NavigationLinkTuple
 {
     fn count(&self) -> usize {
         6
+    }
+
+    fn get_header(&self, index: usize) -> Option<NavigationHeader> {
+        [&self.0, &self.1, &self.2, &self.3, &self.4, &self.5][index]
+            .header
+            .clone()
     }
 
     fn get_label(&self, index: usize) -> &str {
@@ -369,6 +397,12 @@ impl NavigationLinkTuple
         5
     }
 
+    fn get_header(&self, index: usize) -> Option<NavigationHeader> {
+        [&self.0, &self.1, &self.2, &self.3, &self.4][index]
+            .header
+            .clone()
+    }
+
     fn get_label(&self, index: usize) -> &str {
         match index {
             0 => self.0.label(),
@@ -428,6 +462,14 @@ impl NavigationLinkTuple
 {
     fn count(&self) -> usize {
         7
+    }
+
+    fn get_header(&self, index: usize) -> Option<NavigationHeader> {
+        [
+            &self.0, &self.1, &self.2, &self.3, &self.4, &self.5, &self.6,
+        ][index]
+            .header
+            .clone()
     }
     fn get_label(&self, index: usize) -> &str {
         [

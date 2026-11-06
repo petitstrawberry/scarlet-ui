@@ -89,6 +89,90 @@ the geometric distance of every descendant from a screen edge. Apply SafeArea
 at the container that owns the boundary; an arbitrary inset frame does not
 implicitly consume it. Choose edges explicitly for separate branches.
 
+## Floating application chrome
+
+`ContentShell` separates the safe content rectangle from the paint viewport.
+It accepts independent optional `.header(view, height)` and
+`.sidebar(view, width)` slots. Omitted slots consume no space. Chrome slots
+are placed within the inherited platform safe area and paint after content;
+normal event dispatch gives their controls priority over content beneath them.
+Wrap the shell in a canvas `Surface` to keep its background continuous.
+
+```rust
+use scarlet_ui::prelude::*;
+
+let toolbar = Surface::new(
+    HeaderBar::new(Text::new("Library")).surface(Color::CLEAR).separator(Color::CLEAR),
+    SurfaceRole::Structural,
+).material(GlassMaterial::regular()).corner_radius(16.).padding(8.);
+let page = ContentShell::scrolling(
+    ScrollView::new(Text::new("Scrollable document")).vertical().content_size(0., 1200.),
+).header(toolbar, 64.).underlap(24.);
+```
+
+Use `ContentShell::new(fixed_content)` for forms, empty states, or mixed stacks
+with their own fixed status rows: it fits the content inside the safe rectangle.
+Use `ContentShell::scrolling(scrollport)` when ScrollView, ListView, or GridView
+owns the content boundary. The viewport extends under the adjacent chrome by
+16 points by default (configurable with `.underlap(...)`), while the first item,
+scrollbar, and reveal targets stay safe. The last item remains reachable above
+the bottom system reservation. Underlap is bounded by the occupied slot; it does
+not turn the whole toolbar into a scroll viewport. This uses ordinary retained
+scroll composition and the existing GlassMaterial backdrop dependency.
+
+`NavigationView::content_underlap(points)` similarly opts a floating sidebar and its header
+chrome into a slightly larger selected-content viewport. Its default is zero;
+Simple navigation and the existing floating bottom bar retain their behavior.
+The selected page consumes the forwarded reservations using ScrollView or
+`.safe_area_padding(...)` for fixed content. Multiple sibling branches handle
+their own reservations independently. A header height of zero removes the slot.
+
+### Replaceable navigation headers
+
+`NavigationView::header(|| view)` installs a shared custom header. The supplied
+view receives the available width through normal layout constraints and owns
+its appearance, shape and internal margins. Navigation adds no material or
+padding around it. `HeaderBar` remains available as a standalone styled view.
+
+A destination can override the shared slot, including suppressing it entirely:
+
+```rust
+use scarlet_ui_core::{NavigationHeader, NavigationLink, NavigationView, ScrollView, Text};
+use scarlet_ui_core::prelude::*;
+
+let nav = NavigationView::new((
+    NavigationLink::new("Library", || ScrollView::new(Text::new("Songs")))
+        .custom_header(NavigationHeader::new(|| {
+            scarlet_ui_core::vstack! {
+                HeaderBar::new(Text::new("Library")).height(48.),
+                HeaderBar::new(Text::new("Name / Artist / Album")).height(28.),
+            }.spacing(8.)
+        }).automatic_height()),
+    NavigationLink::new("Canvas", || Text::new("Canvas").safe_area_padding(SafeAreaEdges::ALL))
+        .custom_header(NavigationHeader::hidden()),
+))
+.header(|| HeaderBar::new(Text::new("Shared header")))
+.overlay_header(true);
+```
+
+The compatibility height is 48px; `header_height(points)` changes the shared
+height. `automatic_header_height()` or `NavigationHeader::automatic_height()`
+measures the view, including live extension rows, on layout. Give such views a
+finite preferred height. Header state changes retain the content element and
+scroll offset. Each destination's header keeps its own view subscriptions.
+
+`overlay_header(true)` extends the content viewport behind the complete header
+in either sidebar or bottom-bar presentation. Its measured height becomes one
+safe-area reservation; do not subtract that height again or put a second
+ContentShell around the same page header. The default remains partitioned,
+except for the existing explicit `content_underlap` behavior.
+
+For custom chrome which already includes an outer leading margin,
+`header_leading_overlap(margin)` shares that transparent margin with a floating
+sidebar's trailing margin. It is ignored by Simple and bottom-bar navigation.
+Only transparent spacing should overlap; shadows are excluded from geometry.
+Standalone content shells remain useful for independent panes without navigation.
+
 ## Observation and lifecycle
 
 `GeometryProxy::safe_area_insets()` exposes the scope's unconsumed insets through

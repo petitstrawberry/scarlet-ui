@@ -3,6 +3,7 @@
 //! NavigationView provides sidebar and bottom-bar presentations where users can
 //! select different items to display different content views.
 
+use super::NavigationHeader;
 use crate::os::Mutex;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -37,12 +38,12 @@ const DEFAULT_MINIMUM_CONTENT_HEIGHT: f32 = 240.0;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NavigationSidebarStyle {
     /// The original edge-to-edge rail and narrow selection indicator.
-    #[default]
     Simple,
     /// An inset rounded panel with softly tinted, rounded destination rows.
     /// Uses the shared in-app backdrop material and a uniform selected tint.
     /// In bottom-bar presentation, floats an inset glass capsule above the
     /// window edge. Selection uses a translucent tint without an indicator line.
+    #[default]
     Floating,
 }
 
@@ -188,6 +189,7 @@ where
     /// Width reserved when using sidebar presentation.
     sidebar_width: f32,
     sidebar_style: NavigationSidebarStyle,
+    content_underlap: f32,
     floating_bar_bottom_overlap: f32,
     /// Requested adaptive presentation policy.
     presentation: NavigationPresentation,
@@ -203,6 +205,9 @@ where
     header_builder: Option<Rc<dyn Fn() -> Box<dyn View>>>,
     /// Height reserved for the content header.
     header_height: f32,
+    automatic_header_height: bool,
+    overlay_header: bool,
+    header_leading_overlap: f32,
 }
 
 impl<T> NavigationView<T>
@@ -232,7 +237,8 @@ where
             links,
             selected_index: State::new(state_id, 0),
             sidebar_width: 200.0,
-            sidebar_style: NavigationSidebarStyle::Simple,
+            sidebar_style: NavigationSidebarStyle::default(),
+            content_underlap: 0.,
             floating_bar_bottom_overlap: 0.0,
             presentation: NavigationPresentation::Automatic,
             minimum_content_size: Size::new(
@@ -244,6 +250,9 @@ where
             icon_color: None,
             header_builder: None,
             header_height: 0.0,
+            automatic_header_height: false,
+            overlay_header: false,
+            header_leading_overlap: 0.,
         }
     }
 
@@ -266,7 +275,8 @@ where
             links,
             selected_index: navigation_selected_state(state_key),
             sidebar_width: 200.0,
-            sidebar_style: NavigationSidebarStyle::Simple,
+            sidebar_style: NavigationSidebarStyle::default(),
+            content_underlap: 0.,
             floating_bar_bottom_overlap: 0.0,
             presentation: NavigationPresentation::Automatic,
             minimum_content_size: Size::new(
@@ -278,6 +288,9 @@ where
             icon_color: None,
             header_builder: None,
             header_height: 0.0,
+            automatic_header_height: false,
+            overlay_header: false,
+            header_leading_overlap: 0.,
         }
     }
 
@@ -291,10 +304,36 @@ where
         self
     }
 
-    /// Opt into a sidebar treatment without changing adaptive presentation.
+    /// Select navigation appearance without changing adaptive presentation.
+    /// Bubble Glass (`Floating`) is the default; `Simple` retains the old rail.
     pub fn sidebar_style(mut self, style: NavigationSidebarStyle) -> Self {
         self.sidebar_style = style;
         self
+    }
+
+    /// Select the shared Bubble Glass or legacy Simple chrome appearance.
+    pub fn chrome_style(self, style: crate::views::ChromeStyle) -> Self {
+        self.sidebar_style(match style {
+            crate::views::ChromeStyle::BubbleGlass => NavigationSidebarStyle::Floating,
+            crate::views::ChromeStyle::Simple => NavigationSidebarStyle::Simple,
+        })
+    }
+
+    /// Extend the content viewport beneath a floating sidebar and its header.
+    /// Reservations are forwarded as safe areas: scrollports inset their
+    /// contents, while fixed pages should use SafeArea or ContentShell.
+    /// Simple navigation keeps its existing partitioned layout.
+    pub fn content_underlap(mut self, points: f32) -> Self {
+        self.content_underlap = if points.is_finite() {
+            points.max(0.)
+        } else {
+            0.
+        };
+        self
+    }
+
+    pub(crate) fn get_content_underlap(&self) -> f32 {
+        self.content_underlap
     }
 
     /// Allow a floating bottom bar to overlap the bottom safe area by up to
@@ -489,8 +528,69 @@ where
     ///
     /// Navigation view with the requested header height.
     pub fn header_height(mut self, height: f32) -> Self {
-        self.header_height = height.max(0.0);
+        self.header_height = if height.is_finite() {
+            height.max(0.)
+        } else {
+            0.
+        };
+        self.automatic_header_height = false;
         self
+    }
+
+    /// Replace the shared header with a configured slot. Destinations may
+    /// override it via `NavigationLink::custom_header`.
+    pub fn custom_header(mut self, header: NavigationHeader) -> Self {
+        self.header_builder = header.builder;
+        self.header_height = header.height.unwrap_or(0.);
+        self.automatic_header_height = header.height.is_none();
+        self
+    }
+
+    /// Measure the custom header, including extension rows, at the available
+    /// width. The header view should have a finite preferred height.
+    pub fn automatic_header_height(mut self) -> Self {
+        self.automatic_header_height = true;
+        self
+    }
+
+    /// Paint content behind the header and reserve its height as a safe inset.
+    /// This applies to both sidebar and bottom-bar navigation. Fixed content
+    /// must consume safe areas; ScrollView does so automatically.
+    pub fn overlay_header(mut self, overlay: bool) -> Self {
+        self.overlay_header = overlay;
+        self
+    }
+
+    /// Share a custom header's leading margin with a floating sidebar's
+    /// trailing margin. Only that transparent margin should overlap; shadows
+    /// do not contribute to layout. Other presentations keep zero overlap.
+    pub fn header_leading_overlap(mut self, points: f32) -> Self {
+        self.header_leading_overlap = if points.is_finite() {
+            points.max(0.)
+        } else {
+            0.
+        };
+        self
+    }
+
+    pub(crate) fn resolved_header(&self) -> NavigationHeader {
+        self.links
+            .get_header(self.selected_index.get())
+            .unwrap_or_else(|| NavigationHeader {
+                builder: self.header_builder.clone(),
+                height: if self.automatic_header_height {
+                    None
+                } else {
+                    Some(self.header_height)
+                },
+            })
+    }
+
+    pub(crate) fn get_overlay_header(&self) -> bool {
+        self.overlay_header
+    }
+    pub(crate) fn get_header_leading_overlap(&self) -> f32 {
+        self.header_leading_overlap
     }
 
     /// Get the sidebar width
@@ -567,15 +667,26 @@ where
     }
 
     pub(crate) fn header_builder(&self) -> Option<Rc<dyn Fn() -> Box<dyn View>>> {
-        self.header_builder.clone()
+        let header = self.resolved_header();
+        if header.is_visible() {
+            header.builder
+        } else {
+            None
+        }
     }
 
     pub(crate) fn get_header_height(&self) -> f32 {
-        if self.header_builder.is_some() {
-            self.header_height
+        let header = self.resolved_header();
+        if header.is_visible() {
+            header.height.unwrap_or(0.)
         } else {
-            0.0
+            0.
         }
+    }
+
+    pub(crate) fn get_automatic_header_height(&self) -> bool {
+        let header = self.resolved_header();
+        header.is_visible() && header.height.is_none()
     }
 }
 
@@ -591,6 +702,7 @@ where
             selected_index: self.selected_index.clone(),
             sidebar_width: self.sidebar_width,
             sidebar_style: self.sidebar_style,
+            content_underlap: self.content_underlap,
             floating_bar_bottom_overlap: self.floating_bar_bottom_overlap,
             presentation: self.presentation,
             minimum_content_size: self.minimum_content_size,
@@ -599,6 +711,9 @@ where
             icon_color: self.icon_color,
             header_builder: self.header_builder.clone(),
             header_height: self.header_height,
+            automatic_header_height: self.automatic_header_height,
+            overlay_header: self.overlay_header,
+            header_leading_overlap: self.header_leading_overlap,
         }
     }
 }
@@ -631,9 +746,9 @@ mod tests {
     }
 
     #[test]
-    fn floating_sidebar_is_opt_in_and_survives_clone() {
+    fn bubble_glass_is_default_and_simple_remains_explicit() {
         let view = NavigationView::new((NavigationLink::new("Home", || Text::new("Home")),));
-        assert_eq!(view.get_sidebar_style(), NavigationSidebarStyle::Simple);
+        assert_eq!(view.get_sidebar_style(), NavigationSidebarStyle::Floating);
         let floating = view.sidebar_style(NavigationSidebarStyle::Floating);
         assert_eq!(
             floating.clone().get_sidebar_style(),
@@ -647,7 +762,18 @@ mod tests {
             (NavigationLink::new("Home", || Text::new("Home")),),
             999999,
         );
-        assert_eq!(keyed.get_sidebar_style(), NavigationSidebarStyle::Simple);
+        assert_eq!(keyed.get_sidebar_style(), NavigationSidebarStyle::Floating);
+        let simple = keyed.chrome_style(crate::views::ChromeStyle::Simple);
+        assert_eq!(
+            simple.clone().get_sidebar_style(),
+            NavigationSidebarStyle::Simple
+        );
+        assert_eq!(
+            simple
+                .chrome_style(crate::views::ChromeStyle::BubbleGlass)
+                .get_sidebar_style(),
+            NavigationSidebarStyle::Floating
+        );
     }
     use crate::views::{NavigationLink, Text};
     use crate::{Icon, InteractionMode, Size};

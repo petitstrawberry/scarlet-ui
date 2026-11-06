@@ -3992,9 +3992,9 @@ mod tests {
         let mut pipeline = RenderingPipeline::new();
         pipeline.set_root(navigation.create_element());
         pipeline.layout_initial();
-        pipeline.handle_event(&touch_frame(1, 1, TouchPhase::Down, 10, 50));
+        pipeline.handle_event(&touch_frame(1, 1, TouchPhase::Down, 32, 72));
         assert_eq!(selected.get(), 0);
-        pipeline.handle_event(&touch_frame(2, 1, TouchPhase::Up, 10, 50));
+        pipeline.handle_event(&touch_frame(2, 1, TouchPhase::Up, 32, 72));
         assert_eq!(selected.get(), 1);
         assert_eq!(callback_count.get(), 1);
     }
@@ -4531,6 +4531,7 @@ mod tests {
             NavigationLink::new("First", || Text::new("first page")),
             NavigationLink::new("Second", || Text::new("second page")),
         ))
+        .sidebar_style(crate::views::NavigationSidebarStyle::Simple)
         .sidebar_width(150.0)
         .create_element();
         let mut pipeline = RenderingPipeline::new();
@@ -5546,8 +5547,8 @@ mod tests {
         assert!(
             pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
                 button: MouseButton::Left,
-                x: 10,
-                y: 45,
+                x: 32,
+                y: 72,
                 click_count: 1,
             }))
         );
@@ -5674,6 +5675,9 @@ mod tests {
             NavigationLink::new("First", || Text::new("first page")),
             NavigationLink::new("Factory", page),
         ))
+        // This regression exercises the CPU picture-cache route; backdrop
+        // chrome deliberately uses a different retained-command route.
+        .chrome_style(crate::views::ChromeStyle::Simple)
         .create_element();
         pipeline.set_root(root);
         pipeline.layout_initial();
@@ -5841,6 +5845,9 @@ mod tests {
             NavigationLink::new("Display", display),
         }
         .sidebar_width(190.0)
+        // This regression exercises the CPU picture-cache route; backdrop
+        // chrome deliberately uses a different retained-command route.
+        .chrome_style(crate::views::ChromeStyle::Simple)
         .create_element();
         pipeline.set_root(root);
         pipeline.layout_initial();
@@ -6270,8 +6277,8 @@ mod tests {
         assert!(
             pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
                 button: MouseButton::Left,
-                x: 10,
-                y: 45,
+                x: 32,
+                y: 72,
                 click_count: 1,
             }))
         );

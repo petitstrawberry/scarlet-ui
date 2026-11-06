@@ -946,7 +946,6 @@ impl WidgetFactory {
                 .alignment(Alignment::Top)
             }),
         ])
-        .material(GlassMaterial::regular())
         .tab_bar_placement(tab_bar_placement_for_selection(
             self.tab_bar_placement.get(),
         ))
@@ -1276,7 +1275,6 @@ impl Application for WidgetFactory {
                         .icon(Icon::Package),
                 }
                 .presentation(NavigationPresentation::Automatic)
-                .sidebar_style(NavigationSidebarStyle::Floating)
                 .floating_bar_bottom_overlap(if cfg!(target_arch = "wasm32") {
                     12.0
                 } else {

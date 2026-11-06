@@ -1,5 +1,61 @@
 # Shared glass material trial
 
+## Default chrome
+
+NavigationView (both constructors), HeaderBar and TabView default to Bubble
+Glass. Sidebar and bottom navigation use the existing Floating geometry; tabs
+use the existing content-sized material bar. HeaderBar paints glass within its
+existing bounds and adds no padding or safe-area reservation. Its component
+outline defaults to 16px, independently configurable with `.corner_radius`.
+Navigation content underlap remains an explicit layout choice.
+
+Use `.chrome_style(ChromeStyle::Simple)` on any of these components for the
+previous solid treatment, or `ChromeStyle::BubbleGlass` to restore the default.
+Presets reset appearance colors; apply color/material overrides afterward.
+`NavigationSidebarStyle::Simple` and `Floating` remain supported.
+`HeaderBar::surface(color)` explicitly selects a solid fill, including CLEAR
+when the bar is already wrapped in a styled Surface, preventing double glass.
+Low-level render-object constructors with explicit colors retain their prior
+semantics. Surface itself still defaults to flat; ordinary content backgrounds
+are not made translucent.
+
+## Bubble Glass composition
+
+`SurfaceStyle::bubble_glass()` packages the shared glass appearance, including
+its directional rim response. It imposes neither a corner radius nor a cast
+shadow. Shape, clipping and layout remain separate choices:
+
+```rust
+use scarlet_ui::prelude::*;
+
+let material = GlassMaterial::regular().opacity(0.55).blur_radius(12.0);
+let appearance = SurfaceStyle::bubble_glass().material(material);
+let toolbar = Text::new("Library")
+    .padding(12.0)
+    .surface_style(appearance)
+    .corner_radius(16.0); // the application chooses the shape
+
+let glass_only = Text::new("Glass").glass(material).corner_radius(6.0);
+let shadow_only = Text::new("Shadow")
+    .surface_shadow(ElevationRole::Raised).corner_radius(6.0);
+let shaped = Surface::section(Text::new("Section"))
+    .corner_radius(4.0).surface_style(appearance);
+```
+
+These modifiers currently paint rectangular or rounded-rectangular bounds;
+they do not infer the silhouette of arbitrary child content. Applying a style
+to an existing `Surface` preserves its radius, clipping and tonal role.
+`.material(...)`, `.elevation(...)` and `.corner_radius(...)` remain available
+individually. Shadows use paint outsets and do not enlarge the layout/hit bounds.
+Styles add no padding or safe-area reservation.
+
+`GlassMaterial::tint(color)` replaces the tint including its alpha;
+`.opacity(alpha)` sets only that tint's opacity, leaving foreground and optical
+rim intact. `.blur_radius(radius)` controls diffusion independently. Refractive
+quality uses 14% of this radius; Frosted uses the full radius. TintOnly keeps
+its 0.88 opacity floor for readability. These controls affect in-app backdrop
+sampling, not operating-system window transparency.
+
 ## Navigation and shoulder tuning
 
 Floating navigation and material-backed content tabs use a lighter neutral
@@ -103,6 +159,13 @@ A standalone legacy popup window cannot see the parent app's pixels. Its Menu
 buffer remains opaque and readable rather than claiming cross-window blur.
 
 ## Performance and quality policy
+
+Short virtual rows without backdrop reads share their enclosing scroll layer's
+GPU tiles. Allocating separate 512-pixel textures for every short row wastes
+space and can evict the parent viewport's working set on Retina displays.
+Nested rows at most 256 physical pixels tall replay into parent tiles;
+independent tall content and backdrop materials keep their own caches. Pixel
+parity and bounded-allocation regressions cover this routing.
 
 Release CPU benchmark medians on this shared cloud machine (1x / 2x): baseline
 0.58 / 2.50 ms; one material 1.18 / 4.05 ms; three 1.54 / 14.82 ms; eighty

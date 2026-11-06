@@ -1,21 +1,15 @@
 # Tabs and text study
 
-Widget Factory opts into `TabView::material(GlassMaterial::regular())`.
-After review, the trial preserves the original view-switching tab-strip structure:
-full-height rectangular selected tab, a visible bar, and the functional selection
-indicator at the content edge. The earlier tiny rounded-chip alternative was
-rejected. Glass changes the material, not the meaning of the component.
+TabView defaults to Bubble Glass: a centered, content-sized glass strip with
+inset selection tint. HeaderBar and sidebar/bottom navigation use the same
+material family. `.chrome_style(ChromeStyle::Simple)` selects the original
+solid treatment; `.chrome_style(ChromeStyle::BubbleGlass)` restores the default.
 
-Default density remains a 36-logical-pixel bar with 14-pixel labels. Hover and
-press change uniform faces; explicit TabStyle border/indicator overrides remain
-available. The material option declares the dependency needed to bypass isolated
-raster caches. Non-material custom-color paths are uniform, without old bevel
-gradients. The small selected indicator conveys state, not a fixed decorative
-specular highlight.
-
-Floating navigation keeps its existing geometry and gains a neutral structural
-tint so the panel remains visible on a white canvas. Simple and BottomBar remain
-unchanged. This remains a visual trial pending whole-interface review.
+Default density remains a 36-logical-pixel tab bar with 14-pixel labels.
+`.material(GlassMaterial::regular().opacity(0.55).blur_radius(12.0))` customizes
+its glass. Apply `.style(TabStyle { ... })` after the chrome preset to override
+colors or enable an indicator. Preset changes reset appearance colors but
+preserve dimensions, placement and selected state.
 
 Top and bottom placement, caller-owned selection, touch cancellation and active
 content remain intact. The selected face follows the same clamped index as the
@@ -48,7 +42,7 @@ cargo run --locked -p scarlet-ui-core --example tabs-text-study -- target/tabs-t
 ```
 
 The output is diagnostic PPM imagery, not a native application screenshot.
-Older images of the solid treatment do not represent the new opt-in material.
+Older images of the solid treatment do not represent the default Bubble Glass appearance.
 The integrated CPU/SGFX backends now support actual backdrop blur and cached
 soft shadows. See GLASS_MATERIAL.md for limitations, fallback and performance.
 Native, physical GPU and dark-mode review remain necessary before adoption.

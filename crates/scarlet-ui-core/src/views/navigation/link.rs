@@ -4,6 +4,7 @@
 //! It is NOT a View - it stores a label, optional typed icon, and a closure
 //! that builds the selected content view.
 
+use super::NavigationHeader;
 use crate::icon::Icon;
 use crate::view::View;
 use alloc::boxed::Box;
@@ -39,6 +40,7 @@ pub struct NavigationLink {
     pub(crate) content_builder: Rc<dyn Fn() -> Box<dyn View>>,
     /// Optional callback invoked when the link becomes selected.
     on_select: Option<Rc<dyn Fn()>>,
+    pub(crate) header: Option<NavigationHeader>,
 }
 
 impl Clone for NavigationLink {
@@ -48,6 +50,7 @@ impl Clone for NavigationLink {
             icon: self.icon,
             content_builder: Rc::clone(&self.content_builder),
             on_select: self.on_select.clone(),
+            header: self.header.clone(),
         }
     }
 }
@@ -83,6 +86,7 @@ impl NavigationLink {
             icon: None,
             content_builder: Rc::new(builder),
             on_select: None,
+            header: None,
         }
     }
 
@@ -109,6 +113,20 @@ impl NavigationLink {
     /// coupling that state change to page construction.
     pub fn on_select(mut self, callback: impl Fn() + 'static) -> Self {
         self.on_select = Some(Rc::new(callback));
+        self
+    }
+
+    /// Replace the shared navigation header for this destination.
+    /// The header switches with the selected content and keeps its own state.
+    pub fn header<V: View + 'static>(mut self, builder: impl Fn() -> V + 'static) -> Self {
+        self.header = Some(NavigationHeader::new(builder));
+        self
+    }
+
+    /// Install a configured custom header, or `NavigationHeader::hidden()` to
+    /// suppress the shared header. Unconfigured links inherit the shared slot.
+    pub fn custom_header(mut self, header: NavigationHeader) -> Self {
+        self.header = Some(header);
         self
     }
 
