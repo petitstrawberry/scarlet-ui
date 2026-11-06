@@ -103,6 +103,108 @@ fn save(path: &Path, width: u32, height: u32, bgra: &[u8]) -> io::Result<()> {
     }
     f.flush()
 }
+
+#[test]
+fn rounded_fills_and_strokes_cover_curved_edge_pixels() {
+    let Some(context) = context() else {
+        assert!(std::env::var_os("SCARLET_REQUIRE_GPU_TESTS").is_none());
+        return;
+    };
+    let shapes = [
+        (Rect::from_xywh(12.25, 10.25, 150., 60.), 30., None),
+        (Rect::from_xywh(180.25, 10.25, 200., 60.), 30., Some(1.)),
+        (Rect::from_xywh(8.25, 90.25, 220., 160.), 80., None),
+        (Rect::from_xywh(250., 90., 140., 160.), 50., Some(1.5)),
+    ];
+    for scale in [1000, 1500, 2000] {
+        let factor = scale as f32 / 1000.;
+        let (width, height) = (400 * scale / 1000, 260 * scale / 1000);
+        let mut paint = PaintContext::new();
+        for (rect, radius, stroke) in shapes {
+            let color = Color::BLACK.with_opacity(0.6);
+            if let Some(stroke) = stroke {
+                paint.stroke_rounded_rect(rect, radius, stroke, color);
+            } else {
+                paint.fill_rounded_rect(rect, radius, color);
+            }
+        }
+        let mut encoder = SgfxPaintEncoder::new(width, height, false).unwrap();
+        let target = encoder.target_texture(0).unwrap();
+        let mut resources = context.create_resources(encoder.resource_table());
+        resources
+            .map_image(
+                target,
+                context
+                    .create_image(width, height, TextureFormat::Bgra8Unorm)
+                    .unwrap(),
+            )
+            .unwrap();
+        let queue = context.create_queue();
+        encoder
+            .encode_frame(
+                &mut queue.executor(&mut resources),
+                0,
+                None,
+                &paint,
+                Color::WHITE,
+                scale,
+                &[(0, 0, width, height)],
+            )
+            .unwrap();
+        let gpu = resources.read_texture(target).unwrap();
+        let mut worst = 0;
+        // Independent 8x8 area samples check both sides of the silhouette,
+        // including translucent one-pixel strokes and large-radius corners.
+        for (rect, radius, stroke) in shapes {
+            for y in ((rect.top() * factor - 1.).floor().max(0.) as u32)
+                ..((rect.bottom() * factor + 1.).ceil() as u32).min(height)
+            {
+                for x in ((rect.left() * factor - 1.).floor().max(0.) as u32)
+                    ..((rect.right() * factor + 1.).ceil() as u32).min(width)
+                {
+                    let d = scarlet_ui_core::glass::glass_edge(
+                        rect,
+                        radius,
+                        Point::new((x as f32 + 0.5) / factor, (y as f32 + 0.5) / factor),
+                    )
+                    .0;
+                    if d.abs() * factor > 2. && stroke.is_none_or(|w| (d - w).abs() * factor > 2.) {
+                        continue;
+                    }
+                    let mut covered = 0;
+                    for sy in 0..8 {
+                        for sx in 0..8 {
+                            let p = Point::new(
+                                (x as f32 + (sx as f32 + 0.5) / 8.) / factor,
+                                (y as f32 + (sy as f32 + 0.5) / 8.) / factor,
+                            );
+                            let d = scarlet_ui_core::glass::glass_edge(rect, radius, p).0;
+                            covered += u32::from(d >= 0. && stroke.is_none_or(|w| d <= w));
+                        }
+                    }
+                    let expected = (255. * (1. - 0.6 * covered as f32 / 64.)).round() as u8;
+                    let actual = gpu[((y * width + x) * 4) as usize];
+                    worst = worst.max(actual.abs_diff(expected));
+                }
+            }
+        }
+        assert!(
+            worst <= 35,
+            "curved area coverage error at {scale}: {worst}"
+        );
+        if let Some(dir) = std::env::var_os("SCARLET_TAB_PARITY_DIR") {
+            fs::create_dir_all(&dir).unwrap();
+            save(
+                &std::path::PathBuf::from(dir).join(format!("rounded-primitives-{scale}.ppm")),
+                width,
+                height,
+                &gpu,
+            )
+            .unwrap();
+        }
+    }
+}
+
 #[test]
 fn stock_tabs_match_cpu_and_gpu_on_the_same_background() {
     let Some(context) = context() else {
@@ -344,7 +446,9 @@ fn responsive_navigation_renders_rounded_glass_in_portrait_and_landscape() {
                         .unwrap();
                     }
                     let (x, y) = if width < height {
-                        (20, height - 12)
+                        // Probe inside the rounded surface. The former point
+                        // was outside its corner and sampled a hard-edge leak.
+                        (24, height - 16)
                     } else {
                         (100, height - 40)
                     };
@@ -501,7 +605,7 @@ fn shoulder_reflection_stays_soft_and_matches_cpu() {
             ("search", Rect::from_xywh(24.25, 52.25, 272., 55.5), 27.75),
             ("dock", Rect::from_xywh(24.5, 44.5, 272., 71.), 32.),
         ] {
-            for scale in [1000, 1500, 2000] {
+            for scale in [1000, 1250, 1500, 2000, 3000] {
                 let (width, height) = (320 * scale / 1000, 160 * scale / 1000);
                 let mut paint = PaintContext::new();
                 paint.refractive_glass_rounded_rect(
@@ -519,6 +623,7 @@ fn shoulder_reflection_stays_soft_and_matches_cpu() {
                     .iter()
                     .flat_map(|p| p.to_le_bytes())
                     .collect();
+                let mut portable = None;
                 for analytic in [false, true] {
                     let mut encoder = SgfxPaintEncoder::new(width, height, false).unwrap();
                     encoder.set_analytic_glass(analytic);
@@ -546,6 +651,23 @@ fn shoulder_reflection_stays_soft_and_matches_cpu() {
                         .unwrap();
                     assert_eq!(encoder.backdrop_fallback_count(), 0);
                     let gpu = resources.read_texture(target).unwrap();
+                    if analytic {
+                        // Include the outer half pixel: omitting it hid the
+                        // hard corner clipping and isolated dark edge pixels.
+                        let portable: &Vec<u8> = portable.as_ref().unwrap();
+                        let delta = portable
+                            .iter()
+                            .zip(&gpu)
+                            .map(|(a, b)| a.abs_diff(*b))
+                            .max()
+                            .unwrap();
+                        assert!(
+                            delta <= 14,
+                            "portable/analytic silhouette differs: {shape} {name} {scale}: {delta}"
+                        );
+                    } else {
+                        portable = Some(gpu.clone());
+                    }
                     let center = ((height / 2 * width + width / 2) * 4) as usize;
                     let mut max_delta = 0;
                     let mut max_lift = 0;

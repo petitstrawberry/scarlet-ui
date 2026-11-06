@@ -8,10 +8,10 @@ use crate::error::{Error, Result};
 
 pub(crate) const MAX_FRAME_VERTICES: usize = 196_608;
 
-/// A point on an inset rounded contour; 13 points per quarter include both
+/// A point on an inset rounded contour; 25 points per quarter include both
 /// tangent endpoints, so the straight sides never cut across a rounded corner.
 fn glass_contour(rect: Rect, radius: f32, inset: f32, index: usize) -> Point {
-    glass_contour_with_steps(rect, radius, inset, index, 12)
+    glass_contour_with_steps(rect, radius, inset, index, 24)
 }
 
 fn glass_contour_with_steps(
@@ -328,7 +328,9 @@ impl Tessellator {
             .get_mut(start..end)
             .ok_or(Error::InvalidFrame)?;
         for vertex in vertices {
-            vertex.color = color;
+            for (component, tint) in vertex.color.iter_mut().zip(color) {
+                *component *= tint;
+            }
         }
         Ok(())
     }
@@ -422,9 +424,6 @@ impl Tessellator {
             FloatRect::new(0.0, 0.0, w.max(1.0), h.max(1.0)),
         )?;
         let rect = Rect::from_xywh(0.0, 0.0, rect.size.width, rect.size.height);
-        if kind != 0 {
-            local.push_clip(rect, radius)?;
-        }
         match kind {
             0 => {
                 local.fill_rounded_rect_raw(rect, radius)?;
@@ -450,7 +449,6 @@ impl Tessellator {
         &mut self,
         rect: Rect,
         vertices: &[Vertex],
-        radius: f32,
         source: Option<FloatRect>,
         opacity: f32,
     ) -> Result<Option<GeometryRange>> {
@@ -471,18 +469,7 @@ impl Tessellator {
                         / source.height;
                 }
             }
-            // Cached geometry already includes its own rounded clipping. Do
-            // not clip every triangle against that same polygon again.
-            self.push_triangle_clipped(
-                transformed,
-                Some((
-                    FloatRect::from_logical(rect, self.scale),
-                    (radius * self.scale)
-                        .max(0.0)
-                        .min(rect.size.width * self.scale * 0.5)
-                        .min(rect.size.height * self.scale * 0.5),
-                )),
-            )?;
+            self.push_triangle(transformed)?;
         }
         self.finish_range(start)
     }
@@ -496,7 +483,7 @@ impl Tessellator {
             return Ok(None);
         }
         let vertices = self.shape(rect, radius, 0, 0.0)?;
-        self.replay_shape(rect, &vertices, radius, None, 1.0)
+        self.replay_shape(rect, &vertices, None, 1.0)
     }
     pub(crate) fn refractive_rect(
         &mut self,
@@ -506,7 +493,7 @@ impl Tessellator {
         strength: f32,
     ) -> Result<Option<GeometryRange>> {
         let vertices = self.shape(rect, radius, 1, strength)?;
-        self.replay_shape(rect, &vertices, radius, Some(source), 1.0)
+        self.replay_shape(rect, &vertices, Some(source), 1.0)
     }
     pub(crate) fn glass_rim(
         &mut self,
@@ -515,7 +502,7 @@ impl Tessellator {
         opacity: f32,
     ) -> Result<Option<GeometryRange>> {
         let vertices = self.shape(rect, radius, 2, 0.0)?;
-        self.replay_shape(rect, &vertices, radius, None, opacity)
+        self.replay_shape(rect, &vertices, None, opacity)
     }
 
     fn fill_rounded_rect_raw(
@@ -533,10 +520,45 @@ impl Tessellator {
         let radius = (corner_radius.max(0.0) * self.scale)
             .min(bounds.width * 0.5)
             .min(bounds.height * 0.5);
-        let points = rounded_rect_points(bounds, radius);
         let start = self.vertices.len();
-        self.tessellate_even_odd(&points)?;
+        if radius > 0.0 && bounds.width > 1.0 && bounds.height > 1.0 {
+            let segments = curve_segments(radius);
+            let outer = rounded_inset_points(bounds, radius, -0.5, segments);
+            let inner = rounded_inset_points(bounds, radius, 0.5, segments);
+            self.coverage_band(&outer, 0.0, &inner, 1.0)?;
+            self.tessellate_even_odd(&inner)?;
+        } else {
+            self.tessellate_even_odd(&rounded_rect_points(bounds, radius))?;
+        }
         self.finish_range(start)
+    }
+
+    fn coverage_band(
+        &mut self,
+        outer: &[Point2],
+        outer_alpha: f32,
+        inner: &[Point2],
+        inner_alpha: f32,
+    ) -> Result<()> {
+        let vertex = |p, alpha| {
+            let mut v = Vertex::solid(p);
+            v.color[3] = alpha;
+            v
+        };
+        for i in 0..outer.len() {
+            let next = (i + 1) % outer.len();
+            self.push_triangle([
+                vertex(outer[i], outer_alpha),
+                vertex(outer[next], outer_alpha),
+                vertex(inner[next], inner_alpha),
+            ])?;
+            self.push_triangle([
+                vertex(outer[i], outer_alpha),
+                vertex(inner[next], inner_alpha),
+                vertex(inner[i], inner_alpha),
+            ])?;
+        }
+        Ok(())
     }
 
     pub(crate) fn stroke_path(
@@ -596,6 +618,21 @@ impl Tessellator {
             .min(bounds.height * 0.5);
         let start = self.vertices.len();
         let width = stroke_width.max(1.0) * self.scale;
+        if radius > 0.0 && width * 2.0 + 1.0 < bounds.width.min(bounds.height) {
+            let segments = curve_segments(radius);
+            let mut distances = [-0.5, 0.5, width - 0.5, width + 0.5];
+            distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            for pair in distances.windows(2) {
+                let coverage = |d: f32| (d + 0.5).min(width - d + 0.5).clamp(0., 1.);
+                self.coverage_band(
+                    &rounded_inset_points(bounds, radius, pair[0], segments),
+                    coverage(pair[0]),
+                    &rounded_inset_points(bounds, radius, pair[1], segments),
+                    coverage(pair[1]),
+                )?;
+            }
+            return self.finish_range(start);
+        }
         let outer = rounded_rect_points(bounds, radius);
         if width * 2.0 >= bounds.width || width * 2.0 >= bounds.height {
             self.tessellate_even_odd(&outer)?;
@@ -695,28 +732,40 @@ impl Tessellator {
                 ],
             )
         };
-        let mut rings = [[Vertex::solid(Point2::new(0., 0.)); 52]; 7];
-        for (ring, fraction) in [0., 0.04, 0.12, 0.28, 0.50, 0.75, 1.]
-            .into_iter()
-            .enumerate()
-        {
-            for i in 0..52 {
-                rings[ring][i] = vertex(glass_contour(rect, radius, edge * fraction, i));
+        let half_pixel = 0.5 / self.scale;
+        let mut distances = [
+            -half_pixel,
+            0.,
+            half_pixel,
+            edge * 0.04,
+            edge * 0.12,
+            edge * 0.28,
+            edge * 0.50,
+            edge * 0.75,
+            edge,
+        ];
+        distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut rings = [[Vertex::solid(Point2::new(0., 0.)); 100]; 9];
+        for (ring, distance) in distances.into_iter().enumerate() {
+            for i in 0..100 {
+                let mut v = vertex(glass_contour(rect, radius, distance, i));
+                v.color = [(distance * self.scale + 0.5).clamp(0., 1.); 4];
+                rings[ring][i] = v;
             }
         }
         let center = vertex(Point::new(
             rect.left() + rect.size.width * 0.5,
             rect.top() + rect.size.height * 0.5,
         ));
-        for ring in 0..6 {
-            for i in 0..52 {
-                let next = (i + 1) % 52;
+        for ring in 0..8 {
+            for i in 0..100 {
+                let next = (i + 1) % 100;
                 self.push_triangle([rings[ring][i], rings[ring][next], rings[ring + 1][next]])?;
                 self.push_triangle([rings[ring][i], rings[ring + 1][next], rings[ring + 1][i]])?;
             }
         }
-        for i in 0..52 {
-            self.push_triangle([rings[6][i], rings[6][(i + 1) % 52], center])?;
+        for i in 0..100 {
+            self.push_triangle([rings[8][i], rings[8][(i + 1) % 100], center])?;
         }
         self.finish_range(start)
     }
@@ -746,13 +795,22 @@ impl Tessellator {
             let ny = libm::sinf(angle);
             let p = glass_contour_with_steps(rect, radius, d, i, 24);
             let reflection = scarlet_ui_core::glass::glass_surface_reflection_at_scale(
-                d, -nx, -ny, bezel, self.scale,
+                d.max(0.),
+                -nx,
+                -ny,
+                bezel,
+                self.scale,
             );
             let rgb = if reflection >= 0.0 { 1.0 } else { 0.0 };
             Vertex {
                 position: [p.x * self.scale, p.y * self.scale],
                 tex_coord: [0.0, 0.0],
-                color: [rgb, rgb, rgb, reflection.abs() * opacity],
+                color: [
+                    rgb,
+                    rgb,
+                    rgb,
+                    reflection.abs() * opacity * (d * self.scale + 0.5).clamp(0., 1.),
+                ],
             }
         };
         // Calculate outside mutable borrowing of the tessellator.
@@ -760,9 +818,9 @@ impl Tessellator {
         // build scratch off the native host's stack.
         let mut rings = Vec::new();
         rings
-            .try_reserve_exact(17)
+            .try_reserve_exact(18)
             .map_err(|_| Error::FrameTooComplex)?;
-        rings.resize(17, [Vertex::solid(Point2::new(0.0, 0.0)); 100]);
+        rings.resize(18, [Vertex::solid(Point2::new(0.0, 0.0)); 100]);
         for i in 0..100 {
             let angle =
                 core::f32::consts::PI * (-1. + (i / 25) as f32 * 0.5 + (i % 25) as f32 / 48.);
@@ -807,6 +865,7 @@ impl Tessellator {
             let inset = 1. / self.scale;
             let rim_width = (1.25 + 0.50 * libm::cosf(angle) * libm::cosf(angle)).min(bezel * 0.10);
             let mut distances = [
+                (-half_pixel, 0),
                 (0., 0),
                 (width * 0.25, 0),
                 (width * 0.5, 0),
@@ -835,11 +894,32 @@ impl Tessellator {
                 rings[ring][i] = v;
             }
         }
-        for ring in 0..16 {
-            for i in 0..100 {
-                let next = (i + 1) % 100;
-                self.push_triangle([rings[ring][i], rings[ring][next], rings[ring + 1][next]])?;
-                self.push_triangle([rings[ring][i], rings[ring + 1][next], rings[ring + 1][i]])?;
+        // Fixed-pipeline colors interpolate before alpha blending. A triangle
+        // spanning a black/white sign change would interpolate gray RGB even
+        // at the transparent crossing and leave dark spots around the corner.
+        // Interpolate shadow and light coverage independently, with constant
+        // RGB in each pass. The optical profile and all sample positions stay
+        // unchanged. Omit fully transparent triangles to bound the geometry.
+        for rgb in [0.0, 1.0] {
+            for ring in 0..17 {
+                for i in 0..100 {
+                    let next = (i + 1) % 100;
+                    for triangle in [
+                        [rings[ring][i], rings[ring][next], rings[ring + 1][next]],
+                        [rings[ring][i], rings[ring + 1][next], rings[ring + 1][i]],
+                    ] {
+                        let triangle = triangle.map(|mut v| {
+                            if v.color[0] != rgb {
+                                v.color[3] = 0.0;
+                            }
+                            v.color[..3].fill(rgb);
+                            v
+                        });
+                        if triangle.iter().any(|v| v.color[3] > 0.0) {
+                            self.push_triangle(triangle)?;
+                        }
+                    }
+                }
             }
         }
         self.finish_range(start)
@@ -993,21 +1073,8 @@ impl Tessellator {
     }
 
     fn push_triangle(&mut self, triangle: [Vertex; 3]) -> Result<()> {
-        self.push_triangle_clipped(triangle, None)
-    }
-
-    fn push_triangle_clipped(
-        &mut self,
-        triangle: [Vertex; 3],
-        already_clipped: Option<(FloatRect, f32)>,
-    ) -> Result<()> {
         let mut polygon: Option<Vec<Vertex>> = None;
         for clip in &self.clip_stack {
-            if already_clipped
-                .is_some_and(|(rect, radius)| rect == clip.bounds && radius == clip.corner_radius)
-            {
-                continue;
-            }
             let Some(rounded) = clip.rounded_polygon.as_ref() else {
                 continue;
             };
@@ -1102,8 +1169,28 @@ fn rounded_rect_points(rect: FloatRect, radius: f32) -> Vec<Point2> {
             Point2::new(rect.x, rect.bottom()),
         ];
     }
-    let segments = ((radius * 0.5) as usize).clamp(4, 16);
+    let segments = curve_segments(radius);
     rounded_rect_points_with_segments(rect, radius, segments)
+}
+
+// Keep the chord error below approximately one eighth of a device pixel.
+fn curve_segments(radius: f32) -> usize {
+    (libm::ceilf(core::f32::consts::FRAC_PI_2 * libm::sqrtf(radius.max(0.0))) as usize)
+        .max(((radius * 0.5) as usize).clamp(4, 16))
+        .clamp(4, 64)
+}
+
+fn rounded_inset_points(rect: FloatRect, radius: f32, inset: f32, segments: usize) -> Vec<Point2> {
+    rounded_rect_points_with_segments(
+        FloatRect::new(
+            rect.x + inset,
+            rect.y + inset,
+            rect.width - 2.0 * inset,
+            rect.height - 2.0 * inset,
+        ),
+        (radius - inset).max(0.0),
+        segments,
+    )
 }
 
 fn rounded_rect_points_with_segments(rect: FloatRect, radius: f32, segments: usize) -> Vec<Point2> {
