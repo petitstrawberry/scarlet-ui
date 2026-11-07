@@ -74,6 +74,9 @@ jobs:
         # Each GPU fixture creates its own device and LLVM-backed software
         # renderer. Keep those fixtures sequential on the shared CPU runner.
         cargo test --locked --verbose -p scarlet-ui-renderer-sgfx -- --test-threads=1
+    - name: Test SWS wheel normalization on the host
+      # The SWS library is Scarlet-only, but report normalization is pure Rust.
+      run: cargo test --locked -p scarlet-ui-platform-sws --test wheel
     - name: Test preview macro registration examples
       # The destination crate's preview cfg must be enabled to test registration.
       run: cargo test --locked -p scarlet-ui-macros --features preview --doc

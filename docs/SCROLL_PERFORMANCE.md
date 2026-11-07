@@ -27,6 +27,16 @@ text, exact size and output scale are cache keys. Oversized runs bypass retentio
 
 ## Gesture continuity
 
+SWS high-resolution wheel reports retain fractional logical pixels across
+report boundaries. Previously, 120 separate reports of one high-resolution unit
+each produced no movement, although one report of 120 units moved 32 pixels.
+Both now produce 32 pixels in either direction. Legacy/discrete wheel scaling
+is unchanged, and a legacy report paired with a high-resolution report is not
+counted twice. Focus loss, suspension, output-scale changes and discrete-only
+input reset the corresponding carry. Run the host regression with
+`cargo test -p scarlet-ui-platform-sws --test wheel`.
+This verifies input distance conservation, not Scarlet GPU frame rate.
+
 Winit's integer logical wheel events retain fractional remainders between native
 pixel samples. Previously, every small HiDPI delta was rounded separately: 100
 samples of 0.4 physical pixels at 2x scale could produce no motion instead of 20
