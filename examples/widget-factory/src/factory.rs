@@ -1564,6 +1564,10 @@ fn perspective_matrix(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16]
 
 #[cfg(test)]
 mod tests {
+    // navigation! retains selection by call site; tests using the application's
+    // navigation share that state even when their WidgetFactory values differ.
+    static NAVIGATION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use super::*;
     use scarlet_ui::event::Phase;
     use scarlet_ui::views::SplitViewRenderObject;
@@ -1629,6 +1633,7 @@ mod tests {
 
     #[test]
     fn retained_factory_page_reflows_after_negotiating_mobile_safe_area() {
+        let _navigation = NAVIGATION_TEST_LOCK.lock().unwrap();
         use scarlet_ui::platform::{
             PlatformBackend, PlatformWindow, PlatformWindowDefaults, WindowCreateRequest,
         };
@@ -1779,6 +1784,7 @@ mod tests {
             last: RefCell::new(None),
         });
         let app = WidgetFactory::new();
+        app.navigation().selected_index_state().set(0);
         let mut tick = scarlet_ui::ApplicationRunner::new(Box::new(Backend(probe.clone())))
             .into_tick(app.clone())
             .unwrap();
@@ -1821,6 +1827,7 @@ mod tests {
 
     #[test]
     fn navigation_headers_fit_safe_areas_and_stay_fixed_while_pages_scroll() {
+        let _navigation = NAVIGATION_TEST_LOCK.lock().unwrap();
         use scarlet_ui::views::{HeaderBarRenderObject, navigation::NavigationViewRenderObject};
         fn find<T: 'static>(element: &dyn Element) -> Option<&dyn Element> {
             if element
@@ -2545,6 +2552,7 @@ mod tests {
 
     #[test]
     fn factory_navigation_after_text_view_edit_needs_only_one_click() {
+        let _navigation = NAVIGATION_TEST_LOCK.lock().unwrap();
         use scarlet_ui::event::{KeyCode, KeyEvent, KeyModifiers};
         use scarlet_ui::renderer::{PaintCommand, PaintContext};
         use scarlet_ui::{ComponentElement, RenderingPipeline, SceneBuilder};
@@ -2616,6 +2624,7 @@ mod tests {
             }
         }
         let app = WidgetFactory::new();
+        app.navigation().selected_index_state().set(0);
         let mut pipeline = RenderingPipeline::new();
         // Exactly the application's scene builder and listenables, rather than
         // a cached NavigationView. State edits reconstruct the complete Window.

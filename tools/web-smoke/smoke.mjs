@@ -779,7 +779,8 @@ try {
         let controls=await untilPixels(`factory-hidpi-${dpr}-controls`,frame=>changedPixels(overview,frame,heading)>100);
         // The neutral, narrow side contour must survive the dense Controls
         // scene. A blur-only budget fallback has no dark line at this edge.
-        const rim=scaled({x:11,y:height-38,width:3,height:4});
+        // Navigation owns an 8px outer margin; sample its body outline, not the old 12px inset.
+        const rim=scaled({x:8,y:height-38,width:1,height:4});
         assert(coloredPixels(controls,rim,(r,g,b)=>Math.max(r,g,b)-Math.min(r,g,b)<10&&r<225).count>=2,
           `Controls navigation lost its optical contour at DPR ${dpr}`);
         // A warm static scroll must reuse tiles rather than silently expanding
