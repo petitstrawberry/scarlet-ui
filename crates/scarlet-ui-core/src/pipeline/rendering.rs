@@ -3762,10 +3762,12 @@ mod tests {
         assert!(is_on.get());
 
         let selected = State::new(crate::state::generate_state_id(), 0);
+        let row_height = 32.0;
         let select = Select::new(
             alloc::vec![String::from("First"), String::from("Second")],
             selected.clone(),
-        );
+        )
+        .row_height(row_height);
         let expanded = select.expanded().clone();
         let mut select_pipeline = RenderingPipeline::new();
         select_pipeline.set_root(select.create_element());
@@ -3781,8 +3783,11 @@ mod tests {
             .size
             .height;
         // The form popup is detached: 6px gap, 4px inset, then row centers.
-        let second_row_y = (trigger_height + 6.0 + 4.0 + trigger_height * 1.5) as i32;
+        // Rows keep their preferred height even when the root trigger stretches.
+        let second_row_y = (trigger_height + 6.0 + 4.0 + row_height * 1.5) as i32;
         select_pipeline.handle_event(&touch_frame(8, 4, TouchPhase::Down, 10, second_row_y));
+        assert_eq!(selected.get(), 0);
+        assert!(expanded.get());
         select_pipeline.handle_event(&touch_frame(9, 4, TouchPhase::Up, 10, second_row_y));
         assert_eq!(selected.get(), 1);
         assert!(!expanded.get());
