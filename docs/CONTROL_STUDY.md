@@ -19,9 +19,11 @@ renderer is removed.
   the new material. Foreground labels remain sharp. This is frosted glass, not
   optical refraction or sampling of the operating-system desktop. See
   GLASS_MATERIAL.md for bounds, fallback and performance limitations.
-- Shared 36-logical-pixel default height, 14-pixel label size, 10-pixel content
-  padding and 12-pixel radius for the three form controls. Explicit frames and
-  compact titlebar/menu density remain authoritative.
+- Shared natural form-control height: 28 logical pixels for pointer input and
+  36 for touch. Labels remain 14 pixels, with default horizontal/vertical padding
+  of 8/4 for pointer input and 10/8 for touch. Radius remains 12 pixels; slider,
+  toggle, navigation and window metrics are unchanged. Explicit padding, select
+  row heights and frame constraints take precedence over these defaults.
 - Measured glyph width and line advance replace byte-count width and guessed
   baselines. Fonts remain the platform's existing font selection.
 - Scarlet marks selection and keyboard focus. Focus uses a soft three-pixel

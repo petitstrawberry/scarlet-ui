@@ -62,7 +62,7 @@ pub struct Select {
     expanded: State<bool>,
     on_change: Option<Arc<dyn Fn(usize) + 'static>>,
     width: f32,
-    row_height: f32,
+    row_height: Option<f32>,
     placeholder: String,
     max_visible_rows: usize,
     select_style: SelectStyle,
@@ -88,7 +88,7 @@ impl Select {
             expanded,
             on_change: None,
             width: 260.0,
-            row_height: style::CONTROL_HEIGHT,
+            row_height: None,
             placeholder: String::from("Select…"),
             max_visible_rows: 8,
             select_style: SelectStyle::Form,
@@ -153,7 +153,7 @@ impl Select {
     ///
     /// The updated Select view.
     pub fn row_height(mut self, row_height: f32) -> Self {
-        self.row_height = row_height;
+        self.row_height = Some(row_height);
         self
     }
 
@@ -215,10 +215,11 @@ impl View for Select {
                 self.selected_index.get(),
                 self.expanded.get(),
                 self.width,
-                self.row_height,
+                self.row_height.unwrap_or_else(style::control_height),
                 self.placeholder.clone(),
                 self.max_visible_rows,
             )
+            .with_row_height(self.row_height)
             .with_enabled(self.enabled)
             .with_style(self.select_style),
         ))
@@ -239,7 +240,7 @@ pub struct SelectRenderObject {
     selected_index: usize,
     expanded: bool,
     width: f32,
-    row_height: f32,
+    row_height: Option<f32>,
     placeholder: String,
     max_visible_rows: usize,
     select_style: SelectStyle,
@@ -283,7 +284,7 @@ impl SelectRenderObject {
             selected_index,
             expanded,
             width,
-            row_height,
+            row_height: Some(row_height),
             placeholder,
             max_visible_rows,
             select_style: SelectStyle::Form,
@@ -300,6 +301,11 @@ impl SelectRenderObject {
         };
         render_object.selected_index = render_object.clamped_selected_index();
         render_object
+    }
+
+    fn with_row_height(mut self, height: Option<f32>) -> Self {
+        self.row_height = height;
+        self
     }
 
     fn with_style(mut self, select_style: SelectStyle) -> Self {
@@ -501,7 +507,7 @@ impl SelectRenderObject {
 
     fn option_row_height(&self) -> f32 {
         match self.select_style {
-            SelectStyle::Form => self.effective_row_height(),
+            SelectStyle::Form => self.preferred_row_height(),
             SelectStyle::Menu => MENU_ROW_HEIGHT,
         }
     }
@@ -620,8 +626,14 @@ impl SelectRenderObject {
         Rect::from_xywh(left, top, right - left, bottom - top)
     }
 
+    fn preferred_row_height(&self) -> f32 {
+        self.row_height
+            .unwrap_or_else(style::control_height)
+            .max(0.0)
+    }
+
     fn effective_row_height(&self) -> f32 {
-        self.row_height.max(style::metrics().minimum_control_height)
+        self.size.height
     }
 
     fn draw_select(&mut self) {
@@ -667,12 +679,8 @@ impl SelectRenderObject {
 
 impl ElementRenderObject for SelectRenderObject {
     fn layout(&mut self, constraints: crate::element::LayoutConstraints) -> Size {
-        let mut width = self.width.max(constraints.min_width).max(120.0);
-        if constraints.max_width.is_finite() && constraints.max_width >= 0.0 {
-            width = width.min(constraints.max_width);
-        }
-        let height = self.effective_row_height();
-        self.size = Size { width, height };
+        self.size =
+            constraints.constrain(Size::new(self.width.max(0.0), self.preferred_row_height()));
 
         let bounds = self.buffer_bounds();
         self.buffer_origin = bounds.origin;
@@ -794,15 +802,17 @@ impl ElementRenderObject for SelectRenderObject {
                     style::metrics().control_radius,
                     material,
                 );
-                if w > 44.0 {
+                let inset = style::control_padding(None).left;
+                let trailing = inset + 10.0 + 8.0;
+                if w > inset + trailing {
                     ctx.push_clip(Rect::from_xywh(
-                        origin.x + 12.0,
+                        origin.x + inset,
                         origin.y,
-                        w - 44.0,
+                        w - inset - trailing,
                         trigger_h,
                     ));
                     ctx.draw_text(
-                        Point::new(origin.x + 12.0, text_y),
+                        Point::new(origin.x + inset, text_y),
                         String::from(label),
                         label_color,
                         style::CONTROL_FONT_SIZE,
@@ -810,7 +820,7 @@ impl ElementRenderObject for SelectRenderObject {
                     ctx.pop_clip();
                 }
                 if w >= 24.0 {
-                    let x = origin.x + w - 24.0;
+                    let x = origin.x + w - inset - 10.0;
                     let y = origin.y + (trigger_h - 6.0) * 0.5;
                     ctx.draw_line(Point::new(x, y), Point::new(x + 5.0, y + 5.0), 1.5, subtle);
                     ctx.draw_line(
@@ -973,7 +983,7 @@ impl ElementRenderObject for SelectRenderObject {
                 || self.selected_index != new_selected_index
                 || self.expanded != new_expanded
                 || (self.width - new_width).abs() > 0.001
-                || (self.row_height - new_row_height).abs() > 0.001
+                || self.row_height != new_row_height
                 || self.placeholder != new_placeholder
                 || self.max_visible_rows != new_max_visible_rows
                 || self.select_style != select.select_style
@@ -1089,9 +1099,9 @@ mod tests {
                         let clip = clips.last().expect("every label is clipped");
                         assert_eq!(
                             clip.origin.x,
-                            origin.x + if labels == 0 { 12.0 } else { 24.0 }
+                            origin.x + if labels == 0 { 8.0 } else { 24.0 }
                         );
-                        assert_eq!(clip.size.width, if labels == 0 { 112.0 } else { 120.0 });
+                        assert_eq!(clip.size.width, if labels == 0 { 122.0 } else { 120.0 });
                         assert_eq!(clip.size.height, select.effective_row_height());
                         labels += 1;
                     }
