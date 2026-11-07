@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import path from 'node:path';
 
 // Never forward workflow secrets/tokens or the complete runner environment.
@@ -83,4 +84,31 @@ export function offscreenScrollTop({top, bottom, viewportHeight, scrollHeight}) 
   const before = Math.floor(top - viewportHeight) - 1;
   if (before >= 0 && before <= maximum) return before;
   throw new Error('Cannot scroll the entire specimen outside this viewport');
+}
+
+// All three Inputs surfaces share this 244px interior span (the narrowest,
+// Select, is 260px wide). Vote across each row rather than trusting an empty
+// column: text, a caret or an icon can cross any individual probe column.
+// Dense glyph rows can cover more than half the span (the CI fixture reaches
+// 60% ink), so require 35% neutral fill; white page gaps still contribute zero.
+// Keep the minimum band height and exact surface count so missing/extra
+// controls still fail instead of merging arbitrary gaps or taking three hits.
+export function inputsGeometry(frame, x, top) {
+  const interior = {x:x+8, width:244};
+  assert.ok(Number.isInteger(top) && top >= 0 && top < frame.height-70);
+  assert.ok(interior.x >= 0 && interior.x+interior.width <= frame.width);
+  const surface = (r,g,b) => Math.min(r,g,b)>=230 && Math.max(r,g,b)<=252 && Math.max(r,g,b)-Math.min(r,g,b)<10;
+  const bands=[];
+  let start;
+  for(let y=top;y<=frame.height-70;y++) {
+    const fill=y<frame.height-70 &&
+      coloredPixels(frame,{...interior,y,height:1},surface).count >= interior.width*0.35;
+    if(fill) start??=y;
+    else if(start!==undefined) {
+      if(y-start>=24) bands.push({x,y:start-2,width:320,height:y-start+4});
+      start=undefined;
+    }
+  }
+  assert.equal(bands.length,3,'Inputs must show TextField, Select and TextView surfaces');
+  return {field:bands[0],select:bands[1],view:bands[2]};
 }
