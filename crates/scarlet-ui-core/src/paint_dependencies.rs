@@ -201,12 +201,21 @@ impl DisplayList {
             return deps.clone();
         }
         let deps: Arc<[PaintDependencies]> = if let Some(bounds) = self.raster_bounds {
-            // The raster hint proves that all backdrop reads are covered by
-            // preceding opaque paint inside this recording. To its parent it is
-            // one independent picture, not thousands of external dependencies.
+            // Retain one conservative footprint instead of walking every control.
+            // An ancestor clip can cut the opaque backing away from a filter's
+            // halo, so even a locally isolated picture still exposes its reads.
+            let mut reads = PaintRegion::Empty;
+            for dep in self.context.paint_dependencies(scale) {
+                reads = match (reads, dep.reads) {
+                    (PaintRegion::Unknown, _) | (_, PaintRegion::Unknown) => PaintRegion::Unknown,
+                    (PaintRegion::Rect(a), PaintRegion::Rect(b)) => PaintRegion::Rect(union(a, b)),
+                    (PaintRegion::Empty, b) => b,
+                    (a, PaintRegion::Empty) => a,
+                };
+            }
             alloc::vec![PaintDependencies::new(
                 PaintRegion::Rect(expand(bounds, 2.)),
-                PaintRegion::Empty
+                reads
             )]
             .into()
         } else {
@@ -568,6 +577,26 @@ mod tests {
             PaintDependencies::new(PaintRegion::Rect(writes), PaintRegion::Rect(reads)),
         );
     }
+    #[test]
+    fn clipped_cached_glass_keeps_damage_from_outside_its_viewport() {
+        let viewport = r(0., 0., 200., 120.);
+        let mut local = PaintContext::new();
+        local.fill_rect(viewport, Color::WHITE);
+        local.backdrop_filter_rounded_rect(r(40., 40., 50., 50.), 10., 10., Color::WHITE);
+        let layer = local.into_cached_layer(viewport);
+        assert!(layer.raster_cache_bounds().is_some());
+        let mut scene = PaintContext::new();
+        scene.push_clip(r(40., 0., 160., 120.));
+        scene.draw_display_list(Point::ZERO, layer);
+        scene.pop_clip();
+        // The clip removes the local backing at x=32, but the visible glass
+        // still samples it. Changing the outer background must repaint the glass.
+        for scale in [1000, 2000, 3000] {
+            let damage = scene.dependent_damage(&[r(32., 50., 2., 2.)], viewport, scale);
+            assert!(hits(PaintRegion::Rect(r(42., 50., 2., 2.)), &damage));
+        }
+    }
+
     #[test]
     fn buffer_resource_changes_are_not_hidden_by_equal_command_indices() {
         let record = |color| {
