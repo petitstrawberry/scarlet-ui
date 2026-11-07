@@ -256,10 +256,10 @@ impl RetainedPaint {
         node.clip = clip;
         let mut context = PaintContext::new();
         RenderingPipeline::paint_element_overlay(&mut context, element, Point::ZERO);
-        let same_overlay = node.overlay.as_ref().map_or_else(
-            || context.is_empty(),
-            |old| context.same_recording(old),
-        );
+        let same_overlay = node
+            .overlay
+            .as_ref()
+            .map_or_else(|| context.is_empty(), |old| context.same_recording(old));
         if !same_overlay {
             node.overlay = (!context.is_empty()).then(|| context.into_display_list());
             changed = true;
@@ -298,46 +298,39 @@ impl RetainedPaint {
         }
     }
 
-    pub fn collect_bounds(&self, result: &mut BTreeMap<ElementId, Rect>) {
-        if let Some(root) = self.root {
-            self.bounds_node(root, Point::ZERO, None, result);
+    /// Resolve the previous frame's bounds only for a dirty element. Scroll
+    /// translations stay on ancestors; no absolute-bounds table is rebuilt for
+    /// every descendant of an unchanged picture.
+    pub fn bounds(&self, id: ElementId) -> Option<Rect> {
+        let mut path = Vec::new();
+        let mut current = Some(id);
+        while let Some(id) = current {
+            let node = self.nodes.get(&id)?;
+            path.push(id);
+            current = node.parent;
         }
-    }
-    fn bounds_node(
-        &self,
-        id: ElementId,
-        origin: Point,
-        clip: Option<Rect>,
-        result: &mut BTreeMap<ElementId, Rect>,
-    ) {
-        let Some(node) = self.nodes.get(&id) else {
-            return;
-        };
-        let abs = Point::new(origin.x + node.position.x, origin.y + node.position.y);
-        let bounds = Rect::new(
-            Point::new(abs.x + node.bounds.origin.x, abs.y + node.bounds.origin.y),
-            node.bounds.size,
-        );
-        if let Some(bounds) = clip.map_or(Some(bounds), |clip| intersect(bounds, clip)) {
-            result.insert(id, bounds);
-        }
-        let next_clip = match node.clip {
-            Some((local, _)) => {
+        let mut origin = Point::ZERO;
+        let mut clip = None;
+        for ancestor in path.into_iter().rev() {
+            let node = self.nodes.get(&ancestor)?;
+            origin.x += node.position.x;
+            origin.y += node.position.y;
+            if ancestor == id {
                 let bounds = Rect::new(
-                    Point::new(abs.x + local.origin.x, abs.y + local.origin.y),
+                    Point::new(origin.x + node.bounds.left(), origin.y + node.bounds.top()),
+                    node.bounds.size,
+                );
+                return clip.map_or(Some(bounds), |clip| intersect(bounds, clip));
+            }
+            if let Some((local, _)) = node.clip {
+                let bounds = Rect::new(
+                    Point::new(origin.x + local.left(), origin.y + local.top()),
                     local.size,
                 );
-                let next = clip.map_or(Some(bounds), |clip| intersect(bounds, clip));
-                let Some(next) = next else {
-                    return;
-                };
-                Some(next)
+                clip = Some(clip.map_or(Some(bounds), |clip| intersect(bounds, clip))?);
             }
-            None => clip,
-        };
-        for child in &node.children {
-            self.bounds_node(*child, abs, next_clip, result);
         }
+        None
     }
     pub fn replay(&self, context: &mut PaintContext<'_>, damage: Option<&[Rect]>) {
         if let Some(root) = self.root {

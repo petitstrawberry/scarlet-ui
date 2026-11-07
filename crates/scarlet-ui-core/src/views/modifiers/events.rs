@@ -75,7 +75,9 @@ impl<V: View + Clone> View for Focusable<V> {
     }
 
     fn listenables(&self) -> alloc::vec::Vec<&dyn Listenable> {
-        let mut listenables = self.inner.listenables();
+        // The child owns its own subscriptions. The wrapper must notify the
+        // pipeline about focus/IME changes, including during a scroll gesture.
+        let mut listenables: alloc::vec::Vec<&dyn Listenable> = alloc::vec::Vec::new();
         listenables.push(&self.focused);
         if let Some(text_input) = &self.text_input {
             listenables.push(text_input);

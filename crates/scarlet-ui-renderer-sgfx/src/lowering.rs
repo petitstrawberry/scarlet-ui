@@ -475,6 +475,7 @@ pub struct SgfxPaintEncoder {
     backdrop_fallbacks: u32,
     analytic_glass: bool,
     raster_tiles: Vec<tiles::Tile>,
+    raster_layer_plans: Vec<tiles::LayerPlan>,
     tile_backdrops: Vec<Option<backdrop::Resources>>,
     tile_depth: usize,
     // Logical translation from window coordinates into the current raster tile.
@@ -619,6 +620,7 @@ impl SgfxPaintEncoder {
             retained_meshes: Vec::new(),
             analytic_glass: false,
             raster_tiles: Vec::new(),
+            raster_layer_plans: Vec::new(),
             tile_backdrops: Vec::new(),
             tile_depth: 0,
             tile_translation: scarlet_ui_core::geometry::Point::ZERO,

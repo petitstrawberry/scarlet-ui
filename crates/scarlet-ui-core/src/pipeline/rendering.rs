@@ -104,6 +104,7 @@ pub struct RenderingPipeline {
     // retained picture. Use ordered dependency-aware replay for those scenes,
     // rather than the isolated CPU picture compositor.
     scene_reads_backdrop: bool,
+    select_overlay_active: bool,
     paint_caches: BTreeMap<ElementId, PaintCache>,
     window_backdrop_cache: Option<WindowBackdropCache>,
     layer_store: LayerStore,
@@ -111,6 +112,7 @@ pub struct RenderingPipeline {
     dirty_scratch: DirtyScratch,
     retained_paint: super::retained_paint::RetainedPaint,
     retained_backdrop: Option<RetainedWindowBackdrop>,
+    direct_backdrop_absent: bool,
     last_direct_scene: Option<alloc::sync::Arc<crate::renderer::DisplayList>>,
     #[cfg(test)]
     paint_test_counters: PaintTestCounters,
@@ -144,6 +146,7 @@ impl RenderingPipeline {
             paint_background_color: None,
             paint_enabled: true,
             scene_reads_backdrop: false,
+            select_overlay_active: false,
             paint_caches: BTreeMap::new(),
             window_backdrop_cache: None,
             layer_store: LayerStore::new(),
@@ -151,6 +154,7 @@ impl RenderingPipeline {
             dirty_scratch: DirtyScratch::default(),
             retained_paint: Default::default(),
             retained_backdrop: None,
+            direct_backdrop_absent: false,
             last_direct_scene: None,
             #[cfg(test)]
             paint_test_counters: PaintTestCounters::default(),
@@ -624,7 +628,14 @@ impl RenderingPipeline {
     }
 
     fn sync_select_popup_viewports(&mut self) -> bool {
-        fn visit(element: &mut dyn Element, parent: Point, viewport: Rect, legacy: bool) -> bool {
+        fn visit(
+            element: &mut dyn Element,
+            parent: Point,
+            viewport: Rect,
+            legacy: bool,
+            active: &mut bool,
+        ) -> bool {
+            *active |= RenderingPipeline::is_expanded_select(element);
             let position = element.position();
             let origin = Point::new(parent.x + position.x, parent.y + position.y);
             let mut changed = false;
@@ -645,15 +656,21 @@ impl RenderingPipeline {
                 }
             }
             for child in element.children_mut() {
-                changed |= visit(child.as_mut(), origin, viewport, legacy);
+                changed |= visit(child.as_mut(), origin, viewport, legacy, active);
             }
             changed
         }
         let viewport = crate::geometry::safe_area_rect(self.window_size, self.safe_area_insets());
-        let changed = self
-            .element_tree
-            .root_mut()
-            .is_some_and(|root| visit(root.as_mut(), Point::ZERO, viewport, !self.paint_enabled));
+        self.select_overlay_active = false;
+        let changed = self.element_tree.root_mut().is_some_and(|root| {
+            visit(
+                root.as_mut(),
+                Point::ZERO,
+                viewport,
+                !self.paint_enabled,
+                &mut self.select_overlay_active,
+            )
+        });
         self.paint_needs_full |= changed;
         changed
     }
@@ -671,8 +688,10 @@ impl RenderingPipeline {
             &mut self.element_tree,
             self.window_size,
             !self.paint_enabled,
-            |tree| {
-                self.event_dispatcher.reconcile_keyboard_focus(tree);
+            |tree, reconcile| {
+                if reconcile {
+                    self.event_dispatcher.reconcile_keyboard_focus(tree);
+                }
                 self.overlays.apply(tree);
             },
         );
@@ -999,6 +1018,16 @@ impl RenderingPipeline {
             .extend_from_slice(self.pipeline_owner.last_composite_ids());
         self.dirty_scratch.ids.sort_unstable();
         self.dirty_scratch.ids.dedup();
+        if self.paint_backend.supports_retained_display_lists() {
+            for id in &self.dirty_scratch.ids {
+                // Popup bounds saved after the previous frame take precedence.
+                if !self.last_paint_bounds.contains_key(id) {
+                    if let Some(bounds) = self.retained_paint.bounds(*id) {
+                        self.last_paint_bounds.insert(*id, bounds);
+                    }
+                }
+            }
+        }
         let force_full = force_recording_rebuild;
         if !force_full && self.dirty_scratch.ids.is_empty() {
             return Ok(PresentedFrame::Idle);
@@ -1044,13 +1073,25 @@ impl RenderingPipeline {
         if self.paint_damage.as_ref().is_some_and(Vec::is_empty) {
             return Ok(PresentedFrame::Idle);
         }
+        if force_recording_rebuild || !self.pipeline_owner.last_paint_ids().is_empty() {
+            self.direct_backdrop_absent = false;
+        }
+        let deferred_backdrop = if self.direct_backdrop_absent {
+            None
+        } else {
+            let backdrop = self
+                .element_tree
+                .root()
+                .and_then(|root| Self::find_deferred_window_backdrop(root, Point::ZERO));
+            self.direct_backdrop_absent = backdrop.is_none();
+            backdrop
+        };
         let mut ctx = PaintContext::new();
         // Record the complete ordered scene. Damage limits raster work, not
         // which earlier paint is available to a destination-reading operation.
         let damage = None;
         if let Some(root) = self.element_tree.root() {
-            if let Some((backdrop, origin)) = Self::find_deferred_window_backdrop(root, Point::ZERO)
-            {
+            if let Some((backdrop, origin)) = deferred_backdrop {
                 if self.paint_backend.supports_retained_display_lists() {
                     if self
                         .retained_backdrop
@@ -1084,7 +1125,9 @@ impl RenderingPipeline {
             } else {
                 Self::walk_direct_paint(&mut ctx, root, Point::ZERO, damage);
             }
-            Self::paint_select_overlays(&mut ctx, root, Point::ZERO, damage);
+            if self.select_overlay_active {
+                Self::paint_select_overlays(&mut ctx, root, Point::ZERO, damage);
+            }
         }
         let scene = ctx.into_display_list();
         let ctx = scene.context();
@@ -1123,9 +1166,9 @@ impl RenderingPipeline {
         self.last_direct_scene = Some(alloc::sync::Arc::clone(&scene));
         self.last_paint_bounds.clear();
         if self.paint_backend.supports_retained_display_lists() {
-            self.retained_paint
-                .collect_bounds(&mut self.last_paint_bounds);
-            if let Some(root) = self.element_tree.root() {
+            if self.select_overlay_active
+                && let Some(root) = self.element_tree.root()
+            {
                 Self::collect_select_overlay_bounds(root, Point::ZERO, &mut self.last_paint_bounds);
             }
         } else if let Some(root) = self.element_tree.root() {
@@ -3375,12 +3418,19 @@ impl RenderingPipeline {
             &mut self.element_tree,
             self.window_size,
             false,
-            |tree| {
-                self.event_dispatcher.reconcile_keyboard_focus(tree);
+            |tree, reconcile| {
+                if reconcile {
+                    self.event_dispatcher.reconcile_keyboard_focus(tree);
+                }
                 self.overlays.apply(tree);
             },
         );
-        self.sync_select_popup_viewports();
+        if self.paint_needs_full
+            || !self.pipeline_owner.last_paint_ids().is_empty()
+            || self.select_overlay_active
+        {
+            self.sync_select_popup_viewports();
+        }
         let layout_us = started.map(|start| start.elapsed().as_micros());
         let background_color = self.extract_background_color();
         let result = self.render_paint_path(background_color);
@@ -3414,7 +3464,14 @@ impl RenderingPipeline {
     /// In a full implementation, this would route events through the
     /// EventDispatcher to the target elements.
     pub fn handle_event(&mut self, _event: &crate::event::Event) -> bool {
-        self.sync_select_popup_viewports();
+        if self.select_overlay_active
+            || !matches!(
+                _event,
+                crate::event::Event::Mouse(crate::event::MouseEvent::Wheel { .. })
+            )
+        {
+            self.sync_select_popup_viewports();
+        }
         if self.overlays.handle_event(_event) {
             self.overlays.apply_presentation(&mut self.element_tree);
             self.request_redraw();
