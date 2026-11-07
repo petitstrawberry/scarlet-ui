@@ -505,7 +505,10 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
             for (i, item) in self.items.iter().enumerate() {
                 if matches!(item.action, MenuAction::Separator) {
                     // Draw separator line
+                    #[cfg(feature = "std")]
                     let sep_y = (current_y + MENU_SEPARATOR_ROW_HEIGHT / 2.0).floor() as i32;
+                    #[cfg(not(feature = "std"))]
+                    let sep_y = libm::floorf(current_y + MENU_SEPARATOR_ROW_HEIGHT / 2.0) as i32;
                     canvas.fill_rect(
                         MENU_TEXT_INSET as i32,
                         sep_y,
@@ -624,10 +627,14 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
 
         for (i, item) in self.items.iter().enumerate() {
             if matches!(item.action, MenuAction::Separator) {
+                #[cfg(feature = "std")]
+                let separator_offset = (MENU_SEPARATOR_ROW_HEIGHT / 2.0).floor();
+                #[cfg(not(feature = "std"))]
+                let separator_offset = libm::floorf(MENU_SEPARATOR_ROW_HEIGHT / 2.0);
                 ctx.fill_rect(
                     Rect::from_xywh(
                         origin.x + MENU_TEXT_INSET,
-                        origin.y + current_y + (MENU_SEPARATOR_ROW_HEIGHT / 2.0).floor(),
+                        origin.y + current_y + separator_offset,
                         (width - MENU_TEXT_INSET * 2.0).max(0.0),
                         1.0,
                     ),
