@@ -178,6 +178,7 @@ pub struct SgfxPaintBackend<S> {
     next_slot: usize,
     front_slot: Option<usize>,
     supports_depth: bool,
+    supports_programmable: bool,
     backend_kind: BackendKind,
     render_failed: bool,
     full_redraw_required: bool,
@@ -245,6 +246,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             next_slot: 0,
             front_slot: None,
             supports_depth: capabilities.supports_depth(),
+            supports_programmable: capabilities.supports_programmable_graphics(),
             backend_kind,
             render_failed: false,
             full_redraw_required: false,
@@ -761,13 +763,14 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         // SWS continues presenting the old generation until the first frame
         // from this session reaches the display, then releases the old commit
         // through the regular shared-frame lifecycle.
-        let encoder = SgfxPaintEncoder::with_target_count(
+        let mut encoder = SgfxPaintEncoder::with_target_count(
             self.physical_width,
             self.physical_height,
             self.supports_depth,
             PRESENTATION_SLOT_COUNT,
         )
         .map_err(|source| diagnostic(Stage::CreateSession, "create paint encoder", source))?;
+        encoder.set_analytic_glass(self.supports_programmable);
         let mut targets = Vec::new();
         targets
             .try_reserve_exact(PRESENTATION_SLOT_COUNT)
