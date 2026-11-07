@@ -5,7 +5,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {chromium} from 'playwright';
 import {PNG} from 'pngjs';
-import {browserEnvironment, localRequest, artifactPath, changedPixels, coloredPixels, red, dark, hasTextOnWhite, offscreenScrollTop, togglePixels} from './smoke-helpers.mjs';
+import {browserEnvironment, localRequest, artifactPath, changedPixels, coloredPixels, red, dark, hasTextOnWhite, offscreenScrollTop, togglePixels, inputsGeometry} from './smoke-helpers.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(process.argv[2] ?? path.join(here, '../../target/web-samples'));
@@ -94,24 +94,6 @@ async function visibleToggle(name) {
 
 // The 28px menu and measured 64px navigation header precede page controls.
 const factoryBodyTop=28+64;
-function inputsGeometry(frame, x, top=factoryBodyTop) {
-  // Probe the empty trailing column of the three Inputs surfaces. Deriving
-  // their vertical bands from rendered pixels avoids old font-height offsets.
-  const probe=x+200, bands=[];
-  let start;
-  for(let y=top;y<frame.height-70;y++) {
-    const i=(y*frame.width+probe)*4;
-    const rgb=[...frame.data.subarray(i,i+3)];
-    const fill=Math.min(...rgb)>=230&&Math.max(...rgb)<=252&&Math.max(...rgb)-Math.min(...rgb)<10;
-    if(fill) start??=y;
-    else if(start!==undefined) {
-      if(y-start>=24) bands.push({x,y:start-2,width:320,height:y-start+4});
-      start=undefined;
-    }
-  }
-  assert.equal(bands.length,3,'Inputs must show TextField, Select and TextView surfaces');
-  return {field:bands[0],select:bands[1],view:bands[2]};
-}
 
 async function monitoredContext(options) {
   const context=await browser.newContext(options);
@@ -694,7 +676,7 @@ try {
       }
       if(name==='inputs') {
         const selectX=pageX+padding+(stacked?0:168);
-        const select=inputsGeometry(frame,selectX).select;
+        const select=inputsGeometry(frame,selectX,factoryBodyTop).select;
         const selectY=select.y;
         await page.mouse.click(selectX+80,selectY+select.height/2);
         const popupArea={x:selectX,y:selectY,width:Math.min(230,viewportWidth-selectX),height:145};
@@ -852,7 +834,7 @@ try {
   await ready('/widget-factory/','scarlet_ui_widget_factory');
   await page.mouse.click(70,128);await page.mouse.move(950,30);
   const editor=page.locator('textarea[data-scarlet-text-input]');
-  const inputGeometry=inputsGeometry(await screenshot('factory-editor-geometry'),382);
+  const inputGeometry=inputsGeometry(await screenshot('factory-editor-geometry'),382,factoryBodyTop);
   const fieldPixels=inputGeometry.field;
   const viewPixels=inputGeometry.view;
   const fieldY=fieldPixels.y+fieldPixels.height/2;
