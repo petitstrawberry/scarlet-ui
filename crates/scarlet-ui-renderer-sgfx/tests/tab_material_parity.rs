@@ -341,11 +341,8 @@ fn navigation_scene(width: u32, height: u32) -> Box<dyn Element> {
                 HeaderBar::new(Text::new("Extension row").font_size(12.)).height(28.),
             }
             .spacing(8.)
-            .padding(8.)
         })
         .automatic_header_height()
-        .overlay_header(true)
-        .header_leading_overlap(8.)
         .presentation(NavigationPresentation::Automatic)
         .shows_icons(true)
         .minimum_content_size(Size::new(320.0, 0.0));

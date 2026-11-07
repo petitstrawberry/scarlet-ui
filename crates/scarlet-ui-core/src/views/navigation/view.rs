@@ -186,10 +186,9 @@ where
     links: T,
     /// Currently selected link index (tracked via State for reactivity)
     selected_index: State<usize>,
-    /// Width reserved when using sidebar presentation.
+    /// Width of the sidebar body, excluding navigation-owned margins and gaps.
     sidebar_width: f32,
     sidebar_style: NavigationSidebarStyle,
-    content_underlap: f32,
     floating_bar_bottom_overlap: f32,
     /// Requested adaptive presentation policy.
     presentation: NavigationPresentation,
@@ -206,8 +205,6 @@ where
     /// Height reserved for the content header.
     header_height: f32,
     automatic_header_height: bool,
-    overlay_header: bool,
-    header_leading_overlap: f32,
 }
 
 impl<T> NavigationView<T>
@@ -238,7 +235,6 @@ where
             selected_index: State::new(state_id, 0),
             sidebar_width: 200.0,
             sidebar_style: NavigationSidebarStyle::default(),
-            content_underlap: 0.,
             floating_bar_bottom_overlap: 0.0,
             presentation: NavigationPresentation::Automatic,
             minimum_content_size: Size::new(
@@ -251,8 +247,6 @@ where
             header_builder: None,
             header_height: 0.0,
             automatic_header_height: false,
-            overlay_header: false,
-            header_leading_overlap: 0.,
         }
     }
 
@@ -276,7 +270,6 @@ where
             selected_index: navigation_selected_state(state_key),
             sidebar_width: 200.0,
             sidebar_style: NavigationSidebarStyle::default(),
-            content_underlap: 0.,
             floating_bar_bottom_overlap: 0.0,
             presentation: NavigationPresentation::Automatic,
             minimum_content_size: Size::new(
@@ -289,18 +282,16 @@ where
             header_builder: None,
             header_height: 0.0,
             automatic_header_height: false,
-            overlay_header: false,
-            header_leading_overlap: 0.,
         }
     }
 
-    /// Set the width reserved by sidebar presentation.
+    /// Set the sidebar body width, excluding outer margins, gaps and shadows.
     ///
     /// # Parameters
     ///
     /// * `width` - Width of the sidebar in points
     pub fn sidebar_width(mut self, width: f32) -> Self {
-        self.sidebar_width = width;
+        self.sidebar_width = if width.is_finite() { width.max(0.) } else { 0. };
         self
     }
 
@@ -317,23 +308,6 @@ where
             crate::views::ChromeStyle::BubbleGlass => NavigationSidebarStyle::Floating,
             crate::views::ChromeStyle::Simple => NavigationSidebarStyle::Simple,
         })
-    }
-
-    /// Extend the content viewport beneath a floating sidebar and its header.
-    /// Reservations are forwarded as safe areas: scrollports inset their
-    /// contents, while fixed pages should use SafeArea or ContentShell.
-    /// Simple navigation keeps its existing partitioned layout.
-    pub fn content_underlap(mut self, points: f32) -> Self {
-        self.content_underlap = if points.is_finite() {
-            points.max(0.)
-        } else {
-            0.
-        };
-        self
-    }
-
-    pub(crate) fn get_content_underlap(&self) -> f32 {
-        self.content_underlap
     }
 
     /// Allow a floating bottom bar to overlap the bottom safe area by up to
@@ -490,6 +464,30 @@ where
         self
     }
 
+    /// Use the selected destination's label as the standard header title.
+    /// Destination header overrides remain available through `NavigationLink`.
+    pub fn navigation_header(self) -> Self {
+        use crate::{Spacer, Text, hstack};
+        use alloc::string::ToString;
+        use alloc::vec::Vec;
+        let labels: Vec<_> = (0..self.links.count())
+            .map(|index| self.links.get_label(index).to_string())
+            .collect();
+        let selected = self.selected_index.clone();
+        self.toolbar(move || {
+            hstack! {
+                Text::new(labels.get(selected.get()).cloned().unwrap_or_default()).font_size(20.),
+                Spacer::new(),
+            }
+        })
+    }
+
+    /// Install controls inside navigation-owned header chrome. Do not wrap
+    /// them in HeaderBar or reserve a second header in the selected page.
+    pub fn toolbar<V: View + Clone + 'static>(self, builder: impl Fn() -> V + 'static) -> Self {
+        self.custom_header(NavigationHeader::toolbar(builder))
+    }
+
     /// Add a header above the selected content view.
     ///
     /// The builder is evaluated whenever the navigation content is rebuilt,
@@ -553,26 +551,6 @@ where
         self
     }
 
-    /// Paint content behind the header and reserve its height as a safe inset.
-    /// This applies to both sidebar and bottom-bar navigation. Fixed content
-    /// must consume safe areas; ScrollView does so automatically.
-    pub fn overlay_header(mut self, overlay: bool) -> Self {
-        self.overlay_header = overlay;
-        self
-    }
-
-    /// Share a custom header's leading margin with a floating sidebar's
-    /// trailing margin. Only that transparent margin should overlap; shadows
-    /// do not contribute to layout. Other presentations keep zero overlap.
-    pub fn header_leading_overlap(mut self, points: f32) -> Self {
-        self.header_leading_overlap = if points.is_finite() {
-            points.max(0.)
-        } else {
-            0.
-        };
-        self
-    }
-
     pub(crate) fn resolved_header(&self) -> NavigationHeader {
         self.links
             .get_header(self.selected_index.get())
@@ -584,13 +562,6 @@ where
                     Some(self.header_height)
                 },
             })
-    }
-
-    pub(crate) fn get_overlay_header(&self) -> bool {
-        self.overlay_header
-    }
-    pub(crate) fn get_header_leading_overlap(&self) -> f32 {
-        self.header_leading_overlap
     }
 
     /// Get the sidebar width
@@ -702,7 +673,6 @@ where
             selected_index: self.selected_index.clone(),
             sidebar_width: self.sidebar_width,
             sidebar_style: self.sidebar_style,
-            content_underlap: self.content_underlap,
             floating_bar_bottom_overlap: self.floating_bar_bottom_overlap,
             presentation: self.presentation,
             minimum_content_size: self.minimum_content_size,
@@ -712,8 +682,6 @@ where
             header_builder: self.header_builder.clone(),
             header_height: self.header_height,
             automatic_header_height: self.automatic_header_height,
-            overlay_header: self.overlay_header,
-            header_leading_overlap: self.header_leading_overlap,
         }
     }
 }

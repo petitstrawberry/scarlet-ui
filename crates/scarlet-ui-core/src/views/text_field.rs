@@ -46,7 +46,7 @@ pub struct TextField {
     text_color: Color,
     placeholder_color: Color,
     font_size: f32,
-    padding: f32,
+    padding: Option<f32>,
     enabled: bool,
 }
 
@@ -71,7 +71,7 @@ impl TextField {
             text_color: palette.text(),
             placeholder_color: palette.text_secondary(),
             font_size: style::CONTROL_FONT_SIZE,
-            padding: style::CONTROL_PADDING,
+            padding: None,
             enabled: true,
         }
     }
@@ -165,7 +165,7 @@ impl TextField {
 
     /// Set the padding.
     pub fn padding(mut self, padding: f32) -> Self {
-        self.padding = padding;
+        self.padding = Some(padding);
         self
     }
 
@@ -299,7 +299,7 @@ pub struct TextFieldRenderObject {
     text_color: Color,
     placeholder_color: Color,
     font_size: f32,
-    padding: f32,
+    padding: Option<f32>,
     enabled: bool,
     hovered: bool,
     size: Size,
@@ -310,7 +310,12 @@ impl TextFieldRenderObject {
     pub fn from_view(view: &TextField) -> Self {
         let text_document = TextDocument::from_str(&view.text.get());
         let selection = TextSelection::collapsed(text_document.len());
-        let layout = text_field_layout(&text_document, view.font_size, view.padding, Size::ZERO);
+        let layout = text_field_layout(
+            &text_document,
+            view.font_size,
+            style::control_padding(view.padding).left,
+            Size::ZERO,
+        );
         Self {
             text_document,
             selection,
@@ -339,8 +344,12 @@ impl TextFieldRenderObject {
     }
 
     fn compute_layout(&mut self) {
-        self.layout =
-            text_field_layout(&self.text_document, self.font_size, self.padding, self.size);
+        self.layout = text_field_layout(
+            &self.text_document,
+            self.font_size,
+            style::control_padding(self.padding).left,
+            self.size,
+        );
     }
 }
 
@@ -359,14 +368,15 @@ impl ElementRenderObject for TextFieldRenderObject {
         };
         let (measured_width, _) = graphics::measure_text_sized(&visible_text, self.font_size);
         let line_height = graphics::line_height_sized(self.font_size).max(1) as f32;
+        let padding = style::control_padding(self.padding);
+        let minimum_height = if self.padding.is_none() {
+            style::control_height()
+        } else {
+            style::metrics().minimum_control_height
+        };
         let intrinsic = Size::new(
-            measured_width as f32 + preedit_width + self.padding * 2.0,
-            if self.font_size == style::CONTROL_FONT_SIZE && self.padding == style::CONTROL_PADDING
-            {
-                style::CONTROL_HEIGHT
-            } else {
-                (line_height + self.padding * 2.0).max(style::CONTROL_HEIGHT)
-            },
+            measured_width as f32 + preedit_width + padding.left + padding.right,
+            (line_height + padding.top + padding.bottom).max(minimum_height),
         );
         self.size = constraints.constrain(intrinsic);
         self.compute_layout();
@@ -502,7 +512,7 @@ impl ElementRenderObject for TextFieldRenderObject {
             self.selection,
             self.focused,
             self.font_size,
-            self.padding,
+            style::control_padding(self.padding).left,
             background,
             text,
             if self.enabled {

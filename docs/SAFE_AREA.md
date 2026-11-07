@@ -120,19 +120,18 @@ the bottom system reservation. Underlap is bounded by the occupied slot; it does
 not turn the whole toolbar into a scroll viewport. This uses ordinary retained
 scroll composition and the existing GlassMaterial backdrop dependency.
 
-`NavigationView::content_underlap(points)` similarly opts a floating sidebar and its header
-chrome into a slightly larger selected-content viewport. Its default is zero;
-Simple navigation and the existing floating bottom bar retain their behavior.
-The selected page consumes the forwarded reservations using ScrollView or
-`.safe_area_padding(...)` for fixed content. Multiple sibling branches handle
-their own reservations independently. A header height of zero removes the slot.
+Floating navigation lays out content across the full canvas, including the space
+behind its header and sidebar. Safe-area reservations guide content layout and
+scroll endpoints; they are not clips. Fixed content consumes them with
+`.safe_area_padding(...)`, while ScrollView consumes them as content insets.
 
 ### Replaceable navigation headers
 
 `NavigationView::header(|| view)` installs a shared custom header. The supplied
 view receives the available width through normal layout constraints and owns
-its appearance, shape and internal margins. Navigation adds no material or
-padding around it. `HeaderBar` remains available as a standalone styled view.
+its appearance, shape and internal margins. Navigation owns the outer 8-point margin and the 8-point gap between chrome
+bodies. The custom root layout must describe its body outline, without outer
+padding or shadow clearance. `HeaderBar` remains available as a standalone styled view.
 
 A destination can override the shared slot, including suppressing it entirely:
 
@@ -151,27 +150,28 @@ let nav = NavigationView::new((
     NavigationLink::new("Canvas", || Text::new("Canvas").safe_area_padding(SafeAreaEdges::ALL))
         .custom_header(NavigationHeader::hidden()),
 ))
-.header(|| HeaderBar::new(Text::new("Shared header")))
-.overlay_header(true);
+.header(|| HeaderBar::new(Text::new("Shared header")));
 ```
 
-The compatibility height is 48px; `header_height(points)` changes the shared
+The default fixed header height is 48px; `header_height(points)` changes the shared
 height. `automatic_header_height()` or `NavigationHeader::automatic_height()`
 measures the view, including live extension rows, on layout. Give such views a
 finite preferred height. Header state changes retain the content element and
 scroll offset. Each destination's header keeps its own view subscriptions.
 
-`overlay_header(true)` extends the content viewport behind the complete header
-in either sidebar or bottom-bar presentation. Its measured height becomes one
-safe-area reservation; do not subtract that height again or put a second
-ContentShell around the same page header. The default remains partitioned,
-except for the existing explicit `content_underlap` behavior.
+The measured header height and its following gap become one safe-area
+reservation. Do not subtract them again or stack another page header.
+`navigation_header()` supplies the selected destination title; `toolbar(builder)`
+supplies stock header styling around custom controls. Custom headers retain their
+own appearance and internal padding, including gaps between extension rows.
 
-For custom chrome which already includes an outer leading margin,
-`header_leading_overlap(margin)` shares that transparent margin with a floating
-sidebar's trailing margin. It is ignored by Simple and bottom-bar navigation.
-Only transparent spacing should overlap; shadows are excluded from geometry.
-Standalone content shells remain useful for independent panes without navigation.
+`sidebar_width` is the sidebar body's outline width. Navigation adds the outer
+margin and inter-body gap. Content safe edges align with header outline edges.
+Existing element `size()`/`bounds()` describe these layout bounds;
+`paint_outsets()` exposes shadow overflow separately. Shadows affect neither
+allocation nor safe width. Simple navigation partitions the content and chrome
+without floating margins. Independent panes may use their own navigation or
+content shell.
 
 ## Observation and lifecycle
 

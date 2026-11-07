@@ -19,9 +19,11 @@ renderer is removed.
   the new material. Foreground labels remain sharp. This is frosted glass, not
   optical refraction or sampling of the operating-system desktop. See
   GLASS_MATERIAL.md for bounds, fallback and performance limitations.
-- Shared 36-logical-pixel default height, 14-pixel label size, 10-pixel content
-  padding and 12-pixel radius for the three form controls. Explicit frames and
-  compact titlebar/menu density remain authoritative.
+- Shared natural form-control height: 28 logical pixels for pointer input and
+  36 for touch. Labels remain 14 pixels, with default horizontal/vertical padding
+  of 8/4 for pointer input and 10/8 for touch. Radius remains 12 pixels; slider,
+  toggle, navigation and window metrics are unchanged. Explicit padding, select
+  row heights and frame constraints take precedence over these defaults.
 - Measured glyph width and line advance replace byte-count width and guessed
   baselines. Fonts remain the platform's existing font selection.
 - Scarlet marks selection and keyboard focus. Focus uses a soft three-pixel
@@ -171,19 +173,16 @@ review rather than accepted as complete.
 
 ## Factory navigation headers
 
-Each Widget Factory destination owns a `NavigationHeader` containing a stock
-`HeaderBar`, with an icon and title. The bar uses the default Bubble Glass
-appearance, a 48-point height and an explicit 8-point outer margin; navigation
-measures the resulting 64-point slot. Page bodies contain the demonstrations
-and supporting copy rather than a second page title.
+Each Widget Factory destination supplies a `NavigationHeader` containing a stock
+`HeaderBar`, with an icon and title. The body is 48 points high with Bubble Glass
+styling. Navigation places the body 8 points inside the platform safe area and
+reserves one 8-point gap below it. The custom view contains no outer padding.
 
-`overlay_header(true)` keeps the title fixed while the page scrolls beneath it.
-The page's `ScrollView` consumes the forwarded safe-area reservation once, so
-its first row starts below the header and its last row stays reachable above
-bottom navigation. The same structure supports narrow bottom navigation and
-wide sidebars. The 8-point leading overlap shares only transparent header and
-sidebar spacing. No extra `ContentShell` or manual header-height subtraction is
-needed.
+The page's ScrollView fills the canvas behind the fixed chrome and consumes the
+safe-area reservation once. Its first row begins below the header, and its last
+row stays reachable above bottom navigation. Sidebar and header outlines have
+one 8-point gap. Responsive rows use the measured content safe width rather
+than duplicating navigation's width calculation.
 
 ## Current API coverage
 

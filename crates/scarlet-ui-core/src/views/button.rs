@@ -35,7 +35,7 @@ pub struct Button {
     border_color: Color,
     text_color: Color,
     font_size: f32,
-    padding: f32,
+    padding: Option<f32>,
     press_repeat: Option<(Duration, Duration)>,
     appearance: ButtonAppearance,
     material: Option<style::GlassMaterial>,
@@ -66,7 +66,7 @@ impl Button {
             border_color: palette.border(),
             text_color: palette.text_primary(),
             font_size: style::CONTROL_FONT_SIZE,
-            padding: style::CONTROL_PADDING,
+            padding: None,
             press_repeat: None,
             appearance: ButtonAppearance::Raised,
             material: Some(style::GlassMaterial::button()),
@@ -115,7 +115,7 @@ impl Button {
             border_color: palette.border(),
             text_color: palette.text_primary(),
             font_size: style::CONTROL_FONT_SIZE,
-            padding: 7.0,
+            padding: None,
             press_repeat: None,
             appearance: ButtonAppearance::Raised,
             material: Some(style::GlassMaterial::button()),
@@ -244,7 +244,7 @@ impl Button {
         self.pressed_background_color = Some(palette.header_button_pressed());
         self.border_color = Color::CLEAR;
         self.text_color = palette.text();
-        self.padding = 6.0;
+        self.padding = Some(6.0);
         self.appearance = ButtonAppearance::Header;
         self
     }
@@ -285,7 +285,7 @@ impl Button {
 
     /// Set the padding
     pub fn padding(mut self, padding: f32) -> Self {
-        self.padding = padding;
+        self.padding = Some(padding);
         self
     }
 
@@ -326,9 +326,9 @@ impl Button {
         self.font_size
     }
 
-    /// Get the padding
+    /// Get the explicit padding, or the current default horizontal padding.
     pub fn get_padding(&self) -> f32 {
-        self.padding
+        style::control_padding(self.padding).left
     }
 
     /// Get the optional explicit icon size.
@@ -373,8 +373,9 @@ impl Button {
             self.border_color,
             self.text_color,
             self.font_size,
-            self.padding,
+            self.get_padding(),
         );
+        render_object.padding = self.padding;
         render_object.icon_size = self.icon_size;
         render_object.hover_background_color = self.hover_background_color;
         render_object.pressed_background_color = self.pressed_background_color;
@@ -413,7 +414,7 @@ pub struct ButtonRenderObject {
     border_color: Color,
     text_color: Color,
     font_size: f32,
-    padding: f32,
+    padding: Option<f32>,
     appearance: ButtonAppearance,
     material: Option<style::GlassMaterial>,
     enabled: bool,
@@ -503,7 +504,7 @@ impl ButtonRenderObject {
             border_color,
             text_color,
             font_size,
-            padding,
+            padding: Some(padding),
             appearance: ButtonAppearance::Raised,
             material: None,
             enabled: true,
@@ -520,12 +521,18 @@ impl ButtonRenderObject {
 
     /// Estimate button size based on label
     fn estimate_size(&self) -> Size {
+        let padding = style::control_padding(self.padding);
+        let minimum_height = if self.padding.is_none() {
+            style::control_height()
+        } else {
+            style::metrics().minimum_control_height
+        };
         if self.icon.is_some() && self.label.is_empty() {
             let icon_size = self
                 .icon_size
                 .map(|size| size.logical_pixels() as f32)
                 .unwrap_or(self.font_size * 1.35);
-            let side = icon_size + self.padding * 2.0;
+            let side = (icon_size + padding.top + padding.bottom).max(minimum_height);
             return Size::new(side, side);
         }
         let (text_width, _) = graphics::measure_text_sized(&self.label, self.font_size);
@@ -537,14 +544,10 @@ impl ButtonRenderObject {
         } else {
             0.0
         };
-        let width = text_width as f32 + icon_width + self.padding * 2.0;
-        let height = if self.font_size == style::CONTROL_FONT_SIZE
-            && self.padding == style::CONTROL_PADDING
-        {
-            style::CONTROL_HEIGHT
-        } else {
-            graphics::line_height_sized(self.font_size) as f32 + self.padding * 2.0
-        };
+        let width = text_width as f32 + icon_width + padding.left + padding.right;
+        let height =
+            (graphics::line_height_sized(self.font_size) as f32 + padding.top + padding.bottom)
+                .max(minimum_height);
 
         Size { width, height }
     }
@@ -646,14 +649,11 @@ impl ElementRenderObject for ButtonRenderObject {
 
         // Honor tight sizing from a Frame or parent so the button's layout,
         // painted bounds, and hit area agree. Loose sizing remains intrinsic.
-        let mut width = intrinsic.width;
+        let mut width = intrinsic.width.max(constraints.min_width);
         let mut height = intrinsic
             .height
-            .max(if self.appearance == ButtonAppearance::Header {
-                style::metrics().minimum_control_height
-            } else {
-                style::CONTROL_HEIGHT
-            });
+            .max(style::metrics().minimum_control_height)
+            .max(constraints.min_height);
 
         // Apply max constraints (don't exceed maximum)
         if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
@@ -830,9 +830,10 @@ impl ElementRenderObject for ButtonRenderObject {
 
         if let Some(icon) = self.icon {
             let available_icon_size = if self.label.is_empty() {
-                (self.size.width.min(self.size.height) - self.padding).max(1.0)
+                (self.size.width.min(self.size.height) - style::control_padding(self.padding).top)
+                    .max(1.0)
             } else {
-                (self.size.height - self.padding).max(1.0)
+                (self.size.height - style::control_padding(self.padding).top).max(1.0)
             };
             let icon_size = self
                 .icon_size
@@ -1181,12 +1182,32 @@ mod tests {
     }
 
     #[test]
-    fn button_visual_geometry_stays_stable_across_posture_changes() {
+    fn default_button_density_follows_input_mode_and_explicit_sizes_remain_authoritative() {
         let _environment = crate::input_environment::install_test_input_environment(
             crate::InputEnvironment::new(1, Some(true), None, true, true, true, false),
         );
         let mut render_object = Button::new("Mode").build_render_object();
         let tablet_size = render_object.layout(LayoutConstraints::unconstrained());
+        let mut other_controls = [
+            crate::TextField::new(crate::State::new(
+                crate::state::generate_state_id(),
+                String::new(),
+            ))
+            .create_element(),
+            crate::Select::new(
+                alloc::vec![String::from("Mode")],
+                crate::State::new(crate::state::generate_state_id(), 0usize),
+            )
+            .create_element(),
+        ];
+        let mut explicit = Button::new("Mode").padding(10.0).build_render_object();
+        let explicit_size = explicit.layout(LayoutConstraints::unconstrained());
+        for control in &mut other_controls {
+            assert_eq!(
+                control.layout(LayoutConstraints::unconstrained()).height,
+                36.0
+            );
+        }
 
         crate::input_environment::install_input_environment(crate::InputEnvironment::new(
             2,
@@ -1200,7 +1221,22 @@ mod tests {
         let laptop_size = render_object.layout(LayoutConstraints::unconstrained());
 
         assert_eq!(tablet_size.height, 36.0);
-        assert_eq!(laptop_size.height, tablet_size.height);
+        assert_eq!(laptop_size.height, 28.0);
+        for control in &mut other_controls {
+            assert_eq!(
+                control.layout(LayoutConstraints::unconstrained()).height,
+                28.0
+            );
+        }
+        assert_eq!(
+            explicit.layout(LayoutConstraints::unconstrained()),
+            explicit_size
+        );
+        assert!(explicit_size.height > laptop_size.height);
+        assert_eq!(
+            explicit.layout(LayoutConstraints::tight(80.0, 22.0)),
+            Size::new(80.0, 22.0)
+        );
         assert_eq!(
             crate::current_input_environment().interaction_mode(),
             crate::InteractionMode::Pointer

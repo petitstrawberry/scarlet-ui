@@ -136,7 +136,7 @@ fn floating_navigation_reserves_underlap_and_disabled_headers_remove_the_slot() 
             .vertical()
             .content_size(0., 1000.)
     }),);
-    for (floating, underlap) in [(true, 16.), (false, 0.)] {
+    for floating in [true, false] {
         let view = NavigationView::new(links.clone())
             .presentation(NavigationPresentation::Sidebar)
             .sidebar_width(80.)
@@ -145,7 +145,6 @@ fn floating_navigation_reserves_underlap_and_disabled_headers_remove_the_slot() 
             } else {
                 NavigationSidebarStyle::Simple
             })
-            .content_underlap(16.)
             .header(|| Rectangle::new())
             .header_height(0.);
         let mut p = pipeline(view);
@@ -159,9 +158,20 @@ fn floating_navigation_reserves_underlap_and_disabled_headers_remove_the_slot() 
         let scroll = &navigation.children()[0];
         assert_eq!(
             scroll.bounds(),
-            Rect::from_xywh(80. - underlap, 0., 320. + underlap, 300.)
+            if floating {
+                Rect::from_xywh(0., 0., 400., 300.)
+            } else {
+                Rect::from_xywh(80., 0., 320., 300.)
+            }
         );
-        assert_eq!(scroll.children()[0].position(), Point::new(underlap, 0.));
+        assert_eq!(
+            scroll.children()[0].position(),
+            if floating {
+                Point::new(96., 8.)
+            } else {
+                Point::ZERO
+            }
+        );
     }
 }
 
@@ -226,10 +236,7 @@ fn navigation_switches_custom_shared_and_hidden_headers_without_stacking_insets(
     .header(|| Rectangle::new().frame_height(40.))
     .automatic_header_height()
     .sidebar_width(80.)
-    .presentation(NavigationPresentation::Sidebar)
-    .content_underlap(80.)
-    .overlay_header(true)
-    .header_leading_overlap(8.);
+    .presentation(NavigationPresentation::Sidebar);
     let selected = nav.selected_index_state().clone();
     let mut p = pipeline(nav);
     for (index, height) in [(0, 40.), (1, 72.), (2, 0.), (0, 40.)] {
@@ -239,11 +246,14 @@ fn navigation_switches_custom_shared_and_hidden_headers_without_stacking_insets(
         assert_eq!(navigation.children().len(), if height > 0. { 3 } else { 2 });
         let scroll = &navigation.children()[0];
         assert_eq!(scroll.bounds(), Rect::from_xywh(0., 0., 400., 300.));
-        assert_eq!(scroll.children()[0].position(), Point::new(80., height));
+        assert_eq!(
+            scroll.children()[0].position(),
+            Point::new(96., if height > 0. { height + 16. } else { 8. })
+        );
         if height > 0. {
             assert_eq!(
                 navigation.children()[1].bounds(),
-                Rect::from_xywh(72., 0., 328., height)
+                Rect::from_xywh(96., 8., 296., height)
             );
         }
     }
@@ -253,11 +263,11 @@ fn navigation_switches_custom_shared_and_hidden_headers_without_stacking_insets(
     let navigation = &shell(&p).children()[0];
     assert_eq!(
         navigation.children()[1].bounds(),
-        Rect::from_xywh(82., 20., 506., 40.)
+        Rect::from_xywh(106., 28., 474., 40.)
     );
     assert_eq!(
         navigation.children()[0].children()[0].position(),
-        Point::new(80., 60.)
+        Point::new(106., 76.)
     );
 }
 
@@ -309,10 +319,8 @@ fn live_header_extensions_relayout_in_both_presentations_preserving_scrolled_con
             }),))
             .header(move || header.clone())
             .automatic_header_height()
-            .overlay_header(true)
             .presentation(presentation)
-            .sidebar_width(80.)
-            .content_underlap(80.),
+            .sidebar_width(80.),
         );
         p.render_for_present().unwrap();
         wheel(&mut p, 80);

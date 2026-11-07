@@ -32,9 +32,6 @@ pub struct NavigationViewRenderObject {
     sidebar_width: f32,
     header_height: f32,
     automatic_header_height: bool,
-    overlay_header: bool,
-    header_leading_overlap: f32,
-    content_underlap: f32,
     presentation: NavigationPresentation,
     minimum_content_size: Size,
     size: Size,
@@ -44,8 +41,8 @@ const BOTTOM_BAR_EXTRA_HEIGHT: f32 = 12.0;
 const BOTTOM_BAR_ICON_TOP_INSET: f32 = 8.0;
 const BOTTOM_BAR_TEXT_BOTTOM_INSET: f32 = 5.0;
 const TEXT_LINE_HEIGHT_FACTOR: f32 = 1.2;
-const FLOATING_BAR_MARGIN_X: f32 = 12.0;
-const FLOATING_BAR_MARGIN_Y: f32 = 8.0;
+const CHROME_MARGIN: f32 = 8.0;
+const CHROME_GAP: f32 = 8.0;
 const FLOATING_BAR_RADIUS: f32 = 28.0;
 
 fn bottom_bar_height(navigation_item_height: f32) -> f32 {
@@ -83,94 +80,6 @@ fn bottom_bar_content_geometry(
             },
         ),
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct NavigationGeometry {
-    navigation: Rect,
-    header: Option<Rect>,
-    content: Rect,
-}
-
-fn navigation_geometry(
-    size: Size,
-    presentation: NavigationPresentation,
-    sidebar_width: f32,
-    header_height: f32,
-    bottom_bar_height: f32,
-) -> NavigationGeometry {
-    let width = size.width.max(0.0);
-    let height = size.height.max(0.0);
-    let header_height = header_height.max(0.0).min(height);
-    match presentation {
-        NavigationPresentation::BottomBar => {
-            let bottom_height = bottom_bar_height
-                .max(0.0)
-                .min((height - header_height).max(0.0));
-            NavigationGeometry {
-                navigation: Rect::from_xywh(0.0, height - bottom_height, width, bottom_height),
-                header: (header_height > 0.0)
-                    .then(|| Rect::from_xywh(0.0, 0.0, width, header_height)),
-                content: Rect::from_xywh(
-                    0.0,
-                    header_height,
-                    width,
-                    (height - header_height - bottom_height).max(0.0),
-                ),
-            }
-        }
-        NavigationPresentation::Automatic | NavigationPresentation::Sidebar => {
-            let sidebar_width = sidebar_width.max(0.0).min(width);
-            let content_width = (width - sidebar_width).max(0.0);
-            NavigationGeometry {
-                navigation: Rect::from_xywh(0.0, 0.0, sidebar_width, height),
-                header: (header_height > 0.0)
-                    .then(|| Rect::from_xywh(sidebar_width, 0.0, content_width, header_height)),
-                content: Rect::from_xywh(
-                    sidebar_width,
-                    header_height,
-                    content_width,
-                    (height - header_height).max(0.0),
-                ),
-            }
-        }
-    }
-}
-
-// Apply only to outermost vertical scrollports, including those behind wrappers.
-// Geometry is measured first so short or side-by-side scrollports get their
-// own overlap. Clear the inset when switching back to a sidebar.
-fn inset_overlay_scroll(
-    element: &mut dyn Element,
-    parent: Point,
-    cover: Option<Rect>,
-) -> (bool, bool) {
-    let origin = Point::new(
-        parent.x + element.position().x,
-        parent.y + element.position().y,
-    );
-    let bounds = Rect::new(origin, element.bounds().size);
-    let inset = cover.map_or(0.0, |cover| {
-        if bounds.right() > cover.left() && bounds.left() < cover.right() {
-            (bounds.bottom().min(cover.bottom()) - cover.top().max(bounds.top())).max(0.0)
-        } else {
-            0.0
-        }
-    });
-    if let Some(changed) = element
-        .render_object_mut()
-        .and_then(|render| render.set_bottom_overlay_inset(inset))
-    {
-        return (true, changed);
-    }
-    let mut accepted = false;
-    let mut changed = false;
-    for child in element.children_mut() {
-        let result = inset_overlay_scroll(child.as_mut(), origin, cover);
-        accepted |= result.0;
-        changed |= result.1;
-    }
-    (accepted, changed)
 }
 
 impl NavigationViewRenderObject {
@@ -239,10 +148,7 @@ impl NavigationViewRenderObject {
             sidebar_width,
             header_height: header_height.max(0.0),
             automatic_header_height: false,
-            overlay_header: false,
-            header_leading_overlap: 0.,
             safe_area_insets: EdgeInsets::ZERO,
-            content_underlap: 0.,
             floating_bar_bottom_overlap: 0.0,
             presentation,
             minimum_content_size,
@@ -250,19 +156,8 @@ impl NavigationViewRenderObject {
         }
     }
 
-    pub(crate) fn set_header_layout(
-        &mut self,
-        automatic: bool,
-        overlay: bool,
-        leading_overlap: f32,
-    ) {
+    pub(crate) fn set_header_layout(&mut self, automatic: bool) {
         self.automatic_header_height = automatic;
-        self.overlay_header = overlay;
-        self.header_leading_overlap = leading_overlap;
-    }
-
-    pub(crate) fn set_content_underlap(&mut self, underlap: f32) {
-        self.content_underlap = underlap;
     }
 
     pub(crate) fn set_floating_bar_bottom_overlap(&mut self, overlap: f32) {
@@ -325,241 +220,132 @@ impl ElementRenderObject for NavigationViewRenderObject {
             constraints.max_width.max(0.0),
             constraints.max_height.max(0.0),
         );
-        let resolved_bottom_bar_height = children
-            .last()
-            .and_then(|child| child.render_object())
-            .and_then(|render| {
-                render
-                    .as_any()
-                    .downcast_ref::<NavigationSidebarRenderObject>()
-            })
-            .map_or_else(
-                || bottom_bar_height(style::metrics().navigation_item_height),
-                NavigationSidebarRenderObject::preferred_bottom_bar_height,
-            );
-        let safe = crate::geometry::safe_area_rect(size, self.safe_area_insets);
-        let presentation = self.presentation.resolve_for_size(
-            safe.size,
-            self.sidebar_width,
-            self.minimum_content_size,
-            resolved_bottom_bar_height,
-        );
-        let floating = children
+        let navigation = children
             .last()
             .and_then(|c| c.render_object())
-            .and_then(|r| r.as_any().downcast_ref::<NavigationSidebarRenderObject>())
-            .is_some_and(|r| r.sidebar_style == NavigationSidebarStyle::Floating);
-        let overlay = floating && presentation == NavigationPresentation::BottomBar;
-        let sidebar_header = presentation == NavigationPresentation::Sidebar;
-        let leading_overlap = if floating && sidebar_header {
-            self.header_leading_overlap
-                .min(self.sidebar_width.min(safe.size.width))
+            .and_then(|r| r.as_any().downcast_ref::<NavigationSidebarRenderObject>());
+        let floating =
+            navigation.is_some_and(|r| r.sidebar_style == NavigationSidebarStyle::Floating);
+        let bottom_height = navigation.map_or_else(
+            || bottom_bar_height(style::metrics().navigation_item_height),
+            NavigationSidebarRenderObject::preferred_bottom_bar_height,
+        );
+        let safe = crate::geometry::safe_area_rect(size, self.safe_area_insets);
+        let margin = if floating { CHROME_MARGIN } else { 0. };
+        let gap = if floating { CHROME_GAP } else { 0. };
+        let reserved_sidebar = if self.sidebar_width > 0. {
+            self.sidebar_width + margin * 2. + gap
         } else {
-            0.
+            margin * 2.
         };
-        let header_left = safe.left()
-            + if sidebar_header {
-                self.sidebar_width.min(safe.size.width) - leading_overlap
+        let presentation = self.presentation.resolve_for_size(
+            safe.size,
+            reserved_sidebar,
+            self.minimum_content_size,
+            bottom_height + margin + gap,
+        );
+        let mx = margin.min(safe.size.width * 0.5);
+        let my = margin.min(safe.size.height * 0.5);
+        let mut body = safe.inset(EdgeInsets::new(mx, my, mx, my));
+        let navigation_rect = if presentation == NavigationPresentation::Sidebar {
+            let width = self.sidebar_width.min(body.size.width).max(0.);
+            let rect = Rect::from_xywh(body.left(), body.top(), width, body.size.height);
+            if width > 0. {
+                let advance = (width + gap).min(body.size.width);
+                body.origin.x += advance;
+                body.size.width -= advance;
+            }
+            rect
+        } else {
+            // The system bottom inset and the outer margin provide the same
+            // breathing room. Share them; only explicit home-indicator overlap
+            // may move the bar into that reservation.
+            let shift = if floating && size.height > size.width {
+                self.floating_bar_bottom_overlap
+                    .min((self.safe_area_insets.bottom - 20.).max(0.))
             } else {
                 0.
             };
-        let header_height = if self.automatic_header_height {
-            children.get_mut(1).map_or(0., |header| {
-                header.set_safe_area_insets(EdgeInsets::ZERO);
-                let measured = header.layout(LayoutConstraints::new(
-                    (safe.right() - header_left).max(0.),
-                    (safe.right() - header_left).max(0.),
-                    0.,
-                    safe.size.height,
-                ));
-                if measured.height.is_finite() {
-                    measured.height.clamp(0., safe.size.height)
-                } else {
-                    0.
-                }
-            })
-        } else {
-            self.header_height.min(safe.size.height)
-        };
-
-        let mut geometry = navigation_geometry(
-            size,
-            presentation,
-            self.sidebar_width,
-            header_height,
-            resolved_bottom_bar_height,
-        );
-        if overlay {
-            geometry.content.size.height += geometry.navigation.size.height;
-        }
-        let insets = EdgeInsets::new(
-            safe.left(),
-            safe.top(),
-            (size.width - safe.right()).max(0.0),
-            (size.height - safe.bottom()).max(0.0),
-        );
-        let mut content_insets = insets;
-        // The platform's bottom reservation already supplies breathing room
-        // below the floating capsule. Share it with the transparent outer
-        // margin instead of stacking another 8px above the safe edge.
-        let shared_bottom_margin = if overlay {
-            FLOATING_BAR_MARGIN_Y
-                .min(insets.bottom)
-                .min(geometry.navigation.size.height.min(safe.size.height) * 0.5)
-        } else {
-            0.0
-        };
-        // Overlap is explicit because a generic safe area may describe an OS
-        // obstruction. Retain a 20px bottom gap, and do not change landscape.
-        let bottom_overlap = if overlay && size.height > size.width {
-            self.floating_bar_bottom_overlap
-                .min((insets.bottom - 20.0).max(0.0))
-                .min(
-                    (geometry.navigation.size.height.min(safe.size.height) - shared_bottom_margin)
-                        .max(0.0),
-                )
-        } else {
-            0.0
-        };
-        let bottom_shift = shared_bottom_margin + bottom_overlap;
-        if presentation == NavigationPresentation::BottomBar {
-            geometry.navigation.size.height = geometry.navigation.size.height.min(safe.size.height);
-            geometry.navigation.origin =
-                Point::new(safe.left(), safe.bottom() - geometry.navigation.size.height);
-            geometry.navigation.origin.y += bottom_shift;
-            geometry.navigation.size.width = safe.size.width;
-            if !overlay {
-                geometry.content.size.height =
-                    (geometry.navigation.top() - geometry.content.top()).max(0.0);
-                content_insets.bottom = 0.0;
-            }
-        } else {
-            geometry.navigation.origin = Point::new(safe.left(), safe.top());
-            geometry.navigation.size.width = geometry.navigation.size.width.min(safe.size.width);
-            geometry.navigation.size.height = safe.size.height;
-            geometry.content.origin.x = geometry.navigation.right();
-            geometry.content.size.width = (size.width - geometry.content.left()).max(0.0);
-            content_insets.left = 0.0;
-            if let Some(header) = &mut geometry.header {
-                header.origin.x = geometry.content.left();
-            }
-        }
-        if let Some(header) = &mut geometry.header {
-            header.origin.x = header_left;
-            header.origin.y = safe.top();
-            header.size.width = (safe.right() - header.left()).max(0.0);
-            header.size.height = header.size.height.min(safe.size.height);
-        }
-        let underlap = if floating && presentation == NavigationPresentation::Sidebar {
-            self.content_underlap
-        } else {
-            0.
-        };
-        if underlap > 0. {
-            if presentation == NavigationPresentation::Sidebar {
-                let left = underlap.min(geometry.navigation.size.width);
-                geometry.content.origin.x -= left;
-                geometry.content.size.width += left;
-                content_insets.left += left;
-            }
-        }
-        if let Some(header) = geometry.header {
-            let top = if self.overlay_header {
-                header.size.height
+            let bottom = if floating {
+                (size.height - self.safe_area_insets.bottom.max(margin) + shift).max(safe.top())
             } else {
-                underlap.min(header.size.height)
+                safe.bottom()
             };
-            geometry.content.origin.y -= top;
-            geometry.content.size.height += top;
-            content_insets.top += top;
-        }
+            let height = bottom_height.min((bottom - body.top()).max(0.));
+            let rect = Rect::from_xywh(body.left(), bottom - height, body.size.width, height);
+            body.size.height = (rect.top() - gap - body.top()).max(0.);
+            rect
+        };
+        let header_rect = if has_header {
+            let height = if self.automatic_header_height {
+                children.get_mut(1).map_or(0., |header| {
+                    header.set_safe_area_insets(EdgeInsets::ZERO);
+                    let measured = header.layout(LayoutConstraints::new(
+                        body.size.width,
+                        body.size.width,
+                        0.,
+                        body.size.height,
+                    ));
+                    if measured.height.is_finite() {
+                        measured.height.clamp(0., body.size.height)
+                    } else {
+                        0.
+                    }
+                })
+            } else {
+                self.header_height.min(body.size.height)
+            };
+            let rect = Rect::from_xywh(body.left(), body.top(), body.size.width, height);
+            if height > 0. {
+                let advance = (height + gap).min(body.size.height);
+                body.origin.y += advance;
+                body.size.height -= advance;
+            }
+            Some(rect)
+        } else {
+            None
+        };
         if let Some(navigation) = children.get_mut(navigation_index) {
-            if let Some(render_object) = navigation.render_object_mut()
-                && let Some(navigation_render_object) = render_object
-                    .as_any_mut()
-                    .downcast_mut::<NavigationSidebarRenderObject>(
-                )
-            {
-                navigation_render_object.set_presentation(presentation);
+            if let Some(render) = navigation.render_object_mut().and_then(|r| {
+                r.as_any_mut()
+                    .downcast_mut::<NavigationSidebarRenderObject>()
+            }) {
+                render.set_presentation(presentation);
             }
             navigation.layout(LayoutConstraints::tight(
-                geometry.navigation.size.width,
-                geometry.navigation.size.height,
+                navigation_rect.size.width,
+                navigation_rect.size.height,
             ));
-            navigation.set_position(geometry.navigation.origin);
+            navigation.set_position(navigation_rect.origin);
         }
-
-        if has_header && let Some(header) = children.get_mut(1) {
-            let header_geometry = geometry
-                .header
-                .unwrap_or_else(|| Rect::from_xywh(0.0, 0.0, 0.0, 0.0));
+        if let Some(rect) = header_rect
+            && let Some(header) = children.get_mut(1)
+        {
             if !self.automatic_header_height {
                 header.set_safe_area_insets(EdgeInsets::ZERO);
-                header.layout(LayoutConstraints::tight(
-                    header_geometry.size.width,
-                    header_geometry.size.height,
-                ));
+                header.layout(LayoutConstraints::tight(rect.size.width, rect.size.height));
             }
-            // Keep automatic headers' loose height constraint. Tightening it
-            // here would turn the measured height into a relayout boundary,
-            // hiding later intrinsic-size changes from navigation.
-            header.set_position(header_geometry.origin);
+            // Preserve loose height constraints so live extension rows propagate
+            // intrinsic-size changes to navigation without replacing the body.
+            header.set_position(rect.origin);
         }
-
         if let Some(content) = children.get_mut(content_index) {
-            content.set_safe_area_insets(content_insets);
-            content.layout(LayoutConstraints::new(
-                geometry.content.size.width,
-                geometry.content.size.width,
-                0.0,
-                geometry.content.size.height,
-            ));
-            content.set_position(geometry.content.origin);
-            let cover = if overlay {
-                // ScrollView separately reserves the platform bottom inset.
-                // Only the overlap above that inset is additional chrome.
-                Some(Rect::new(
-                    geometry.navigation.origin,
-                    Size::new(
-                        geometry.navigation.size.width,
-                        (geometry.navigation.size.height - bottom_shift).max(0.0),
-                    ),
-                ))
+            if floating {
+                // One continuous canvas; safe bounds come from the same body
+                // outlines used to place both chrome surfaces. Shadows are
+                // deliberately absent from this calculation.
+                content.set_safe_area_insets(EdgeInsets::new(
+                    body.left(),
+                    body.top(),
+                    (size.width - body.right()).max(0.),
+                    (size.height - body.bottom()).max(0.),
+                ));
+                content.layout(LayoutConstraints::tight(size.width, size.height));
+                content.set_position(Point::ZERO);
             } else {
-                None
-            };
-            let (accepts, changed) = inset_overlay_scroll(content.as_mut(), Point::ZERO, cover);
-            if changed {
-                content.layout(LayoutConstraints::new(
-                    geometry.content.size.width,
-                    geometry.content.size.width,
-                    0.0,
-                    geometry.content.size.height,
-                ));
-            }
-            if !accepts && underlap == 0. {
-                // Static pages still fit above chrome; scrollports extend behind it.
                 content.set_safe_area_insets(EdgeInsets::ZERO);
-                content.set_position(Point::new(
-                    geometry.content.left() + content_insets.left,
-                    geometry.content.top() + content_insets.top,
-                ));
-                content.layout(LayoutConstraints::new(
-                    (geometry.content.size.width - content_insets.left - content_insets.right)
-                        .max(0.0),
-                    (geometry.content.size.width - content_insets.left - content_insets.right)
-                        .max(0.0),
-                    0.0,
-                    (geometry.content.size.height
-                        - content_insets.top
-                        - content_insets.bottom
-                        - if overlay {
-                            geometry.navigation.size.height - bottom_shift
-                        } else {
-                            0.0
-                        })
-                    .max(0.0),
-                ));
+                content.layout(LayoutConstraints::tight(body.size.width, body.size.height));
+                content.set_position(body.origin);
             }
         }
 
@@ -731,13 +517,13 @@ impl NavigationSidebarRenderObject {
             });
         }
         if self.is_floating() {
-            if x < 16.0 || x >= self.size.width - 16.0 || y < 16.0 {
+            if x < 8.0 || x >= self.size.width - 8.0 || y < 8.0 {
                 return None;
             }
-            let index = ((y - 16.0) / 40.0) as usize;
+            let index = ((y - 8.0) / 40.0) as usize;
             return (index < self.labels.len()
-                && y < 16.0 + index as f32 * 40.0 + 36.0
-                && y < self.size.height - 16.0)
+                && y < 8.0 + index as f32 * 40.0 + 36.0
+                && y < self.size.height - 8.0)
                 .then_some(index);
         }
         let index = match self.presentation {
@@ -785,20 +571,11 @@ impl NavigationSidebarRenderObject {
             };
         // Keep 8px inside the glass above/below the icon-label group, plus
         // independent outer margins. Large labels can grow the allocation.
-        (content_height + 16.0).max(56.0) + FLOATING_BAR_MARGIN_Y * 2.0
+        (content_height + 16.0).max(56.0)
     }
 
     fn glass_bottom_panel(&self, origin: Point) -> Rect {
-        // Leave air around the whole bar, including its bottom edge. Clamp
-        // insets for transient zero/small allocations during window resizing.
-        let inset_x = FLOATING_BAR_MARGIN_X.min(self.size.width.max(0.0) * 0.5);
-        let inset_y = FLOATING_BAR_MARGIN_Y.min(self.size.height.max(0.0) * 0.5);
-        Rect::from_xywh(
-            origin.x + inset_x,
-            origin.y + inset_y,
-            (self.size.width - 2.0 * inset_x).max(0.0),
-            (self.size.height - 2.0 * inset_y).max(0.0),
-        )
+        Rect::new(origin, self.size)
     }
 
     fn glass_bottom_item(&self, origin: Point, index: usize) -> Rect {
@@ -903,21 +680,19 @@ impl NavigationSidebarRenderObject {
 
     fn floating_row(&self, origin: Point, index: usize) -> Rect {
         Rect::from_xywh(
-            origin.x + 16.0,
-            origin.y + 16.0 + index as f32 * 40.0,
-            (self.size.width - 32.0).max(0.0),
+            origin.x + 8.0,
+            origin.y + 8.0 + index as f32 * 40.0,
+            (self.size.width - 16.0).max(0.0),
             36.0,
         )
     }
 
     fn paint_floating(&self, ctx: &mut PaintContext<'_>, origin: Point) {
         let palette = ColorPalette::default();
-        let panel = Rect::from_xywh(
-            origin.x + 8.0,
-            origin.y + 8.0,
-            (self.size.width - 16.0).max(0.0),
-            (self.size.height - 16.0).max(0.0),
-        );
+        let panel = Rect::new(origin, self.size);
+        if panel.size.width <= 0. || panel.size.height <= 0. {
+            return;
+        }
         // Do not cover the backdrop with an opaque rail before sampling it.
         // Floating navigation uses the same real material as controls/surfaces.
         let mut material = style::GlassMaterial::regular();
@@ -927,10 +702,10 @@ impl NavigationSidebarRenderObject {
         style::paint_glass_material(ctx, panel, 16.0, material);
         // Clip destinations to the inset panel on short windows.
         let content = Rect::from_xywh(
-            origin.x + 16.0,
-            origin.y + 16.0,
-            (self.size.width - 32.0).max(0.0),
-            (self.size.height - 32.0).max(0.0),
+            origin.x + 8.0,
+            origin.y + 8.0,
+            (self.size.width - 16.0).max(0.0),
+            (self.size.height - 16.0).max(0.0),
         );
         ctx.push_clip(content);
         for index in 0..self.labels.len() {
@@ -1150,12 +925,30 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
     }
 
     fn hit_test(&self, point: Point) -> bool {
-        if self.presentation == NavigationPresentation::BottomBar
-            && self.sidebar_style == NavigationSidebarStyle::Floating
-        {
-            self.index_at_point(point.x, point.y).is_some()
+        let rect = Rect::new(Point::ZERO, self.size);
+        if !rect.contains(point) {
+            return false;
+        }
+        if self.is_floating() || self.is_glass_bottom_bar() {
+            let radius = style::radius_for(
+                rect,
+                if self.is_glass_bottom_bar() {
+                    FLOATING_BAR_RADIUS
+                } else {
+                    16.
+                },
+            );
+            let dx = point.x
+                - point
+                    .x
+                    .clamp(radius, (self.size.width - radius).max(radius));
+            let dy = point.y
+                - point
+                    .y
+                    .clamp(radius, (self.size.height - radius).max(radius));
+            dx * dx + dy * dy <= radius * radius
         } else {
-            Rect::new(Point::ZERO, self.size).contains(point)
+            true
         }
     }
 
@@ -1420,9 +1213,8 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
 #[cfg(test)]
 mod tests {
     use super::{
-        NavigationGeometry, NavigationPresentation, NavigationSidebar,
-        NavigationSidebarRenderObject, NavigationViewRenderObject, bottom_bar_content_geometry,
-        bottom_bar_height, navigation_geometry,
+        NavigationPresentation, NavigationSidebar, NavigationSidebarRenderObject,
+        NavigationViewRenderObject, bottom_bar_content_geometry, bottom_bar_height,
     };
     use crate::color::Color;
     use crate::element::{ElementRenderObject, LayoutConstraints};
@@ -1433,26 +1225,6 @@ mod tests {
     use crate::state::State;
     use alloc::string::String;
     use alloc::vec;
-
-    #[test]
-    fn bottom_bar_geometry_reserves_header_content_and_bottom_regions() {
-        let bottom_height =
-            bottom_bar_height(crate::views::style::metrics().navigation_item_height);
-        assert_eq!(
-            navigation_geometry(
-                Size::new(800.0, 600.0),
-                NavigationPresentation::BottomBar,
-                200.0,
-                48.0,
-                bottom_height,
-            ),
-            NavigationGeometry {
-                navigation: Rect::from_xywh(0.0, 600.0 - bottom_height, 800.0, bottom_height),
-                header: Some(Rect::from_xywh(0.0, 0.0, 800.0, 48.0)),
-                content: Rect::from_xywh(0.0, 48.0, 800.0, 600.0 - 48.0 - bottom_height),
-            }
-        );
-    }
 
     #[test]
     fn bottom_bar_height_stays_stable_across_posture_changes() {
@@ -1494,24 +1266,6 @@ mod tests {
     fn legacy_constructor_preserves_fixed_sidebar_presentation() {
         let render_object = NavigationViewRenderObject::new(200.0, 0.0);
         assert_eq!(render_object.presentation, NavigationPresentation::Sidebar);
-    }
-
-    #[test]
-    fn sidebar_geometry_keeps_header_and_content_after_navigation_rail() {
-        assert_eq!(
-            navigation_geometry(
-                Size::new(800.0, 600.0),
-                NavigationPresentation::Sidebar,
-                200.0,
-                48.0,
-                bottom_bar_height(crate::views::style::metrics().navigation_item_height),
-            ),
-            NavigationGeometry {
-                navigation: Rect::from_xywh(0.0, 0.0, 200.0, 600.0),
-                header: Some(Rect::from_xywh(200.0, 0.0, 600.0, 48.0)),
-                content: Rect::from_xywh(200.0, 48.0, 600.0, 552.0),
-            }
-        );
     }
 
     #[test]
@@ -1619,12 +1373,12 @@ mod tests {
             viewport.height, 600.0,
             "content paints all the way behind chrome"
         );
-        assert_eq!(content.height, 1282.0);
+        assert_eq!(content.height, 1290.0);
         assert_eq!(
-            offset.1, 682.0,
+            offset.1, 690.0,
             "last row clears the floating bar and authored inset"
         );
-        assert_eq!(children[1].position().y, 528.0);
+        assert_eq!(children[1].position().y, 536.0);
         let nav = children[1].render_object().unwrap();
         assert!(
             !nav.hit_test(Point::new(1.0, 1.0)),
@@ -1639,9 +1393,9 @@ mod tests {
         );
         render.layout_with_children(LayoutConstraints::tight(900.0, 600.0), &mut children);
         let (viewport, content, offset) = scroll_render(children[0].as_ref()).unwrap();
-        assert_eq!(viewport, Size::new(700.0, 600.0));
-        assert_eq!(content.height, 1210.0);
-        assert_eq!(offset.1, 610.0);
+        assert_eq!(viewport, Size::new(900.0, 600.0));
+        assert_eq!(content.height, 1226.0);
+        assert_eq!(offset.1, 626.0);
     }
 
     #[test]
@@ -1654,7 +1408,7 @@ mod tests {
         assert!(
             matches!(ctx.commands().first(), Some(crate::renderer::PaintCommand::BackdropFilterRoundedRect {
             rect, corner_radius, blur_radius, ..
-        }) if *rect == Rect::from_xywh(8.0, 8.0, 184.0, 184.0)
+        }) if *rect == Rect::from_xywh(0.0, 0.0, 200.0, 200.0)
             && *corner_radius == 16.0 && *blur_radius > 0.0 && *blur_radius < 18.0)
         );
         assert!(
@@ -1722,7 +1476,7 @@ mod tests {
         use crate::renderer::PaintCommand;
         let mut render = NavigationSidebarRenderObject::from_view(&floating_sidebar());
         render.set_presentation(NavigationPresentation::BottomBar);
-        assert_eq!(render.preferred_bottom_bar_height(), 72.0);
+        assert_eq!(render.preferred_bottom_bar_height(), 56.0);
         render.layout(LayoutConstraints::tight(
             390.0,
             render.preferred_bottom_bar_height(),
@@ -1731,7 +1485,7 @@ mod tests {
         assert_eq!(render.index_at_point(1.0, 1.0), None);
         assert_eq!(render.index_at_point(389.0, 71.0), None);
         assert_eq!(
-            render.index_at_point(13.0, 9.0),
+            render.index_at_point(1.0, 9.0),
             None,
             "rounded corner is empty"
         );
@@ -1754,7 +1508,7 @@ mod tests {
             })
             .collect();
         assert_eq!(glass.len(), 1, "selection must not re-filter the glass");
-        assert_eq!(glass[0].0, Rect::from_xywh(12.0, 8.0, 366.0, 56.0));
+        assert_eq!(glass[0].0, Rect::from_xywh(0.0, 0.0, 390.0, 56.0));
         assert_eq!(glass[0].1, 28.0);
         assert!(
             !ctx.commands()
@@ -1805,14 +1559,14 @@ mod tests {
         render.layout(LayoutConstraints::tight(200.0, 500.0));
         assert_eq!(render.index_at_point(28.0, 20.0), Some(0));
         assert_eq!(render.index_at_point(28.0, 56.0), Some(1));
-        assert_eq!(render.index_at_point(8.0, 20.0), None);
-        assert_eq!(render.index_at_point(28.0, 8.0), None);
-        assert_eq!(render.index_at_point(28.0, 52.0), None);
-        assert_eq!(render.index_at_point(185.0, 20.0), None);
+        assert_eq!(render.index_at_point(7.0, 20.0), None);
+        assert_eq!(render.index_at_point(28.0, 7.0), None);
+        assert_eq!(render.index_at_point(28.0, 46.0), None);
+        assert_eq!(render.index_at_point(193.0, 20.0), None);
         render.set_presentation(NavigationPresentation::BottomBar);
         render.layout(LayoutConstraints::tight(200.0, 52.0));
         assert!(!render.is_floating());
-        assert_eq!(render.index_at_point(8.0, 8.0), None);
+        assert_eq!(render.index_at_point(0.0, 0.0), None);
         assert_eq!(render.index_at_point(50.0, 26.0), Some(0));
         assert_eq!(render.index_at_point(150.0, 26.0), Some(1));
     }
@@ -2038,12 +1792,12 @@ mod tests {
         render.set_safe_area_insets(EdgeInsets::new(13., 47., 17., 29.));
         render.layout_with_children(LayoutConstraints::tight(400., 800.), &mut children);
         assert_eq!(children[0].bounds(), Rect::from_xywh(0., 0., 400., 800.));
-        assert_eq!(children[1].bounds().left(), 13.);
-        assert_eq!(children[1].bounds().right(), 383.);
-        assert_eq!(children[1].bounds().bottom(), 779.);
+        assert_eq!(children[1].bounds().left(), 21.);
+        assert_eq!(children[1].bounds().right(), 375.);
+        assert_eq!(children[1].bounds().bottom(), 771.);
         assert_eq!(
             children[0].children()[0].bounds().bottom(),
-            children[1].bounds().top(),
+            children[1].bounds().top() - 8.,
             "selected final row can stop above floating bar"
         );
         let bar_height = children[1].bounds().size.height;
@@ -2055,7 +1809,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             scroll.content_size().height,
-            1200. + 47. + 29. + bar_height - 8.
+            1200. + 47. + 8. + 29. + bar_height + 8.
         );
         render.update_configuration(
             200.,
@@ -2064,8 +1818,8 @@ mod tests {
             Size::new(320., 0.),
         );
         render.layout_with_children(LayoutConstraints::tight(800., 400.), &mut children);
-        assert_eq!(children[0].bounds(), Rect::from_xywh(213., 0., 587., 400.));
-        assert_eq!(children[1].bounds(), Rect::from_xywh(13., 47., 200., 324.));
+        assert_eq!(children[0].bounds(), Rect::from_xywh(0., 0., 800., 400.));
+        assert_eq!(children[1].bounds(), Rect::from_xywh(21., 55., 200., 308.));
         let scroll = children[0]
             .render_object()
             .unwrap()
@@ -2074,7 +1828,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             scroll.content_size().height,
-            1276.,
+            1292.,
             "old navigation overlay reservation is removed"
         );
     }
@@ -2095,14 +1849,11 @@ mod tests {
         );
         render.set_safe_area_insets(EdgeInsets::new(13., 47., 17., 29.));
         render.layout_with_children(LayoutConstraints::tight(400., 800.), &mut children);
-        assert_eq!(children[0].bounds().left(), 13.);
-        assert_eq!(children[0].bounds().top(), 47.);
-        assert_eq!(children[0].bounds().right(), 383.);
-        assert!(children[0].bounds().bottom() <= children[1].bounds().top());
-        assert_eq!(
-            children[0].children()[0].position(),
-            Point::ZERO,
-            "static fallback consumes insets once"
-        );
+        assert_eq!(children[0].bounds(), Rect::from_xywh(0., 0., 400., 800.));
+        let fixed = &children[0].children()[0];
+        assert_eq!(fixed.bounds().left(), 21.);
+        assert_eq!(fixed.bounds().top(), 55.);
+        assert_eq!(fixed.bounds().right(), 375.);
+        assert_eq!(fixed.bounds().bottom(), children[1].bounds().top() - 8.);
     }
 }

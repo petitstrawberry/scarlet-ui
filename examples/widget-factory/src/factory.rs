@@ -621,6 +621,7 @@ impl scarlet_ui::element::ElementRenderObject for FactoryPageLayout {
 #[derive(Clone)]
 pub(crate) struct WidgetFactory {
     viewport: State<Size>,
+    page_width: State<f32>,
     slider_value: State<f32>,
     toggle_on: State<bool>,
     toggle_off: State<bool>,
@@ -647,6 +648,7 @@ impl WidgetFactory {
         let cube_mesh = cube_mesh();
         Self {
             viewport: State::new(StateId::new(29), Size::new(860.0, 560.0)),
+            page_width: State::new(scarlet_ui::state::generate_state_id(), 500.0),
             slider_value: State::new(StateId::new(20), 0.42),
             toggle_on: State::new(StateId::new(21), true),
             toggle_off: State::new(StateId::new(33), false),
@@ -722,16 +724,11 @@ impl WidgetFactory {
         ])
     }
 
-    const SIDEBAR_WIDTH: f32 = 190.0;
+    const SIDEBAR_WIDTH: f32 = 174.0;
     const MIN_CONTENT_WIDTH: f32 = 360.0;
 
     fn content_width(&self) -> f32 {
-        let width = self.viewport.get().width;
-        if width >= Self::SIDEBAR_WIDTH + Self::MIN_CONTENT_WIDTH {
-            width - Self::SIDEBAR_WIDTH
-        } else {
-            width
-        }
+        self.page_width.get()
     }
     fn stacked_rows(&self) -> bool {
         self.content_width() < 560.0
@@ -750,7 +747,16 @@ impl WidgetFactory {
     }
 
     fn scroll_page<V: View + Clone>(&self, content: V) -> impl View + Clone + use<V> {
-        ScrollView::new(FactoryPageContent(content)).vertical()
+        let width = self.page_width.clone();
+        ScrollView::new(FactoryPageContent(content))
+            .vertical()
+            .on_geometry_change(
+                |g| {
+                    let i = g.safe_area_insets();
+                    (g.size().width - i.left - i.right).max(0.)
+                },
+                move |w| width.set(w),
+            )
     }
 
     fn row<V: View + Clone>(&self, name: &str, control: V) -> impl View + Clone + use<V> {
@@ -1020,7 +1026,6 @@ impl WidgetFactory {
                 .padding(12.0),
             )
             .height(48.0)
-            .padding(8.0)
         })
         .automatic_height()
     }
@@ -1066,8 +1071,6 @@ impl WidgetFactory {
         .sidebar_width(Self::SIDEBAR_WIDTH)
         .minimum_content_size(Size::new(Self::MIN_CONTENT_WIDTH, 0.0))
         // ScrollView consumes this reservation once; do not add page top insets.
-        .overlay_header(true)
-        .header_leading_overlap(8.0)
     }
 
     fn overview_page(&self) -> impl View + Clone + use<> {
@@ -1334,6 +1337,7 @@ impl View for WidgetFactory {
     fn listenables(&self) -> Vec<&dyn Listenable> {
         vec![
             &self.viewport,
+            &self.page_width,
             &self.slider_value,
             &self.toggle_on,
             &self.toggle_off,
@@ -1560,6 +1564,10 @@ fn perspective_matrix(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16]
 
 #[cfg(test)]
 mod tests {
+    // navigation! retains selection by call site; tests using the application's
+    // navigation share that state even when their WidgetFactory values differ.
+    static NAVIGATION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use super::*;
     use scarlet_ui::event::Phase;
     use scarlet_ui::views::SplitViewRenderObject;
@@ -1624,7 +1632,202 @@ mod tests {
     }
 
     #[test]
+    fn retained_factory_page_reflows_after_negotiating_mobile_safe_area() {
+        let _navigation = NAVIGATION_TEST_LOCK.lock().unwrap();
+        use scarlet_ui::platform::{
+            PlatformBackend, PlatformWindow, PlatformWindowDefaults, WindowCreateRequest,
+        };
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        type Result<T> = scarlet_ui::Result<T>;
+        struct Probe {
+            frames: Cell<usize>,
+            last: RefCell<Option<scarlet_ui::Buffer>>,
+        }
+        struct Backend(Rc<Probe>);
+        struct WindowMock {
+            size: Size,
+            probe: Rc<Probe>,
+        }
+        impl PlatformBackend for Backend {
+            fn window_defaults(&mut self) -> PlatformWindowDefaults {
+                PlatformWindowDefaults::new(false)
+                    .with_decoration(scarlet_ui::WindowDecoration::NONE)
+            }
+            fn output_scale_milli(&mut self) -> u32 {
+                1000
+            }
+            fn create_window(&mut self, _: WindowCreateRequest) -> Result<Box<dyn PlatformWindow>> {
+                Ok(Box::new(WindowMock {
+                    size: Size::new(390., 640.),
+                    probe: self.0.clone(),
+                }))
+            }
+        }
+        struct RetainedBackend(scarlet_ui::renderer::CpuPaintBackend);
+        impl scarlet_ui::renderer::PaintBackend for RetainedBackend {
+            fn supports_retained_display_lists(&self) -> bool {
+                true
+            }
+            fn resize(&mut self, size: Size, scale: u32) {
+                self.0.resize(size, scale);
+            }
+            fn render<'a>(
+                &'a mut self,
+                context: &scarlet_ui::renderer::PaintContext<'_>,
+                color: Color,
+                logical: Option<&[Rect]>,
+                physical: Option<&[scarlet_ui::compositor::DamageRect]>,
+            ) -> Result<scarlet_ui::renderer::BackendFrame<'a>> {
+                self.0.render(context, color, logical, physical)
+            }
+        }
+        impl PlatformWindow for WindowMock {
+            fn take_paint_backend(
+                &mut self,
+            ) -> Result<Option<Box<dyn scarlet_ui::renderer::PaintBackend>>> {
+                Ok(Some(Box::new(RetainedBackend(
+                    scarlet_ui::renderer::CpuPaintBackend::new(self.size, 1000, Color::WHITE),
+                ))))
+            }
+
+            fn new(_: &str, _: &str, size: Size) -> Result<Self> {
+                Ok(Self {
+                    size,
+                    probe: Rc::new(Probe {
+                        frames: Cell::new(0),
+                        last: RefCell::new(None),
+                    }),
+                })
+            }
+            fn poll_event(&mut self) -> Option<scarlet_ui::Event> {
+                None
+            }
+            fn present(&mut self, buffer: &scarlet_ui::Buffer) {
+                self.probe.frames.set(self.probe.frames.get() + 1);
+                *self.probe.last.borrow_mut() = Some(buffer.clone());
+            }
+            fn set_title(&mut self, _: &str) {}
+            fn size(&self) -> Size {
+                self.size
+            }
+            fn safe_area_insets(&self) -> EdgeInsets {
+                EdgeInsets::new(13., 41., 17., 29.)
+            }
+            fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+                self.size = Size::new(width as f32, height as f32);
+                Ok(())
+            }
+            fn close(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn minimize(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn maximize(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn set_fullscreen(&mut self, _: bool) -> Result<()> {
+                Ok(())
+            }
+            fn restore(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn request_move(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn create_popup(&mut self, _: Point, _: Size) -> Result<u32> {
+                Ok(0)
+            }
+            fn destroy_popup(&mut self, _: u32) -> Result<()> {
+                Ok(())
+            }
+            fn set_workarea(&mut self, _: i32, _: i32, _: u32, _: u32) -> Result<()> {
+                Ok(())
+            }
+            fn create_window_with_type(
+                &mut self,
+                app_id: &str,
+                title: &str,
+                size: Size,
+                _: u32,
+            ) -> Result<Self> {
+                Self::new(app_id, title, size)
+            }
+            fn move_window(&mut self, _: i32, _: i32) -> Result<()> {
+                Ok(())
+            }
+            fn set_window_type(&mut self, _: u32, _: u32) -> Result<()> {
+                Ok(())
+            }
+            fn get_screen_size(&mut self) -> Result<(u32, u32)> {
+                Ok((390, 640))
+            }
+            fn surface_id(&self) -> u32 {
+                1
+            }
+            fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+                self
+            }
+            fn set_resizable(&mut self, _: bool) -> Result<()> {
+                Ok(())
+            }
+            fn set_opaque(&mut self, _: bool) -> Result<()> {
+                Ok(())
+            }
+            fn set_menu_titles(&mut self, _: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+        let probe = Rc::new(Probe {
+            frames: Cell::new(0),
+            last: RefCell::new(None),
+        });
+        let app = WidgetFactory::new();
+        app.navigation().selected_index_state().set(0);
+        let mut tick = scarlet_ui::ApplicationRunner::new(Box::new(Backend(probe.clone())))
+            .into_tick(app.clone())
+            .unwrap();
+        for _ in 0..8 {
+            assert!(tick().unwrap().is_some());
+        }
+        assert_eq!(app.page_width.get(), 344.);
+        assert!(app.stacked_rows());
+        assert!(probe.frames.get() >= 2);
+        let image = probe.last.borrow();
+        let buffer = image.as_ref().unwrap();
+        // The negotiated width is reported on the first frame, then the app
+        // rebuilds its rows. Retained display lists must discard the wide initial
+        // row subtree, not replay its ProgressView into the right safe area.
+        let red = |pixel: u32| {
+            let (r, g, b) = ((pixel >> 16) & 255, (pixel >> 8) & 255, pixel & 255);
+            r > 150 && g < 100 && b < 130
+        };
+        assert!(
+            buffer
+                .as_slice()
+                .iter()
+                .filter(|&&pixel| red(pixel))
+                .count()
+                > 100,
+            "the frame must contain rendered controls, not an empty target"
+        );
+        let unsafe_red = buffer
+            .as_slice()
+            .chunks(390)
+            .take(500)
+            .flat_map(|row| &row[373..])
+            .filter(|&&pixel| red(pixel))
+            .count();
+        assert_eq!(
+            unsafe_red, 0,
+            "retained rows must reflow before painting inside the safe area"
+        );
+    }
+
+    #[test]
     fn navigation_headers_fit_safe_areas_and_stay_fixed_while_pages_scroll() {
+        let _navigation = NAVIGATION_TEST_LOCK.lock().unwrap();
         use scarlet_ui::views::{HeaderBarRenderObject, navigation::NavigationViewRenderObject};
         fn find<T: 'static>(element: &dyn Element) -> Option<&dyn Element> {
             if element
@@ -1672,10 +1875,10 @@ mod tests {
                     assert_eq!(header.top(), safe.top + 8.);
                     assert_eq!(header.size.height, 48.);
                     let sidebar = app.viewport.get().width
-                        >= WidgetFactory::SIDEBAR_WIDTH + WidgetFactory::MIN_CONTENT_WIDTH;
+                        >= WidgetFactory::SIDEBAR_WIDTH + 24. + WidgetFactory::MIN_CONTENT_WIDTH;
                     let expected_left = safe.left
                         + if sidebar {
-                            WidgetFactory::SIDEBAR_WIDTH
+                            WidgetFactory::SIDEBAR_WIDTH + 16.
                         } else {
                             8.
                         };
@@ -1687,14 +1890,15 @@ mod tests {
                         safe.top + 64.,
                         "reserve the measured header exactly once"
                     );
-                    assert_eq!(page.size.width, app.content_width());
+                    assert_eq!(page.size.width, header.size.width);
                     let nav = find::<NavigationViewRenderObject>(root.as_ref()).unwrap();
                     // Content, header, navigation: chrome stays on a separate plane.
                     assert_eq!(nav.children().len(), 3);
-                    let nav_id = nav.id();
-                    fn scroll(element: &mut dyn Element, nav_id: scarlet_ui::ElementId) {
-                        if element.id() == nav_id {
-                            element.children_mut()[0].handle_event(
+                    fn scroll(element: &mut dyn Element) -> bool {
+                        if element.type_name_debug().starts_with(
+                            "RenderElement<scarlet_ui_core::views::scroll::ScrollView<",
+                        ) {
+                            return element.handle_event(
                                 &Event::Mouse(MouseEvent::Wheel {
                                     delta_x: 0,
                                     delta_y: -10_000,
@@ -1705,13 +1909,13 @@ mod tests {
                                 }),
                                 Phase::Target,
                             );
-                        } else {
-                            for child in element.children_mut() {
-                                scroll(child.as_mut(), nav_id);
-                            }
                         }
+                        element
+                            .children_mut()
+                            .iter_mut()
+                            .any(|c| scroll(c.as_mut()))
                     }
-                    scroll(root.as_mut(), nav_id);
+                    scroll(root.as_mut());
                     let after = bounds::<FactoryPageLayout>(root.as_ref(), Point::ZERO).unwrap();
                     assert!(after.top() <= page.top());
                     assert!(
@@ -1923,7 +2127,7 @@ mod tests {
                 }
                 // Deliberately oversized demo content is allowed only inside
                 // a real clipping viewport (nested ScrollView/TextView/TabView).
-                if !root && render.clip_bounds(origin).is_some() {
+                if *extent > 0.0 && !root && render.clip_bounds(origin).is_some() {
                     return;
                 }
             }
@@ -1935,7 +2139,7 @@ mod tests {
         app.text_value.set("Retained across resize".into());
         app.slider_value.set(0.73);
         for width in [375.0, 390.0, 562.0, 860.0, 1200.0] {
-            app.viewport.set(Size::new(width, 600.0));
+            app.page_width.set(width);
             let pages: Vec<(&str, Box<dyn View>, &[&str])> = vec![
                 (
                     "Overview",
@@ -2028,7 +2232,7 @@ mod tests {
                 );
                 assert!((after - extent).abs() < 0.5);
                 root.layout(LayoutConstraints::tight(app.content_width(), 180.0));
-                root.handle_event(
+                root.children_mut()[0].handle_event(
                     &Event::Mouse(MouseEvent::Wheel {
                         delta_x: 0,
                         delta_y: -10_000,
@@ -2039,7 +2243,7 @@ mod tests {
                     }),
                     Phase::Target,
                 );
-                let content_bottom = root.children()[0].position().y + extent;
+                let content_bottom = root.children()[0].children()[0].position().y + extent;
                 assert!(
                     (content_bottom - 180.0).abs() < 0.5,
                     "{name} at {width}: final content must be reachable, bottom={content_bottom}"
@@ -2348,6 +2552,7 @@ mod tests {
 
     #[test]
     fn factory_navigation_after_text_view_edit_needs_only_one_click() {
+        let _navigation = NAVIGATION_TEST_LOCK.lock().unwrap();
         use scarlet_ui::event::{KeyCode, KeyEvent, KeyModifiers};
         use scarlet_ui::renderer::{PaintCommand, PaintContext};
         use scarlet_ui::{ComponentElement, RenderingPipeline, SceneBuilder};
@@ -2419,6 +2624,7 @@ mod tests {
             }
         }
         let app = WidgetFactory::new();
+        app.navigation().selected_index_state().set(0);
         let mut pipeline = RenderingPipeline::new();
         // Exactly the application's scene builder and listenables, rather than
         // a cached NavigationView. State edits reconstruct the complete Window.

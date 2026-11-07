@@ -367,8 +367,23 @@ pub(crate) fn surface_radius(role: SurfaceRole) -> f32 {
 
 /// Shared control typography and spacing. Keep chrome density independent.
 pub(crate) const CONTROL_FONT_SIZE: f32 = 14.0;
-pub(crate) const CONTROL_HEIGHT: f32 = 36.0;
-pub(crate) const CONTROL_PADDING: f32 = 10.0;
+/// Natural form-control size; explicit widget padding and frames take precedence.
+pub(crate) fn control_height() -> f32 {
+    match current_input_environment().interaction_mode() {
+        InteractionMode::Pointer => 28.0,
+        InteractionMode::Touch => 36.0,
+    }
+}
+
+pub(crate) fn control_padding(explicit: Option<f32>) -> EdgeInsets {
+    if let Some(padding) = explicit {
+        return EdgeInsets::new(padding, padding, padding, padding);
+    }
+    match current_input_environment().interaction_mode() {
+        InteractionMode::Pointer => EdgeInsets::new(8.0, 4.0, 8.0, 4.0),
+        InteractionMode::Touch => EdgeInsets::new(10.0, 8.0, 10.0, 8.0),
+    }
+}
 pub(crate) const CONTROL_GAP: f32 = 8.0;
 
 pub(crate) fn control_text_y(height: f32, font_size: f32) -> f32 {
