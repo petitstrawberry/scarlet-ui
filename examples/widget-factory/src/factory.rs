@@ -1628,6 +1628,198 @@ mod tests {
     }
 
     #[test]
+    fn retained_factory_page_reflows_after_negotiating_mobile_safe_area() {
+        use scarlet_ui::platform::{
+            PlatformBackend, PlatformWindow, PlatformWindowDefaults, WindowCreateRequest,
+        };
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        type Result<T> = scarlet_ui::Result<T>;
+        struct Probe {
+            frames: Cell<usize>,
+            last: RefCell<Option<scarlet_ui::Buffer>>,
+        }
+        struct Backend(Rc<Probe>);
+        struct WindowMock {
+            size: Size,
+            probe: Rc<Probe>,
+        }
+        impl PlatformBackend for Backend {
+            fn window_defaults(&mut self) -> PlatformWindowDefaults {
+                PlatformWindowDefaults::new(false)
+                    .with_decoration(scarlet_ui::WindowDecoration::NONE)
+            }
+            fn output_scale_milli(&mut self) -> u32 {
+                1000
+            }
+            fn create_window(&mut self, _: WindowCreateRequest) -> Result<Box<dyn PlatformWindow>> {
+                Ok(Box::new(WindowMock {
+                    size: Size::new(390., 640.),
+                    probe: self.0.clone(),
+                }))
+            }
+        }
+        struct RetainedBackend(scarlet_ui::renderer::CpuPaintBackend);
+        impl scarlet_ui::renderer::PaintBackend for RetainedBackend {
+            fn supports_retained_display_lists(&self) -> bool {
+                true
+            }
+            fn resize(&mut self, size: Size, scale: u32) {
+                self.0.resize(size, scale);
+            }
+            fn render<'a>(
+                &'a mut self,
+                context: &scarlet_ui::renderer::PaintContext<'_>,
+                color: Color,
+                logical: Option<&[Rect]>,
+                physical: Option<&[scarlet_ui::compositor::DamageRect]>,
+            ) -> Result<scarlet_ui::renderer::BackendFrame<'a>> {
+                self.0.render(context, color, logical, physical)
+            }
+        }
+        impl PlatformWindow for WindowMock {
+            fn take_paint_backend(
+                &mut self,
+            ) -> Result<Option<Box<dyn scarlet_ui::renderer::PaintBackend>>> {
+                Ok(Some(Box::new(RetainedBackend(
+                    scarlet_ui::renderer::CpuPaintBackend::new(self.size, 1000, Color::WHITE),
+                ))))
+            }
+
+            fn new(_: &str, _: &str, size: Size) -> Result<Self> {
+                Ok(Self {
+                    size,
+                    probe: Rc::new(Probe {
+                        frames: Cell::new(0),
+                        last: RefCell::new(None),
+                    }),
+                })
+            }
+            fn poll_event(&mut self) -> Option<scarlet_ui::Event> {
+                None
+            }
+            fn present(&mut self, buffer: &scarlet_ui::Buffer) {
+                self.probe.frames.set(self.probe.frames.get() + 1);
+                *self.probe.last.borrow_mut() = Some(buffer.clone());
+            }
+            fn set_title(&mut self, _: &str) {}
+            fn size(&self) -> Size {
+                self.size
+            }
+            fn safe_area_insets(&self) -> EdgeInsets {
+                EdgeInsets::new(13., 41., 17., 29.)
+            }
+            fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+                self.size = Size::new(width as f32, height as f32);
+                Ok(())
+            }
+            fn close(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn minimize(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn maximize(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn set_fullscreen(&mut self, _: bool) -> Result<()> {
+                Ok(())
+            }
+            fn restore(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn request_move(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn create_popup(&mut self, _: Point, _: Size) -> Result<u32> {
+                Ok(0)
+            }
+            fn destroy_popup(&mut self, _: u32) -> Result<()> {
+                Ok(())
+            }
+            fn set_workarea(&mut self, _: i32, _: i32, _: u32, _: u32) -> Result<()> {
+                Ok(())
+            }
+            fn create_window_with_type(
+                &mut self,
+                app_id: &str,
+                title: &str,
+                size: Size,
+                _: u32,
+            ) -> Result<Self> {
+                Self::new(app_id, title, size)
+            }
+            fn move_window(&mut self, _: i32, _: i32) -> Result<()> {
+                Ok(())
+            }
+            fn set_window_type(&mut self, _: u32, _: u32) -> Result<()> {
+                Ok(())
+            }
+            fn get_screen_size(&mut self) -> Result<(u32, u32)> {
+                Ok((390, 640))
+            }
+            fn surface_id(&self) -> u32 {
+                1
+            }
+            fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+                self
+            }
+            fn set_resizable(&mut self, _: bool) -> Result<()> {
+                Ok(())
+            }
+            fn set_opaque(&mut self, _: bool) -> Result<()> {
+                Ok(())
+            }
+            fn set_menu_titles(&mut self, _: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+        let probe = Rc::new(Probe {
+            frames: Cell::new(0),
+            last: RefCell::new(None),
+        });
+        let app = WidgetFactory::new();
+        let mut tick = scarlet_ui::ApplicationRunner::new(Box::new(Backend(probe.clone())))
+            .into_tick(app.clone())
+            .unwrap();
+        for _ in 0..8 {
+            assert!(tick().unwrap().is_some());
+        }
+        assert_eq!(app.page_width.get(), 344.);
+        assert!(app.stacked_rows());
+        assert!(probe.frames.get() >= 2);
+        let image = probe.last.borrow();
+        let buffer = image.as_ref().unwrap();
+        // The negotiated width is reported on the first frame, then the app
+        // rebuilds its rows. Retained display lists must discard the wide initial
+        // row subtree, not replay its ProgressView into the right safe area.
+        let red = |pixel: u32| {
+            let (r, g, b) = ((pixel >> 16) & 255, (pixel >> 8) & 255, pixel & 255);
+            r > 150 && g < 100 && b < 130
+        };
+        assert!(
+            buffer
+                .as_slice()
+                .iter()
+                .filter(|&&pixel| red(pixel))
+                .count()
+                > 100,
+            "the frame must contain rendered controls, not an empty target"
+        );
+        let unsafe_red = buffer
+            .as_slice()
+            .chunks(390)
+            .take(500)
+            .flat_map(|row| &row[373..])
+            .filter(|&&pixel| red(pixel))
+            .count();
+        assert_eq!(
+            unsafe_red, 0,
+            "retained rows must reflow before painting inside the safe area"
+        );
+    }
+
+    #[test]
     fn navigation_headers_fit_safe_areas_and_stay_fixed_while_pages_scroll() {
         use scarlet_ui::views::{HeaderBarRenderObject, navigation::NavigationViewRenderObject};
         fn find<T: 'static>(element: &dyn Element) -> Option<&dyn Element> {

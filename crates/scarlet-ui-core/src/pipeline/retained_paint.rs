@@ -165,7 +165,10 @@ impl RetainedPaint {
                 .iter()
                 .any(|child| self.nodes[child].reads_backdrop);
         self.nodes.get_mut(&id).unwrap().reads_backdrop = reads_backdrop;
-        if group {
+        // Backdrop-dependent groups can install independently retained groups
+        // below the viewport's immediate child. Refresh those existing groups
+        // bottom-up too, before an ancestor records references to their lists.
+        if group || self.nodes[&id].group.is_some() {
             self.cache_static_subtrees(id);
         }
     }
@@ -516,6 +519,34 @@ mod tests {
             source: ScrollSource::Trackpad,
         }));
     }
+    #[test]
+    fn previously_grouped_descendant_refreshes_before_ancestor_replay() {
+        let view = |color| {
+            VStack::new((
+                Rectangle::new().fill(color).frame(80., 20.),
+                Rectangle::new().fill(Color::BLUE).frame(80., 20.),
+            ))
+        };
+        let mut element = view(Color::RED).create_element();
+        let constraints = crate::element::LayoutConstraints::tight(80., 40.);
+        element.layout(constraints);
+        let mut scene = RetainedPaint::default();
+        scene.sync_tree(element.as_ref(), &[], &[], &[], true);
+        // Backdrop fallback can install a group below the immediate child of
+        // a viewport. Such a node has no viewport-owning parent on the next
+        // sync, but its recording still needs to follow content changes.
+        let grouped = element.children()[0].id();
+        scene.cache_static_subtrees(grouped);
+        let original = scene.nodes[&grouped].group.as_ref().unwrap().1.identity();
+        element.update(&view(Color::GREEN));
+        element.layout(constraints);
+        scene.sync_tree(element.as_ref(), &[element.id()], &[], &[], false);
+        let node = &scene.nodes[&grouped];
+        let (stamp, list) = node.group.as_ref().unwrap();
+        assert_eq!(*stamp, node.content_stamp);
+        assert_ne!(list.identity(), original);
+    }
+
     #[test]
     fn composite_and_virtualization_reuse_recordings_and_match_direct_pixels() {
         let items = State::new(crate::generate_state_id(), (0..100).collect());
