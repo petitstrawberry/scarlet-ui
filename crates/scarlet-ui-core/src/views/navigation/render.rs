@@ -40,7 +40,6 @@ pub struct NavigationViewRenderObject {
 const BOTTOM_BAR_EXTRA_HEIGHT: f32 = 12.0;
 const BOTTOM_BAR_ICON_TOP_INSET: f32 = 8.0;
 const BOTTOM_BAR_TEXT_BOTTOM_INSET: f32 = 5.0;
-const TEXT_LINE_HEIGHT_FACTOR: f32 = 1.2;
 const CHROME_MARGIN: f32 = 8.0;
 const CHROME_GAP: f32 = 8.0;
 const FLOATING_BAR_RADIUS: f32 = 28.0;
@@ -63,7 +62,7 @@ fn bottom_bar_content_geometry(
     text_width: f32,
 ) -> BottomBarContentGeometry {
     let text_x = item.origin.x + (item.size.width - text_width) * 0.5;
-    let text_height = font_size * TEXT_LINE_HEIGHT_FACTOR;
+    let text_height = graphics::line_height_sized(font_size) as f32;
     BottomBarContentGeometry {
         icon_origin: shows_icon.then(|| {
             Point::new(
@@ -563,7 +562,7 @@ impl NavigationSidebarRenderObject {
         if self.sidebar_style != NavigationSidebarStyle::Floating {
             return bottom_bar_height(self.item_height);
         }
-        let content_height = self.font_size * TEXT_LINE_HEIGHT_FACTOR
+        let content_height = graphics::line_height_sized(self.font_size) as f32
             + if self.shows_icons {
                 self.icon_size as f32 + 4.0
             } else {
@@ -650,7 +649,7 @@ impl NavigationSidebarRenderObject {
                 .copied()
                 .flatten()
                 .filter(|_| self.shows_icons);
-            let text_height = self.font_size * TEXT_LINE_HEIGHT_FACTOR;
+            let text_height = graphics::line_height_sized(self.font_size) as f32;
             let icon_size = self.icon_size as f32;
             let content_height = text_height + if icon.is_some() { icon_size + 4.0 } else { 0.0 };
             let top = item.origin.y + (item.size.height - content_height) * 0.5;
@@ -1259,7 +1258,12 @@ mod tests {
             Some(crate::geometry::Point::new(132.0, 28.0))
         );
         assert_eq!(geometry.text_origin.x, 126.0);
-        assert!((geometry.text_origin.y - 62.2).abs() < 0.001);
+        // The baseline reservation follows the actual face, including fonts
+        // whose line height is much larger than 1.2 em.
+        assert_eq!(
+            geometry.text_origin.y + crate::graphics::line_height_sized(14.0) as f32,
+            79.0,
+        );
     }
 
     #[test]
