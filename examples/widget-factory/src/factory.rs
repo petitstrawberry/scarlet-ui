@@ -621,6 +621,7 @@ impl scarlet_ui::element::ElementRenderObject for FactoryPageLayout {
 #[derive(Clone)]
 pub(crate) struct WidgetFactory {
     viewport: State<Size>,
+    page_width: State<f32>,
     slider_value: State<f32>,
     toggle_on: State<bool>,
     toggle_off: State<bool>,
@@ -647,6 +648,7 @@ impl WidgetFactory {
         let cube_mesh = cube_mesh();
         Self {
             viewport: State::new(StateId::new(29), Size::new(860.0, 560.0)),
+            page_width: State::new(scarlet_ui::state::generate_state_id(), 500.0),
             slider_value: State::new(StateId::new(20), 0.42),
             toggle_on: State::new(StateId::new(21), true),
             toggle_off: State::new(StateId::new(33), false),
@@ -722,16 +724,11 @@ impl WidgetFactory {
         ])
     }
 
-    const SIDEBAR_WIDTH: f32 = 190.0;
+    const SIDEBAR_WIDTH: f32 = 174.0;
     const MIN_CONTENT_WIDTH: f32 = 360.0;
 
     fn content_width(&self) -> f32 {
-        let width = self.viewport.get().width;
-        if width >= Self::SIDEBAR_WIDTH + Self::MIN_CONTENT_WIDTH {
-            width - Self::SIDEBAR_WIDTH
-        } else {
-            width
-        }
+        self.page_width.get()
     }
     fn stacked_rows(&self) -> bool {
         self.content_width() < 560.0
@@ -750,7 +747,16 @@ impl WidgetFactory {
     }
 
     fn scroll_page<V: View + Clone>(&self, content: V) -> impl View + Clone + use<V> {
-        ScrollView::new(FactoryPageContent(content)).vertical()
+        let width = self.page_width.clone();
+        ScrollView::new(FactoryPageContent(content))
+            .vertical()
+            .on_geometry_change(
+                |g| {
+                    let i = g.safe_area_insets();
+                    (g.size().width - i.left - i.right).max(0.)
+                },
+                move |w| width.set(w),
+            )
     }
 
     fn row<V: View + Clone>(&self, name: &str, control: V) -> impl View + Clone + use<V> {
@@ -1020,7 +1026,6 @@ impl WidgetFactory {
                 .padding(12.0),
             )
             .height(48.0)
-            .padding(8.0)
         })
         .automatic_height()
     }
@@ -1066,8 +1071,6 @@ impl WidgetFactory {
         .sidebar_width(Self::SIDEBAR_WIDTH)
         .minimum_content_size(Size::new(Self::MIN_CONTENT_WIDTH, 0.0))
         // ScrollView consumes this reservation once; do not add page top insets.
-        .overlay_header(true)
-        .header_leading_overlap(8.0)
     }
 
     fn overview_page(&self) -> impl View + Clone + use<> {
@@ -1334,6 +1337,7 @@ impl View for WidgetFactory {
     fn listenables(&self) -> Vec<&dyn Listenable> {
         vec![
             &self.viewport,
+            &self.page_width,
             &self.slider_value,
             &self.toggle_on,
             &self.toggle_off,
@@ -1672,10 +1676,10 @@ mod tests {
                     assert_eq!(header.top(), safe.top + 8.);
                     assert_eq!(header.size.height, 48.);
                     let sidebar = app.viewport.get().width
-                        >= WidgetFactory::SIDEBAR_WIDTH + WidgetFactory::MIN_CONTENT_WIDTH;
+                        >= WidgetFactory::SIDEBAR_WIDTH + 24. + WidgetFactory::MIN_CONTENT_WIDTH;
                     let expected_left = safe.left
                         + if sidebar {
-                            WidgetFactory::SIDEBAR_WIDTH
+                            WidgetFactory::SIDEBAR_WIDTH + 16.
                         } else {
                             8.
                         };
@@ -1687,14 +1691,15 @@ mod tests {
                         safe.top + 64.,
                         "reserve the measured header exactly once"
                     );
-                    assert_eq!(page.size.width, app.content_width());
+                    assert_eq!(page.size.width, header.size.width);
                     let nav = find::<NavigationViewRenderObject>(root.as_ref()).unwrap();
                     // Content, header, navigation: chrome stays on a separate plane.
                     assert_eq!(nav.children().len(), 3);
-                    let nav_id = nav.id();
-                    fn scroll(element: &mut dyn Element, nav_id: scarlet_ui::ElementId) {
-                        if element.id() == nav_id {
-                            element.children_mut()[0].handle_event(
+                    fn scroll(element: &mut dyn Element) -> bool {
+                        if element.type_name_debug().starts_with(
+                            "RenderElement<scarlet_ui_core::views::scroll::ScrollView<",
+                        ) {
+                            return element.handle_event(
                                 &Event::Mouse(MouseEvent::Wheel {
                                     delta_x: 0,
                                     delta_y: -10_000,
@@ -1705,13 +1710,13 @@ mod tests {
                                 }),
                                 Phase::Target,
                             );
-                        } else {
-                            for child in element.children_mut() {
-                                scroll(child.as_mut(), nav_id);
-                            }
                         }
+                        element
+                            .children_mut()
+                            .iter_mut()
+                            .any(|c| scroll(c.as_mut()))
                     }
-                    scroll(root.as_mut(), nav_id);
+                    scroll(root.as_mut());
                     let after = bounds::<FactoryPageLayout>(root.as_ref(), Point::ZERO).unwrap();
                     assert!(after.top() <= page.top());
                     assert!(
@@ -1923,7 +1928,7 @@ mod tests {
                 }
                 // Deliberately oversized demo content is allowed only inside
                 // a real clipping viewport (nested ScrollView/TextView/TabView).
-                if !root && render.clip_bounds(origin).is_some() {
+                if *extent > 0.0 && !root && render.clip_bounds(origin).is_some() {
                     return;
                 }
             }
@@ -1935,7 +1940,7 @@ mod tests {
         app.text_value.set("Retained across resize".into());
         app.slider_value.set(0.73);
         for width in [375.0, 390.0, 562.0, 860.0, 1200.0] {
-            app.viewport.set(Size::new(width, 600.0));
+            app.page_width.set(width);
             let pages: Vec<(&str, Box<dyn View>, &[&str])> = vec![
                 (
                     "Overview",
@@ -2028,7 +2033,7 @@ mod tests {
                 );
                 assert!((after - extent).abs() < 0.5);
                 root.layout(LayoutConstraints::tight(app.content_width(), 180.0));
-                root.handle_event(
+                root.children_mut()[0].handle_event(
                     &Event::Mouse(MouseEvent::Wheel {
                         delta_x: 0,
                         delta_y: -10_000,
@@ -2039,7 +2044,7 @@ mod tests {
                     }),
                     Phase::Target,
                 );
-                let content_bottom = root.children()[0].position().y + extent;
+                let content_bottom = root.children()[0].children()[0].position().y + extent;
                 assert!(
                     (content_bottom - 180.0).abs() < 0.5,
                     "{name} at {width}: final content must be reachable, bottom={content_bottom}"

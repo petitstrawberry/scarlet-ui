@@ -67,12 +67,7 @@ where
         content.nav.get_presentation(),
         content.nav.get_minimum_content_size(),
     );
-    render_object.set_header_layout(
-        content.nav.get_automatic_header_height(),
-        content.nav.get_overlay_header(),
-        content.nav.get_header_leading_overlap(),
-    );
-    render_object.set_content_underlap(content.nav.get_content_underlap());
+    render_object.set_header_layout(content.nav.get_automatic_header_height());
     render_object.set_floating_bar_bottom_overlap(content.nav.get_floating_bar_bottom_overlap());
     crate::element::UpdateResult::Updated
 }
@@ -87,12 +82,7 @@ where
         content.nav.get_presentation(),
         content.nav.get_minimum_content_size(),
     );
-    render.set_header_layout(
-        content.nav.get_automatic_header_height(),
-        content.nav.get_overlay_header(),
-        content.nav.get_header_leading_overlap(),
-    );
-    render.set_content_underlap(content.nav.get_content_underlap());
+    render.set_header_layout(content.nav.get_automatic_header_height());
     render.set_floating_bar_bottom_overlap(content.nav.get_floating_bar_bottom_overlap());
     render
 }
