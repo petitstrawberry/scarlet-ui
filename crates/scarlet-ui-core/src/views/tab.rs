@@ -893,7 +893,15 @@ impl ElementRenderObject for TabViewRenderObject {
                 (rect.size.width - inset_x * 2.0).max(0.0),
                 (rect.size.height - inset_y * 2.0).max(0.0),
             );
-            let radius = style::radius_for(face, 12.0);
+            // Keep the inset face concentric with the outer glass capsule.
+            let radius = style::radius_for(
+                face,
+                if self.material.is_some() {
+                    (self.tab_bar_height * 0.5 - inset).max(0.0)
+                } else {
+                    12.0
+                },
+            );
             let pressed = self.pressed_index() == Some(index);
             if index == selected {
                 let fill = if self.material.is_some() {
@@ -1428,6 +1436,59 @@ mod tests {
                 tabs.tab_index_at(Point::new(bar.origin.x + 15.0, bar.origin.y + 15.0)),
                 Some(0)
             );
+        }
+    }
+
+    #[test]
+    fn glass_tab_faces_follow_the_outer_capsule_radius() {
+        for placement in [TabBarPlacement::Top, TabBarPlacement::Bottom] {
+            for height in [24.0, 30.0, 36.0, 40.0, 56.0] {
+                for selected in 0..2 {
+                    let mut view = glass_tabs(placement);
+                    view.tabs = view.tabs.tab_bar_height(height);
+                    view.tabs.selected_index.set(selected);
+                    let mut tabs = tab_render_object(&view);
+                    tabs.layout(LayoutConstraints::tight(300.0, 180.0));
+                    // Exercise the selected face and the opposite end's hover
+                    // and pressed feedback with the same nested geometry.
+                    tabs.hovered_index = Some(1 - selected);
+                    tabs.pressed_index = Some(1 - selected);
+                    let mut ctx = PaintContext::new();
+                    tabs.paint(&mut ctx, Point::ZERO);
+                    let (bar, outer_radius) = ctx
+                        .commands()
+                        .iter()
+                        .find_map(|command| match command {
+                            PaintCommand::BackdropFilterRoundedRect {
+                                rect,
+                                corner_radius,
+                                ..
+                            } => Some((*rect, *corner_radius)),
+                            _ => None,
+                        })
+                        .expect("glass capsule");
+                    let mut faces = 0;
+                    for command in ctx.commands() {
+                        if let PaintCommand::FillRoundedRect {
+                            rect,
+                            corner_radius,
+                            ..
+                        } = command
+                        {
+                            let inset = rect.top() - bar.top();
+                            assert_eq!(
+                                *corner_radius + inset,
+                                outer_radius,
+                                "nested corner centers must match at height {height}"
+                            );
+                            assert_eq!(rect.top() + corner_radius, bar.top() + outer_radius);
+                            assert_eq!(rect.bottom() - corner_radius, bar.bottom() - outer_radius);
+                            faces += 1;
+                        }
+                    }
+                    assert_eq!(faces, 2, "selection and interaction feedback");
+                }
+            }
         }
     }
 
