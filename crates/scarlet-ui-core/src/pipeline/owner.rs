@@ -285,7 +285,7 @@ impl PipelineOwner {
         window_size: Size,
         render_legacy_paint: bool,
     ) {
-        self.flush_before_paint(element_tree, window_size, render_legacy_paint, |_| {});
+        self.flush_before_paint(element_tree, window_size, render_legacy_paint, |_, _| {});
     }
 
     /// Reconcile input ownership after rebuilding/layout and before recording
@@ -295,9 +295,21 @@ impl PipelineOwner {
         element_tree: &mut ElementTree,
         window_size: Size,
         render_legacy_paint: bool,
-        before_paint: impl FnOnce(&mut ElementTree),
+        before_paint: impl FnOnce(&mut ElementTree, bool),
     ) {
         self.collect_global_dirty();
+
+        // A composite-only update changes placement, not focus claims or
+        // mounted input controls. Reconciliation walks the tree; reserve it for
+        // content/geometry changes instead of every scroll animation frame.
+        let structure_changed = !self.dirty_build.is_empty()
+            || !self.dirty_layout.is_empty()
+            || !self.dirty_children.is_empty();
+        let content_changed = !self.dirty_build.is_empty()
+            || !self.dirty_layout.is_empty()
+            || !self.dirty_paint.is_empty()
+            || !self.dirty_self_paint.is_empty()
+            || !self.dirty_children.is_empty();
 
         // 1. Build Phase: Rebuild Elements whose State changed
         self.flush_build(element_tree);
@@ -306,7 +318,13 @@ impl PipelineOwner {
         // 2. Layout Phase: Recalculate layout
         self.flush_layout(element_tree, window_size);
 
-        before_paint(element_tree);
+        if structure_changed {
+            crate::element::invalidate_scroll_structure();
+        }
+        before_paint(
+            element_tree,
+            content_changed || self.dirty_composite.is_empty(),
+        );
         self.collect_global_dirty();
 
         // 3. Paint Phase: Repaint dirty elements

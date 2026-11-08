@@ -519,6 +519,7 @@ pub struct RenderElement<V: View + Clone, R: RenderObject> {
     view: V,
     render_object: R,
     children: Vec<Box<dyn Element>>,
+    scroll_dependencies: core::cell::Cell<Option<(usize, bool)>>,
     position: Point,
     last_constraints: Option<LayoutConstraints>,
     safe_area_insets: EdgeInsets,
@@ -567,6 +568,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             view,
             render_object,
             children: Vec::new(),
+            scroll_dependencies: core::cell::Cell::new(None),
             position: Point::ZERO,
             last_constraints: None,
             safe_area_insets: EdgeInsets::ZERO,
@@ -592,6 +594,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             view,
             render_object,
             children: Vec::new(),
+            scroll_dependencies: core::cell::Cell::new(None),
             position: Point::ZERO,
             last_constraints: None,
             safe_area_insets: EdgeInsets::ZERO,
@@ -612,6 +615,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             view,
             render_object,
             children,
+            scroll_dependencies: core::cell::Cell::new(None),
             position: Point::ZERO,
             last_constraints: None,
             safe_area_insets: EdgeInsets::ZERO,
@@ -644,6 +648,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             view,
             render_object,
             children,
+            scroll_dependencies: core::cell::Cell::new(None),
             position: Point::ZERO,
             last_constraints: None,
             safe_area_insets: EdgeInsets::ZERO,
@@ -689,6 +694,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             view,
             render_object,
             children,
+            scroll_dependencies: core::cell::Cell::new(None),
             position: Point::ZERO,
             last_constraints: None,
             safe_area_insets: EdgeInsets::ZERO,
@@ -704,6 +710,10 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
 
     fn should_subscribe_view_listenables(&self) -> bool {
         self.children.is_empty()
+            || self
+                .render_object
+                .as_any()
+                .is::<crate::views::FocusableRenderObject>()
     }
 
     fn subscribe_view_listenables(&mut self) {
@@ -836,6 +846,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn children_mut(&mut self) -> &mut [Box<dyn Element>] {
+        self.scroll_dependencies.set(None);
         &mut self.children
     }
 
@@ -1108,6 +1119,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     }
 
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
+        crate::element::invalidate_scroll_structure();
         self.last_constraints = Some(constraints);
         self.render_object
             .set_safe_area_insets(self.safe_area_insets);
@@ -1164,7 +1176,29 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         self.position = position;
     }
 
+    fn has_scroll_dependencies(&self) -> bool {
+        if self.render_object.owns_child_viewport() {
+            return false;
+        }
+        let revision = crate::element::scroll_structure_revision();
+        if let Some((old, result)) = self.scroll_dependencies.get() {
+            if old == revision {
+                return result;
+            }
+        }
+        let result = self.view_key().is_some()
+            || self
+                .children
+                .iter()
+                .any(|child| child.has_scroll_dependencies());
+        self.scroll_dependencies.set(Some((revision, result)));
+        result
+    }
+
     fn set_viewport_hint(&mut self, viewport: Rect) -> bool {
+        if !self.has_scroll_dependencies() {
+            return false;
+        }
         if self.render_object.owns_child_viewport() {
             return false;
         }

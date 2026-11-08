@@ -209,8 +209,18 @@ pub trait Element {
         false
     }
 
+    /// Whether scrolling can affect virtual children or keyed anchors. Custom
+    /// elements conservatively participate; ordinary retained controls cache
+    /// this structural property and need no per-scroll viewport traversal.
+    fn has_scroll_dependencies(&self) -> bool {
+        true
+    }
+
     /// Select a keyed visible item. Nested scrolling viewports are isolated.
     fn scroll_anchor(&self, viewport: Rect) -> Option<ScrollAnchor> {
+        if !self.has_scroll_dependencies() {
+            return None;
+        }
         if self
             .render_object()
             .is_some_and(|object| object.owns_child_viewport())

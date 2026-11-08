@@ -474,7 +474,10 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
             )
             .unwrap();
         let queue = context.create_queue();
-        for glass_height in [0., 70., 1100.] {
+        for glass_height in [0., 70., 1100., -1.] {
+            if glass_height < 0. && !analytic {
+                continue;
+            }
             let mut content = PaintContext::new();
             content.fill_rect(Rect::from_xywh(-100., -100., 440., 1400.), Color::WHITE);
             for row in 0..60 {
@@ -525,6 +528,27 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
                     1.,
                 );
                 content.fill_rect(Rect::from_xywh(48., 90., 60., 4.), Color::rgb(0., 0., 1.));
+            }
+            if glass_height < 0. {
+                // More than 64 lenses fit a cold 512px tile, while fewer than
+                // 64 are visible. Splitting the raster grid must preserve the
+                // direct image, including its clipping and fractional phases.
+                for row in 0..30 {
+                    for col in 0..9 {
+                        content.refractive_glass_rounded_rect(
+                            Rect::from_xywh(
+                                10. + col as f32 * 36.,
+                                row as f32 * 40. + 8.,
+                                28.,
+                                20.,
+                            ),
+                            5.,
+                            2.52,
+                            Color::WHITE.with_opacity(0.35),
+                            1.,
+                        );
+                    }
+                }
             }
             let layer = content.into_cached_layer(Rect::from_xywh(-100., -100., 440., 1400.));
             assert!(

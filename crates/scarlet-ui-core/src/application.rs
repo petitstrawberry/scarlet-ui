@@ -638,17 +638,6 @@ impl ApplicationRunner {
             let elapsed = slot.animation_tick.elapsed();
             slot.animation_tick = Instant::now();
             if !slot.suspended && slot.pipeline.has_active_animation() {
-                // Legacy no-std builds have no Instant; their render loop is
-                // already paced by frame grants or the fallback timer.
-                let elapsed = if elapsed.is_zero() && cfg!(not(feature = "std")) {
-                    if slot.frame_ready {
-                        PRESENT_INTERVAL
-                    } else {
-                        Duration::ZERO
-                    }
-                } else {
-                    elapsed
-                };
                 slot.pipeline.advance_animations(elapsed);
             }
             let frame_granted = !slot.frame_pacing_enabled || slot.frame_ready;

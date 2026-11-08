@@ -24,6 +24,8 @@ pub type Path = Vec<Point>;
 #[path = "paint_dependencies.rs"]
 mod dependencies;
 pub use dependencies::{PaintDependencies, PaintRegion};
+#[path = "paint_replay.rs"]
+mod replay;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClipRegion {
@@ -242,6 +244,8 @@ pub struct BufferHandle(pub usize);
 pub struct DisplayList {
     identity: u64,
     cache_identity: u64,
+    nested: bool,
+    replay_indices: core::cell::RefCell<Vec<(u32, Arc<replay::ReplayIndex>)>>,
     flat: core::cell::OnceCell<PaintContext<'static>>,
     footprints: core::cell::RefCell<Vec<(u32, Arc<[PaintDependencies]>)>>,
     context: PaintContext<'static>,
@@ -249,6 +253,8 @@ pub struct DisplayList {
     raster_bounds: Option<Rect>,
     reads_backdrop: bool,
     has_extensions: bool,
+    cached_descendants: bool,
+    write_bounds: core::cell::RefCell<Vec<(u32, PaintRegion)>>,
 }
 
 impl PartialEq for dyn PaintExtension {
@@ -280,6 +286,10 @@ impl DisplayList {
     pub fn has_extensions(&self) -> bool {
         self.has_extensions
     }
+    /// Whether this recording encloses independently retained raster layers.
+    pub fn has_cached_descendants(&self) -> bool {
+        self.cached_descendants
+    }
     /// Conservative local bounds of a layer eligible for GPU raster retention.
     /// This is a hint; unsupported commands must retain normal paint semantics.
     pub fn raster_cache_bounds(&self) -> Option<Rect> {
@@ -297,12 +307,7 @@ impl DisplayList {
     /// Flat command view, materialized once per revision for raster backends.
     /// The original context keeps the identities of unchanged child recordings.
     pub fn flat_context(&self) -> &PaintContext<'static> {
-        if self
-            .context
-            .commands
-            .iter()
-            .any(|c| matches!(c, PaintCommand::DrawDisplayList { .. }))
-        {
+        if self.nested {
             self.flat
                 .get_or_init(|| self.context.flattened().into_owned())
         } else {
@@ -401,10 +406,15 @@ impl<'a> PaintContext<'a> {
                 PaintCommand::DrawDisplayList { list, .. } => list.has_extensions(),
                 _ => false,
             }),
+            cached_descendants: self.commands.iter().any(|c| matches!(c,
+                PaintCommand::DrawDisplayList { list, .. } if list.raster_bounds.is_some() || list.cached_descendants)),
+            write_bounds: core::cell::RefCell::new(Vec::new()),
             raster_bounds: None,
             self_contained: self_contained && depth == 0,
             identity: NEXT_LIST_ID.allocate(),
             cache_identity: 0,
+            nested: self.commands.iter().any(|c| matches!(c, PaintCommand::DrawDisplayList { .. })),
+            replay_indices: core::cell::RefCell::new(Vec::new()),
             flat: core::cell::OnceCell::new(),
             footprints: core::cell::RefCell::new(Vec::new()),
             context: PaintContext {
@@ -645,8 +655,20 @@ impl<'a> PaintContext<'a> {
                     text_positions.push((
                         index,
                         Point::new(
-                            crate::graphics::text_origin_physical(position.x + scene_origin.x, scale_milli) as f32 / scale - base.x + offset.x,
-                            crate::graphics::text_origin_physical(position.y + scene_origin.y, scale_milli) as f32 / scale - base.y + offset.y,
+                            crate::graphics::text_origin_physical(
+                                position.x + scene_origin.x,
+                                scale_milli,
+                            ) as f32
+                                / scale
+                                - base.x
+                                + offset.x,
+                            crate::graphics::text_origin_physical(
+                                position.y + scene_origin.y,
+                                scale_milli,
+                            ) as f32
+                                / scale
+                                - base.y
+                                + offset.y,
                         ),
                     ));
                 }
@@ -1709,7 +1731,10 @@ fn command_paint_bounds(
             let mut bounds = None;
             let glyphs = match font_stack {
                 Some(stack) => crate::graphics::rasterize_text_cached_with_font_stack(
-                    text, *font_size_px, scale_milli, stack,
+                    text,
+                    *font_size_px,
+                    scale_milli,
+                    stack,
                 ),
                 None => crate::graphics::rasterize_text_cached(text, *font_size_px, scale_milli),
             };
@@ -3045,7 +3070,12 @@ impl CpuPaintRenderer {
                             let mut canvas =
                                 crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
                             canvas.draw_text_at(
-                                *position, text, color, *font_size_px, font_stack.as_deref(), None,
+                                *position,
+                                text,
+                                color,
+                                *font_size_px,
+                                font_stack.as_deref(),
+                                None,
                             );
                         }
                         EffectiveClipRects::Empty => {}
@@ -3055,7 +3085,11 @@ impl CpuPaintRenderer {
                                 let mut canvas =
                                     crate::graphics::Canvas::for_buffer(self.current_buffer_mut());
                                 canvas.draw_text_at(
-                                    *position, text, color, *font_size_px, font_stack.as_deref(),
+                                    *position,
+                                    text,
+                                    color,
+                                    *font_size_px,
+                                    font_stack.as_deref(),
                                     Some((rect, 0.0)),
                                 );
                             }

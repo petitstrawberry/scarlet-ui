@@ -101,7 +101,11 @@ fn add_region(dirty: &mut Vec<Rect>, region: PaintRegion, viewport: Rect) {
         }
     }
 }
-fn command_dependencies(c: &PaintCommand, ctx: &PaintContext<'_>, scale: u32) -> PaintDependencies {
+pub(super) fn command_dependencies(
+    c: &PaintCommand,
+    ctx: &PaintContext<'_>,
+    scale: u32,
+) -> PaintDependencies {
     match c {
         PaintCommand::BackdropFilterRoundedRect {
             rect, blur_radius, ..
@@ -196,7 +200,27 @@ impl DisplayList {
         if let Some((_, deps)) = self.footprints.borrow().iter().find(|(s, _)| *s == scale) {
             return deps.clone();
         }
-        let deps: Arc<[PaintDependencies]> = self.context.paint_dependencies(scale).into();
+        let deps: Arc<[PaintDependencies]> = if let Some(bounds) = self.raster_bounds {
+            // Retain one conservative footprint instead of walking every control.
+            // An ancestor clip can cut the opaque backing away from a filter's
+            // halo, so even a locally isolated picture still exposes its reads.
+            let mut reads = PaintRegion::Empty;
+            for dep in self.context.paint_dependencies(scale) {
+                reads = match (reads, dep.reads) {
+                    (PaintRegion::Unknown, _) | (_, PaintRegion::Unknown) => PaintRegion::Unknown,
+                    (PaintRegion::Rect(a), PaintRegion::Rect(b)) => PaintRegion::Rect(union(a, b)),
+                    (PaintRegion::Empty, b) => b,
+                    (a, PaintRegion::Empty) => a,
+                };
+            }
+            alloc::vec![PaintDependencies::new(
+                PaintRegion::Rect(expand(bounds, 2.)),
+                reads
+            )]
+            .into()
+        } else {
+            self.context.paint_dependencies(scale).into()
+        };
         let mut cache = self.footprints.borrow_mut();
         if cache.len() == 2 {
             cache.remove(0);
@@ -396,6 +420,97 @@ fn atoms(
     }
 }
 impl DisplayList {
+    fn cached_write_bounds(&self, scale: u32) -> PaintRegion {
+        if let Some((_, bounds)) = self.write_bounds.borrow().iter().find(|(s, _)| *s == scale) {
+            return *bounds;
+        }
+        let mut bounds = PaintRegion::Empty;
+        for dep in self.cached_dependencies(scale).iter() {
+            bounds = match (bounds, dep.writes) {
+                (PaintRegion::Unknown, _) | (_, PaintRegion::Unknown) => PaintRegion::Unknown,
+                (PaintRegion::Rect(a), PaintRegion::Rect(b)) => PaintRegion::Rect(union(a, b)),
+                (PaintRegion::Empty, b) => b,
+                (a, PaintRegion::Empty) => a,
+            };
+        }
+        let mut cache = self.write_bounds.borrow_mut();
+        if cache.len() == 2 {
+            cache.remove(0);
+        }
+        cache.push((scale, bounds));
+        bounds
+    }
+
+    // Match immutable children before descending. A translated unchanged scroll
+    // picture contributes its old/new bounds without atomizing every control.
+    // Changed children still recurse, preserving localized revision damage.
+    fn hierarchical_damage(&self, previous: &Self, scale: u32) -> Option<Option<Vec<Rect>>> {
+        let (new, old) = (&self.context.commands, &previous.context.commands);
+        if new.len() != old.len()
+            || !self.context.buffers.is_empty()
+            || !previous.context.buffers.is_empty()
+        {
+            return None;
+        }
+        let mut clips = Vec::new();
+        let mut damage = Vec::new();
+        let add = |damage: &mut Vec<Rect>, mut rect: Rect, clips: &[Rect]| {
+            for clip in clips {
+                let Some(clipped) = intersect(rect, *clip) else {
+                    return;
+                };
+                rect = clipped;
+            }
+            damage.push(rect);
+        };
+        for (a, b) in new.iter().zip(old) {
+            if let (
+                PaintCommand::DrawDisplayList { origin: p, list: a },
+                PaintCommand::DrawDisplayList { origin: q, list: b },
+            ) = (a, b)
+            {
+                if p == q {
+                    let Some(changes) = a.damage_since(b, scale) else {
+                        return Some(None);
+                    };
+                    for r in changes {
+                        add(
+                            &mut damage,
+                            Rect::new(Point::new(r.left() + p.x, r.top() + p.y), r.size),
+                            &clips,
+                        );
+                    }
+                } else {
+                    for (list, origin) in [(a, p), (b, q)] {
+                        match list.cached_write_bounds(scale) {
+                            PaintRegion::Rect(r) => add(
+                                &mut damage,
+                                Rect::new(
+                                    Point::new(r.left() + origin.x, r.top() + origin.y),
+                                    r.size,
+                                ),
+                                &clips,
+                            ),
+                            PaintRegion::Unknown => return Some(None),
+                            PaintRegion::Empty => {}
+                        }
+                    }
+                }
+            } else if a != b || matches!(a, PaintCommand::Extension { .. }) {
+                return None;
+            } else {
+                match a {
+                    PaintCommand::PushClip { rect, .. } => clips.push(*rect),
+                    PaintCommand::PopClip => {
+                        clips.pop();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Some(Some(damage))
+    }
+
     /// Local changes between immutable revisions, before dependency propagation.
     /// Unknown coverage returns None: callers must repaint the complete picture.
     pub fn damage_since(&self, previous: &DisplayList, scale: u32) -> Option<Vec<Rect>> {
@@ -406,6 +521,9 @@ impl DisplayList {
         // atoms. Keep the existing complete replay fallback for those streams.
         if !self.is_self_contained() || !previous.is_self_contained() {
             return None;
+        }
+        if let Some(damage) = self.hierarchical_damage(previous, scale) {
+            return damage;
         }
         let mut old = Vec::new();
         let mut new = Vec::new();
@@ -460,6 +578,26 @@ mod tests {
         );
     }
     #[test]
+    fn clipped_cached_glass_keeps_damage_from_outside_its_viewport() {
+        let viewport = r(0., 0., 200., 120.);
+        let mut local = PaintContext::new();
+        local.fill_rect(viewport, Color::WHITE);
+        local.backdrop_filter_rounded_rect(r(40., 40., 50., 50.), 10., 10., Color::WHITE);
+        let layer = local.into_cached_layer(viewport);
+        assert!(layer.raster_cache_bounds().is_some());
+        let mut scene = PaintContext::new();
+        scene.push_clip(r(40., 0., 160., 120.));
+        scene.draw_display_list(Point::ZERO, layer);
+        scene.pop_clip();
+        // The clip removes the local backing at x=32, but the visible glass
+        // still samples it. Changing the outer background must repaint the glass.
+        for scale in [1000, 2000, 3000] {
+            let damage = scene.dependent_damage(&[r(32., 50., 2., 2.)], viewport, scale);
+            assert!(hits(PaintRegion::Rect(r(42., 50., 2., 2.)), &damage));
+        }
+    }
+
+    #[test]
     fn buffer_resource_changes_are_not_hidden_by_equal_command_indices() {
         let record = |color| {
             let mut buffer = Buffer::new(Size::new(8., 8.));
@@ -502,10 +640,9 @@ mod tests {
             assert!(!with_ink.context().same_recording(&first));
             let mut partial = CpuPaintRenderer::new(viewport.size, scale, Color::WHITE);
             partial.execute(first.context());
-            for (previous, current, has_ink) in [
-                (&first, &with_ink, true),
-                (&with_ink, &unchanged, false),
-            ] {
+            for (previous, current, has_ink) in
+                [(&first, &with_ink, true), (&with_ink, &unchanged, false)]
+            {
                 let damage = current.damage_since(previous, scale).unwrap();
                 assert!(
                     !damage.is_empty(),

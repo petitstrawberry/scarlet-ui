@@ -760,6 +760,19 @@ impl WidgetFactory {
     }
 
     fn row<V: View + Clone>(&self, name: &str, control: V) -> impl View + Clone + use<V> {
+        self.row_aligned(name, control, Alignment::Center)
+    }
+
+    fn row_top<V: View + Clone>(&self, name: &str, control: V) -> impl View + Clone + use<V> {
+        self.row_aligned(name, control, Alignment::Top)
+    }
+
+    fn row_aligned<V: View + Clone>(
+        &self,
+        name: &str,
+        control: V,
+        alignment: Alignment,
+    ) -> impl View + Clone + use<V> {
         let label = Text::new(name.to_owned()).text_style(TextStyle::Callout);
         if self.stacked_rows() {
             Either::A(
@@ -772,7 +785,7 @@ impl WidgetFactory {
             Either::B(
                 hstack![label.frame_width(150.0), control]
                     .spacing(18.0)
-                    .alignment(Alignment::Top)
+                    .alignment(alignment)
                     .frame_width(self.row_width()),
             )
         }
@@ -1006,28 +1019,23 @@ impl WidgetFactory {
         // material stress scene belongs to Controls, not behind tab content.
         vstack! {
             self.row("Split layout", self.split_layout_select()),
-            self.row("SplitView", self.split_view()),
+            self.row_top("SplitView", self.split_view()),
             self.row("Tab bar", self.tab_bar_placement_select()),
-            self.row("TabView", self.tab_view()),
+            self.row_top("TabView", self.tab_view()),
         }
         .spacing(16.0)
         .alignment(Alignment::Leading)
     }
 
     fn page_header(title: &'static str, icon: Icon) -> NavigationHeader {
-        NavigationHeader::new(move || {
-            HeaderBar::new(
-                hstack![
-                    IconView::new(icon).size(IconSize::Medium),
-                    Text::new(title).text_style(TextStyle::Headline),
-                    Spacer::new(),
-                ]
-                .spacing(10.0)
-                .padding(12.0),
-            )
-            .height(48.0)
+        NavigationHeader::toolbar(move || {
+            hstack![
+                IconView::new(icon).size(IconSize::Medium),
+                Text::new(title).text_style(TextStyle::Headline),
+                Spacer::new(),
+            ]
+            .spacing(10.0)
         })
-        .automatic_height()
     }
 
     fn navigation(
@@ -1079,7 +1087,7 @@ impl WidgetFactory {
             self.row("ProgressView", self.progress()),
             self.row("Rectangle", self.rectangle()),
             self.row("Divider", self.divider()),
-            self.row("ScrollView both", self.scroll_view()),
+            self.row_top("ScrollView both", self.scroll_view()),
             self.configurable_layouts(),
         }
         .spacing(16.0)
@@ -1191,7 +1199,7 @@ impl WidgetFactory {
             .text_style(TextStyle::Callout)
             .tone(TextTone::Secondary),
             Divider::new().frame(width, 1.0),
-            self.row(
+            self.row_top(
                 "Disabled",
                 vstack![
                     Button::new("Save changes").enabled(false),
@@ -1239,7 +1247,7 @@ impl WidgetFactory {
             self.row("TextField", self.text_field()),
             self.row("Select", self.select()),
             self.row("Slider", self.slider()),
-            self.row("TextView", self.text_view()),
+            self.row_top("TextView", self.text_view()),
         }
         .spacing(16.0)
         .alignment(Alignment::Leading)
@@ -1301,7 +1309,7 @@ impl WidgetFactory {
 
     fn display_page(&self) -> impl View + Clone + use<> {
         let content = vstack! {
-            self.row(
+            self.row_top(
                 "Text",
                 vstack![
                     Text::new("Text hierarchy").text_style(TextStyle::Headline),
@@ -1315,11 +1323,11 @@ impl WidgetFactory {
             ),
             self.row("Rectangle", self.rectangle()),
             self.row("Divider", self.divider()),
-            self.row("Tabler Icons", self.icons()),
-            self.row("Surface styles", self.surface_styles()),
-            self.row("ScrollView both", self.scroll_view()),
-            self.row("ScrollView x", self.horizontal_scroll_view()),
-            self.row("ScrollView y", self.vertical_scroll_view()),
+            self.row_top("Tabler Icons", self.icons()),
+            self.row_top("Surface styles", self.surface_styles()),
+            self.row_top("ScrollView both", self.scroll_view()),
+            self.row_top("ScrollView x", self.horizontal_scroll_view()),
+            self.row_top("ScrollView y", self.vertical_scroll_view()),
             self.configurable_layouts(),
         }
         .spacing(16.0)

@@ -16,6 +16,15 @@ const BASE_TILES: usize = 64;
 const MAX_TILES: usize = 128;
 const MAX_TILE_DEPTH: usize = 8;
 
+// Failed cold tiles must not be retried at the same density every frame.
+// Plans hold weak recordings; immutable revisions and DPI changes get a new plan.
+// Texture slots remain bounded independently of the number of page controls.
+pub(super) struct LayerPlan {
+    source: Weak<DisplayList>,
+    scale: u32,
+    extent: u32,
+}
+
 pub(super) struct Tile {
     list: u64,
     cache_identity: u64,
@@ -24,6 +33,7 @@ pub(super) struct Tile {
     recording: Option<Arc<DisplayList>>,
     scale: u32,
     padding: u32,
+    extent: u32,
     snap: [usize; 2],
     snap_dependencies: Vec<(Point, f32)>,
     phase: [u32; 2],
@@ -151,8 +161,16 @@ fn live_boundary(
     clips: &[(Rect, f32)],
     full: PixelBounds,
 ) -> Vec<PixelBounds> {
-    let filters = list
-        .flat_context()
+    let selection = list.context_for_region(
+        Rect::from_xywh(
+            visible.x / factor - origin.x - 2. / factor,
+            visible.y / factor - origin.y - 2. / factor,
+            (visible.width + 4.) / factor,
+            (visible.height + 4.) / factor,
+        ),
+        (factor * 1000.) as u32,
+    );
+    let filters = selection
         .commands()
         .iter()
         .filter_map(|command| {
@@ -368,6 +386,29 @@ impl SgfxPaintEncoder {
         {
             return Ok(None);
         }
+        let plan = if let Some(index) = self
+            .raster_layer_plans
+            .iter()
+            .position(|plan| plan.scale == scale && plan.source.ptr_eq(&Arc::downgrade(list)))
+        {
+            index
+        } else {
+            self.raster_layer_plans
+                .retain(|plan| plan.source.strong_count() != 0);
+            if self.raster_layer_plans.len() == MAX_TILES {
+                self.raster_layer_plans.remove(0);
+            }
+            self.raster_layer_plans.push(LayerPlan {
+                source: Arc::downgrade(list),
+                scale,
+                extent: SIDE,
+            });
+            self.raster_layer_plans.len() - 1
+        };
+        let extent = self.raster_layer_plans[plan].extent;
+        if extent == 0 {
+            return Ok(None);
+        }
         let factor = scale as f32 / 1000.;
         let scene_origin = Point::new(
             origin.x - self.tile_translation.x,
@@ -376,34 +417,45 @@ impl SgfxPaintEncoder {
         let base = Point::new(libm::floorf(origin.x), libm::floorf(origin.y));
         let phase_values = [origin.x - base.x, origin.y - base.y];
         let phase = phase_values.map(f32::to_bits);
-        let mut halo = 0_f32;
-        if list.reads_backdrop() {
-            for command in list.flat_context().commands() {
-                if let PaintCommand::BackdropFilterRoundedRect {
-                    blur_radius,
-                    refraction,
-                    ..
-                } = command
-                {
-                    let blur = (blur_radius.max(0.) * factor).min(64.);
-                    halo = halo.max(
-                        blur + (blur / 4.).max(1.)
-                            + 2.
-                            + if *refraction > 0. {
-                                12. * 1.4 * factor
-                            } else {
-                                0.
-                            },
-                    );
+        let unit = scale / 1000;
+        let padding = if let Some(tile) = self
+            .raster_tiles
+            .iter()
+            .find(|tile| tile.list == list.identity() && tile.scale == scale)
+        {
+            tile.padding
+        } else {
+            let mut halo = 0_f32;
+            if list.reads_backdrop() {
+                for command in list.flat_context().commands() {
+                    if let PaintCommand::BackdropFilterRoundedRect {
+                        blur_radius,
+                        refraction,
+                        ..
+                    } = command
+                    {
+                        let blur = (blur_radius.max(0.) * factor).min(64.);
+                        halo = halo.max(
+                            blur + (blur / 4.).max(1.)
+                                + 2.
+                                + if *refraction > 0. {
+                                    12. * 1.4 * factor
+                                } else {
+                                    0.
+                                },
+                        );
+                    }
                 }
             }
-        }
-        let unit = scale / 1000;
-        let padding = (libm::ceilf(halo / factor) as u32) * unit;
-        if padding * 2 >= SIDE {
+            (libm::ceilf(halo / factor) as u32) * unit
+        };
+        if padding * 2 >= extent {
             return Ok(None);
         }
-        let side = (SIDE - 2 * padding) / unit * unit;
+        let side = (extent - 2 * padding) / unit * unit;
+        if side == 0 {
+            return Ok(None);
+        }
         let offset = [base.x * factor, base.y * factor];
         let bounds = FloatRect::new(
             (bounds.left() + origin.x) * factor,
@@ -450,6 +502,7 @@ impl SgfxPaintEncoder {
                 && tile.list != 0
                 && tile.scale == scale
                 && tile.padding == padding
+                && tile.extent == extent
                 && tile.snap == snap_signature(&tile.snap_dependencies, scene_origin, phase_values)
                 && tile.phase == phase
                 && tile.x >= x0
@@ -497,6 +550,7 @@ impl SgfxPaintEncoder {
                         && tile.list != 0
                         && tile.scale == scale
                         && tile.padding == padding
+                        && tile.extent == extent
                         && tile.snap
                             == snap_signature(&tile.snap_dependencies, scene_origin, phase_values)
                         && tile.phase == phase
@@ -539,6 +593,7 @@ impl SgfxPaintEncoder {
                             recording: None,
                             scale,
                             padding,
+                            extent,
                             snap: [0; 2],
                             snap_dependencies: Vec::new(),
                             phase,
@@ -580,17 +635,29 @@ impl SgfxPaintEncoder {
                         (padding as f32 - x as f32 * side as f32) / factor,
                         (padding as f32 - y as f32 * side as f32) / factor,
                     );
-                    let flat = list.context().raster_tile_composite_context(
-                        scene_origin,
-                        tile_offset,
-                        scale,
-                    );
+                    let selected;
+                    let source = if list.has_cached_descendants() {
+                        list.context()
+                    } else {
+                        selected = list.context_for_region(
+                            Rect::from_xywh(
+                                -tile_offset.x - phase_values[0],
+                                -tile_offset.y - phase_values[1],
+                                extent as f32 / factor,
+                                extent as f32 / factor,
+                            ),
+                            scale,
+                        );
+                        &selected
+                    };
+                    let flat =
+                        source.raster_tile_composite_context(scene_origin, tile_offset, scale);
                     let nested = flat
                         .commands()
                         .iter()
                         .any(|c| matches!(c, PaintCommand::DrawDisplayList { .. }));
                     let tile_bounds =
-                        Rect::from_xywh(0., 0., SIDE as f32 / factor, SIDE as f32 / factor);
+                        Rect::from_xywh(0., 0., extent as f32 / factor, extent as f32 / factor);
                     let regions = match changes {
                         None => alloc::vec![tile_bounds],
                         Some(changes) => {
@@ -616,6 +683,8 @@ impl SgfxPaintEncoder {
                         }
                     };
                     let dimensions = (self.width, self.height);
+                    // Slots stay 512px. Only the active subregion shrinks; keep
+                    // the transform/viewport tied to the physical texture size.
                     self.width = SIDE;
                     self.height = SIDE;
                     let depth = self.tile_depth;
@@ -641,8 +710,8 @@ impl SgfxPaintEncoder {
                         for region in &regions {
                             let left = libm::floorf(region.left() * factor).max(0.) as u32;
                             let top = libm::floorf(region.top() * factor).max(0.) as u32;
-                            let right = (libm::ceilf(region.right() * factor) as u32).min(SIDE);
-                            let bottom = (libm::ceilf(region.bottom() * factor) as u32).min(SIDE);
+                            let right = (libm::ceilf(region.right() * factor) as u32).min(extent);
+                            let bottom = (libm::ceilf(region.bottom() * factor) as u32).min(extent);
                             if right <= left || bottom <= top {
                                 continue;
                             }
@@ -686,15 +755,40 @@ impl SgfxPaintEncoder {
                     (self.width, self.height) = dimensions;
                     rendered?;
                     if degraded {
-                        return Ok(None);
+                        // Keep the material intact. A dense 512px tile can exceed
+                        // the per-pass filter budget even though its pixels are
+                        // static. Split its grid, retry once at each smaller size,
+                        // and retain that plan for subsequent scroll frames.
+                        let smaller = extent / 2;
+                        let extent = if smaller > padding * 2 && smaller >= 64 {
+                            smaller
+                        } else {
+                            0
+                        };
+                        // Nested layers may have inserted or retired plans.
+                        if let Some(plan) = self.raster_layer_plans.iter_mut().find(|plan| {
+                            plan.scale == scale && plan.source.ptr_eq(&Arc::downgrade(list))
+                        }) {
+                            plan.extent = extent;
+                        } else {
+                            if self.raster_layer_plans.len() == MAX_TILES {
+                                self.raster_layer_plans.remove(0);
+                            }
+                            self.raster_layer_plans.push(LayerPlan {
+                                source: Arc::downgrade(list),
+                                scale,
+                                extent,
+                            });
+                        }
+                        return self.lower_cached_layer(executor, list, origin, scale, clips, full);
                     }
                     let dependencies = snap_dependencies(
                         list,
                         FloatRect::new(
                             (x as f32 * side as f32 - padding as f32) / factor,
                             (y as f32 * side as f32 - padding as f32) / factor,
-                            SIDE as f32 / factor,
-                            SIDE as f32 / factor,
+                            extent as f32 / factor,
+                            extent as f32 / factor,
                         ),
                         scale,
                     );
@@ -705,6 +799,7 @@ impl SgfxPaintEncoder {
                         recording: Some(Arc::clone(list)),
                         scale,
                         padding,
+                        extent,
                         snap,
                         snap_dependencies: dependencies,
                         phase,
@@ -762,12 +857,21 @@ impl SgfxPaintEncoder {
                 area.width as f32 / factor,
                 area.height as f32 / factor,
             ));
+            let selected = list.context_for_region(
+                Rect::from_xywh(
+                    area.x as f32 / factor - origin.x,
+                    area.y as f32 / factor - origin.y,
+                    area.width as f32 / factor,
+                    area.height as f32 / factor,
+                ),
+                scale,
+            );
             let local;
             if self.tile_depth > 0 {
-                local = list.context().raster_tile_context(scene_origin, base, scale);
+                local = selected.raster_tile_context(scene_origin, base, scale);
                 context.append_at(&local, Point::ZERO);
             } else {
-                context.draw_display_list(origin, Arc::clone(list));
+                context.append_at(&selected, origin);
             }
             context.pop_clip();
             for _ in clips {
@@ -889,6 +993,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dense_glass_splits_once_and_reuses_the_smaller_tiles() {
+        let mut renderer = SgfxPaintEncoder::new(200, 120, false).unwrap();
+        renderer.set_analytic_glass(true);
+        let mut paint = PaintContext::new();
+        paint.fill_rect(Rect::from_xywh(-100., -100., 700., 1400.), UiColor::WHITE);
+        for row in 0..30 {
+            for col in 0..12 {
+                paint.refractive_glass_rounded_rect(
+                    Rect::from_xywh(10. + col as f32 * 36., row as f32 * 40. + 8., 28., 20.),
+                    5.,
+                    2.52,
+                    UiColor::WHITE.with_opacity(0.35),
+                    1.,
+                );
+            }
+        }
+        let list = paint.into_cached_layer(Rect::from_xywh(-100., -100., 700., 1400.));
+        let mut trace = Trace::default();
+        frame(&mut renderer, &mut trace, &list, -40.).unwrap();
+        assert!(
+            renderer
+                .raster_layer_plans
+                .iter()
+                .any(|plan| plan.extent > 0 && plan.extent < SIDE)
+        );
+        let textures: Vec<_> = renderer
+            .raster_tiles
+            .iter()
+            .filter(|tile| tile.list == list.identity())
+            .map(|tile| tile.texture)
+            .collect();
+        assert!(
+            !textures.is_empty(),
+            "dense pages must produce reusable pixels"
+        );
+        trace.targets.clear();
+        frame(&mut renderer, &mut trace, &list, -41.).unwrap();
+        assert!(
+            !trace.targets.iter().any(|target| textures.contains(target)),
+            "scrolling must not repeat the failed full-size tile render"
+        );
+        assert_eq!(renderer.backdrop_fallback_count(), 0);
     }
 
     #[test]
@@ -1016,10 +1165,7 @@ mod tests {
                     true,
                     "text snapping is translation invariant across the window origin"
                 );
-                assert_eq!(
-                    trace.targets.iter().filter(|id| **id != target).count(),
-                    0
-                );
+                assert_eq!(trace.targets.iter().filter(|id| **id != target).count(), 0);
                 trace.targets.clear();
                 render(&mut renderer, &mut trace, -21.25);
                 assert_eq!(trace.targets, [target], "unchanged snap phase stays warm");
