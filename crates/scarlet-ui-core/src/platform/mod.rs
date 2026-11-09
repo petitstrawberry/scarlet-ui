@@ -67,6 +67,7 @@ pub(crate) fn install_platform_window_defaults(defaults: PlatformWindowDefaults)
     };
     let title = match concrete.title_bar {
         WindowTitleBar::System => 1,
+        WindowTitleBar::SystemOverlay => 3,
         WindowTitleBar::None => 2,
         _ => 0,
     };
@@ -83,6 +84,7 @@ fn platform_window_decoration() -> WindowDecoration {
     let title = match (bits >> 2) & 3 {
         1 => WindowTitleBar::System,
         2 => WindowTitleBar::None,
+        3 => WindowTitleBar::SystemOverlay,
         _ => WindowTitleBar::Custom,
     };
     WindowDecoration::new(frame, title)
@@ -148,6 +150,13 @@ pub enum WindowTitleBar {
     Custom,
     /// The platform window manager draws its standard titlebar and controls.
     System,
+    /// Native controls overlay application content without a separate titlebar.
+    ///
+    /// macOS Winit only. Requires a system frame. The title is hidden visually
+    /// but retained for accessibility/window menus. Reserve a top strip (at
+    /// least 28 logical pixels) and keep controls clear of the traffic lights.
+    /// Applications provide their own drag region using `PlatformWindow::request_move`.
+    SystemOverlay,
     /// No titlebar is drawn.
     None,
 }
@@ -162,7 +171,7 @@ impl WindowTitleBar {
 
     /// Return whether the platform window manager owns the titlebar.
     pub fn is_system(self) -> bool {
-        matches!(self, Self::System)
+        matches!(self, Self::System | Self::SystemOverlay)
             || matches!(self, Self::PlatformDefault)
                 && platform_window_decoration().title_bar.is_system()
     }
@@ -185,6 +194,8 @@ impl WindowDecoration {
     pub const CUSTOM: Self = Self::new(WindowFrame::Custom, WindowTitleBar::Custom);
     /// The platform window manager draws both the frame and titlebar.
     pub const SYSTEM: Self = Self::new(WindowFrame::System, WindowTitleBar::System);
+    /// macOS native traffic lights over full-size application content.
+    pub const SYSTEM_OVERLAY: Self = Self::new(WindowFrame::System, WindowTitleBar::SystemOverlay);
     /// Neither a frame nor titlebar is drawn.
     pub const NONE: Self = Self::new(WindowFrame::None, WindowTitleBar::None);
 
