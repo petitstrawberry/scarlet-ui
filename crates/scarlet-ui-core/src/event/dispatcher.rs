@@ -1356,16 +1356,21 @@ impl EventDispatcher {
             && !modifiers.alt
             && !modifiers.super_key
         {
-            let editing_multiline_text = self
+            let accepts_tab_input = self
                 .current_focus_path(element_tree)
                 .and_then(|path| path.last().copied())
                 .and_then(|id| element_tree.find_element(id))
                 .and_then(|element| element.render_object())
-                .is_some_and(|render| render.as_any().is::<crate::views::TextViewRenderObject>());
-            // A multiline editor owns Tab for indentation. Single-line fields
-            // and ordinary controls participate in the window's focus order.
-            if !editing_multiline_text && self.advance_keyboard_focus(element_tree, modifiers.shift)
-            {
+                .is_some_and(|render| {
+                    render.as_any().is::<crate::views::TextViewRenderObject>()
+                        || render
+                            .as_any()
+                            .downcast_ref::<crate::views::modifiers::FocusableRenderObject>()
+                            .is_some_and(|control| control.accepts_tab_input())
+                });
+            // Multiline editors and embedded controls can own Tab input.
+            // Other controls participate in the window's focus order.
+            if !accepts_tab_input && self.advance_keyboard_focus(element_tree, modifiers.shift) {
                 return true;
             }
         }
