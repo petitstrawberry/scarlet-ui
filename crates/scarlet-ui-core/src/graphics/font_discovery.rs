@@ -56,6 +56,24 @@ impl FontDiscovery {
         }
     }
 
+    pub(super) fn font_for_family(&mut self, family: &str) -> Option<DiscoveredFont> {
+        let id = self.collection.family_id(family)?;
+        let mut query = self.collection.query(&mut self.source_cache);
+        query.set_families([id]);
+        let mut selected = None;
+        query.matches_with(|font| {
+            if !has_drawable_glyph(font.blob.as_ref(), font.index, 'M') {
+                return QueryStatus::Continue;
+            }
+            selected = Some(DiscoveredFont {
+                bytes: font.blob.as_ref().to_vec(),
+                index: font.index,
+            });
+            QueryStatus::Stop
+        });
+        selected
+    }
+
     /// Select and own a font face that contains `ch`.
     pub(super) fn font_for_char(&mut self, ch: char) -> Option<DiscoveredFont> {
         if self.unresolved_chars.contains(&ch) {
