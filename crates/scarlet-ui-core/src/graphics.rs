@@ -2,6 +2,7 @@
 //!
 //! Provides Canvas for drawing text, shapes, and managing glyph caches.
 
+#[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -9,7 +10,10 @@ use alloc::vec::Vec;
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use ab_glyph::{Font, FontRef, Glyph, InvalidFont, PxScale, PxScaleFont, ScaleFont, point};
+use ab_glyph::{Font, FontArc, Glyph, InvalidFont, PxScale, PxScaleFont, ScaleFont, point};
+
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
+use ab_glyph::FontVec;
 
 use crate::buffer::Buffer;
 use crate::color::Color;
@@ -336,7 +340,7 @@ fn ceil_i32(v: f32) -> i32 {
 }
 
 fn glyph_cache_get_or_rasterize(
-    scaled: &PxScaleFont<&FontRef<'static>>,
+    scaled: &PxScaleFont<&FontArc>,
     ch: char,
     font_stack_id: usize,
     font_slot: u8,
@@ -419,8 +423,8 @@ fn next_font_stack_id() -> usize {
 /// the primary font does not provide a glyph for a character.
 #[derive(Clone, Debug)]
 pub struct FontStack {
-    primary: FontRef<'static>,
-    fallbacks: Vec<FontRef<'static>>,
+    primary: FontArc,
+    fallbacks: Vec<FontArc>,
     cache_id: usize,
 }
 
@@ -444,12 +448,45 @@ impl FontStack {
     ///
     /// A font stack if the font bytes are valid.
     pub fn new(font_bytes: &'static [u8]) -> Result<Self, InvalidFont> {
-        let primary = FontRef::try_from_slice(font_bytes)?;
+        let primary = FontArc::try_from_slice(font_bytes)?;
         Ok(Self {
             primary,
             fallbacks: Vec::new(),
             cache_id: next_font_stack_id(),
         })
+    }
+
+    /// Create a stack from owned font data without requiring a process-lifetime leak.
+    pub fn from_owned(font_bytes: Vec<u8>) -> Result<Self, InvalidFont> {
+        Ok(Self {
+            primary: FontArc::try_from_vec(font_bytes)?,
+            fallbacks: Vec::new(),
+            cache_id: next_font_stack_id(),
+        })
+    }
+
+    /// Append another stack's faces as fallbacks, retaining their shared storage.
+    pub fn with_fallback_stack(mut self, fallback: &Self) -> Self {
+        self.fallbacks.push(fallback.primary.clone());
+        self.fallbacks.extend(fallback.fallbacks.iter().cloned());
+        self.cache_id = next_font_stack_id();
+        self
+    }
+
+    /// Resolve an installed family into an independent stack. Does not change UI fonts.
+    /// Font discovery performs I/O; call this outside the rendering/event thread.
+    #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
+    pub fn from_system_family(family: &str) -> Result<Option<Self>, InvalidFont> {
+        FontDiscovery::new()
+            .font_for_family(family)
+            .map(|font| {
+                Ok(Self {
+                    primary: discovered_font_ref(font)?,
+                    fallbacks: Vec::new(),
+                    cache_id: next_font_stack_id(),
+                })
+            })
+            .transpose()
     }
 
     /// Add a fallback font to this stack.
@@ -462,7 +499,7 @@ impl FontStack {
     ///
     /// `Ok(())` when the fallback was accepted.
     pub fn add_fallback(&mut self, font_bytes: &'static [u8]) -> Result<(), InvalidFont> {
-        let font = FontRef::try_from_slice(font_bytes)?;
+        let font = FontArc::try_from_slice(font_bytes)?;
         self.fallbacks.push(font);
         self.cache_id = next_font_stack_id();
         Ok(())
@@ -494,8 +531,8 @@ impl FontStack {
 
 #[derive(Clone)]
 struct DefaultFontState {
-    font: Option<FontRef<'static>>,
-    fallback_fonts: Vec<FontRef<'static>>,
+    font: Option<FontArc>,
+    fallback_fonts: Vec<FontArc>,
     #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
     discovery: Option<FontDiscovery>,
     cache_id: usize,
@@ -529,7 +566,7 @@ fn clear_text_caches() {
 ///
 /// `Ok(())` when the font was accepted.
 pub fn set_default_font(font_bytes: &'static [u8]) -> Result<(), InvalidFont> {
-    let font = FontRef::try_from_slice(font_bytes)?;
+    let font = FontArc::try_from_slice(font_bytes)?;
     let mut state = DEFAULT_FONT.lock();
     state.font = Some(font);
     #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
@@ -586,7 +623,7 @@ pub fn set_default_font_stack(font_stack: FontStack) {
 ///
 /// `Ok(())` when the font was accepted.
 pub fn add_default_font_fallback(font_bytes: &'static [u8]) -> Result<(), InvalidFont> {
-    let font = FontRef::try_from_slice(font_bytes)?;
+    let font = FontArc::try_from_slice(font_bytes)?;
     let mut state = DEFAULT_FONT.lock();
     state.fallback_fonts.push(font);
     #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
@@ -730,9 +767,8 @@ fn load_fonts_from_rootfs_once() {
 }
 
 #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
-fn discovered_font_ref(font: DiscoveredFont) -> Result<FontRef<'static>, InvalidFont> {
-    let leaked: &'static [u8] = Box::leak(font.bytes.into_boxed_slice());
-    FontRef::try_from_slice_and_index(leaked, font.index)
+fn discovered_font_ref(font: DiscoveredFont) -> Result<FontArc, InvalidFont> {
+    FontVec::try_from_vec_and_index(font.bytes, font.index).map(FontArc::new)
 }
 
 #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
@@ -811,7 +847,7 @@ fn fullwidth_ascii_fallback(ch: char) -> Option<char> {
     }
 }
 
-fn select_font_for_char(ch: char, font_stack: &FontStack) -> (FontRef<'static>, u8, char) {
+fn select_font_for_char(ch: char, font_stack: &FontStack) -> (FontArc, u8, char) {
     if font_stack.primary.glyph_id(ch).0 != 0 {
         return (font_stack.primary.clone(), 0, ch);
     }
@@ -1111,14 +1147,14 @@ fn is_zero_width_format(ch: char) -> bool {
 // Public font sizes are logical pixels per em. ab_glyph's PxScale instead
 // measures ascent minus descent, which varies independently between faces.
 // Convert each face, including fallbacks, without adding character spacing.
-fn em_scale(font: &FontRef<'_>, em_pixels: f32) -> PxScale {
+fn em_scale(font: &FontArc, em_pixels: f32) -> PxScale {
     let units = font
         .units_per_em()
         .unwrap_or_else(|| font.height_unscaled());
     PxScale::from(em_pixels * font.height_unscaled() / units)
 }
 
-fn em_advance(font: &FontRef<'_>, ch: char, em_pixels: f32) -> f32 {
+fn em_advance(font: &FontArc, ch: char, em_pixels: f32) -> f32 {
     let units = font
         .units_per_em()
         .unwrap_or_else(|| font.height_unscaled());
@@ -1646,6 +1682,30 @@ mod text_run_tests {
         // thread; unrelated parallel tests can legitimately populate the cache.
         pub(super) static GLYPH_CACHE_LOOKUPS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
     }
+    #[test]
+    fn owned_faces_keep_metrics_and_fallbacks_after_source_and_original_stack_drop() {
+        let owned =
+            FontStack::from_owned(include_bytes!("testing/fonts/metrics-primary.ttf").to_vec())
+                .unwrap();
+        let fallback =
+            FontStack::from_owned(include_bytes!("testing/fonts/metrics-fallback.ttf").to_vec())
+                .unwrap();
+        let stack = owned.clone().with_fallback_stack(&fallback);
+        assert_ne!(stack.cache_id(), owned.cache_id());
+        let expected = rasterize_text_with_font_stack("日☃", 20., 1000, &stack);
+        drop(owned);
+        drop(fallback);
+        let cloned = stack.clone();
+        assert_eq!(cloned.cache_id(), stack.cache_id());
+        drop(stack);
+        assert_eq!(
+            expected,
+            rasterize_text_with_font_stack("日☃", 20., 1000, &cloned)
+        );
+        assert_eq!(expected[1].key.font_slot, 1);
+        assert!(FontStack::from_owned(vec![0; 16]).is_err());
+    }
+
     #[test]
     fn explicit_stack_runs_reuse_masks_and_distinguish_fallbacks_size_and_dpi() {
         let primary = FontStack::new(include_bytes!("testing/fonts/metrics-primary.ttf")).unwrap();
