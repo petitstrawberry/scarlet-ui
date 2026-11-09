@@ -129,3 +129,12 @@ SortAscending = "sort-ascending"
 SortDescending = "sort-descending"
 Table = "table"
 Tag = "tag"
+
+# Recognizable programming-language marks for file explorers.
+BrandRust = "brand-rust"
+BrandPython = "brand-python"
+BrandJavascript = "brand-javascript"
+BrandTypescript = "brand-typescript"
+BrandGolang = "brand-golang"
+BrandHtml5 = "brand-html5"
+BrandCss3 = "brand-css3"
