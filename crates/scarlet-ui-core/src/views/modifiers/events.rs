@@ -25,6 +25,7 @@ pub struct OnClick<V: View, F: Clone + 'static> {
 pub struct Focusable<V: View> {
     inner: V,
     focused: State<bool>,
+    tab_input: bool,
     text_input: Option<State<Option<TextInputElementState>>>,
 }
 
@@ -43,6 +44,7 @@ impl<V: View> Focusable<V> {
         Self {
             inner,
             focused,
+            tab_input: false,
             text_input: None,
         }
     }
@@ -51,6 +53,12 @@ impl<V: View> Focusable<V> {
     /// `None` disables text input while the wrapper retains keyboard focus.
     pub fn text_input(mut self, state: State<Option<TextInputElementState>>) -> Self {
         self.text_input = Some(state);
+        self
+    }
+
+    /// Let this control receive Tab/Shift+Tab instead of moving keyboard focus.
+    pub fn tab_input(mut self, enabled: bool) -> Self {
+        self.tab_input = enabled;
         self
     }
 
@@ -67,6 +75,7 @@ impl<V: View + Clone> View for Focusable<V> {
             |view| {
                 let mut object = FocusableRenderObject::new(view.focused.clone());
                 object.text_input = view.text_input.clone();
+                object.tab_input = view.tab_input;
                 object
             },
             update_focusable_render_object::<V>,
@@ -96,12 +105,14 @@ fn update_focusable_render_object<V: View>(
 ) -> UpdateResult {
     render_object.focused = view.focused.clone();
     render_object.text_input = view.text_input.clone();
+    render_object.tab_input = view.tab_input;
     UpdateResult::Updated
 }
 
 /// Render object for [`Focusable`].
 pub struct FocusableRenderObject {
     focused: State<bool>,
+    tab_input: bool,
     text_input: Option<State<Option<TextInputElementState>>>,
     size: Size,
 }
@@ -111,9 +122,14 @@ impl FocusableRenderObject {
     pub fn new(focused: State<bool>) -> Self {
         Self {
             focused,
+            tab_input: false,
             text_input: None,
             size: Size::ZERO,
         }
+    }
+
+    pub(crate) fn accepts_tab_input(&self) -> bool {
+        self.tab_input
     }
 
     /// Return whether this object is currently focused.

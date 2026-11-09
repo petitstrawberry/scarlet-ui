@@ -805,3 +805,41 @@ fn primary_modifier_uses_command_on_macos_and_control_elsewhere() {
     assert_eq!(meta.primary(), cfg!(target_os = "macos"));
     assert!(!KeyModifiers::empty().primary());
 }
+
+#[test]
+fn embedded_control_can_keep_tab_and_reverse_tab_without_moving_focus() {
+    let focus = state(true);
+    let received = Rc::new(Cell::new(0));
+    let seen = received.clone();
+    let control = Spacer::new()
+        .frame(200.0, 80.0)
+        .on_event(move |event| {
+            if let Event::Keyboard(KeyEvent::Pressed {
+                keycode: KeyCode::Tab,
+                ..
+            }) = event
+            {
+                seen.set(seen.get() + 1);
+                return true;
+            }
+            false
+        })
+        .focusable(focus.clone())
+        .tab_input(true);
+    let mut pipeline = pipeline(VStack::new((
+        Button::new("Before"),
+        control,
+        Button::new("After"),
+    )));
+    pipeline.render();
+    let original = focused(&pipeline);
+    assert!(original.is_some());
+    for reverse in [false, true, false] {
+        assert!(tab(&mut pipeline, reverse));
+        pipeline.render();
+        assert_eq!(focused(&pipeline), original);
+        assert!(focus.get());
+    }
+    assert_eq!(received.get(), 3);
+    pipeline.teardown();
+}
