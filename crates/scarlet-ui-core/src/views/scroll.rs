@@ -140,6 +140,7 @@ pub struct ScrollView<V: View> {
     scrollbar_visibility: ScrollbarVisibility,
     scrollbar_color: Option<Color>,
     selection_index_state: Option<State<Option<usize>>>,
+    selection_range_state: Option<State<Option<(f32, f32)>>>,
     selection_item_extent: Option<f32>,
     selection_target: Option<SelectionScrollTarget>,
     selection_range_resolver: Option<SelectionRangeResolver>,
@@ -172,6 +173,7 @@ impl<V: View> ScrollView<V> {
             scrollbar_visibility: ScrollbarVisibility::default(),
             scrollbar_color: None,
             selection_index_state: None,
+            selection_range_state: None,
             selection_item_extent: None,
             selection_target: None,
             selection_range_resolver: None,
@@ -416,6 +418,7 @@ impl<V: View> ScrollView<V> {
     pub fn scroll_to_index(mut self, index: Option<usize>, item_extent: f32) -> Self {
         let item_extent = item_extent.max(1.0);
         self.selection_range_resolver = None;
+        self.selection_range_state = None;
         self.selection_index_state = None;
         self.selection_item_extent = None;
         self.selection_target = index.map(|index| SelectionScrollTarget {
@@ -451,6 +454,7 @@ impl<V: View> ScrollView<V> {
 
     fn set_selection_range(&mut self, axis: ScrollAxis, start: f32, end: f32) {
         self.selection_range_resolver = None;
+        self.selection_range_state = None;
         self.selection_index_state = None;
         self.selection_item_extent = None;
         self.selection_target = if start.is_finite() && end.is_finite() && end > start.max(0.0) {
@@ -484,6 +488,7 @@ impl<V: View> ScrollView<V> {
     pub fn scroll_to_index_state(mut self, index: State<Option<usize>>, item_extent: f32) -> Self {
         let item_extent = item_extent.max(1.0);
         self.selection_range_resolver = None;
+        self.selection_range_state = None;
         self.selection_index_state = Some(index.clone());
         self.selection_item_extent = Some(item_extent);
         self.selection_target = index.get().map(|index| SelectionScrollTarget {
@@ -496,6 +501,20 @@ impl<V: View> ScrollView<V> {
         self
     }
 
+    /// Bind a vertical reveal range without rebuilding the surrounding view.
+    ///
+    /// The range is in logical content coordinates. An unchanged range preserves
+    /// manual scrolling; `None`, empty and non-finite ranges clear the request.
+    /// Selection-only changes move retained content without measuring it again.
+    pub fn scroll_to_vertical_range_state(mut self, range: State<Option<(f32, f32)>>) -> Self {
+        self.selection_index_state = None;
+        self.selection_item_extent = None;
+        self.selection_target = None;
+        self.selection_range_resolver = None;
+        self.selection_range_state = Some(range);
+        self
+    }
+
     pub(crate) fn scroll_to_layout_range(
         mut self,
         resolver: impl Fn(Size) -> Option<(usize, f32, f32)> + 'static,
@@ -503,6 +522,7 @@ impl<V: View> ScrollView<V> {
         self.selection_index_state = None;
         self.selection_item_extent = None;
         self.selection_target = None;
+        self.selection_range_state = None;
         self.selection_range_resolver = Some(Rc::new(resolver));
         self
     }
@@ -510,6 +530,19 @@ impl<V: View> ScrollView<V> {
     fn current_selection_target(&self, viewport: Size) -> Option<SelectionScrollTarget> {
         if let Some(resolver) = &self.selection_range_resolver {
             return resolved_selection_range(resolver, viewport);
+        }
+        if let Some(range) = &self.selection_range_state {
+            return range.get().and_then(|(start, end)| {
+                (start.is_finite() && end.is_finite() && end > start.max(0.0)).then_some(
+                    SelectionScrollTarget {
+                        axis: ScrollAxis::Vertical,
+                        identity: 0,
+                        index: 0,
+                        offset: start.max(0.0),
+                        item_extent: end - start.max(0.0),
+                    },
+                )
+            });
         }
         if let Some(index) = &self.selection_index_state {
             return index.get().map(|index| SelectionScrollTarget {
@@ -639,6 +672,9 @@ impl<V: View + Clone + 'static> View for ScrollView<V> {
         let mut listenables = self.inner.listenables();
         if let Some(index) = &self.selection_index_state {
             listenables.push(index);
+        }
+        if let Some(range) = &self.selection_range_state {
+            listenables.push(range);
         }
         listenables
     }
@@ -1660,6 +1696,10 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
             self.selection_scroll_pending = true;
         }
         Some(changed)
+    }
+
+    fn owns_view_state(&self) -> bool {
+        true
     }
 
     fn owns_child_viewport(&self) -> bool {
