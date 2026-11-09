@@ -492,6 +492,20 @@ pub trait RenderObject: Any {
         ScrollOffsetUpdate::None
     }
 
+    /// Opt into content-local viewport notifications from ancestor scroll views.
+    /// Custom document renderers can use these hints to cull offscreen paint
+    /// commands while retaining their full layout size.
+    fn depends_on_viewport(&self) -> bool {
+        false
+    }
+
+    /// Update the visible rectangle in this render object's local coordinates.
+    /// Return true when this object's paint commands must be recorded again.
+    /// This does not request layout or invalidate descendant paint records.
+    fn set_viewport_hint(&mut self, _viewport: Rect) -> bool {
+        false
+    }
+
     /// Scroll containers provide their own content-local viewport during
     /// layout and scrolling; an ancestor's hint must not replace it.
     fn owns_child_viewport(&self) -> bool {
@@ -1186,7 +1200,8 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
                 return result;
             }
         }
-        let result = self.view_key().is_some()
+        let result = self.render_object.depends_on_viewport()
+            || self.view_key().is_some()
             || self
                 .children
                 .iter()
@@ -1201,6 +1216,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         }
         if self.render_object.owns_child_viewport() {
             return false;
+        }
+        if self.render_object.set_viewport_hint(viewport) && self.mounted {
+            crate::pipeline::mark_element_needs_self_paint(self.pipeline_id, self.id);
         }
         let mut changed = false;
         for child in self.children.iter_mut() {
@@ -2993,5 +3011,129 @@ mod control_state_tests {
         ));
         assert!(!send(element.as_mut(), mouse(true)));
         assert_eq!(text.get(), "Original");
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod viewport_tests {
+    use super::*;
+    use crate::{
+        event::{MouseEvent, ScrollSource, WheelPhase},
+        pipeline::RenderingPipeline,
+        prelude::*,
+    };
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    #[derive(Clone)]
+    struct Body {
+        visible: Arc<Mutex<Vec<Rect>>>,
+        layouts: Arc<AtomicUsize>,
+    }
+    struct BodyRender {
+        view: Body,
+        viewport: Option<Rect>,
+    }
+    impl View for Body {
+        fn create_element(&self) -> Box<dyn Element> {
+            Box::new(RenderElement::with_view_children_and_updater(
+                self.clone(),
+                |view| BodyRender {
+                    view: view.clone(),
+                    viewport: None,
+                },
+                |_, _| UpdateResult::NoChange,
+                |_| Vec::new(),
+            ))
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+    impl ElementRenderObject for BodyRender {
+        fn layout(&mut self, _: LayoutConstraints) -> Size {
+            self.view.layouts.fetch_add(1, Ordering::Relaxed);
+            Size::new(300.0, 3000.0)
+        }
+        fn size(&self) -> Size {
+            Size::new(300.0, 3000.0)
+        }
+        fn render(&mut self) {}
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn depends_on_viewport(&self) -> bool {
+            true
+        }
+        fn set_viewport_hint(&mut self, viewport: Rect) -> bool {
+            if self.viewport == Some(viewport) {
+                return false;
+            }
+            self.viewport = Some(viewport);
+            self.view.visible.lock().unwrap().push(viewport);
+            true
+        }
+        fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
+            let viewport = self.viewport.unwrap();
+            let color = if viewport.origin.y < 100.0 {
+                Color::rgb(20, 200, 40)
+            } else {
+                Color::rgb(220, 30, 50)
+            };
+            ctx.fill_rect(
+                Rect::from_xywh(
+                    origin.x,
+                    origin.y + viewport.origin.y,
+                    300.0,
+                    viewport.size.height,
+                ),
+                color,
+            );
+            true
+        }
+    }
+    #[test]
+    fn viewport_paint_changes_retain_layout_and_refresh_scrolled_content() {
+        let visible = Arc::new(Mutex::new(Vec::new()));
+        let layouts = Arc::new(AtomicUsize::new(0));
+        let body = Body {
+            visible: visible.clone(),
+            layouts: layouts.clone(),
+        };
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new("Viewport", ScrollView::new(body).frame(300.0, 200.0))
+                .decorated(false)
+                .size(Size::new(300.0, 200.0))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        let first = pipeline.render().unwrap().as_slice()[100 * 300 + 100] & 0xffffff;
+        assert_eq!(first, 0x14c828);
+        let before = layouts.load(Ordering::Relaxed);
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: -1000,
+            x: 100,
+            y: 100,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad
+        })));
+        let pixel = pipeline.render().unwrap().as_slice()[100 * 300 + 100] & 0xffffff;
+        assert_eq!(
+            pixel, 0xdc1e32,
+            "must refresh the viewport-dependent child record"
+        );
+        assert_eq!(
+            layouts.load(Ordering::Relaxed),
+            before,
+            "scrolling must not relayout the document"
+        );
+        assert!(visible.lock().unwrap().last().unwrap().origin.y >= 100.0);
+        pipeline.teardown();
     }
 }
