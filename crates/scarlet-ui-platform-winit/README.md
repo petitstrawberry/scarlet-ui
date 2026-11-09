@@ -57,3 +57,21 @@ counter. Edit shortcuts must operate on the focused field without incrementing
 the native counter. View → Enable Action updates checked/enabled state. Quit is
 vetoed until “Allow closing probe” is clicked, and increments the close-request
 counter instead. The dark input also exercises `TextField::placeholder_color`.
+
+### macOS unified titlebar
+
+`Window::decoration(WindowDecoration::SYSTEM_OVERLAY)` keeps the native traffic
+lights and system frame, hides the native title text, and lets application
+content fill the titlebar. The window title remains available to accessibility
+and window menus. Ordinary `SYSTEM` decorations are unchanged.
+
+The app must reserve its own title strip (at least 28 logical pixels) and keep
+interactive content clear of the traffic lights; a 32px strip with a 90px
+leading reservation is suitable for a compact toolbar. Initiate dragging only
+from that strip via `PlatformWindow::request_move`. Do not make the entire
+editor/content view draggable. ScarletUI does not add custom titlebar height or
+custom window buttons in overlay mode.
+
+This option requires a system frame and is currently supported only by macOS
+Winit. Other Winit hosts return `WindowDecorationUnsupported`; applications
+should select normal platform decorations there.

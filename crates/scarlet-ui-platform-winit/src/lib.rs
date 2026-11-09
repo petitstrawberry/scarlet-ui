@@ -1337,6 +1337,10 @@ pub struct WinitPlatformWindow {
 }
 
 fn validate_window_decoration(decoration: WindowDecoration) -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    if decoration.title_bar == scarlet_ui_core::platform::WindowTitleBar::SystemOverlay {
+        return Err(Error::WindowDecorationUnsupported);
+    }
     if decoration.title_bar.is_system() && !decoration.frame.is_system() {
         return Err(Error::WindowDecorationUnsupported);
     }
@@ -1356,7 +1360,14 @@ fn apply_platform_window_decoration(
     attributes: WindowAttributes,
     decoration: WindowDecoration,
 ) -> WindowAttributes {
-    if decoration.frame.is_system() && !decoration.title_bar.is_system() {
+    if decoration.title_bar == scarlet_ui_core::platform::WindowTitleBar::SystemOverlay {
+        attributes
+            .with_titlebar_transparent(true)
+            .with_title_hidden(true)
+            .with_titlebar_buttons_hidden(false)
+            .with_fullsize_content_view(true)
+            .with_has_shadow(true)
+    } else if decoration.frame.is_system() && !decoration.title_bar.is_system() {
         attributes
             .with_titlebar_transparent(true)
             .with_title_hidden(true)
@@ -2268,6 +2279,16 @@ mod tests {
         )));
         assert!(!system_window_decorations_enabled(WindowDecoration::CUSTOM));
         assert!(!system_window_decorations_enabled(WindowDecoration::NONE));
+    }
+
+    #[test]
+    fn system_overlay_keeps_native_controls_and_requires_a_supported_frame() {
+        assert!(system_window_decorations_enabled(WindowDecoration::SYSTEM_OVERLAY));
+        assert_eq!(validate_window_decoration(WindowDecoration::new(WindowFrame::Custom, WindowTitleBar::SystemOverlay)), Err(Error::WindowDecorationUnsupported));
+        #[cfg(target_os = "macos")]
+        assert!(validate_window_decoration(WindowDecoration::SYSTEM_OVERLAY).is_ok());
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(validate_window_decoration(WindowDecoration::SYSTEM_OVERLAY), Err(Error::WindowDecorationUnsupported));
     }
 
     #[test]

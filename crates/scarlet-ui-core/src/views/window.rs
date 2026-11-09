@@ -2773,6 +2773,19 @@ mod tests {
     use crate::views::Text;
 
     #[test]
+    fn system_overlay_does_not_reserve_a_custom_titlebar_or_border() {
+        let decoration = WindowDecoration::SYSTEM_OVERLAY;
+        assert!(decoration.frame.is_system());
+        assert!(decoration.title_bar.is_system());
+        assert!(!decoration.has_custom_chrome());
+        let layout = WindowContentLayout::for_decoration(decoration);
+        assert_eq!(layout.decoration_size(), Size::ZERO);
+        let window = Window::new("Overlay", crate::views::Text::new("Content"))
+            .decoration(decoration);
+        assert_eq!(window.window_decoration(), decoration);
+    }
+
+    #[test]
     fn opaque_backdrop_culls_only_fully_hidden_shadow_pixels() {
         use crate::renderer::CpuPaintRenderer;
 
