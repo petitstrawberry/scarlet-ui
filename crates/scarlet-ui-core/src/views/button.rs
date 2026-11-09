@@ -597,13 +597,15 @@ impl ButtonRenderObject {
         if self.enabled {
             self.text_color
         } else {
-            ColorPalette::default().text_tertiary()
+            self.text_color.with_opacity(self.text_color.a * 0.45)
         }
     }
 
     fn current_background(&self) -> Color {
         if !self.enabled {
-            return ColorPalette::default().background_secondary();
+            return self
+                .background_color
+                .with_opacity(self.background_color.a * 0.55);
         }
         if self.is_pressed() {
             self.pressed_background_color
@@ -618,7 +620,7 @@ impl ButtonRenderObject {
 
     fn current_border(&self) -> Color {
         if !self.enabled {
-            return ColorPalette::default().divider();
+            return self.border_color.with_opacity(self.border_color.a * 0.55);
         }
         if self.is_pressed() {
             self.border_color.darken(0.08)
@@ -1008,6 +1010,52 @@ mod tests {
         match &context.commands()[filter_index] {
             PaintCommand::BackdropFilterRoundedRect { tint, .. } => *tint,
             _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn disabled_custom_buttons_keep_their_theme_and_transparent_header_face() {
+        for palette in [ColorPalette::light(), ColorPalette::dark()] {
+            let mut button = laid_out(
+                Button::new("Replace All")
+                    .header_style()
+                    .background_color(Color::TRANSPARENT)
+                    .text_color(palette.text())
+                    .enabled(false),
+            );
+            assert_eq!(button.current_background().a, 0.0);
+            let mut paint = PaintContext::new();
+            button.paint(&mut paint, Point::ZERO);
+            assert!(paint.commands().iter().any(|command| matches!(command,
+                PaintCommand::DrawText { color, .. }
+                if *color == palette.text().with_opacity(palette.text().a * 0.45))));
+            button.render();
+            assert!(
+                button
+                    .get_buffer()
+                    .unwrap()
+                    .as_slice()
+                    .iter()
+                    .any(|pixel| pixel >> 24 == 0),
+                "header must retain transparent pixels"
+            );
+
+            let fill = palette.surface();
+            let custom = laid_out(
+                Button::new("Save")
+                    .background_color(fill)
+                    .border_color(palette.border())
+                    .text_color(palette.text())
+                    .enabled(false),
+            );
+            assert_eq!(
+                custom.current_background(),
+                fill.with_opacity(fill.a * 0.55)
+            );
+            assert_eq!(
+                custom.current_border(),
+                palette.border().with_opacity(palette.border().a * 0.55)
+            );
         }
     }
 
