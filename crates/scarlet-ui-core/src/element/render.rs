@@ -499,6 +499,12 @@ pub trait RenderObject: Any {
         false
     }
 
+    /// Whether this container owns view-state bindings in addition to its children.
+    /// Bound scroll targets must rebuild the container itself, not its ancestors.
+    fn owns_view_state(&self) -> bool {
+        false
+    }
+
     /// Update the visible rectangle in this render object's local coordinates.
     /// Return true when this object's paint commands must be recorded again.
     /// This does not request layout or invalidate descendant paint records.
@@ -724,6 +730,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
 
     fn should_subscribe_view_listenables(&self) -> bool {
         self.children.is_empty()
+            || self.render_object.owns_view_state()
             || self
                 .render_object
                 .as_any()
@@ -3134,6 +3141,53 @@ mod viewport_tests {
             "scrolling must not relayout the document"
         );
         assert!(visible.lock().unwrap().last().unwrap().origin.y >= 100.0);
+        pipeline.teardown();
+    }
+    #[test]
+    fn bound_vertical_reveal_moves_retained_content_without_relayout() {
+        let visible = Arc::new(Mutex::new(Vec::new()));
+        let layouts = Arc::new(AtomicUsize::new(0));
+        let range = crate::state::State::new(crate::state::generate_state_id(), None);
+        let body = Body {
+            visible: visible.clone(),
+            layouts: layouts.clone(),
+        };
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new(
+                "Range",
+                ScrollView::new(body)
+                    .scroll_to_vertical_range_state(range.clone())
+                    .frame(300.0, 200.0),
+            )
+            .decorated(false)
+            .size(Size::new(300.0, 200.0))
+            .create_element(),
+        );
+        pipeline.layout_initial();
+        pipeline.render();
+        let before = layouts.load(Ordering::Relaxed);
+        range.set(Some((500.0, 700.0)));
+        assert_eq!(
+            pipeline.render().unwrap().as_slice()[100 * 300 + 100] & 0xffffff,
+            0xdc1e32
+        );
+        assert_eq!(visible.lock().unwrap().last().unwrap().origin.y, 500.0);
+        assert_eq!(layouts.load(Ordering::Relaxed), before);
+        assert!(pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: -100,
+            x: 100,
+            y: 100,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad
+        })));
+        pipeline.render();
+        assert!(visible.lock().unwrap().last().unwrap().origin.y > 500.0);
+        assert_eq!(layouts.load(Ordering::Relaxed), before);
+        for _ in 0..10 {
+            assert!(pipeline.render().is_none());
+        }
         pipeline.teardown();
     }
 }
