@@ -72,6 +72,11 @@ pub struct VisualLine {
 }
 
 impl TextViewLayout {
+    /// Available text area after padding and the line-number gutter.
+    pub fn viewport_size(&self) -> Size {
+        Size::new(self.viewport_width, self.viewport_height)
+    }
+
     /// Compute all visual line metrics for a text view.
     ///
     /// # Arguments
@@ -185,7 +190,7 @@ impl TextViewLayout {
                         padding,
                         &measure,
                     ),
-                    WrapMode::Soft => push_wrapped_lines(
+                    WrapMode::Soft | WrapMode::Code | WrapMode::CodeAnywhere => push_wrapped_lines(
                         &mut visual_lines,
                         logical_line,
                         range.start,
@@ -193,6 +198,8 @@ impl TextViewLayout {
                         text_origin_x - scroll.x,
                         padding,
                         viewport_width,
+                        matches!(wrap_mode, WrapMode::Code | WrapMode::CodeAnywhere),
+                        wrap_mode != WrapMode::CodeAnywhere,
                         &measure,
                     ),
                 }
@@ -209,7 +216,7 @@ impl TextViewLayout {
             .fold(0.0, f32::max);
         let content_width = match wrap_mode {
             WrapMode::None => max_line_width,
-            WrapMode::Soft => viewport_width,
+            WrapMode::Soft | WrapMode::Code | WrapMode::CodeAnywhere => viewport_width,
         };
         let content_height = visual_lines.len() as f32 * line_height;
         let clip_scroll_y = scroll.y - padding + BORDER_WIDTH;
@@ -318,7 +325,7 @@ impl TextViewLayout {
         self.size = size;
         self.viewport_width = (size.width - self.padding * 2.0 - self.gutter_width).max(1.0);
         self.viewport_height = (size.height - self.padding * 2.0).max(1.0);
-        if self.wrap_mode == WrapMode::Soft {
+        if self.wrap_mode != WrapMode::None {
             self.content_width = self.viewport_width;
         }
         self.visible_lines = visible_range(
@@ -333,7 +340,7 @@ impl TextViewLayout {
         let scroll = self.clamp_scroll(requested);
         if scroll != self.scroll {
             for (index, line) in self.visual_lines.iter_mut().enumerate() {
-                line.x = self.text_origin_x - scroll.x;
+                line.x += self.scroll.x - scroll.x;
                 line.y = self.padding + index as f32 * self.line_height - scroll.y;
             }
             self.scroll = scroll;
@@ -466,6 +473,19 @@ impl TextViewLayout {
 }
 
 impl VisualLine {
+    /// Display text for this fragment, with tabs expanded for painting.
+    pub fn display_text(&self) -> &str { &self.text }
+
+    /// Map a display-text byte boundary back to the original document.
+    pub fn source_byte_at_display_byte(&self, byte: usize) -> usize {
+        self.document_byte_for_display_byte(byte.min(self.text.len()))
+    }
+
+    /// Horizontal advance at a display-text byte boundary, relative to this fragment.
+    pub fn display_advance(&self, byte: usize) -> f32 {
+        self.width_to_display_byte(byte.min(self.text.len()))
+    }
+
     fn new(
         logical_line: usize,
         text_range: Range<usize>,
@@ -617,6 +637,8 @@ fn push_wrapped_lines(
     x: f32,
     y: f32,
     max_width: f32,
+    preserve_indent: bool,
+    prefer_breaks: bool,
     measure: &graphics::TextMeasure,
 ) {
     if text.is_empty() {
@@ -634,24 +656,34 @@ fn push_wrapped_lines(
     // Use the same shaped advances as painting, including kerning and marks.
     let (display, offsets) = expand_tabs_with_offsets(text, DEFAULT_TAB_WIDTH);
     let widths = measure.prefix_widths(&display);
+    let mut opportunities = unicode_linebreak::linebreaks(text).peekable();
     let graphemes: Vec<_> = text.grapheme_indices(true).map(|(start, grapheme)| {
         let end = start + grapheme.len();
-        (start, end, grapheme == " " || grapheme == "\t",
-            widths[offsets[end]] - widths[offsets[start]])
+        while opportunities.peek().is_some_and(|(byte, _)| *byte < end) {
+            opportunities.next();
+        }
+        let may_break = opportunities.peek().is_some_and(|(byte, _)| *byte == end);
+        (start, end, may_break, widths[offsets[end]] - widths[offsets[start]])
     }).collect();
+    let indent_end = text.char_indices().find(|(_, ch)| !matches!(ch, ' ' | '\t')).map_or(text.len(), |(byte, _)| byte);
+    let indent = if preserve_indent { widths[offsets[indent_end]] } else { 0.0 };
+    // Deep indentation must not consume the continuation's entire viewport.
+    let indent = if indent < max_width * 0.5 { indent } else { 0.0 };
     let mut start = 0;
     while start < graphemes.len() {
         let mut end = start;
-        let mut last_space = None;
+        let continuation_indent = if start == 0 { 0.0 } else { indent };
+        let available = (max_width - continuation_indent).max(1.0);
+        let mut last_break = None;
         let mut advance = 0.0;
         while end < graphemes.len() {
             advance += graphemes[end].3;
-            if graphics::TextMeasure::rounded_width(advance) > max_width && end > start {
-                end = last_space.unwrap_or(end);
+            if graphics::TextMeasure::rounded_width(advance) > available && end > start {
+                end = last_break.unwrap_or(end);
                 break;
             }
-            if graphemes[end].2 {
-                last_space = Some(end + 1);
+            if prefer_breaks && graphemes[end].2 {
+                last_break = Some(end + 1);
             }
             end += 1;
         }
@@ -662,7 +694,7 @@ fn push_wrapped_lines(
             logical_line,
             line_start + byte_start..line_start + byte_end,
             text[byte_start..byte_end].to_string(),
-            x,
+            x + continuation_indent,
             y,
             measure,
         );

@@ -1226,6 +1226,21 @@ impl ApplicationHandler for WinitPumpHandler {
                 );
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                #[cfg(target_os = "macos")]
+                {
+                    use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+                    if let Key::Character(key) = event.key_without_modifiers() {
+                        let action = self.shared.menus.borrow().option_shortcut(
+                            window_id, key.as_str(), state.modifiers,
+                        );
+                        if let Some((surface, action)) = action {
+                            if event.state == WinitElementState::Pressed {
+                                scarlet_ui_core::menu_model::invoke_menu_callback(surface, &action);
+                            }
+                            return;
+                        }
+                    }
+                }
                 state.push_keyboard_input(&event.logical_key, event.state);
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
