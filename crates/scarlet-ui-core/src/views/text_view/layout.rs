@@ -190,7 +190,7 @@ impl TextViewLayout {
                         padding,
                         &measure,
                     ),
-                    WrapMode::Soft | WrapMode::Code => push_wrapped_lines(
+                    WrapMode::Soft | WrapMode::Code | WrapMode::CodeAnywhere => push_wrapped_lines(
                         &mut visual_lines,
                         logical_line,
                         range.start,
@@ -198,7 +198,8 @@ impl TextViewLayout {
                         text_origin_x - scroll.x,
                         padding,
                         viewport_width,
-                        wrap_mode == WrapMode::Code,
+                        matches!(wrap_mode, WrapMode::Code | WrapMode::CodeAnywhere),
+                        wrap_mode != WrapMode::CodeAnywhere,
                         &measure,
                     ),
                 }
@@ -215,7 +216,7 @@ impl TextViewLayout {
             .fold(0.0, f32::max);
         let content_width = match wrap_mode {
             WrapMode::None => max_line_width,
-            WrapMode::Soft | WrapMode::Code => viewport_width,
+            WrapMode::Soft | WrapMode::Code | WrapMode::CodeAnywhere => viewport_width,
         };
         let content_height = visual_lines.len() as f32 * line_height;
         let clip_scroll_y = scroll.y - padding + BORDER_WIDTH;
@@ -637,6 +638,7 @@ fn push_wrapped_lines(
     y: f32,
     max_width: f32,
     preserve_indent: bool,
+    prefer_breaks: bool,
     measure: &graphics::TextMeasure,
 ) {
     if text.is_empty() {
@@ -680,7 +682,7 @@ fn push_wrapped_lines(
                 end = last_break.unwrap_or(end);
                 break;
             }
-            if graphemes[end].2 {
+            if prefer_breaks && graphemes[end].2 {
                 last_break = Some(end + 1);
             }
             end += 1;

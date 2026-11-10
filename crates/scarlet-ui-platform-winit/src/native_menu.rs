@@ -529,9 +529,17 @@ fn is_model_shortcut(shortcuts: &[Shortcut], key: &str, flags: NSEventModifierFl
         .any(|sc| sc.key == key.to_lowercase() && sc.modifiers == flags & relevant)
 }
 
+fn native_option_shortcut(flags: NSEventModifierFlags) -> bool {
+    flags.contains(NSEventModifierFlags::NSEventModifierFlagOption)
+        && !flags.intersects(NSEventModifierFlags::NSEventModifierFlagCommand | NSEventModifierFlags::NSEventModifierFlagControl)
+}
+
 // Refuse native execution of app-defined keyboard equivalents, while leaving
 // their normal macOS shortcut labels visible. This preserves focused TextField
 // cut/copy/paste/select-all/undo and the app's existing shortcut/chord routing.
+// Option-only combinations must use AppKit's keyboard-layout-aware matching:
+// winit's logical key is the composed character (e.g. Ω for Option+Z), not z.
+// Native activation consumes that key before it can also insert text.
 // Mouse menu activation still goes through ScarletMenuAction.
 declare_class!(
     struct ScarletMenuBar;
@@ -547,7 +555,8 @@ declare_class!(
         #[method(performKeyEquivalent:)]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
             let characters = unsafe { event.charactersIgnoringModifiers() };
-            if characters.is_some_and(|key| is_model_shortcut(self.ivars(), &key.to_string(), unsafe { event.modifierFlags() })) {
+            let flags = unsafe { event.modifierFlags() };
+            if !native_option_shortcut(flags) && characters.is_some_and(|key| is_model_shortcut(self.ivars(), &key.to_string(), flags)) {
                 false
             } else {
                 unsafe { msg_send![super(self), performKeyEquivalent: event] }
@@ -560,6 +569,15 @@ declare_class!(
 mod tests {
     use super::*;
     use scarlet_ui_core::{MenuBarModel, MenuEntry, MenuItemModel};
+
+    #[test]
+    fn option_menu_shortcuts_use_native_layout_matching_without_taking_edit_shortcuts() {
+        assert!(native_option_shortcut(parse_shortcut("Alt+Z").unwrap().modifiers));
+        assert!(native_option_shortcut(parse_shortcut("Alt+Shift+F").unwrap().modifiers));
+        for shortcut in ["Cmd+C", "Cmd+Alt+Z", "Ctrl+Alt+Z", "Ctrl+Z"] {
+            assert!(!native_option_shortcut(parse_shortcut(shortcut).unwrap().modifiers));
+        }
+    }
 
     #[test]
     fn model_round_trip_keeps_nested_state_and_unicode() {

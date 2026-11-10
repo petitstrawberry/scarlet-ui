@@ -752,7 +752,7 @@ impl TextViewRenderObject {
         self.layout.viewport_height = (self.visible_bottom() - self.padding * 2.0).max(1.0);
         let base_width = match self.wrap_mode {
             WrapMode::None => self.layout.max_line_width,
-            WrapMode::Soft | WrapMode::Code => self.layout.viewport_width,
+            WrapMode::Soft | WrapMode::Code | WrapMode::CodeAnywhere => self.layout.viewport_width,
         };
         self.layout.content_width = base_width;
         if !self.preedit.is_empty() {
