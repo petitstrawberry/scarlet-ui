@@ -192,6 +192,34 @@ pub(crate) struct NativeMenus {
 }
 
 impl NativeMenus {
+    /// Option can produce a different logical character (Option+Z is Ω).
+    /// Match only registered Option shortcuts against the keyboard-layout key
+    /// without modifiers; leave all other Option text to winit.
+    pub(crate) fn option_shortcut(
+        &self,
+        window: WindowId,
+        key: &str,
+        modifiers: scarlet_ui_core::event::KeyModifiers,
+    ) -> Option<(u32, String)> {
+        if !modifiers.alt || modifiers.control || modifiers.super_key {
+            return None;
+        }
+        let model = self.windows.get(&window)?;
+        let app = NSApplication::sharedApplication(MainThreadMarker::new()?);
+        let owner = model.owner.load()?;
+        if app.keyWindow().as_deref() != Some(&owner)
+            || unsafe { owner.attachedSheet() }.is_some()
+        {
+            return None;
+        }
+        let mut flags = NSEventModifierFlags::NSEventModifierFlagOption;
+        if modifiers.shift {
+            flags |= NSEventModifierFlags::NSEventModifierFlagShift;
+        }
+        option_action(&model.spec.items, key, flags)
+            .map(|id| (model.surface_id, id.to_owned()))
+    }
+
     pub(crate) fn launched(&mut self) {
         self.launched = true;
         self.refresh();
@@ -306,6 +334,21 @@ impl NativeMenus {
             self.installed = None;
         }
     }
+}
+
+fn option_action<'a>(items: &'a [ItemSpec], key: &str, flags: NSEventModifierFlags) -> Option<&'a str> {
+    for item in items.iter().filter(|item| item.enabled && !item.separator) {
+        if !item.items.is_empty() {
+            if let Some(id) = option_action(&item.items, key, flags) {
+                return Some(id);
+            }
+        } else if item.shortcut.as_deref().and_then(parse_shortcut)
+            .is_some_and(|shortcut| shortcut.key == key.to_lowercase() && shortcut.modifiers == flags)
+        {
+            return Some(&item.id);
+        }
+    }
+    None
 }
 
 impl Drop for NativeMenus {
@@ -529,17 +572,9 @@ fn is_model_shortcut(shortcuts: &[Shortcut], key: &str, flags: NSEventModifierFl
         .any(|sc| sc.key == key.to_lowercase() && sc.modifiers == flags & relevant)
 }
 
-fn native_option_shortcut(flags: NSEventModifierFlags) -> bool {
-    flags.contains(NSEventModifierFlags::NSEventModifierFlagOption)
-        && !flags.intersects(NSEventModifierFlags::NSEventModifierFlagCommand | NSEventModifierFlags::NSEventModifierFlagControl)
-}
-
 // Refuse native execution of app-defined keyboard equivalents, while leaving
 // their normal macOS shortcut labels visible. This preserves focused TextField
 // cut/copy/paste/select-all/undo and the app's existing shortcut/chord routing.
-// Option-only combinations must use AppKit's keyboard-layout-aware matching:
-// winit's logical key is the composed character (e.g. Ω for Option+Z), not z.
-// Native activation consumes that key before it can also insert text.
 // Mouse menu activation still goes through ScarletMenuAction.
 declare_class!(
     struct ScarletMenuBar;
@@ -555,8 +590,7 @@ declare_class!(
         #[method(performKeyEquivalent:)]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
             let characters = unsafe { event.charactersIgnoringModifiers() };
-            let flags = unsafe { event.modifierFlags() };
-            if !native_option_shortcut(flags) && characters.is_some_and(|key| is_model_shortcut(self.ivars(), &key.to_string(), flags)) {
+            if characters.is_some_and(|key| is_model_shortcut(self.ivars(), &key.to_string(), unsafe { event.modifierFlags() })) {
                 false
             } else {
                 unsafe { msg_send![super(self), performKeyEquivalent: event] }
@@ -571,12 +605,19 @@ mod tests {
     use scarlet_ui_core::{MenuBarModel, MenuEntry, MenuItemModel};
 
     #[test]
-    fn option_menu_shortcuts_use_native_layout_matching_without_taking_edit_shortcuts() {
-        assert!(native_option_shortcut(parse_shortcut("Alt+Z").unwrap().modifiers));
-        assert!(native_option_shortcut(parse_shortcut("Alt+Shift+F").unwrap().modifiers));
-        for shortcut in ["Cmd+C", "Cmd+Alt+Z", "Ctrl+Alt+Z", "Ctrl+Z"] {
-            assert!(!native_option_shortcut(parse_shortcut(shortcut).unwrap().modifiers));
-        }
+    fn option_shortcuts_match_only_enabled_registered_layout_keys() {
+        let mut spec = parse_menu(r#"{"items":[{"id":"view","title":"View","items":[{"id":"wrap","title":"Wrap","shortcut":"Alt+Z"}]}]}"#).unwrap();
+        let option = NSEventModifierFlags::NSEventModifierFlagOption;
+        assert_eq!(option_action(&spec.items, "z", option), Some("wrap"));
+        assert_eq!(option_action(&spec.items, "Z", option), Some("wrap"));
+        assert_eq!(option_action(&spec.items, "Ω", option), None);
+        assert_eq!(option_action(&spec.items, "o", option), None);
+        assert_eq!(option_action(&spec.items, "z", option | NSEventModifierFlags::NSEventModifierFlagShift), None);
+        spec.items[0].items[0].enabled = false;
+        assert_eq!(option_action(&spec.items, "z", option), None);
+        spec.items[0].items[0].enabled = true;
+        spec.items[0].enabled = false;
+        assert_eq!(option_action(&spec.items, "z", option), None);
     }
 
     #[test]
