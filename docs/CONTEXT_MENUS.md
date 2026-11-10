@@ -42,6 +42,11 @@ selection. Explicit `TextView::on_copy` and `on_paste` callbacks still take
 precedence. TextField pastes retain its existing single-line normalization;
 TextView preserves newlines.
 
+Hosts with their own undo or asynchronous edit transactions can use
+`TextView::on_edit_action` to handle Copy, Cut, Paste and Select All from both
+shortcuts and the standard context menu. This overrides `on_copy`/`on_paste`;
+ScarletUI leaves clipboard access and all text mutations to the callback.
+
 Clipboard access is asynchronous and limited to 256 KiB of UTF-8 text. Cut
 removes the selected text only after the clipboard write succeeds. Pending cuts
 and pastes are discarded when the editor is replaced, disabled, loses focus,

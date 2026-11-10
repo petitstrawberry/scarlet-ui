@@ -21,9 +21,9 @@ pub use decoration::{TextDiagnosticSpan, TextStyleSpan};
 
 pub use document::{EditDelta, TextDocument, TextPosition};
 pub(crate) use editing::{
-    text_edit_state, apply_text_edit,
-    handle_text_view_focus, handle_text_view_keyboard, handle_text_view_mouse,
+    apply_text_edit, handle_text_view_focus, handle_text_view_keyboard, handle_text_view_mouse,
     handle_text_view_scroll_gesture, handle_text_view_text_input, handle_text_view_touch,
+    text_edit_state,
 };
 pub use layout::{TextViewLayout, VisualLine};
 pub use selection::{TabMode, TextSelection, TextViewScroll, WrapMode};
@@ -85,6 +85,7 @@ pub struct TextView {
     border_color: Color,
     focused_border_color: Color,
     borderless: bool,
+    on_edit_action: Option<Arc<dyn Fn(crate::clipboard::TextEditAction) + 'static>>,
     on_copy: Option<Arc<dyn for<'a> Fn(Cow<'a, str>) + 'static>>,
     on_paste: Option<Arc<dyn Fn() -> Option<Cow<'static, str>> + 'static>>,
     on_text_change: Option<Arc<dyn Fn(&EditDelta) + 'static>>,
@@ -94,6 +95,18 @@ pub struct TextView {
 }
 
 impl TextView {
+    /// Route standard clipboard and selection commands to the host editor.
+    /// The host owns asynchronous completion and undo transactions; ScarletUI
+    /// does not mutate text or touch the clipboard for these commands.
+    /// This takes precedence over `on_copy` and `on_paste`.
+    pub fn on_edit_action(
+        mut self,
+        callback: impl Fn(crate::clipboard::TextEditAction) + 'static,
+    ) -> Self {
+        self.on_edit_action = Some(Arc::new(callback));
+        self
+    }
+
     pub fn text_spans(mut self, spans: Vec<TextStyleSpan>) -> Self {
         self.decorations.foreground =
             DecorationIndex::new(spans.into_iter().map(|span| (span.range, span.color)));
@@ -170,6 +183,7 @@ impl TextView {
             border_color: palette.divider(),
             focused_border_color: style::focus_highlight(&palette),
             borderless: false,
+            on_edit_action: None,
             on_copy: None,
             on_paste: None,
             on_text_change: None,
