@@ -166,7 +166,7 @@ pub use views::{
     BitmapImage, CanvasView, ContentShell, Divider, DividerOrientation, GridView, HeaderBar,
     HorizontalSizeClass, IconView, Image, ImageFit, ImageSource, ListView, ProgressView,
     ScrollAxis, ScrollView, ScrollWheelDirection, ScrollbarVisibility, Select, SelectStyle, Slider,
-    TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, Toggle, VectorImageData,
+    TabBarPlacement, TabBarPosition, TabItem, TabPane, TabStyle, TabView, Toggle, VectorImageData,
     VectorTriangle, VerticalSizeClass, WindowSizeClass,
 };
 pub use views::{
@@ -232,7 +232,7 @@ pub mod prelude {
         BitmapImage, CanvasView, ContentShell, Divider, DividerOrientation, GridView, HeaderBar,
         HorizontalSizeClass, IconView, Image, ImageFit, ImageSource, ListView, ProgressView,
         ScrollAxis, ScrollView, ScrollWheelDirection, ScrollbarVisibility, Select, SelectStyle,
-        Slider, TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, Toggle,
+        Slider, TabBarPlacement, TabBarPosition, TabItem, TabPane, TabStyle, TabView, Toggle,
         VectorImageData, VectorTriangle, VerticalSizeClass, WindowSizeClass,
     };
     pub use crate::views::{
