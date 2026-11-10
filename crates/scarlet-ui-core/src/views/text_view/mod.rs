@@ -635,6 +635,13 @@ pub struct TextViewRenderObject {
 }
 
 impl TextViewRenderObject {
+    /// The measured visual lines used by painting and hit testing.
+    /// Parent layout containers may inspect this after laying out the text view
+    /// to synchronize an overview or ruler without measuring the document again.
+    pub fn text_layout(&self) -> &TextViewLayout {
+        &self.layout
+    }
+
     /// Create a render object from a text view.
     ///
     /// # Arguments
