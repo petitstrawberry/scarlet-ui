@@ -651,7 +651,11 @@ impl<'a> PaintContext<'a> {
             |value: f32, origin: f32| ((value + origin) * scale) as i32 as f32 / scale - origin;
         for (index, command) in result.commands.iter_mut().enumerate() {
             match command {
-                PaintCommand::DrawText { position, .. } => {
+                PaintCommand::DrawText { position, font_size_px, font_stack, .. } => {
+                    let ascent = match font_stack {
+                        Some(stack) => crate::graphics::font_metrics_sized_with_font_stack(*font_size_px * scale, stack),
+                        None => crate::graphics::font_metrics_sized(*font_size_px * scale),
+                    }.ascent;
                     text_positions.push((
                         index,
                         Point::new(
@@ -662,11 +666,9 @@ impl<'a> PaintContext<'a> {
                                 / scale
                                 - base.x
                                 + offset.x,
-                            crate::graphics::text_origin_physical(
-                                position.y + scene_origin.y,
-                                scale_milli,
-                            ) as f32
+                            libm::floorf((position.y + scene_origin.y) * scale + ascent + 0.5)
                                 / scale
+                                - ascent / scale
                                 - base.y
                                 + offset.y,
                         ),
@@ -1175,7 +1177,9 @@ impl<'a> PaintContext<'a> {
                     // Use the same glyph masks and integer origins as Canvas;
                     // font advance alone misses italic and fallback overhangs.
                     let x = crate::graphics::text_origin_physical(position.x, scale_milli) as f32;
-                    let y = crate::graphics::text_origin_physical(position.y, scale_milli) as f32;
+                    let y = crate::graphics::text_origin_y_physical(
+                        position.y, *font_size_px, scale_milli, font_stack.as_deref(),
+                    ) as f32;
                     let glyphs = match font_stack {
                         Some(stack) => crate::graphics::rasterize_text_cached_with_font_stack(
                             text,
@@ -1727,7 +1731,9 @@ fn command_paint_bounds(
             ..
         } => {
             let x = crate::graphics::text_origin_physical(position.x, scale_milli) as f32;
-            let y = crate::graphics::text_origin_physical(position.y, scale_milli) as f32;
+            let y = crate::graphics::text_origin_y_physical(
+                        position.y, *font_size_px, scale_milli, font_stack.as_deref(),
+                    ) as f32;
             let mut bounds = None;
             let glyphs = match font_stack {
                 Some(stack) => crate::graphics::rasterize_text_cached_with_font_stack(
@@ -5249,7 +5255,11 @@ mod tests {
             let glyph =
                 &crate::graphics::rasterize_text_cached_with_font_stack("A", 12., scale, &font)[0];
             let factor = scale as f32 / 1000.;
-            let expected_y = libm::floorf(15.75 * factor + 0.5) as u32 + glyph.y as u32;
+            // The fixture's ascent is 1160 units/em. Translate the floating
+            // baseline first, then snap once; glyph masks cache its local snap.
+            let ascent = 12.0 * 1.160;
+            let expected_y = (libm::floorf((15.75 + ascent) * factor + 0.5) as i32
+                + glyph.y - libm::floorf(ascent * factor + 0.5) as i32) as u32;
             let first_ink_row = (0..expected.buffer().height())
                 .find(|y| {
                     (0..expected.buffer().width())

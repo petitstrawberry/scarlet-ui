@@ -387,7 +387,10 @@ pub(crate) fn control_padding(explicit: Option<f32>) -> EdgeInsets {
 pub(crate) const CONTROL_GAP: f32 = 8.0;
 
 pub(crate) fn control_text_y(height: f32, font_size: f32) -> f32 {
-    ((height - crate::graphics::line_height_sized(font_size) as f32) * 0.5).max(0.0)
+    // Like Qt's single-line AlignVCenter: center ascent + descent, then place
+    // the baseline. Leading belongs between lines, not around a control label.
+    let metrics = crate::graphics::font_metrics_sized(font_size);
+    metrics.centered_baseline(height) - metrics.ascent
 }
 
 pub(crate) fn control_fill(palette: &ColorPalette, hovered: bool, pressed: bool) -> Color {

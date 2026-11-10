@@ -476,14 +476,8 @@ impl VisualLine {
         document_to_display_offsets: Vec<usize>,
         measure: &graphics::TextMeasure,
     ) -> Self {
-        let mut prefix_widths = alloc::vec![0.0; text.len() + 1];
-        let mut advance = 0.0;
-        for (byte, ch) in text.char_indices() {
-            let start_width = graphics::TextMeasure::rounded_width(advance);
-            prefix_widths[byte..byte + ch.len_utf8()].fill(start_width);
-            advance += measure.advance(ch);
-            prefix_widths[byte + ch.len_utf8()] = graphics::TextMeasure::rounded_width(advance);
-        }
+        let prefix_widths = measure.prefix_widths(&text).into_iter()
+            .map(graphics::TextMeasure::rounded_width).collect();
         let mut line = Self {
             logical_line,
             text_range,
@@ -637,38 +631,21 @@ fn push_wrapped_lines(
         );
         return;
     }
-    // Measure scalars once. Each candidate row then visits advances, rather
-    // than repeatedly expanding and remeasuring its growing text prefix.
-    let mut advances = Vec::with_capacity(text.len());
-    let graphemes: Vec<_> = text
-        .grapheme_indices(true)
-        .map(|(start, grapheme)| {
-            let advance_start = advances.len();
-            for ch in grapheme.chars() {
-                let (ch, repeats) = if ch == '\t' {
-                    (' ', DEFAULT_TAB_WIDTH)
-                } else {
-                    (ch, 1)
-                };
-                advances.extend(core::iter::repeat_n(measure.advance(ch), repeats));
-            }
-            (
-                start,
-                start + grapheme.len(),
-                grapheme == " " || grapheme == "\t",
-                advance_start..advances.len(),
-            )
-        })
-        .collect();
+    // Use the same shaped advances as painting, including kerning and marks.
+    let (display, offsets) = expand_tabs_with_offsets(text, DEFAULT_TAB_WIDTH);
+    let widths = measure.prefix_widths(&display);
+    let graphemes: Vec<_> = text.grapheme_indices(true).map(|(start, grapheme)| {
+        let end = start + grapheme.len();
+        (start, end, grapheme == " " || grapheme == "\t",
+            widths[offsets[end]] - widths[offsets[start]])
+    }).collect();
     let mut start = 0;
     while start < graphemes.len() {
         let mut end = start;
         let mut last_space = None;
         let mut advance = 0.0;
         while end < graphemes.len() {
-            for width in &advances[graphemes[end].3.clone()] {
-                advance += width;
-            }
+            advance += graphemes[end].3;
             if graphics::TextMeasure::rounded_width(advance) > max_width && end > start {
                 end = last_space.unwrap_or(end);
                 break;

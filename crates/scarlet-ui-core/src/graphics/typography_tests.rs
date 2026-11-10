@@ -163,3 +163,138 @@ fn missing_join_and_variation_controls_add_neither_ink_nor_width() {
         assert_eq!(measure.advance(ch), 0.0);
     }
 }
+
+#[test]
+fn centered_controls_use_fractional_ascent_descent_without_line_leading() {
+    let stack = stack();
+    for size in [9.5, 13.0, 17.25] {
+        let metrics = font_metrics_sized_with_font_stack(size, &stack);
+        assert!((metrics.ascent - size * 1.160).abs() < 0.0001);
+        assert!((metrics.descent - size * 0.288).abs() < 0.0001);
+        for height in [24.0, 31.0, 40.0] {
+            let baseline = metrics.centered_baseline(height);
+            let above = baseline - metrics.ascent;
+            let below = height - baseline - metrics.descent;
+            assert!((above - below).abs() < 0.0001);
+            let spaced = FontMetrics {
+                leading: 9.75,
+                ..metrics
+            };
+            assert_eq!(spaced.centered_baseline(height), baseline);
+            // Integer line-height placement must not silently return here.
+            let rounded_top =
+                (height - line_height_sized_with_font_stack(size, &stack) as f32) * 0.5;
+            assert!((above - rounded_top).abs() > 0.01);
+        }
+    }
+}
+
+#[test]
+fn centered_label_baseline_rounds_once_on_the_physical_grid() {
+    let stack = stack();
+    let mut independent_rounding_would_differ = false;
+    for size in [9.5, 13.0, 17.25] {
+        let logical = font_metrics_sized_with_font_stack(size, &stack);
+        for dpi in [1000, 1250, 1500, 2000, 3000] {
+            let scale = dpi as f32 / 1000.0;
+            let physical = font_metrics_sized_with_font_stack(size * scale, &stack);
+            for height in [24.0, 31.0, 40.0] {
+                for translation in [-10.25, 0.0, 0.5, 20.25] {
+                    let baseline = logical.centered_baseline(height) + translation;
+                    let top = baseline - logical.ascent;
+                    let glyph_baseline = libm::floorf(physical.ascent + 0.5) as i32;
+                    let actual =
+                        text_origin_y_physical(top, size, dpi, Some(&stack)) + glyph_baseline;
+                    let expected = text_origin_physical(baseline, dpi);
+                    assert_eq!(actual, expected, "size={size}, dpi={dpi}, height={height}");
+                    independent_rounding_would_differ |=
+                        text_origin_physical(top, dpi) + glyph_baseline != expected;
+                }
+            }
+        }
+    }
+    assert!(
+        independent_rounding_would_differ,
+        "fixture must catch double rounding"
+    );
+}
+
+fn shaping_stack() -> FontStack {
+    FontStack::new(include_bytes!("../testing/fonts/shaping.ttf")).unwrap()
+}
+
+#[test]
+fn opentype_positions_and_carets_share_the_shaped_string() {
+    let font = shaping_stack();
+    let layout = shaping::shape_text("AVfiA\u{301}", 20., &font);
+    // GPOS A/V -120, GSUB fi 510 instead of 350+280, combining acute zero.
+    assert!((layout.width - (700. - 120. + 690. + 510. + 700.) * 0.02).abs() < 0.001);
+    assert_eq!(layout.glyphs.len(), 5);
+    assert!((layout.glyphs[1].x - 11.6).abs() < 0.001);
+    assert!((layout.glyphs[4].x - (35.6 + 7.)).abs() < 0.001);
+    assert!((layout.glyphs[4].y + 16.).abs() < 0.001);
+    let measure = TextMeasure::with_font_stack(20., &font);
+    assert_eq!(measure.prefix_widths("AVfiA\u{301}"), layout.prefix_widths);
+    assert_eq!(*layout.prefix_widths.last().unwrap(), layout.width);
+    assert_eq!(measure_text_sized_with_font_stack("AVfiA\u{301}", 20., &font).0, 50);
+}
+
+#[test]
+fn fractional_glyph_coverage_preserves_spacing_instead_of_truncating_each_origin() {
+    let font = shaping_stack();
+    for scale in [1000, 1250, 1500, 2000] {
+        for text in ["AVAVAV", "iiiiiiii", "fi fi A\u{301}"] {
+            let size = 13.25 * scale as f32 / 1000.;
+            let layout = shaping::shape_text(text, size, &font);
+            let masks = rasterize_text_with_font_stack(text, 13.25, scale, &font);
+            let scaled = font.primary.as_scaled(em_scale(&font.primary, size));
+            let mut index = 0;
+            for glyph in &layout.glyphs {
+                let x = libm::floorf(glyph.x * 4. + 0.5) / 4.;
+                let baseline = libm::floorf(scaled.ascent() + glyph.y + 0.5);
+                let outline = font.primary.outline_glyph(ab_glyph::GlyphId(glyph.id)
+                    .with_scale_and_position(scaled.scale, point(x, baseline)));
+                let Some(outline) = outline else { continue };
+                let bounds = outline.px_bounds();
+                let mask = &masks[index];
+                assert_eq!((mask.x, mask.y), (bounds.min.x as i32, bounds.min.y as i32));
+                assert_eq!((mask.width, mask.height), (bounds.width() as u32, bounds.height() as u32));
+                // Independent full-position outline vs cached fractional mask.
+                outline.draw(|px, py, coverage| {
+                    let actual = mask.mask[(py * mask.width + px) as usize];
+                    assert!((actual as i32 - (coverage * 255.) as i32).abs() <= 1);
+                });
+                index += 1;
+            }
+            assert_eq!(index, masks.len());
+        }
+    }
+    let masks = rasterize_text_with_font_stack("iiii", 13., 1000, &font);
+    assert_ne!(masks[0].key.subpixel_x, masks[1].key.subpixel_x);
+    assert_ne!(masks[0].mask, masks[1].mask);
+}
+
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
+#[test]
+fn shaping_uses_the_selected_collection_face() {
+    let face = discovered_font_ref(DiscoveredFont {
+        bytes: include_bytes!("../testing/fonts/shaping-collection.ttc").to_vec(), index: 1,
+    }).unwrap();
+    let font = FontStack { primary: face, fallbacks: Vec::new(), cache_id: next_font_stack_id() };
+    let expected = shaping::shape_text("AVfi", 20., &shaping_stack());
+    let actual = shaping::shape_text("AVfi", 20., &font);
+    assert_eq!(actual.width, expected.width);
+    assert_eq!(actual.glyphs.len(), 3);
+    assert_eq!(rasterize_text_with_font_stack("AVfi", 20., 2000, &font).len(), 3);
+}
+
+
+#[test]
+fn shaped_layout_cache_reuses_storage_and_separates_fonts_and_sizes() {
+    let font = shaping_stack();
+    let first = shaping::shape_text("AV fi", 13.25, &font);
+    let second = shaping::shape_text("AV fi", 13.25, &font);
+    assert!(Arc::ptr_eq(&first, &second));
+    assert!(!Arc::ptr_eq(&first, &shaping::shape_text("AV fi", 13.5, &font)));
+    assert!(!Arc::ptr_eq(&first, &shaping::shape_text("AV fi", 13.25, &stack())));
+}

@@ -32,15 +32,15 @@ em, using macOS-like desktop density as the visual reference. Apps use 11–12
 for supporting text and larger sizes only for headings or prominent values.
 Output scaling, glyph advances and fallback sizing are unchanged.
 
-Menu items, popup rows, selects, tabs and bottom navigation align text using
-measured line height. Guesses such as `font_size * 1.2` and fixed 15/16-pixel
+Menu items, popup rows and bottom navigation align text using measured line
+metrics. Single-line buttons, selects and tabs use the baseline rule below. Guesses such as `font_size * 1.2` and fixed 15/16-pixel
 heights placed the corrected text too low. This is a control-layout correction,
 not an adjustment to the glyph baseline or a global upward pixel offset.
 
 Fractional line origins are retained through layout, recording and nested scroll
-translations. CPU and SGFX snap once to the nearest physical pixel; they do not
-truncate logical coordinates before applying output scale. Glyph baselines also
-round to the nearest physical pixel. This preserves a centered 9.5px origin at
+translations. CPU and SGFX translate the baseline before snapping to the nearest
+physical pixel, compensating the rounded ascent already stored in cached masks.
+They do not independently round the logical top and ascent. This preserves a centered 9.5px origin at
 2× as 19px instead of moving it up to 18px. Half-pixel ties use a consistent
 direction across the window origin so translated text meshes and raster tiles
 can retain their pixels without introducing an origin-dependent shift.
@@ -99,8 +99,86 @@ glyph placement, fallback baselines, fractional cache behavior, text prefixes,
 zero-width join/variation formatting controls and multiline metrics. Existing
 text layout and rendering tests cover editing.
 
-The renderer currently lays out Unicode scalars and does not claim complete
-script shaping, ligatures, bidirectional layout or kerning. This correction
-changes size conversion and cache identity, not the shaping model. Join and
-variation controls do not draw replacement marks or add phantom width, even if
-the selected fonts omit them; a joined emoji may still draw as separate glyphs.
+Text measurement and rasterization now use OpenType glyph runs from Rustybuzz,
+including GPOS positioning, standard proportional-font ligatures and combining
+marks. The surrounding controls still use an LTR paragraph/caret model; full Unicode
+bidi itemization and color emoji rendering are not claimed.
+
+
+## Single-line control baselines
+
+Buttons and TabView now share baseline placement based on floating-point primary
+font ascent and descent. For control height `H`, ascent `A` and positive descent
+`D`, the baseline is `(H - A - D) / 2 + A`. PaintCommand's top-origin is then
+`baseline - A`; logical coordinates stay fractional through recording. Inter-line
+leading and integer-rounded line advances are not used to center a single label.
+This also keeps labels with descenders, capitals, Japanese text and symbols on
+the same baseline rather than moving them according to their ink bounds.
+
+The reference is Qt 6's single-line text layout: QCommonStyle requests
+AlignVCenter for push-button labels; qt_format_text centers the line's height
+without initial/final inter-line leading. QFontMetricsF defines height as
+ascent + descent, with leading separate. These are independently implemented
+metric calculations; no Qt source is included.
+
+- https://doc.qt.io/qt-6/qfontmetricsf.html#height
+- https://github.com/qt/qtbase/blob/6.10/src/widgets/styles/qcommonstyle.cpp
+- https://github.com/qt/qtbase/blob/6.10/src/gui/painting/qpainter.cpp
+
+Regressions check known font-table metrics at fractional sizes, exclusion of
+leading, and equal button/tab baselines across labels and control heights.
+
+Validation: 734 core tests passed (5 optional tests ignored), followed by all 12
+button tests after adding fractional legacy/paint pixel parity coverage.
+
+The physical-baseline follow-up also updates text damage bounds, cached-tile
+origins and retained SGFX replay anchors. This prevents a correct first paint
+from shifting on partial redraw or scrolling. Tests compare translated baseline
+positions at 100%, 125%, 150%, 200% and 300%, and compare retained GPU vertices
+against fresh submission at multiple fractional origins and scales.
+
+Final baseline/replay validation passed 736 core tests (5 optional tests ignored)
+and all 136 SGFX renderer tests.
+
+
+## Shaped glyph advances and horizontal raster phases
+
+The previous scalar loop ignored pair positioning and substitutions, and placed
+all outlines at integer x coordinates. Retaining a fractional accumulated width
+was not enough: truncating every glyph produced uneven letter spacing. Controls
+and TabPane did not change that underlying algorithm.
+
+The shared layout now obtains glyph IDs, advances and offsets from Rustybuzz,
+using the same font bytes and collection face index as ab_glyph. Measurement,
+TextView caret clusters and CPU/SGFX rasterization consume that layout. Raster
+coverage retains four horizontal subpixel phases (as in Skia's two-bit glyph
+phase cache) instead of discarding each fractional glyph origin. The cache key
+includes the shaped glyph ID and phase, so ligatures and shifted masks cannot
+alias nominal characters or another coverage mask. Existing bounded warm-run
+caches and SGFX atlas reuse remain in place.
+
+References (no source copied):
+- https://docs.rs/rustybuzz/0.19.0/rustybuzz/
+- https://doc.qt.io/qt-6/qtextlayout.html
+- https://github.com/google/skia/blob/main/src/core/SkGlyph.h
+
+Original generated font fixtures include GPOS A/V kerning, a GSUB fi ligature,
+combining-mark positioning and a nonzero collection face. Tests compare mask
+coverage against an independent full-position ab_glyph outline at 100%, 125%,
+150% and 200%, and assert caret positions from known font-table values.
+
+Rustybuzz 0.19 uses its own ttf-parser 0.24. The 0.20 dependency would unify
+variable-font features into ab_glyph's ttf-parser 0.25: on this macOS host that
+makes System Font outlines unavailable and silently selects Helvetica. The
+separate parser preserves the exact pre-change System Font bytes and metrics;
+this was checked against an isolated baseline checkout. No font-family or font
+size adjustment is used to compensate for that dependency side effect.
+
+Validation for the shaped-text change: 740 core tests passed (5 optional tests
+ignored), and 136 SGFX renderer tests passed. Warm-run allocation/cache tests,
+fractional retained replay, selection, wrapping, IME and touch scrolling are
+included in those suites.
+
+Parsed shaping plans are cached per face and script, and bounded shared layouts
+retain measured widths, glyph positions and caret clusters. All faces use the
+same OpenType feature policy; no font-name or monospace branches are applied.

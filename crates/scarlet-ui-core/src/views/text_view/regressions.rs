@@ -161,31 +161,22 @@ fn soft_wrap_preserves_every_source_space_tab_and_grapheme() {
 }
 
 #[test]
-fn cached_caret_widths_match_measurement_at_all_unicode_boundaries() {
-    let text = "Wa é e\u{301} 日本\t👩‍💻🇯🇵 finish";
-    let document = TextDocument::from_str(text);
-    let layout = TextViewLayout::compute(
-        &document,
-        15.25,
-        8.0,
-        WrapMode::None,
-        Size::new(700.0, 80.0),
-        TextViewScroll::default(),
-        false,
+fn cached_carets_use_shaped_clusters_and_preserve_document_offsets() {
+    let font = Arc::new(graphics::FontStack::new(include_bytes!(
+        "../../testing/fonts/shaping.ttf"
+    )).unwrap().with_fallback(include_bytes!("../../testing/fonts/metrics-primary.ttf")).unwrap()
+        .with_fallback(include_bytes!("../../testing/fonts/metrics-fallback.ttf")).unwrap());
+    let document = TextDocument::from_str("AVfiA\u{301}日☃\t");
+    let layout = TextViewLayout::compute_with_font_stack(
+        &document, 20., 8., WrapMode::None, Size::new(700., 80.),
+        TextViewScroll::default(), false, Some(&font),
     );
-    for (byte, _) in text
-        .char_indices()
-        .chain(core::iter::once((text.len(), ' ')))
-    {
-        let expected =
-            graphics::measure_text_sized(&text[..byte].replace('\t', "    "), 15.25).0 as f32;
-        assert_eq!(
-            layout
-                .cursor_rect(TextPosition::new(byte), &document)
-                .origin
-                .x,
-            8.0 + expected
-        );
+    // Font table oracle: A/V kern -120, fi ligature 510 units, zero-width
+    // combining acute, full-em fallback glyphs and four 300-unit spaces.
+    for (byte, expected) in [(0, 0.), (1, 12.), (2, 26.), (3, 31.), (4, 36.),
+        (7, 50.), (10, 70.), (13, 90.), (14, 114.)] {
+        assert_eq!(layout.cursor_rect(TextPosition::new(byte), &document).origin.x,
+            8. + expected, "byte={byte}");
     }
 }
 

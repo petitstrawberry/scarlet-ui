@@ -1102,7 +1102,11 @@ mod tests {
             {
                 let bounds = vertex_bounds(vertices);
                 assert_eq!(bounds.x, (scale_text_origin(10.75, scale) + glyph.x) as f32);
-                assert_eq!(bounds.y, (scale_text_origin(12.75, scale) + glyph.y) as f32);
+                let factor = scale as f32 / 1000.0;
+                let ascent = 20.0 * 1.160;
+                let baseline = libm::floorf((12.75 + ascent) * factor + 0.5) as i32;
+                let cached_ascent = libm::floorf(ascent * factor + 0.5) as i32;
+                assert_eq!(bounds.y, (baseline - cached_ascent + glyph.y) as f32);
                 assert_eq!(bounds.width, glyph.width as f32);
                 assert_eq!(bounds.height, glyph.height as f32);
                 assert!(
@@ -1151,68 +1155,89 @@ mod tests {
     }
     #[test]
     fn fractional_scroll_replay_matches_flat_shape_text_and_image_vertices() {
-        let mut encoder = encoder();
-        let mut executor = Executor::default();
-        let mut recording = PaintContext::new();
-        recording.fill_rounded_rect(Rect::from_xywh(0., 0., 100., 40.), 4., UiColor::WHITE);
-        recording.draw_text(Point::new(0.5, 12.5), "Hello", UiColor::BLACK, 13.);
-        recording.draw_text(Point::new(60., 13.), "World", UiColor::BLACK, 12.);
-        recording.draw_buffer_rect_shared(
-            Rect::from_xywh(4.5, 2.5, 8., 8.),
-            Rect::from_xywh(0., 0., 8., 8.),
-            Arc::new(Buffer::new(Size::new(8., 8.))),
-            1.,
-        );
-        let list = recording.into_display_list();
-        let area = PixelBounds {
-            x: 0,
-            y: 0,
-            width: 200,
-            height: 120,
-        };
-        encoder.advance_frame_serial();
-        let warm = paint(list.clone(), Point::new(10., 20.));
-        encoder
-            .lower_retained(&mut executor, &warm, 2000, area)
-            .unwrap();
-        let bytes = executor.buffer_data[0].clone();
-        for origin in [Point::new(10.25, 20.25), Point::new(10.75, 20.75)] {
-            encoder.advance_frame_serial();
-            let context = paint(list.clone(), origin);
-            let replay = encoder
-                .lower_retained(&mut executor, &context, 2000, area)
-                .unwrap();
-            let flat = context.flattened();
-            let reference = encoder.lower_once(&flat, 2000, area).unwrap();
-            let mut positions = Vec::new();
-            for draw in replay.draws {
-                let start = draw.geometry.first_vertex as usize * PAINT_VERTEX_STRIDE as usize;
-                let end =
-                    start + draw.geometry.vertex_count as usize * PAINT_VERTEX_STRIDE as usize;
-                for vertex in bytes[start..end].chunks_exact(PAINT_VERTEX_STRIDE as usize) {
-                    positions.push([
-                        f32::from_le_bytes(vertex[0..4].try_into().unwrap()) + draw.offset[0],
-                        f32::from_le_bytes(vertex[4..8].try_into().unwrap()) + draw.offset[1],
-                    ]);
-                }
+        for scale in [1000, 1250, 2000] {
+            let mut encoder = encoder();
+            let mut executor = Executor::default();
+            let mut recording = PaintContext::new();
+            recording.fill_rounded_rect(Rect::from_xywh(0., 0., 100., 40.), 4., UiColor::WHITE);
+            recording.draw_text(Point::new(0.5, 12.5), "Hello", UiColor::BLACK, 13.);
+            recording.draw_text(Point::new(60., 13.), "World", UiColor::BLACK, 12.);
+            if scale % 1000 == 0 {
+            recording.draw_buffer_rect_shared(
+                Rect::from_xywh(4.5, 2.5, 8., 8.),
+                Rect::from_xywh(0., 0., 8., 8.),
+                Arc::new(Buffer::new(Size::new(8., 8.))),
+                1.,
+            );
             }
-            let expected: Vec<_> = reference.vertex_bytes
-                [..reference.vertex_bytes.len() - 3 * PAINT_VERTEX_STRIDE as usize]
-                .chunks_exact(PAINT_VERTEX_STRIDE as usize)
-                .map(|vertex| {
-                    [
-                        f32::from_le_bytes(vertex[0..4].try_into().unwrap()),
-                        f32::from_le_bytes(vertex[4..8].try_into().unwrap()),
-                    ]
-                })
-                .collect();
-            assert_eq!(positions.len(), expected.len());
-            for (actual, expected) in positions.iter().zip(expected) {
-                assert!(
-                    (actual[0] - expected[0]).abs() < 0.001
-                        && (actual[1] - expected[1]).abs() < 0.001,
-                    "{actual:?} != {expected:?}"
-                );
+            let font = Arc::new(
+                scarlet_ui_core::graphics::FontStack::new(include_bytes!(
+                    "../../../scarlet-ui-core/src/testing/fonts/metrics-primary.ttf"
+                ))
+                .unwrap(),
+            );
+            recording.draw_text_with_font_stack(
+                Point::new(0.5, 2.5),
+                "A日",
+                UiColor::BLACK,
+                13.25,
+                font,
+            );
+            let list = recording.into_display_list();
+            let area = PixelBounds {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 120,
+            };
+            encoder.advance_frame_serial();
+            let warm = paint(list.clone(), Point::new(10., 20.));
+            encoder
+                .lower_retained(&mut executor, &warm, scale, area)
+                .unwrap();
+            let bytes = executor.buffer_data[0].clone();
+            for origin in [
+                Point::new(10.25, 20.25),
+                Point::new(10.75, 20.75),
+                Point::new(10.85, 20.85),
+            ] {
+                encoder.advance_frame_serial();
+                let context = paint(list.clone(), origin);
+                let replay = encoder
+                    .lower_retained(&mut executor, &context, scale, area)
+                    .unwrap();
+                let flat = context.flattened();
+                let reference = encoder.lower_once(&flat, scale, area).unwrap();
+                let mut positions = Vec::new();
+                for draw in replay.draws {
+                    let start = draw.geometry.first_vertex as usize * PAINT_VERTEX_STRIDE as usize;
+                    let end =
+                        start + draw.geometry.vertex_count as usize * PAINT_VERTEX_STRIDE as usize;
+                    for vertex in bytes[start..end].chunks_exact(PAINT_VERTEX_STRIDE as usize) {
+                        positions.push([
+                            f32::from_le_bytes(vertex[0..4].try_into().unwrap()) + draw.offset[0],
+                            f32::from_le_bytes(vertex[4..8].try_into().unwrap()) + draw.offset[1],
+                        ]);
+                    }
+                }
+                let expected: Vec<_> = reference.vertex_bytes
+                    [..reference.vertex_bytes.len() - 3 * PAINT_VERTEX_STRIDE as usize]
+                    .chunks_exact(PAINT_VERTEX_STRIDE as usize)
+                    .map(|vertex| {
+                        [
+                            f32::from_le_bytes(vertex[0..4].try_into().unwrap()),
+                            f32::from_le_bytes(vertex[4..8].try_into().unwrap()),
+                        ]
+                    })
+                    .collect();
+                assert_eq!(positions.len(), expected.len());
+                for (actual, expected) in positions.iter().zip(expected) {
+                    assert!(
+                        (actual[0] - expected[0]).abs() < 0.001
+                            && (actual[1] - expected[1]).abs() < 0.001,
+                        "{actual:?} != {expected:?}"
+                    );
+                }
             }
         }
     }
