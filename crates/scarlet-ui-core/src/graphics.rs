@@ -10,6 +10,9 @@ use alloc::vec::Vec;
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+#[path = "graphics/shaping.rs"]
+mod shaping;
+
 use ab_glyph::{Font, FontArc, Glyph, InvalidFont, PxScale, PxScaleFont, ScaleFont, point};
 
 #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
@@ -116,8 +119,10 @@ mod scale_context_tests {
 /// Stable cache key for a rasterized glyph mask.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GlyphRasterKey {
-    /// Unicode scalar value selected after font fallback.
-    pub codepoint: u32,
+    /// Glyph selected by the font shaper (including substitutions).
+    pub glyph_id: u16,
+    /// Horizontal quarter-pixel raster phase, independent of color.
+    pub subpixel_x: u8,
     /// Exact physical ab_glyph scale, encoded with `f32::to_bits`.
     /// Fractional font sizes and output scales must not share a raster mask.
     pub scale_bits: u32,
@@ -360,7 +365,8 @@ fn ceil_i32(v: f32) -> i32 {
 
 fn glyph_cache_get_or_rasterize(
     scaled: &PxScaleFont<&FontArc>,
-    ch: char,
+    glyph_id: ab_glyph::GlyphId,
+    subpixel_x: u8,
     font_stack_id: usize,
     font_slot: u8,
 ) -> Option<GlyphMask> {
@@ -368,7 +374,8 @@ fn glyph_cache_get_or_rasterize(
     text_run_tests::GLYPH_CACHE_LOOKUPS.with(|count| count.set(count.get() + 1));
 
     let key = GlyphRasterKey {
-        codepoint: ch as u32,
+        glyph_id: glyph_id.0,
+        subpixel_x,
         scale_bits: scaled.scale.y.to_bits(),
         font_stack_id,
         font_slot,
@@ -379,8 +386,9 @@ fn glyph_cache_get_or_rasterize(
         return Some(found.clone());
     }
 
-    let glyph_id = scaled.glyph_id(ch);
-    let glyph: Glyph = glyph_id.with_scale_and_position(scaled.scale, point(0.0, 0.0));
+    let glyph: Glyph = glyph_id.with_scale_and_position(
+        scaled.scale, point(subpixel_x as f32 / 4.0, 0.0),
+    );
     let outlined = scaled.font.outline_glyph(glyph)?;
     let bounds = outlined.px_bounds();
 
@@ -436,14 +444,34 @@ fn next_font_stack_id() -> usize {
     NEXT_FONT_STACK_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+// Keep the collection face index with the outline font. Shaping must select
+// exactly the same face, including nonzero faces in macOS TTC fonts.
+#[derive(Clone, Debug)]
+struct FontFace {
+    font: FontArc,
+    index: u32,
+}
+impl core::ops::Deref for FontFace {
+    type Target = FontArc;
+    fn deref(&self) -> &FontArc { &self.font }
+}
+impl FontFace {
+    fn from_slice(bytes: &'static [u8]) -> Result<Self, InvalidFont> {
+        Ok(Self { font: FontArc::try_from_slice(bytes)?, index: 0 })
+    }
+    fn from_vec(bytes: Vec<u8>) -> Result<Self, InvalidFont> {
+        Ok(Self { font: FontArc::try_from_vec(bytes)?, index: 0 })
+    }
+}
+
 /// Ordered font collection used for text rendering.
 ///
 /// The first font is the primary face. Fallback fonts are consulted only when
 /// the primary font does not provide a glyph for a character.
 #[derive(Clone, Debug)]
 pub struct FontStack {
-    primary: FontArc,
-    fallbacks: Vec<FontArc>,
+    primary: FontFace,
+    fallbacks: Vec<FontFace>,
     cache_id: usize,
 }
 
@@ -467,7 +495,7 @@ impl FontStack {
     ///
     /// A font stack if the font bytes are valid.
     pub fn new(font_bytes: &'static [u8]) -> Result<Self, InvalidFont> {
-        let primary = FontArc::try_from_slice(font_bytes)?;
+        let primary = FontFace::from_slice(font_bytes)?;
         Ok(Self {
             primary,
             fallbacks: Vec::new(),
@@ -478,7 +506,7 @@ impl FontStack {
     /// Create a stack from owned font data without requiring a process-lifetime leak.
     pub fn from_owned(font_bytes: Vec<u8>) -> Result<Self, InvalidFont> {
         Ok(Self {
-            primary: FontArc::try_from_vec(font_bytes)?,
+            primary: FontFace::from_vec(font_bytes)?,
             fallbacks: Vec::new(),
             cache_id: next_font_stack_id(),
         })
@@ -518,7 +546,7 @@ impl FontStack {
     ///
     /// `Ok(())` when the fallback was accepted.
     pub fn add_fallback(&mut self, font_bytes: &'static [u8]) -> Result<(), InvalidFont> {
-        let font = FontArc::try_from_slice(font_bytes)?;
+        let font = FontFace::from_slice(font_bytes)?;
         self.fallbacks.push(font);
         self.cache_id = next_font_stack_id();
         Ok(())
@@ -550,8 +578,8 @@ impl FontStack {
 
 #[derive(Clone)]
 struct DefaultFontState {
-    font: Option<FontArc>,
-    fallback_fonts: Vec<FontArc>,
+    font: Option<FontFace>,
+    fallback_fonts: Vec<FontFace>,
     #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
     discovery: Option<FontDiscovery>,
     cache_id: usize,
@@ -585,7 +613,7 @@ fn clear_text_caches() {
 ///
 /// `Ok(())` when the font was accepted.
 pub fn set_default_font(font_bytes: &'static [u8]) -> Result<(), InvalidFont> {
-    let font = FontArc::try_from_slice(font_bytes)?;
+    let font = FontFace::from_slice(font_bytes)?;
     let mut state = DEFAULT_FONT.lock();
     state.font = Some(font);
     #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
@@ -642,7 +670,7 @@ pub fn set_default_font_stack(font_stack: FontStack) {
 ///
 /// `Ok(())` when the font was accepted.
 pub fn add_default_font_fallback(font_bytes: &'static [u8]) -> Result<(), InvalidFont> {
-    let font = FontArc::try_from_slice(font_bytes)?;
+    let font = FontFace::from_slice(font_bytes)?;
     let mut state = DEFAULT_FONT.lock();
     state.fallback_fonts.push(font);
     #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
@@ -786,8 +814,8 @@ fn load_fonts_from_rootfs_once() {
 }
 
 #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
-fn discovered_font_ref(font: DiscoveredFont) -> Result<FontArc, InvalidFont> {
-    FontVec::try_from_vec_and_index(font.bytes, font.index).map(FontArc::new)
+fn discovered_font_ref(font: DiscoveredFont) -> Result<FontFace, InvalidFont> {
+    Ok(FontFace { font: FontArc::new(FontVec::try_from_vec_and_index(font.bytes, font.index)?), index: font.index })
 }
 
 #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
@@ -866,7 +894,7 @@ fn fullwidth_ascii_fallback(ch: char) -> Option<char> {
     }
 }
 
-fn select_font_for_char(ch: char, font_stack: &FontStack) -> (FontArc, u8, char) {
+fn select_font_for_char(ch: char, font_stack: &FontStack) -> (FontFace, u8, char) {
     if font_stack.primary.glyph_id(ch).0 != 0 {
         return (font_stack.primary.clone(), 0, ch);
     }
@@ -994,35 +1022,33 @@ pub fn rasterize_text_with_font_stack(
     let base_scaled = font_stack
         .primary
         .as_scaled(em_scale(&font_stack.primary, physical_em));
-    let mut caret_x = 0.0;
-    let mut caret_y = base_scaled.ascent();
-    let mut glyphs = Vec::new();
-
-    for ch in text.chars() {
-        if ch == '\n' {
-            caret_x = 0.0;
-            caret_y += base_scaled.height() + base_scaled.line_gap();
-            continue;
-        }
-        if is_zero_width_format(ch) {
-            continue;
-        }
-
-        let (selected_font, font_slot, render_ch) = select_font_for_char(ch, font_stack);
-        let scaled = selected_font.as_scaled(em_scale(&selected_font, physical_em));
-        if let Some(glyph) =
-            glyph_cache_get_or_rasterize(&scaled, render_ch, font_stack.cache_id(), font_slot)
-        {
+    let layout = shaping::shape_text(text, physical_em, font_stack);
+    let mut glyphs = Vec::with_capacity(layout.glyphs.len());
+    for positioned in layout.glyphs {
+        let face = if positioned.font_slot == 0 {
+            &font_stack.primary
+        } else {
+            &font_stack.fallbacks[positioned.font_slot as usize - 1]
+        };
+        let scaled = face.as_scaled(em_scale(face, physical_em));
+        // Quantize coverage to quarter-pixel phases, not glyph spacing to whole
+        // pixels. Carry the rounded phase into the integer origin at boundaries.
+        let quarters = libm::floorf(positioned.x * 4.0 + 0.5) as i32;
+        let x = quarters.div_euclid(4);
+        let phase = quarters.rem_euclid(4) as u8;
+        if let Some(glyph) = glyph_cache_get_or_rasterize(
+            &scaled, ab_glyph::GlyphId(positioned.id), phase,
+            font_stack.cache_id(), positioned.font_slot,
+        ) {
             glyphs.push(RasterizedGlyph {
                 key: glyph.key,
-                x: caret_x as i32 + glyph.origin_x,
-                y: libm::floorf(caret_y + 0.5) as i32 + glyph.origin_y,
+                x: x + glyph.origin_x,
+                y: libm::floorf(base_scaled.ascent() + positioned.y + 0.5) as i32 + glyph.origin_y,
                 width: glyph.width,
                 height: glyph.height,
                 mask: glyph.mask,
             });
         }
-        caret_x += em_advance(&selected_font, render_ch, physical_em);
     }
 
     glyphs
@@ -1085,6 +1111,21 @@ impl TextMeasure {
             em_advance(&font, render_ch, self.font_size)
         } else {
             ceil_i32(self.font_size.max(1.0) * 0.60).max(1) as f32
+        }
+    }
+
+    pub(crate) fn prefix_widths(&self, text: &str) -> Vec<f32> {
+        if let Some(stack) = &self.font_stack {
+            shaping::shape_text(text, self.font_size, stack).prefix_widths
+        } else {
+            let mut result = alloc::vec![0.0; text.len() + 1];
+            let mut x = 0.0;
+            for (byte, ch) in text.char_indices() {
+                result[byte..byte + ch.len_utf8()].fill(x);
+                x += self.advance(ch);
+                result[byte + ch.len_utf8()] = x;
+            }
+            result
         }
     }
 
@@ -1210,7 +1251,7 @@ fn fallback_line_height(font_size_px: f32) -> u32 {
 
 // Formatting scalars have no standalone ink or advance. A font may omit them
 // (or assign a visible .notdef width); never turn a join/variation selector
-// into a replacement character. This does not implement sequence shaping.
+// into a replacement character. Keep them with their run for shaping.
 fn is_zero_width_format(ch: char) -> bool {
     matches!(ch, '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}' | '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}')
 }
@@ -1250,43 +1291,8 @@ fn fallback_text_metrics(text: &str, font_size_px: f32) -> (u32, u32) {
 }
 
 fn measure_text_uncached(text: &str, font_size_px: f32, font_stack: &FontStack) -> (u32, u32) {
-    let scale = em_scale(&font_stack.primary, font_size_px);
-    let scaled = font_stack.primary.as_scaled(scale);
-
-    let mut max_line_w: f32 = 0.0;
-    let mut line_w: f32 = 0.0;
-    let mut lines: u32 = 1;
-
-    for ch in text.chars() {
-        if ch == '\n' {
-            if line_w > max_line_w {
-                max_line_w = line_w;
-            }
-            line_w = 0.0;
-            lines = lines.saturating_add(1);
-            continue;
-        }
-        if is_zero_width_format(ch) {
-            continue;
-        }
-        let (selected, _, render_ch) = select_font_for_char(ch, font_stack);
-        line_w += em_advance(&selected, render_ch, font_size_px);
-    }
-
-    if line_w > max_line_w {
-        max_line_w = line_w;
-    }
-
-    let line_h = line_advance(font_size_px, font_stack);
-    let total_h = if lines <= 1 {
-        scaled.height()
-    } else {
-        scaled.height() + (lines.saturating_sub(1) as f32) * line_h
-    };
-
-    let w = ceil_i32(max_line_w).max(0) as u32;
-    let h = ceil_i32(total_h).max(0) as u32;
-    (w, h)
+    let layout = shaping::shape_text(text, font_size_px, font_stack);
+    (ceil_i32(layout.width).max(0) as u32, ceil_i32(layout.height).max(0) as u32)
 }
 
 /// Canvas for drawing operations
@@ -1828,7 +1834,8 @@ mod text_run_tests {
     fn glyph(bytes: usize) -> RasterizedGlyph {
         RasterizedGlyph {
             key: GlyphRasterKey {
-                codepoint: 65,
+                glyph_id: 65,
+                subpixel_x: 0,
                 scale_bits: 13.0_f32.to_bits(),
                 font_stack_id: 1,
                 font_slot: 0,

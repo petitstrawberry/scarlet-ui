@@ -218,3 +218,72 @@ fn centered_label_baseline_rounds_once_on_the_physical_grid() {
         "fixture must catch double rounding"
     );
 }
+
+fn shaping_stack() -> FontStack {
+    FontStack::new(include_bytes!("../testing/fonts/shaping.ttf")).unwrap()
+}
+
+#[test]
+fn opentype_positions_and_carets_share_the_shaped_string() {
+    let font = shaping_stack();
+    let layout = shaping::shape_text("AVfiA\u{301}", 20., &font);
+    // GPOS A/V -120, GSUB fi 510 instead of 350+280, combining acute zero.
+    assert!((layout.width - (700. - 120. + 690. + 510. + 700.) * 0.02).abs() < 0.001);
+    assert_eq!(layout.glyphs.len(), 5);
+    assert!((layout.glyphs[1].x - 11.6).abs() < 0.001);
+    assert!((layout.glyphs[4].x - (35.6 + 7.)).abs() < 0.001);
+    assert!((layout.glyphs[4].y + 16.).abs() < 0.001);
+    let measure = TextMeasure::with_font_stack(20., &font);
+    assert_eq!(measure.prefix_widths("AVfiA\u{301}"), layout.prefix_widths);
+    assert_eq!(*layout.prefix_widths.last().unwrap(), layout.width);
+    assert_eq!(measure_text_sized_with_font_stack("AVfiA\u{301}", 20., &font).0, 50);
+}
+
+#[test]
+fn fractional_glyph_coverage_preserves_spacing_instead_of_truncating_each_origin() {
+    let font = shaping_stack();
+    for scale in [1000, 1250, 1500, 2000] {
+        for text in ["AVAVAV", "iiiiiiii", "fi fi A\u{301}"] {
+            let size = 13.25 * scale as f32 / 1000.;
+            let layout = shaping::shape_text(text, size, &font);
+            let masks = rasterize_text_with_font_stack(text, 13.25, scale, &font);
+            let scaled = font.primary.as_scaled(em_scale(&font.primary, size));
+            let mut index = 0;
+            for glyph in layout.glyphs {
+                let x = libm::floorf(glyph.x * 4. + 0.5) / 4.;
+                let baseline = libm::floorf(scaled.ascent() + glyph.y + 0.5);
+                let outline = font.primary.outline_glyph(ab_glyph::GlyphId(glyph.id)
+                    .with_scale_and_position(scaled.scale, point(x, baseline)));
+                let Some(outline) = outline else { continue };
+                let bounds = outline.px_bounds();
+                let mask = &masks[index];
+                assert_eq!((mask.x, mask.y), (bounds.min.x as i32, bounds.min.y as i32));
+                assert_eq!((mask.width, mask.height), (bounds.width() as u32, bounds.height() as u32));
+                // Independent full-position outline vs cached fractional mask.
+                outline.draw(|px, py, coverage| {
+                    let actual = mask.mask[(py * mask.width + px) as usize];
+                    assert!((actual as i32 - (coverage * 255.) as i32).abs() <= 1);
+                });
+                index += 1;
+            }
+            assert_eq!(index, masks.len());
+        }
+    }
+    let masks = rasterize_text_with_font_stack("iiii", 13., 1000, &font);
+    assert_ne!(masks[0].key.subpixel_x, masks[1].key.subpixel_x);
+    assert_ne!(masks[0].mask, masks[1].mask);
+}
+
+#[cfg(all(feature = "std", not(target_arch = "wasm32")))]
+#[test]
+fn shaping_uses_the_selected_collection_face() {
+    let face = discovered_font_ref(DiscoveredFont {
+        bytes: include_bytes!("../testing/fonts/shaping-collection.ttc").to_vec(), index: 1,
+    }).unwrap();
+    let font = FontStack { primary: face, fallbacks: Vec::new(), cache_id: next_font_stack_id() };
+    let expected = shaping::shape_text("AVfi", 20., &shaping_stack());
+    let actual = shaping::shape_text("AVfi", 20., &font);
+    assert_eq!(actual.width, expected.width);
+    assert_eq!(actual.glyphs.len(), 3);
+    assert_eq!(rasterize_text_with_font_stack("AVfi", 20., 2000, &font).len(), 3);
+}

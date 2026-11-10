@@ -99,11 +99,11 @@ glyph placement, fallback baselines, fractional cache behavior, text prefixes,
 zero-width join/variation formatting controls and multiline metrics. Existing
 text layout and rendering tests cover editing.
 
-The renderer currently lays out Unicode scalars and does not claim complete
-script shaping, ligatures, bidirectional layout or kerning. This correction
-changes size conversion and cache identity, not the shaping model. Join and
-variation controls do not draw replacement marks or add phantom width, even if
-the selected fonts omit them; a joined emoji may still draw as separate glyphs.
+Text measurement and rasterization now use OpenType glyph runs from Rustybuzz,
+including GPOS positioning, standard proportional-font ligatures and combining
+marks. Code fonts disable discretionary standard ligatures to preserve cells.
+The surrounding controls still use an LTR paragraph/caret model; full Unicode
+bidi itemization and color emoji rendering are not claimed.
 
 
 ## Single-line control baselines
@@ -140,3 +140,42 @@ against fresh submission at multiple fractional origins and scales.
 
 Final baseline/replay validation passed 736 core tests (5 optional tests ignored)
 and all 136 SGFX renderer tests.
+
+
+## Shaped glyph advances and horizontal raster phases
+
+The previous scalar loop ignored pair positioning and substitutions, and placed
+all outlines at integer x coordinates. Retaining a fractional accumulated width
+was not enough: truncating every glyph produced uneven letter spacing. Controls
+and TabPane did not change that underlying algorithm.
+
+The shared layout now obtains glyph IDs, advances and offsets from Rustybuzz,
+using the same font bytes and collection face index as ab_glyph. Measurement,
+TextView caret clusters and CPU/SGFX rasterization consume that layout. Raster
+coverage retains four horizontal subpixel phases (as in Skia's two-bit glyph
+phase cache) instead of discarding each fractional glyph origin. The cache key
+includes the shaped glyph ID and phase, so ligatures and shifted masks cannot
+alias nominal characters or another coverage mask. Existing bounded warm-run
+caches and SGFX atlas reuse remain in place.
+
+References (no source copied):
+- https://docs.rs/rustybuzz/0.19.0/rustybuzz/
+- https://doc.qt.io/qt-6/qtextlayout.html
+- https://github.com/google/skia/blob/main/src/core/SkGlyph.h
+
+Original generated font fixtures include GPOS A/V kerning, a GSUB fi ligature,
+combining-mark positioning and a nonzero collection face. Tests compare mask
+coverage against an independent full-position ab_glyph outline at 100%, 125%,
+150% and 200%, and assert caret positions from known font-table values.
+
+Rustybuzz 0.19 uses its own ttf-parser 0.24. The 0.20 dependency would unify
+variable-font features into ab_glyph's ttf-parser 0.25: on this macOS host that
+makes System Font outlines unavailable and silently selects Helvetica. The
+separate parser preserves the exact pre-change System Font bytes and metrics;
+this was checked against an isolated baseline checkout. No font-family or font
+size adjustment is used to compensate for that dependency side effect.
+
+Validation for the shaped-text change: 739 core tests passed (5 optional tests
+ignored), and 136 SGFX renderer tests passed. Warm-run allocation/cache tests,
+fractional retained replay, selection, wrapping, IME and touch scrolling are
+included in those suites.

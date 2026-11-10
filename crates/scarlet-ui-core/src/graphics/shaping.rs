@@ -1,0 +1,153 @@
+//! One glyph layout for measurement, caret placement and rasterization.
+//!
+//! OpenType positioning is delegated to Rustybuzz (the Rust HarfBuzz port).
+//! Coordinates stay fractional; only coverage masks quantize to raster phases.
+use super::*;
+use rustybuzz::{BufferFlags, Direction, Feature, UnicodeBuffer};
+use unicode_segmentation::UnicodeSegmentation;
+
+pub(super) struct PositionedGlyph {
+    pub id: u16,
+    pub font_slot: u8,
+    pub x: f32,
+    pub y: f32,
+}
+
+pub(super) struct ShapedText {
+    pub glyphs: Vec<PositionedGlyph>,
+    pub prefix_widths: Vec<f32>,
+    pub width: f32,
+    pub height: f32,
+}
+
+pub(super) fn shape_text(text: &str, size: f32, stack: &FontStack) -> ShapedText {
+    let metrics = font_metrics_sized_with_font_stack(size, stack);
+    let line_height = metrics.height() + metrics.leading;
+    let mut result = ShapedText {
+        glyphs: Vec::new(),
+        prefix_widths: alloc::vec![0.0; text.len() + 1],
+        width: 0.0,
+        height: metrics.height(),
+    };
+    let mut line_start = 0;
+    for (line_index, line) in text.split('\n').enumerate() {
+        let mut run = UnicodeBuffer::new();
+        let mut run_start = 0;
+        let mut run_slot = 0;
+        let mut run_font = stack.primary.clone();
+        let mut x = 0.0;
+        for (byte, ch) in line.char_indices() {
+            let (font, slot, render_ch) = if is_zero_width_format(ch) {
+                (run_font.clone(), run_slot, ch)
+            } else {
+                select_font_for_char(ch, stack)
+            };
+            if slot != run_slot && !run.is_empty() {
+                shape_run(
+                    &line[run_start..byte],
+                    run_start + line_start,
+                    run,
+                    &run_font,
+                    run_slot,
+                    size,
+                    &mut x,
+                    line_index as f32 * line_height,
+                    &mut result,
+                );
+                run = UnicodeBuffer::new();
+                run_start = byte;
+            }
+            run_slot = slot;
+            run_font = font;
+            run.add(render_ch, (byte - run_start) as u32);
+        }
+        if !run.is_empty() {
+            shape_run(
+                &line[run_start..],
+                run_start + line_start,
+                run,
+                &run_font,
+                run_slot,
+                size,
+                &mut x,
+                line_index as f32 * line_height,
+                &mut result,
+            );
+        }
+        result.prefix_widths[line_start + line.len()] = x;
+        result.width = result.width.max(x);
+        result.height = metrics.height() + line_index as f32 * line_height;
+        line_start += line.len() + 1;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shape_run(
+    text: &str,
+    start: usize,
+    mut input: UnicodeBuffer,
+    font: &FontFace,
+    slot: u8,
+    size: f32,
+    x: &mut f32,
+    y: f32,
+    result: &mut ShapedText,
+) {
+    let face = rustybuzz::Face::from_slice(font.font_data(), font.index)
+        .expect("outline and shaping faces use the same validated font data");
+    input.guess_segment_properties();
+    // The current controls have an LTR layout/caret model. Paragraph bidi is a
+    // separate responsibility; don't silently reverse only their painted text.
+    input.set_direction(Direction::LeftToRight);
+    input.set_flags(BufferFlags::REMOVE_DEFAULT_IGNORABLES);
+    // Preserve code-font cells; proportional UI fonts retain standard ligatures.
+    let code_features = [
+        Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(b"liga"), 0, ..),
+        Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(b"clig"), 0, ..),
+    ];
+    let features = if face.is_monospaced() {
+        &code_features[..]
+    } else {
+        &[]
+    };
+    let shaped = rustybuzz::shape(&face, features, input);
+    let factor = size / face.units_per_em() as f32;
+    let infos = shaped.glyph_infos();
+    let positions = shaped.glyph_positions();
+    let mut i = 0;
+    result.prefix_widths[start..=start + text.len()].fill(*x);
+    while i < infos.len() {
+        let cluster = infos[i].cluster as usize;
+        let left = *x;
+        let mut end = i + 1;
+        while end < infos.len() && infos[end].cluster == infos[i].cluster {
+            end += 1;
+        }
+        let cluster_end = infos
+            .get(end)
+            .map_or(text.len(), |info| info.cluster as usize);
+        for (info, position) in infos[i..end].iter().zip(&positions[i..end]) {
+            result.glyphs.push(PositionedGlyph {
+                id: info.glyph_id as u16,
+                font_slot: slot,
+                x: *x + position.x_offset as f32 * factor,
+                y: y - position.y_offset as f32 * factor,
+            });
+            *x += position.x_advance as f32 * factor;
+        }
+        // Carets stay at grapheme boundaries. For a Latin ligature distribute
+        // its advance over the source graphemes, never over UTF-8 bytes/marks.
+        let cluster_text = &text[cluster..cluster_end];
+        let count = cluster_text.graphemes(true).count().max(1);
+        for (n, (byte, grapheme)) in cluster_text.grapheme_indices(true).enumerate() {
+            let a = left + (*x - left) * n as f32 / count as f32;
+            let b = left + (*x - left) * (n + 1) as f32 / count as f32;
+            result.prefix_widths[start + cluster + byte..start + cluster + byte + grapheme.len()]
+                .fill(a);
+            result.prefix_widths[start + cluster + byte + grapheme.len()] = b;
+        }
+        i = end;
+    }
+    result.prefix_widths[start + text.len()] = *x;
+}
