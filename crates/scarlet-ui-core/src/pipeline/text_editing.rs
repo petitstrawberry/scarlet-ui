@@ -649,4 +649,67 @@ mod tests {
         // The already submitted copy may complete; it never authorizes stale deletion.
         assert_eq!(stored.lock().as_deref(), Some("keep"));
     }
+    #[test]
+    fn host_edit_actions_share_context_menu_and_shortcuts_without_eager_cut() {
+        let (mut pipeline, text, stored) = setup("日本語", Some("clipboard"), false, None);
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let seen = actions.clone();
+        let selection = State::new(
+            generate_state_id(),
+            TextSelection {
+                anchor: crate::views::TextPosition::new(0),
+                caret: crate::views::TextPosition::new(9),
+            },
+        );
+        pipeline.set_root(
+            TextView::new(text.clone(), selection)
+                .autofocus(true)
+                .on_edit_action(move |action| seen.lock().push(action))
+                .create_element(),
+        );
+        pipeline
+            .element_tree
+            .layout(LayoutConstraints::tight(400.0, 200.0));
+        pipeline.render();
+        for key in ['c', 'x', 'v', 'a'] {
+            shortcut(&mut pipeline, key);
+        }
+        for action in [
+            TextEditAction::Copy,
+            TextEditAction::Cut,
+            TextEditAction::Paste,
+            TextEditAction::SelectAll,
+        ] {
+            let menu = pipeline
+                .text_edit_context_menu(Point::new(20.0, 20.0))
+                .unwrap();
+            let label = match action {
+                TextEditAction::Copy => "Copy",
+                TextEditAction::Cut => "Cut",
+                TextEditAction::Paste => "Paste",
+                TextEditAction::SelectAll => "Select All",
+            };
+            menu.items()
+                .iter()
+                .find(|item| item.label() == label)
+                .unwrap()
+                .get_callback()
+                .unwrap()();
+            pipeline.poll_text_clipboard();
+        }
+        assert_eq!(
+            *actions.lock(),
+            [
+                TextEditAction::Copy,
+                TextEditAction::Cut,
+                TextEditAction::Paste,
+                TextEditAction::SelectAll
+            ]
+            .repeat(2)
+        );
+        assert_eq!(text.get(), "日本語");
+        assert_eq!(stored.lock().as_deref(), Some("clipboard"));
+        assert!(pipeline.text_editing.pending.is_none());
+        pipeline.teardown();
+    }
 }

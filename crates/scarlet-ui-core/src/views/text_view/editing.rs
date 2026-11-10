@@ -28,8 +28,8 @@ pub(crate) fn text_edit_state(
         document: object.text_document.clone(),
         selection: object.selection,
         composing: !object.preedit.is_empty(),
-        custom_copy: view.on_copy.is_some(),
-        custom_paste: view.on_paste.is_some(),
+        custom_copy: view.on_edit_action.is_some() || view.on_copy.is_some(),
+        custom_paste: view.on_edit_action.is_some() || view.on_paste.is_some(),
     })
 }
 
@@ -42,6 +42,10 @@ pub(crate) fn apply_text_edit(
     use crate::clipboard::TextEditAction;
     if !object.is_focused() || !object.preedit.is_empty() {
         return false;
+    }
+    if let Some(callback) = &view.on_edit_action {
+        callback(action);
+        return true;
     }
     match (action, text) {
         (TextEditAction::Cut, Some(_)) => {
@@ -410,6 +414,22 @@ fn handle_primary_shortcut(
     render_object: &mut TextViewRenderObject,
     key: char,
 ) -> bool {
+    if let Some(callback) = &view.on_edit_action {
+        use crate::clipboard::TextEditAction;
+        let action = match key.to_ascii_lowercase() {
+            'c' => Some(TextEditAction::Copy),
+            'x' => Some(TextEditAction::Cut),
+            'v' => Some(TextEditAction::Paste),
+            'a' => Some(TextEditAction::SelectAll),
+            _ => None,
+        };
+        if let Some(action) = action {
+            if render_object.preedit.is_empty() {
+                callback(action);
+            }
+            return true;
+        }
+    }
     match key {
         'a' | 'A' => {
             select_all(render_object);
