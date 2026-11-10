@@ -442,6 +442,17 @@ pub trait Element {
         0
     }
 
+    /// Whether a captured pointer drag needs timed updates (for example, text
+    /// selection scrolling while the pointer is held outside the viewport).
+    fn pointer_drag_needs_animation(&self) -> bool {
+        false
+    }
+
+    /// Advance a captured pointer drag; return whether visible state changed.
+    fn advance_pointer_drag(&mut self, _elapsed: core::time::Duration) -> bool {
+        false
+    }
+
     /// Get window information if this Element represents a Window
     ///
     /// Returns window information if this element is a window.

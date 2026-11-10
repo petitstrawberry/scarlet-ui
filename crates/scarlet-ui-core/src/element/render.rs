@@ -1361,6 +1361,36 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         crate::views::text_view::text_edit_state(view, object)
     }
 
+    fn pointer_drag_needs_animation(&self) -> bool {
+        !self.control_is_disabled()
+            && self
+                .render_object
+                .as_any()
+                .downcast_ref::<crate::views::TextViewRenderObject>()
+                .is_some_and(|object| object.selection_drag_needs_animation())
+    }
+
+    fn advance_pointer_drag(&mut self, elapsed: core::time::Duration) -> bool {
+        if self.control_is_disabled() {
+            return false;
+        }
+        let Some(view) = self.view.as_any().downcast_ref::<crate::views::TextView>() else {
+            return false;
+        };
+        let Some(object) = self
+            .render_object
+            .as_any_mut()
+            .downcast_mut::<crate::views::TextViewRenderObject>()
+        else {
+            return false;
+        };
+        let changed = crate::views::text_view::advance_text_selection_drag(view, object, elapsed);
+        if changed {
+            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+        }
+        changed
+    }
+
     fn apply_text_edit(
         &mut self,
         action: crate::clipboard::TextEditAction,

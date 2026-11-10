@@ -436,7 +436,7 @@ mod tests {
     }
 
     fn find_scroll_id(element: &dyn Element) -> Option<ElementId> {
-        if element.type_name_debug().contains("ScrollView<") {
+        if element.type_name_debug().contains("ScrollViewRenderObject") {
             return Some(element.id());
         }
         element
@@ -470,6 +470,114 @@ mod tests {
             .render_with_damage()
             .and_then(|(buffer, _)| buffer.get_pixel(20, 20));
         assert_eq!(after, Some(on.to_bgra()));
+    }
+
+    #[test]
+    fn stack_relayout_and_selection_preserve_visible_file_position() {
+        let items = State::new(crate::generate_state_id(), (0usize..40).collect::<Vec<_>>());
+        let selected = State::new(crate::generate_state_id(), None);
+        let window = || {
+            Window::new(
+                "Files",
+                crate::views::VStack::new((
+                    Text::new("Explorer").frame(240., 100.),
+                    ListView::new(items.clone(), selected.clone(), 27., |_, item, _| {
+                        Text::new(format!("File {item}")).frame(240., 27.)
+                    })
+                    .item_key(|item| (*item).into())
+                    .frame(f32::INFINITY, f32::INFINITY),
+                ))
+                .frame(f32::INFINITY, f32::INFINITY),
+            )
+            .decorated(false)
+            .size(Size::new(240., 750.))
+        };
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(window().create_element());
+        pipeline.layout_initial();
+        pipeline.render();
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: 0,
+            delta_y: -1600,
+            x: 100,
+            y: 400,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
+        }));
+        pipeline.render();
+        let id = find_scroll_id(pipeline.element_tree().root().unwrap()).unwrap();
+        let offset = |p: &RenderingPipeline| {
+            p.element_tree().find_element(id).unwrap().children()[0]
+                .position()
+                .y
+        };
+        let before = offset(&pipeline);
+        assert_eq!(before, -400.);
+        for row in [None, Some(33), Some(34)] {
+            selected.set(row);
+            pipeline
+                .element_tree_mut()
+                .root_mut()
+                .unwrap()
+                .update(&window());
+            pipeline.render();
+            assert_eq!(offset(&pipeline), before, "relayout moved a visible file");
+        }
+        pipeline.teardown();
+    }
+
+    #[test]
+    fn horizontal_stack_relayout_preserves_scroll_and_real_resize_clamps() {
+        use crate::views::{HStack, Rectangle};
+        let window = || {
+            Window::new(
+                "Horizontal",
+                HStack::new((
+                    Rectangle::new().frame(100., 100.),
+                    ScrollView::new(Rectangle::new().frame(1080., 100.))
+                        .horizontal()
+                        .content_size(1080., 100.)
+                        .frame(f32::INFINITY, 100.),
+                )),
+            )
+            .decorated(false)
+            .size(Size::new(750., 100.))
+        };
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(window().create_element());
+        pipeline.layout_initial();
+        pipeline.render();
+        let id = find_scroll_id(pipeline.element_tree().root().unwrap()).unwrap();
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            delta_x: -1600,
+            delta_y: 0,
+            x: 400,
+            y: 50,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Trackpad,
+        }));
+        pipeline.render();
+        let offset = |p: &RenderingPipeline| {
+            p.element_tree().find_element(id).unwrap().children()[0]
+                .position()
+                .x
+        };
+        assert_eq!(offset(&pipeline), -400.);
+        pipeline
+            .element_tree_mut()
+            .root_mut()
+            .unwrap()
+            .update(&window());
+        pipeline.render();
+        assert_eq!(offset(&pipeline), -400.);
+        pipeline.resize(Size::new(850., 100.));
+        pipeline.render();
+        assert_eq!(
+            offset(&pipeline),
+            -330.,
+            "real viewport expansion must still clamp"
+        );
+        pipeline.teardown();
     }
 
     #[test]

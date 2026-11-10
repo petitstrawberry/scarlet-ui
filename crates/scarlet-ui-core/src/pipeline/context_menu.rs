@@ -10,6 +10,7 @@ pub(super) struct ContextMenuPopup {
     menu: Menu,
     renderer: MenuRenderObject,
     origin: Point,
+    viewport: Size,
     pressed: Option<usize>,
 }
 impl ContextMenuPopup {
@@ -27,6 +28,7 @@ impl ContextMenuPopup {
             menu,
             renderer,
             origin,
+            viewport,
             pressed: None,
         }
     }
@@ -122,10 +124,17 @@ impl ContextMenuPopup {
                 }
                 (true, false)
             }
-            Event::Focus(FocusEvent::Lost)
-            | Event::Resize { .. }
-            | Event::WindowSuspendedChanged { suspended: true } => (false, true),
-            Event::Mouse(MouseEvent::Wheel { .. }) => (true, true),
+            Event::Focus(FocusEvent::Lost) | Event::WindowSuspendedChanged { suspended: true } => {
+                (false, true)
+            }
+            Event::Resize { width, height } => (
+                false,
+                self.viewport != Size::new(*width as f32, *height as f32),
+            ),
+            // The popup owns pointer input until explicit dismissal. Trackpad
+            // momentum and the trailing zero-delta/end packet must not close
+            // a menu just opened with a two-finger secondary click.
+            Event::Mouse(MouseEvent::Wheel { .. }) => (true, false),
             Event::TextInputCommit { .. }
             | Event::TextInputPreedit { .. }
             | Event::TextInputSelection { .. }
@@ -198,6 +207,37 @@ mod tests {
             popup.handle(&Event::WindowSuspendedChanged { suspended: true }),
             (false, true)
         );
+    }
+
+    #[test]
+    fn wheel_packets_do_not_dismiss_popup() {
+        use crate::event::{ScrollSource, WheelPhase};
+        let mut popup = ContextMenuPopup::new(
+            Menu::new(vec![MenuItemContent::new("Run")]),
+            Point::ZERO,
+            Size::new(300., 200.),
+        );
+        for phase in [
+            WheelPhase::Started,
+            WheelPhase::Moved,
+            WheelPhase::Ended,
+            WheelPhase::Cancelled,
+        ] {
+            for delta in [0, 1, -40] {
+                assert_eq!(
+                    popup.handle(&Event::Mouse(MouseEvent::Wheel {
+                        x: 10,
+                        y: 10,
+                        delta_x: 0,
+                        delta_y: delta,
+                        phase,
+                        source: ScrollSource::Trackpad,
+                    })),
+                    (true, false)
+                );
+            }
+        }
+        assert_eq!(popup.handle(&press(KeyCode::Escape)), (true, true));
     }
 
     #[test]
@@ -300,6 +340,38 @@ mod integration_tests {
                 "dismissal repairs popup pixels, paint={paint}, first mismatch={mismatch:?}"
             );
         }
+    }
+
+    #[test]
+    fn unchanged_resize_and_background_repaint_keep_popup_open() {
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Rectangle::new()
+                .fill(Color::BLUE)
+                .frame(300., 180.)
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        pipeline.resize(Size::new(300., 180.));
+        pipeline.render();
+        pipeline.open_context_menu_at(
+            Menu::new(vec![MenuItemContent::new("Run")]),
+            Point::new(10., 10.),
+        );
+        pipeline.render();
+        pipeline.resize(Size::new(300., 180.));
+        pipeline.handle_event(&Event::Resize {
+            width: 300,
+            height: 180,
+        });
+        pipeline.render();
+        assert!(pipeline.context_menu_is_open());
+        pipeline.request_redraw();
+        pipeline.render();
+        assert!(pipeline.context_menu_is_open());
+        pipeline.resize(Size::new(280., 180.));
+        assert!(!pipeline.context_menu_is_open());
+        pipeline.teardown();
     }
 
     #[test]

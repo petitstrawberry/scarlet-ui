@@ -267,7 +267,7 @@ pub(super) fn paint_text_view_content_with_decorations(
         paint_current_line(ctx, origin, size, layout, selection, current_line_color);
     }
     if let Some(range) = selection.normalized_range() {
-        paint_selection(ctx, origin, layout, range, selection_color);
+        paint_selection(ctx, origin, layout, document, range, selection_color);
     }
     if show_line_numbers {
         paint_line_numbers(
@@ -349,21 +349,44 @@ fn paint_current_line(
     }
 }
 
-fn paint_selection(
+pub(super) fn paint_selection(
     ctx: &mut PaintContext,
     origin: Point,
     layout: &TextViewLayout,
+    document: &TextDocument,
     range: core::ops::Range<usize>,
     color: Color,
 ) {
-    for line in visible_lines(layout) {
-        let start = range.start.max(line.text_range.start);
+    let newline_width = layout.measure_text(" ").0.max(1) as f32;
+    for (index, line) in layout
+        .visual_lines
+        .iter()
+        .enumerate()
+        .skip(layout.visible_lines.start)
+        .take(layout.visible_lines.len())
+    {
+        let newline_selected = range.end > line.text_range.end
+            && layout
+                .visual_lines
+                .get(index + 1)
+                .is_none_or(|next| next.logical_line != line.logical_line)
+            && document
+                .line_range(line.logical_line)
+                .is_some_and(|logical| {
+                    logical.end > line.text_range.end && range.start < logical.end
+                });
+        let start = range
+            .start
+            .max(line.text_range.start)
+            .min(line.text_range.end);
         let end = range.end.min(line.text_range.end);
-        if start >= end {
+        if start >= end && !newline_selected {
             continue;
         }
         let start_x = line.x + width_to_byte(line, start, layout.font_size);
-        let end_x = line.x + width_to_byte(line, end, layout.font_size);
+        let end_x = line.x
+            + width_to_byte(line, end, layout.font_size)
+            + if newline_selected { newline_width } else { 0.0 };
         ctx.fill_rect(
             Rect::from_xywh(
                 origin.x + start_x,

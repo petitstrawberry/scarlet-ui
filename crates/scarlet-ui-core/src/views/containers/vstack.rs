@@ -158,16 +158,26 @@ impl ElementRenderObject for VStackRenderObject {
 
         let mut fixed_total_height: f32 = 0.0;
         let mut max_width: f32 = 0.0;
-        let mut flex_total: u32 = 0;
+        let flex_total: u32 = children.iter().map(|child| child.flex_factor()).sum();
         self.greedy_indices.clear();
         self.child_sizes.clear();
         self.child_sizes.resize(child_count, Size::ZERO);
 
         for (index, child) in children.iter_mut().enumerate() {
             let flex = child.flex_factor();
-            flex_total += flex;
 
             if flex == 0 {
+                // Explicit fillers need only the final allocation. Measuring
+                // them at the whole stack extent first can clamp a nested
+                // scroller and destroy its position before the final layout.
+                if flex_total == 0
+                    && child.fill_height()
+                    && constraints.max_height.is_finite()
+                    && constraints.max_height > 0.0
+                {
+                    self.greedy_indices.push(index);
+                    continue;
+                }
                 let fill_cross = child.fill_width();
                 let child_constraints = if fill_cross {
                     LayoutConstraints::new(0.0, f32::INFINITY, 0.0, constraints.max_height)
