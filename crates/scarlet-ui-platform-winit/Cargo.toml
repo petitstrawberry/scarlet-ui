@@ -13,6 +13,7 @@ scarlet-ui-core = { path = "../scarlet-ui-core", default-features = false, featu
 scarlet-ui-renderer-sgfx = { path = "../scarlet-ui-renderer-sgfx", default-features = false, features = ["std"] }
 
 [target.'cfg(not(target_os = "scarlet"))'.dependencies]
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
 softbuffer = "0.4.8"
 winit = "0.30.13"
 raw-window-handle = { version = "0.6", optional = true }

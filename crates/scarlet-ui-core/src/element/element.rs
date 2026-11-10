@@ -460,6 +460,21 @@ pub trait Element {
     }
 
     /// Get text-input state if this element is the focused editable control.
+    /// Editable snapshot for standard clipboard actions, including unfocused editors.
+    fn text_edit_state(&self) -> Option<crate::clipboard::TextEditState> {
+        None
+    }
+
+    /// Apply an already authorized edit. `text` is present only after a platform
+    /// clipboard operation succeeds; `None` permits a custom callback.
+    fn apply_text_edit(
+        &mut self,
+        _action: crate::clipboard::TextEditAction,
+        _text: Option<&str>,
+    ) -> bool {
+        false
+    }
+
     fn text_input_state(&self) -> Option<TextInputElementState> {
         None
     }

@@ -13,6 +13,52 @@ use crate::event::{
 };
 use crate::geometry::Point;
 
+pub(crate) fn text_edit_state(
+    view: &TextView,
+    object: &TextViewRenderObject,
+) -> Option<crate::clipboard::TextEditState> {
+    let current = match &view.text {
+        super::TextBinding::String(text) => text.get() == object.text_document.as_str().as_ref(),
+        super::TextBinding::Document(text) => text.get().same_revision(&object.text_document),
+    };
+    if !current || view.selection.get() != object.selection {
+        return None;
+    }
+    Some(crate::clipboard::TextEditState {
+        document: object.text_document.clone(),
+        selection: object.selection,
+        composing: !object.preedit.is_empty(),
+        custom_copy: view.on_copy.is_some(),
+        custom_paste: view.on_paste.is_some(),
+    })
+}
+
+pub(crate) fn apply_text_edit(
+    view: &TextView,
+    object: &mut TextViewRenderObject,
+    action: crate::clipboard::TextEditAction,
+    text: Option<&str>,
+) -> bool {
+    use crate::clipboard::TextEditAction;
+    if !object.is_focused() || !object.preedit.is_empty() {
+        return false;
+    }
+    match (action, text) {
+        (TextEditAction::Cut, Some(_)) => {
+            delete_selection(view, object);
+        }
+        (TextEditAction::Paste, Some(text)) => insert_text(view, object, text),
+        (TextEditAction::SelectAll, _) => {
+            select_all(object);
+            finish_caret_change(view, object);
+        }
+        (TextEditAction::Copy, _) => return handle_primary_shortcut(view, object, 'c'),
+        (TextEditAction::Cut, None) => return handle_primary_shortcut(view, object, 'x'),
+        (TextEditAction::Paste, None) => return handle_primary_shortcut(view, object, 'v'),
+    }
+    true
+}
+
 enum CaretMove {
     Left,
     Right,

@@ -417,6 +417,7 @@ impl ElementRenderObject for TextFieldRenderObject {
             self.focused
         };
         let selection = self.selection;
+        let old_document = self.text_document.clone();
         let old_len = self.text_document.len();
         let new_text = view.text.get();
         let text_changed = self.text_document.as_str().as_ref() != new_text.as_str();
@@ -428,6 +429,9 @@ impl ElementRenderObject for TextFieldRenderObject {
         let preedit_spans = self.preedit_spans.clone();
         let size = self.size;
         *self = TextFieldRenderObject::from_view(view);
+        if !text_changed {
+            self.text_document = old_document;
+        }
         let len = self.text_document.len();
         self.selection = if text_changed && selection_followed_old_end {
             TextSelection::collapsed(len)
@@ -599,6 +603,50 @@ impl TextFieldRenderObject {
             style::surface_color(&palette, style::SurfaceRole::Canvas),
         )
     }
+}
+
+pub(crate) fn text_edit_state(
+    field: &TextField,
+    object: &TextFieldRenderObject,
+) -> Option<crate::clipboard::TextEditState> {
+    // State may have changed before the next rebuild. Never edit that older render snapshot.
+    if !field.enabled || field.text.get() != object.text_document.as_str().as_ref() {
+        return None;
+    }
+    Some(crate::clipboard::TextEditState {
+        document: object.text_document.clone(),
+        selection: object.selection,
+        composing: !object.preedit.is_empty(),
+        custom_copy: false,
+        custom_paste: false,
+    })
+}
+
+pub(crate) fn apply_text_edit(
+    field: &TextField,
+    object: &mut TextFieldRenderObject,
+    action: crate::clipboard::TextEditAction,
+    text: Option<&str>,
+) -> bool {
+    use crate::clipboard::TextEditAction;
+    if !object.is_focused() || !field.enabled || !object.preedit.is_empty() {
+        return false;
+    }
+    match action {
+        TextEditAction::SelectAll => {
+            object.selection = TextSelection {
+                anchor: TextPosition::new(0),
+                caret: TextPosition::new(object.text_document.len()),
+            };
+        }
+        TextEditAction::Cut if text.is_some() => {
+            delete_selection(field, object);
+            handle_empty_text_field(field, object);
+        }
+        TextEditAction::Paste if text.is_some() => insert_text(field, object, text.unwrap()),
+        _ => return false,
+    }
+    true
 }
 
 fn handle_empty_text_field(field: &TextField, render_object: &mut TextFieldRenderObject) {

@@ -54,6 +54,7 @@ use ::winit::window::{
     CursorGrabMode, Fullscreen, Window as WinitWindow, WindowAttributes, WindowId,
 };
 
+mod clipboard;
 #[cfg(target_os = "macos")]
 mod file_dialog;
 #[cfg(target_os = "macos")]
@@ -798,6 +799,7 @@ impl WinitEventState {
 }
 
 struct WinitWindowEntry {
+    clipboard_access: std::sync::Arc<clipboard::Access>,
     state: Rc<RefCell<WinitEventState>>,
     window: Rc<WinitWindow>,
 }
@@ -838,7 +840,9 @@ impl WinitSharedState {
         #[cfg(target_os = "macos")]
         self.menus.borrow_mut().remove(window_id);
         self.clear_pointer_lock_owner(window_id);
-        self.windows.borrow_mut().remove(&window_id);
+        if let Some(entry) = self.windows.borrow_mut().remove(&window_id) {
+            entry.clipboard_access.close();
+        }
     }
 
     fn claim_pointer_lock(
@@ -1035,6 +1039,9 @@ impl ApplicationHandler for WinitPumpHandler {
                 ));
             }
             WindowEvent::Destroyed => {
+                if let Some(entry) = self.shared.windows.borrow().get(&window_id) {
+                    entry.clipboard_access.close();
+                }
                 #[cfg(target_os = "macos")]
                 self.shared.menus.borrow_mut().remove(window_id);
                 self.shared.clear_pointer_lock_owner(window_id);
@@ -1058,6 +1065,9 @@ impl ApplicationHandler for WinitPumpHandler {
                 });
             }
             WindowEvent::Focused(focused) => {
+                if let Some(entry) = self.shared.windows.borrow().get(&window_id) {
+                    entry.clipboard_access.focus(focused);
+                }
                 #[cfg(target_os = "macos")]
                 self.shared.menus.borrow_mut().refresh();
                 state.window_focused = focused;
@@ -1322,6 +1332,7 @@ fn mark_pointer_lock_released(state: &mut WinitEventState) {
 }
 
 pub struct WinitPlatformWindow {
+    clipboard: scarlet_ui_core::clipboard::TextClipboard,
     shared: Rc<WinitSharedState>,
     #[cfg(feature = "sgfx")]
     sgfx_backend: Option<SgfxWindowPaintBackend>,
@@ -1511,14 +1522,19 @@ impl WinitPlatformWindow {
             &request.menu_titles,
             Rc::downgrade(&state),
         )?;
+        let clipboard_access = std::sync::Arc::new(clipboard::Access::default());
+        clipboard_access.focus(window.has_focus());
+        let clipboard = clipboard::service(clipboard_access.clone());
         shared.windows.borrow_mut().insert(
             window.id(),
             WinitWindowEntry {
+                clipboard_access,
                 state: state.clone(),
                 window: window.clone(),
             },
         );
         Ok(Self {
+            clipboard,
             shared,
             #[cfg(feature = "sgfx")]
             using_sgfx: sgfx_backend.is_some(),
@@ -1577,6 +1593,15 @@ impl WinitPlatformWindow {
 }
 
 impl PlatformWindow for WinitPlatformWindow {
+    fn text_clipboard(
+        &self,
+    ) -> core::result::Result<
+        scarlet_ui_core::clipboard::TextClipboard,
+        scarlet_ui_core::clipboard::ClipboardError,
+    > {
+        Ok(self.clipboard.clone())
+    }
+
     #[cfg(target_os = "macos")]
     fn begin_file_dialog(
         &mut self,

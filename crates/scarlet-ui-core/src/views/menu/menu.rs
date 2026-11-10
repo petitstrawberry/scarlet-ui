@@ -234,6 +234,16 @@ impl Menu {
         self
     }
 
+    pub(crate) fn popup_renderer(&self, available_width: f32) -> MenuRenderObject {
+        MenuRenderObject::with_requested_item_height(
+            self.items.clone(),
+            self.item_height,
+            self.width
+                .max(self.preferred_width())
+                .min(available_width.max(0.0)),
+        )
+    }
+
     /// Get the menu items
     pub fn items(&self) -> &[MenuItemContent] {
         &self.items

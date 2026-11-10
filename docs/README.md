@@ -30,3 +30,5 @@ The repository files below are the documentation sources; the website imports th
 - [Tabs and text study](TABS_AND_TEXT.md)
 
 The visual studies describe their own trial status; consult the current implementation and recorded limitations alongside them.
+
+- [Context menus and clipboard editing](CONTEXT_MENUS.md)

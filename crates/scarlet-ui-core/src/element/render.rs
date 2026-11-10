@@ -136,6 +136,12 @@ pub enum ScrollOffsetUpdate {
 /// - Rendering to a buffer
 /// - Hit testing
 pub trait RenderObject: Any {
+    /// Build the current right-click menu. The pipeline presents it above the scene
+    /// without changing keyboard focus. Called only when opening the menu.
+    fn context_menu(&self) -> Option<crate::views::Menu> {
+        None
+    }
+
     /// Receive this scope's unconsumed platform safe-area reservations.
     fn set_safe_area_insets(&mut self, _insets: EdgeInsets) {}
 
@@ -1331,6 +1337,60 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             }
         }
         true
+    }
+
+    fn text_edit_state(&self) -> Option<crate::clipboard::TextEditState> {
+        if self.control_is_disabled() {
+            return None;
+        }
+        if let Some(view) = self.view.as_any().downcast_ref::<crate::views::TextField>() {
+            let object = self
+                .render_object
+                .as_any()
+                .downcast_ref::<crate::views::TextFieldRenderObject>()?;
+            return crate::views::text_field::text_edit_state(view, object);
+        }
+        let view = self
+            .view
+            .as_any()
+            .downcast_ref::<crate::views::TextView>()?;
+        let object = self
+            .render_object
+            .as_any()
+            .downcast_ref::<crate::views::TextViewRenderObject>()?;
+        crate::views::text_view::text_edit_state(view, object)
+    }
+
+    fn apply_text_edit(
+        &mut self,
+        action: crate::clipboard::TextEditAction,
+        text: Option<&str>,
+    ) -> bool {
+        if self.control_is_disabled() {
+            return false;
+        }
+        let handled =
+            if let Some(view) = self.view.as_any().downcast_ref::<crate::views::TextField>() {
+                self.render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::TextFieldRenderObject>()
+                    .is_some_and(|object| {
+                        crate::views::text_field::apply_text_edit(view, object, action, text)
+                    })
+            } else if let Some(view) = self.view.as_any().downcast_ref::<crate::views::TextView>() {
+                self.render_object
+                    .as_any_mut()
+                    .downcast_mut::<crate::views::TextViewRenderObject>()
+                    .is_some_and(|object| {
+                        crate::views::text_view::apply_text_edit(view, object, action, text)
+                    })
+            } else {
+                false
+            };
+        if handled {
+            crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+        }
+        handled
     }
 
     fn text_input_state(&self) -> Option<crate::element::TextInputElementState> {

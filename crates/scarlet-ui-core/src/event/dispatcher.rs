@@ -1940,7 +1940,7 @@ impl EventDispatcher {
         )
     }
 
-    fn set_focused_element(
+    pub(crate) fn set_focused_element(
         &mut self,
         element_tree: &mut ElementTree,
         target_id: ElementId,

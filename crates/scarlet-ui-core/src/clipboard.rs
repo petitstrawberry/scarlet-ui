@@ -35,6 +35,37 @@ pub trait ClipboardProvider: Send + Sync + 'static {
     fn write_text(&self, text: &str) -> Result<(), ClipboardError>;
 }
 
+/// Standard editing commands shared by text widgets and their context menus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextEditAction {
+    Copy,
+    Cut,
+    Paste,
+    SelectAll,
+}
+
+/// A retained editor snapshot used to reject stale asynchronous edits.
+#[derive(Clone)]
+pub struct TextEditState {
+    pub document: crate::views::TextDocument,
+    pub selection: crate::views::TextSelection,
+    pub composing: bool,
+    /// Explicit TextView callbacks take precedence over the platform clipboard.
+    pub custom_copy: bool,
+    pub custom_paste: bool,
+}
+
+impl TextEditState {
+    pub(crate) fn matches(&self, other: &Self) -> bool {
+        self.document.same_revision(&other.document)
+            && self.selection == other.selection
+            && !self.composing
+            && !other.composing
+            && self.custom_copy == other.custom_copy
+            && self.custom_paste == other.custom_paste
+    }
+}
+
 struct Shared {
     provider: Arc<dyn ClipboardProvider>,
     busy: AtomicBool,

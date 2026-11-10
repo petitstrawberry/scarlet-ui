@@ -75,3 +75,35 @@ custom window buttons in overlay mode.
 This option requires a system frame and is currently supported only by macOS
 Winit. Other Winit hosts return `WindowDecorationUnsupported`; applications
 should select normal platform decorations there.
+
+## Native text clipboard
+
+`PlatformWindow::text_clipboard()` returns a cloneable asynchronous service backed
+by arboard, with text-only support on macOS, Windows, X11, and Wayland compositors
+supporting a data-control protocol. Arboard falls back to X11 when Wayland data
+control is unavailable; a session without either reports an unavailable error.
+No process-local clipboard is substituted. Images and rich text are not exposed.
+
+Access requires a live, focused owner window. Focus changes invalidate in-flight
+results, and closing the window revokes all retained service clones. Calls are
+revalidated on the native worker immediately before OS access. Text is limited to
+256 KiB (UTF-8 bytes); native reads are checked after the OS returns the text.
+
+One process-wide worker retains native clipboard ownership, including X11 text
+when a window closes. Callers wait at most two seconds on their background task,
+never on the event loop. If an OS call stalls, further requests return `Busy`
+until it finishes rather than creating additional native threads or queued
+writes. A write already submitted to the OS cannot be cancelled or rolled back,
+even if the caller times out or focus changes. Linux clipboard persistence after
+process exit depends on a desktop clipboard manager.
+
+Run the headless authorization and worker-limit tests with:
+
+```sh
+cargo test -p scarlet-ui-platform-winit --lib clipboard::tests
+```
+
+For desktop verification, copy Unicode and multiline text to/from another native
+application, test cut/paste across two ScarletUI windows, and verify that a saved
+service clone is denied after its owner loses focus or closes. Check empty and
+non-text clipboards, oversized text, and sessions without a clipboard server.
