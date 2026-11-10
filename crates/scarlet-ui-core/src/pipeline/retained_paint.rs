@@ -7,7 +7,8 @@ use crate::{
     geometry::{Point, Rect},
     renderer::{DisplayList, PaintContext},
 };
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
+use hashbrown::{HashMap, HashSet};
 
 struct Node {
     generation: u64,
@@ -24,18 +25,25 @@ struct Node {
     overlay: Option<Arc<DisplayList>>,
     group: Option<(u64, Arc<DisplayList>)>,
     reads_backdrop: bool,
+    deferred_paint: bool,
 }
 
 #[derive(Default)]
 pub(super) struct RetainedPaint {
     root: Option<ElementId>,
     generation: u64,
-    nodes: BTreeMap<ElementId, Node>,
+    // Lookup order is irrelevant: replay always follows the explicit child order.
+    nodes: HashMap<ElementId, Node>,
+    deferred_paint: bool,
 }
 impl RetainedPaint {
     pub fn clear(&mut self) {
-        self.nodes.clear();
+        self.nodes = HashMap::new();
         self.root = None;
+        self.deferred_paint = false;
+    }
+    pub fn has_deferred_paint(&self) -> bool {
+        self.deferred_paint
     }
     pub fn sync_tree(
         &mut self,
@@ -44,23 +52,47 @@ impl RetainedPaint {
         self_ids: &[ElementId],
         structural_ids: &[ElementId],
         full: bool,
+        defer_outside: Option<Rect>,
     ) {
         self.root = Some(root.id());
+        self.deferred_paint = false;
         self.generation = self.generation.wrapping_add(1);
-        self.sync(root, paint_ids, self_ids, structural_ids, full, false, None);
+        // A membership query happens for every element. Index the dirty IDs
+        // once instead of linearly scanning a dense dirty list at each node.
+        let paint_ids = paint_ids.iter().copied().collect();
+        let self_ids = self_ids.iter().copied().collect();
+        let structural_ids = structural_ids.iter().copied().collect();
+        self.sync(
+            root,
+            &paint_ids,
+            &self_ids,
+            &structural_ids,
+            full,
+            false,
+            None,
+            Point::ZERO,
+            defer_outside,
+        );
         self.nodes
             .retain(|_, node| node.generation == self.generation);
+        // Virtualization and root replacement must release a formerly large
+        // table. Keep some slack to avoid reallocating during ordinary scrolling.
+        if self.nodes.capacity() > self.nodes.len().saturating_mul(4).max(256) {
+            self.nodes.shrink_to(self.nodes.len().saturating_mul(2));
+        }
     }
     fn sync(
         &mut self,
         element: &dyn Element,
-        paint_ids: &[ElementId],
-        self_ids: &[ElementId],
-        structural_ids: &[ElementId],
+        paint_ids: &HashSet<ElementId>,
+        self_ids: &HashSet<ElementId>,
+        structural_ids: &HashSet<ElementId>,
         inherited: bool,
         group: bool,
         parent: Option<ElementId>,
-    ) {
+        origin: Point,
+        defer_outside: Option<Rect>,
+    ) -> (u64, bool) {
         let id = element.id();
         let subtree_dirty = inherited
             || (paint_ids.contains(&id)
@@ -82,18 +114,20 @@ impl RetainedPaint {
             overlay: None,
             group: None,
             reads_backdrop: false,
+            deferred_paint: false,
         });
+        let own_dirty = own_dirty || node.deferred_paint;
         let position = element.position();
+        let abs = Point::new(origin.x + position.x, origin.y + position.y);
         let bounds = RenderingPipeline::element_paint_bounds(element, Point::ZERO);
         let clip = RenderingPipeline::clip_for_element(element, Point::ZERO);
         let moved = node.position != position;
-        let changed = node.bounds != bounds
-            || node.clip != clip
-            || !node
-                .children
-                .iter()
-                .copied()
-                .eq(element.children().iter().map(|child| child.id()));
+        let children_changed = !node
+            .children
+            .iter()
+            .copied()
+            .eq(element.children().iter().map(|child| child.id()));
+        let changed = node.bounds != bounds || node.clip != clip || children_changed;
         let old_paint = node.paint.as_ref().map_or(0, |list| list.identity());
         let old_overlay = node.overlay.as_ref().map_or(0, |list| list.identity());
         node.generation = self.generation;
@@ -101,10 +135,41 @@ impl RetainedPaint {
         node.position = position;
         node.bounds = bounds;
         node.clip = clip;
-        node.children.clear();
-        node.children
-            .extend(element.children().iter().map(|child| child.id()));
-        if own_dirty {
+        if children_changed {
+            node.children.clear();
+            node.children
+                .extend(element.children().iter().map(|child| child.id()));
+        }
+        // Only explicitly safe objects can defer. Retained groups must stay
+        // complete because a parent can replay their offscreen source pixels.
+        let defer_outside = if group || node.group.is_some() {
+            None
+        } else {
+            defer_outside
+        };
+        let defer = own_dirty
+            && !inherited
+            && defer_outside.is_some_and(|viewport| {
+                let absolute_bounds = Rect::new(
+                    Point::new(abs.x + bounds.left(), abs.y + bounds.top()),
+                    bounds.size,
+                );
+                intersect(absolute_bounds, viewport).is_none()
+                    && element
+                        .render_object()
+                        .is_some_and(|r| r.can_defer_offscreen_paint())
+                    && node
+                        .paint
+                        .as_ref()
+                        .is_none_or(|list| list.is_self_contained() && !list.has_extensions())
+                    && node
+                        .overlay
+                        .as_ref()
+                        .is_none_or(|list| list.is_self_contained() && !list.has_extensions())
+            });
+        node.deferred_paint = defer;
+        self.deferred_paint |= defer;
+        if own_dirty && !defer {
             let mut context = PaintContext::new();
             RenderingPipeline::paint_element_self(&mut context, element, Point::ZERO);
             if node
@@ -116,7 +181,7 @@ impl RetainedPaint {
             }
         }
         // Overlays include scrollbar thumbs and can change on a composite-only frame.
-        if own_dirty || structural_ids.contains(&id) {
+        if (own_dirty && !defer) || structural_ids.contains(&id) {
             let mut context = PaintContext::new();
             RenderingPipeline::paint_element_overlay(&mut context, element, Point::ZERO);
             if node
@@ -136,41 +201,41 @@ impl RetainedPaint {
         if moved {
             node.subtree_stamp = self.generation;
         }
+        // Carry child summaries back up the traversal. Looking each child up
+        // again in the node map adds several tree searches per element.
+        let mut stamp = node.content_stamp;
+        let mut reads_backdrop = element.render_object().is_some_and(|r| r.reads_backdrop());
+        let group_children = element.retains_virtual_items()
+            || element
+                .render_object()
+                .is_some_and(|r| r.owns_child_viewport());
         for child in element.children() {
-            self.sync(
+            let (child_stamp, child_reads_backdrop) = self.sync(
                 child.as_ref(),
                 paint_ids,
                 self_ids,
                 structural_ids,
                 subtree_dirty,
-                element.retains_virtual_items()
-                    || element
-                        .render_object()
-                        .is_some_and(|r| r.owns_child_viewport()),
+                group_children,
                 Some(id),
+                abs,
+                defer_outside,
             );
+            stamp = stamp.max(child_stamp);
+            reads_backdrop |= child_reads_backdrop;
         }
-        let stamp = self.nodes[&id]
-            .children
-            .iter()
-            .fold(self.nodes[&id].content_stamp, |stamp, child| {
-                stamp.max(self.nodes[child].subtree_stamp)
-            });
         let node = self.nodes.get_mut(&id).unwrap();
         node.content_stamp = stamp;
         node.subtree_stamp = node.subtree_stamp.max(stamp);
-        let reads_backdrop = element.render_object().is_some_and(|r| r.reads_backdrop())
-            || self.nodes[&id]
-                .children
-                .iter()
-                .any(|child| self.nodes[child].reads_backdrop);
-        self.nodes.get_mut(&id).unwrap().reads_backdrop = reads_backdrop;
+        node.reads_backdrop = reads_backdrop;
+        let subtree_stamp = node.subtree_stamp;
         // Backdrop-dependent groups can install independently retained groups
         // below the viewport's immediate child. Refresh those existing groups
         // bottom-up too, before an ancestor records references to their lists.
-        if group || self.nodes[&id].group.is_some() {
+        if group || node.group.is_some() {
             self.cache_static_subtrees(id);
         }
+        (subtree_stamp, reads_backdrop)
     }
     fn cache_static_subtrees(&mut self, id: ElementId) {
         self.refresh_group(id);
@@ -374,6 +439,22 @@ impl RetainedPaint {
                 context.draw_display_list(abs, Arc::clone(list));
             }
         }
+        // The node's own paint may extend outside its child clip (a shadow),
+        // so only stop after emitting it. Children and overlays are both inside
+        // this clip and cannot contribute when it misses an ancestor clip.
+        if let (Some(active), Some((local, _))) = (active_clip, node.clip) {
+            let clip = Rect::new(
+                Point::new(abs.x + local.left(), abs.y + local.top()),
+                local.size,
+            );
+            if intersect(active, clip).is_none()
+                && node.overlay.as_ref().is_none_or(|list| {
+                    list.is_self_contained() && !list.has_extensions() && !list.reads_backdrop()
+                })
+            {
+                return;
+            }
+        }
         if let Some((clip, radius)) = node.clip {
             context.push_rounded_clip(
                 Rect::new(
@@ -428,6 +509,188 @@ mod tests {
     };
     use alloc::{boxed::Box, rc::Rc};
     use core::cell::RefCell;
+
+    #[test]
+    fn deferred_offscreen_surface_repaints_before_exposure_and_releases_on_clear() {
+        use crate::element::LayoutConstraints;
+        let view =
+            |color| crate::views::Surface::section(Spacer::new().frame(30., 30.)).fill(color);
+        let mut element = view(Color::RED).create_element();
+        element.layout(LayoutConstraints::tight(30., 30.));
+        element.set_position(Point::new(200., 10.));
+        let id = element.id();
+        let mut scene = RetainedPaint::default();
+        scene.sync_tree(element.as_ref(), &[], &[], &[], true, None);
+        let original = scene.nodes[&id].paint.as_ref().unwrap().identity();
+        for color in [Color::BLUE, Color::GREEN] {
+            element.update(&view(color));
+            scene.sync_tree(
+                element.as_ref(),
+                &[id],
+                &[id],
+                &[],
+                false,
+                Some(Rect::from_xywh(0., 0., 100., 100.)),
+            );
+            assert!(scene.has_deferred_paint());
+            assert_eq!(
+                scene.nodes[&id].paint.as_ref().unwrap().identity(),
+                original
+            );
+        }
+        // Geometry/composite changes flush pending paint even without a dirty ID.
+        element.set_position(Point::new(20., 10.));
+        scene.sync_tree(element.as_ref(), &[], &[], &[], false, None);
+        assert!(!scene.has_deferred_paint());
+        assert_ne!(
+            scene.nodes[&id].paint.as_ref().unwrap().identity(),
+            original
+        );
+        let mut fresh = RetainedPaint::default();
+        fresh.sync_tree(element.as_ref(), &[], &[], &[], true, None);
+        let pixels = |scene: &RetainedPaint| {
+            let mut paint = PaintContext::new();
+            scene.replay(&mut paint, None);
+            let mut renderer = CpuPaintRenderer::new(Size::new(100., 100.), 1000, Color::WHITE);
+            renderer.execute_with_damage(&paint, None);
+            renderer.buffer().data().to_vec()
+        };
+        assert_eq!(pixels(&scene), pixels(&fresh));
+        element.set_position(Point::new(200., 10.));
+        element.update(&view(Color::RED));
+        scene.sync_tree(
+            element.as_ref(),
+            &[id],
+            &[id],
+            &[],
+            false,
+            Some(Rect::from_xywh(0., 0., 100., 100.)),
+        );
+        assert!(scene.has_deferred_paint());
+        scene.clear();
+        assert!(!scene.has_deferred_paint());
+        assert!(scene.nodes.is_empty());
+    }
+
+    #[test]
+    fn offscreen_surface_shadow_reaching_viewport_is_recorded_eagerly() {
+        use crate::element::LayoutConstraints;
+        let view = |color| {
+            crate::views::Surface::section(Spacer::new().frame(30., 30.))
+                .elevation(crate::views::ElevationRole::Floating)
+                .fill(color)
+        };
+        let mut element = view(Color::RED).create_element();
+        element.layout(LayoutConstraints::tight(30., 30.));
+        element.set_position(Point::new(101., 10.));
+        let id = element.id();
+        let mut scene = RetainedPaint::default();
+        scene.sync_tree(element.as_ref(), &[], &[], &[], true, None);
+        assert!(scene.nodes[&id].bounds.left() < -1.);
+        let old = scene.nodes[&id].paint.as_ref().unwrap().identity();
+        element.update(&view(Color::GREEN));
+        scene.sync_tree(
+            element.as_ref(),
+            &[id],
+            &[id],
+            &[],
+            false,
+            Some(Rect::from_xywh(0., 0., 100., 100.)),
+        );
+        assert!(!scene.has_deferred_paint());
+        assert_ne!(scene.nodes[&id].paint.as_ref().unwrap().identity(), old);
+    }
+
+    #[test]
+    fn disjoint_child_clip_keeps_outset_paint_without_child_or_overlay_commands() {
+        let picture = |rect, color| {
+            let mut context = PaintContext::new();
+            context.fill_rect(rect, color);
+            context.into_display_list()
+        };
+        let outset = picture(Rect::from_xywh(-10., 0., 20., 20.), Color::RED);
+        let hidden = picture(Rect::from_xywh(-100., 0., 200., 20.), Color::BLUE);
+        let node = |position, clip, paint, overlay, children| Node {
+            generation: 1,
+            parent: None,
+            subtree_stamp: 1,
+            content_stamp: 1,
+            position,
+            bounds: Rect::from_xywh(-10., 0., 20., 20.),
+            clip,
+            children,
+            paint,
+            overlay,
+            group: None,
+            reads_backdrop: false,
+            deferred_paint: false,
+        };
+        let root = ElementId::new(1);
+        let child = ElementId::new(2);
+        let descendant = ElementId::new(3);
+        let mut scene = RetainedPaint::default();
+        scene.root = Some(root);
+        scene.nodes.insert(
+            root,
+            node(
+                Point::ZERO,
+                Some((Rect::from_xywh(0., 0., 100., 100.), 0.)),
+                None,
+                None,
+                vec![child],
+            ),
+        );
+        scene.nodes.insert(
+            child,
+            node(
+                Point::new(105., 10.),
+                Some((Rect::from_xywh(0., 0., 20., 20.), 0.)),
+                Some(outset.clone()),
+                Some(hidden.clone()),
+                vec![descendant],
+            ),
+        );
+        scene.nodes.insert(
+            descendant,
+            node(Point::ZERO, None, Some(hidden), None, vec![]),
+        );
+        let mut context = PaintContext::new();
+        scene.replay(&mut context, None);
+        let lists: Vec<_> = context
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                crate::renderer::PaintCommand::DrawDisplayList { list, .. } => {
+                    Some(list.identity())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lists, vec![outset.identity()]);
+        assert_eq!(
+            context.commands().len(),
+            3,
+            "only the ancestor clip and visible outset remain"
+        );
+        let mut actual = CpuPaintRenderer::new(Size::new(100., 100.), 1000, Color::WHITE);
+        actual.execute_with_damage(&context, None);
+        let mut expected_context = PaintContext::new();
+        expected_context.fill_rect(Rect::from_xywh(95., 10., 5., 20.), Color::RED);
+        let mut expected = CpuPaintRenderer::new(Size::new(100., 100.), 1000, Color::WHITE);
+        expected.execute_with_damage(&expected_context, None);
+        assert_eq!(actual.buffer().data(), expected.buffer().data());
+
+        // State changes can affect later siblings even inside an empty clip.
+        // Retain their original position in the command stream.
+        let mut opacity = PaintContext::new();
+        opacity.set_opacity(0.5);
+        let opacity = opacity.into_display_list();
+        scene.nodes.get_mut(&child).unwrap().overlay = Some(opacity.clone());
+        let mut stateful = PaintContext::new();
+        scene.replay(&mut stateful, None);
+        assert!(stateful.commands().iter().any(|command| matches!(command,
+            crate::renderer::PaintCommand::DrawDisplayList { list, .. } if list.identity() == opacity.identity())));
+    }
     struct Capture {
         retained: bool,
         renderer: CpuPaintRenderer,
@@ -524,7 +787,7 @@ mod tests {
         let constraints = crate::element::LayoutConstraints::tight(80., 40.);
         element.layout(constraints);
         let mut scene = RetainedPaint::default();
-        scene.sync_tree(element.as_ref(), &[], &[], &[], true);
+        scene.sync_tree(element.as_ref(), &[], &[], &[], true, None);
         // Backdrop fallback can install a group below the immediate child of
         // a viewport. Such a node has no viewport-owning parent on the next
         // sync, but its recording still needs to follow content changes.
@@ -533,7 +796,7 @@ mod tests {
         let original = scene.nodes[&grouped].group.as_ref().unwrap().1.identity();
         element.update(&view(Color::GREEN));
         element.layout(constraints);
-        scene.sync_tree(element.as_ref(), &[element.id()], &[], &[], false);
+        scene.sync_tree(element.as_ref(), &[element.id()], &[], &[], false, None);
         let node = &scene.nodes[&grouped];
         let (stamp, list) = node.group.as_ref().unwrap();
         assert_eq!(*stamp, node.content_stamp);
@@ -589,7 +852,10 @@ mod tests {
         element.set_viewport_hint(Rect::from_xywh(0., 0., 200., 100.));
         element.layout(crate::element::LayoutConstraints::tight(200., 100.));
         let mut scene = RetainedPaint::default();
-        scene.sync_tree(element.as_ref(), &[], &[], &[], true);
+        scene.sync_tree(element.as_ref(), &[], &[], &[], true, None);
+        // Simulate a formerly large mounted tree, then verify that scrolling
+        // with a small live set releases spare table storage as well as nodes.
+        scene.nodes.reserve(8192);
         let weak = Arc::downgrade(
             scene
                 .nodes
@@ -599,7 +865,7 @@ mod tests {
         );
         for y in [10_000., 20_000., 30_000., 40_000.] {
             element.set_viewport_hint(Rect::from_xywh(0., y, 200., 100.));
-            scene.sync_tree(element.as_ref(), &[], &[], &[element.id()], false);
+            scene.sync_tree(element.as_ref(), &[], &[], &[element.id()], false, None);
             assert!(
                 scene.nodes.len() < 200,
                 "the scene must retain mounted virtual rows, not the full model"
@@ -609,6 +875,9 @@ mod tests {
             weak.upgrade().is_none(),
             "removed row recordings must release their resources"
         );
+        assert!(scene.nodes.capacity() <= scene.nodes.len().saturating_mul(4).max(256));
+        scene.clear();
+        assert_eq!(scene.nodes.capacity(), 0);
     }
     #[test]
     fn nested_scroller_refreshes_its_grouped_row() {
@@ -700,6 +969,67 @@ mod tests {
                 shared,
                 old.len() - 1,
                 "only the border overlay recording may change"
+            );
+            let fresh_pixels = Rc::new(RefCell::new(Buffer::new(size)));
+            let mut fresh = RenderingPipeline::new();
+            fresh.set_paint_backend(Box::new(Capture {
+                retained: false,
+                renderer: CpuPaintRenderer::new(size, 1000, Color::WHITE),
+                pixels: fresh_pixels.clone(),
+                lists: Rc::new(RefCell::new(Vec::new())),
+            }));
+            fresh.set_root(updated.create_element());
+            fresh.resize(size);
+            fresh.layout_initial();
+            fresh.render_for_present().unwrap();
+            assert_eq!(pixels.borrow().data(), fresh_pixels.borrow().data());
+            fresh.teardown();
+        }
+        pipeline.teardown();
+    }
+
+    #[test]
+    fn changing_surface_colors_preserves_child_recordings_and_matches_fresh_pixels() {
+        let size = Size::new(200., 100.);
+        let view = |color, _width: f32| {
+            Window::new(
+                "Border",
+                crate::views::Surface::section(Spacer::new().frame(80., 80.))
+                    .corner_radius(10.)
+                    .fill(color)
+                    .border_color(Color::BLUE),
+            )
+            .decorated(false)
+            .size(size)
+        };
+        let pixels = Rc::new(RefCell::new(Buffer::new(size)));
+        let lists = Rc::new(RefCell::new(Vec::new()));
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_paint_backend(Box::new(Capture {
+            retained: true,
+            renderer: CpuPaintRenderer::new(size, 1000, Color::WHITE),
+            pixels: pixels.clone(),
+            lists: lists.clone(),
+        }));
+        pipeline.set_root(view(Color::RED, 1.).create_element());
+        pipeline.resize(size);
+        pipeline.layout_initial();
+        pipeline.render_for_present().unwrap();
+        let old = lists.borrow().clone();
+        for (color, width) in [(Color::GREEN, 3.), (Color::RED, 1.)] {
+            let updated = view(color, width);
+            pipeline
+                .element_tree_mut()
+                .root_mut()
+                .unwrap()
+                .update(&updated);
+            pipeline.render_for_present().unwrap();
+            assert_eq!(pipeline.pipeline_owner().last_self_paint_ids().len(), 1);
+            let shared = old.iter().filter(|id| lists.borrow().contains(id)).count();
+            assert_eq!(
+                shared,
+                old.len() - 1,
+                "only the surface recording may change"
             );
             let fresh_pixels = Rc::new(RefCell::new(Buffer::new(size)));
             let mut fresh = RenderingPipeline::new();

@@ -186,7 +186,10 @@ impl ElementRenderObject for HStackRenderObject {
                 };
                 let child_size = child.layout(child_constraints);
                 self.child_sizes[index] = child_size;
-                if constraints.max_width.is_finite()
+                // Intrinsic content can hit the width cap without requesting
+                // expansion. Only explicit fill-width children share space.
+                if child.fill_width()
+                    && constraints.max_width.is_finite()
                     && constraints.max_width > 0.0
                     && child_size.width + 0.5 >= constraints.max_width
                 {

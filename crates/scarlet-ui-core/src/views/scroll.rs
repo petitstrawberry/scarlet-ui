@@ -1216,6 +1216,14 @@ impl<V: View + Clone + 'static> ElementRenderObject for ScrollViewRenderObject<V
         false
     }
 
+    fn fill_width(&self) -> bool {
+        true
+    }
+
+    fn fill_height(&self) -> bool {
+        true
+    }
+
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         let width = finite_viewport_axis(constraints.min_width, constraints.max_width);
         let height = finite_viewport_axis(constraints.min_height, constraints.max_height);

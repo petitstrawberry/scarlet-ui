@@ -1,10 +1,12 @@
 //! Paint-command to persistent SGFX IR lowering.
 mod backdrop;
+mod batching;
 mod optical_cache;
 mod retained;
 mod shadow_cache;
 mod tiles;
 
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::rc::Rc;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -465,6 +467,10 @@ pub struct SgfxPaintEncoder {
     height: u32,
     supports_depth: bool,
     retained_meshes: Vec<retained::RetainedMesh>,
+    retained_mesh_index: BTreeMap<(u64, u32), usize>,
+    mesh_candidates: BTreeSet<(u64, u32)>,
+    previous_mesh_candidates: BTreeSet<(u64, u32)>,
+    retained_gpu_mesh_count: usize,
     recording_mesh: bool,
     shadow_cache: Option<shadow_cache::ShadowCache>,
     shape_cache: crate::geometry::ShapeCache,
@@ -618,6 +624,10 @@ impl SgfxPaintEncoder {
 
         Ok(Self {
             retained_meshes: Vec::new(),
+            retained_mesh_index: BTreeMap::new(),
+            mesh_candidates: BTreeSet::new(),
+            previous_mesh_candidates: BTreeSet::new(),
+            retained_gpu_mesh_count: 0,
             analytic_glass: false,
             raster_tiles: Vec::new(),
             raster_layer_plans: Vec::new(),
@@ -985,27 +995,29 @@ impl SgfxPaintEncoder {
                 ));
                 clipped.append_retained_at(paint, scarlet_ui_core::geometry::Point::ZERO);
                 clipped.pop_clip();
-                let frame = if retained {
+                let mut frame = if retained {
                     self.lower_retained(executor, &clipped, scale_milli, *area)?
                 } else {
                     self.lower(&clipped, scale_milli, *area)?
                 };
+                batching::batch_draws(self, &mut frame)?;
                 self.submit(executor, target, background, &[*area], &frame)?;
             }
             return Ok(());
         }
-        let lowered = if retained {
+        let mut lowered = if retained {
             self.lower_retained(executor, paint, scale_milli, render_bounds)?
         } else {
             self.lower(paint, scale_milli, render_bounds)?
         };
+        batching::batch_draws(self, &mut lowered)?;
         #[cfg(feature = "std")]
         let lower_us = started.map(|start| start.elapsed().as_micros());
         let result = self.submit(executor, target, background, &render_areas, &lowered);
         #[cfg(feature = "std")]
         if let Some(start) = started {
             eprintln!(
-                "[ScrollTiming] lower_us={} encode_us={} retained_draws={} frame_vertex_bytes={}",
+                "[ScrollTiming] lower_us={} encode_us={} retained_draws={} frame_vertex_bytes={} paint_draws={}",
                 lower_us.unwrap_or_default(),
                 start.elapsed().as_micros(),
                 lowered
@@ -1013,7 +1025,12 @@ impl SgfxPaintEncoder {
                     .iter()
                     .filter(|draw| draw.vertex_buffer.is_some())
                     .count(),
-                lowered.vertex_bytes.len()
+                lowered.vertex_bytes.len(),
+                lowered
+                    .draws
+                    .iter()
+                    .filter(|draw| !matches!(draw.source, DrawSource::ClearOnly))
+                    .count()
             );
         }
         result
@@ -1053,6 +1070,11 @@ impl SgfxPaintEncoder {
     }
 
     fn advance_frame_serial(&mut self) {
+        core::mem::swap(
+            &mut self.mesh_candidates,
+            &mut self.previous_mesh_candidates,
+        );
+        self.mesh_candidates.clear();
         self.frame_serial = self.frame_serial.wrapping_add(1);
         if self.frame_serial == 0 {
             self.frame_serial = 1;
@@ -1368,12 +1390,23 @@ impl SgfxPaintEncoder {
                         return Err(Error::InvalidFrame);
                     }
                     let ascent = match font_stack {
-                        Some(stack) => scarlet_ui_core::graphics::font_metrics_sized_with_font_stack(*font_size_px * scale, stack),
-                        None => scarlet_ui_core::graphics::font_metrics_sized(*font_size_px * scale),
-                    }.ascent;
+                        Some(stack) => {
+                            scarlet_ui_core::graphics::font_metrics_sized_with_font_stack(
+                                *font_size_px * scale,
+                                stack,
+                            )
+                        }
+                        None => {
+                            scarlet_ui_core::graphics::font_metrics_sized(*font_size_px * scale)
+                        }
+                    }
+                    .ascent;
                     let origin_x = scale_text_origin(position.x, scale_milli);
                     let origin_y = scarlet_ui_core::graphics::text_origin_y_physical(
-                        position.y, *font_size_px, scale_milli, font_stack.as_deref(),
+                        position.y,
+                        *font_size_px,
+                        scale_milli,
+                        font_stack.as_deref(),
                     );
                     let color = ui_color(*color, opacity)?;
                     let glyphs = match font_stack {
@@ -5813,7 +5846,7 @@ mod tests {
         let mut encoder = SgfxPaintEncoder::new(32, 32, false).unwrap();
         let glyph_key = GlyphRasterKey {
             glyph_id: 'A' as u16,
-                subpixel_x: 0,
+            subpixel_x: 0,
             scale_bits: 16.0_f32.to_bits(),
             font_stack_id: 1,
             font_slot: 0,

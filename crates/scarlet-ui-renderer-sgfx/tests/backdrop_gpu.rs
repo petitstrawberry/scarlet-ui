@@ -163,6 +163,92 @@ fn fractional_text_mesh_replay_matches_full_frames_at_all_output_scales() {
 }
 
 #[test]
+fn clipped_fractional_text_mesh_replay_matches_full_frames_at_all_output_scales() {
+    use scarlet_ui_core::{geometry::Point, graphics::FontStack};
+    use std::sync::Arc;
+    let Some(context) = context() else { return };
+    let font = Arc::new(
+        FontStack::new(include_bytes!(
+            "../../scarlet-ui-core/src/testing/fonts/metrics-primary.ttf"
+        ))
+        .unwrap()
+        .with_fallback(include_bytes!(
+            "../../scarlet-ui-core/src/testing/fonts/metrics-fallback.ttf"
+        ))
+        .unwrap(),
+    );
+    let queue = context.create_queue();
+    for scale in [1000, 1250, 2000, 3000] {
+        let (width, height) = (240 * scale / 1000, 100 * scale / 1000);
+        let mut encoders = [
+            SgfxPaintEncoder::new(width, height, false).unwrap(),
+            SgfxPaintEncoder::new(width, height, false).unwrap(),
+        ];
+        let targets = encoders.each_ref().map(|e| e.target_texture(0).unwrap());
+        let mut resources = encoders
+            .each_ref()
+            .map(|e| context.create_resources(e.resource_table()));
+        for (resource, target) in resources.iter_mut().zip(targets) {
+            resource
+                .map_image(
+                    target,
+                    context
+                        .create_image(width, height, TextureFormat::Bgra8Unorm)
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+        let mut text = PaintContext::new();
+        text.push_clip(Rect::from_xywh(4., 12., 148., 12.));
+        text.draw_text(Point::new(6.5, 9.5), "Overview", Color::BLACK, 14.);
+        text.draw_text_with_font_stack(
+            Point::new(100.25, 9.5),
+            "日☃",
+            Color::BLACK,
+            14.,
+            font.clone(),
+        );
+        text.pop_clip();
+        let list = text.into_display_list();
+        for origin in [
+            Point::ZERO,
+            Point::new(8., 12.),
+            Point::new(-8., -12.),
+            Point::new(10.25, 20.25),
+            Point::new(-10.75, -2.5),
+            Point::new(-20.5, -10.25),
+            Point::new(0.25, 0.75),
+        ] {
+            let mut frame = PaintContext::new();
+            frame.draw_display_list(origin, list.clone());
+            let flat = frame.flattened();
+            for mode in 0..2 {
+                encoders[mode]
+                    .encode_frame(
+                        &mut queue.executor(&mut resources[mode]),
+                        0,
+                        None,
+                        if mode == 0 { &frame } else { &flat },
+                        Color::WHITE,
+                        scale,
+                        &[(0, 0, width, height)],
+                    )
+                    .unwrap();
+            }
+            let retained = resources[0].read_texture(targets[0]).unwrap();
+            let direct = resources[1].read_texture(targets[1]).unwrap();
+            let max = retained
+                .iter()
+                .zip(&direct)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(max <= 1, "scale={scale} origin={origin:?} max={max}");
+        }
+    }
+}
+
+#[test]
 fn real_backdrop_pixels_clips_foreground_updates_and_alpha_at_1x_2x() {
     let Some(context) = context() else {
         return;

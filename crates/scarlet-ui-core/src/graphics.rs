@@ -451,17 +451,21 @@ struct FontFace {
     font: FontArc,
     index: u32,
     id: usize,
+    shaping: Arc<once_cell::race::OnceBox<shaping::OwnedFace>>,
 }
 impl core::ops::Deref for FontFace {
     type Target = FontArc;
     fn deref(&self) -> &FontArc { &self.font }
 }
 impl FontFace {
+    fn from_font(font: FontArc, index: u32) -> Self {
+        Self { font, index, id: next_font_stack_id(), shaping: Arc::new(once_cell::race::OnceBox::new()) }
+    }
     fn from_slice(bytes: &'static [u8]) -> Result<Self, InvalidFont> {
-        Ok(Self { font: FontArc::try_from_slice(bytes)?, index: 0, id: next_font_stack_id() })
+        Ok(Self::from_font(FontArc::try_from_slice(bytes)?, 0))
     }
     fn from_vec(bytes: Vec<u8>) -> Result<Self, InvalidFont> {
-        Ok(Self { font: FontArc::try_from_vec(bytes)?, index: 0, id: next_font_stack_id() })
+        Ok(Self::from_font(FontArc::try_from_vec(bytes)?, 0))
     }
 }
 
@@ -816,7 +820,7 @@ fn load_fonts_from_rootfs_once() {
 
 #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
 fn discovered_font_ref(font: DiscoveredFont) -> Result<FontFace, InvalidFont> {
-    Ok(FontFace { font: FontArc::new(FontVec::try_from_vec_and_index(font.bytes, font.index)?), index: font.index, id: next_font_stack_id() })
+    Ok(FontFace::from_font(FontArc::new(FontVec::try_from_vec_and_index(font.bytes, font.index)?), font.index))
 }
 
 #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
@@ -895,28 +899,28 @@ fn fullwidth_ascii_fallback(ch: char) -> Option<char> {
     }
 }
 
-fn select_font_for_char(ch: char, font_stack: &FontStack) -> (FontFace, u8, char) {
+fn select_font_for_char(ch: char, font_stack: &FontStack) -> (&FontFace, u8, char) {
     if font_stack.primary.glyph_id(ch).0 != 0 {
-        return (font_stack.primary.clone(), 0, ch);
+        return (&font_stack.primary, 0, ch);
     }
     for (index, font) in font_stack.fallbacks.iter().enumerate() {
         if font.glyph_id(ch).0 != 0 {
-            return (font.clone(), index.saturating_add(1) as u8, ch);
+            return (font, index.saturating_add(1) as u8, ch);
         }
     }
 
     if let Some(fallback_ch) = fullwidth_ascii_fallback(ch) {
         if font_stack.primary.glyph_id(fallback_ch).0 != 0 {
-            return (font_stack.primary.clone(), 0, fallback_ch);
+            return (&font_stack.primary, 0, fallback_ch);
         }
         for (index, font) in font_stack.fallbacks.iter().enumerate() {
             if font.glyph_id(fallback_ch).0 != 0 {
-                return (font.clone(), index.saturating_add(1) as u8, fallback_ch);
+                return (font, index.saturating_add(1) as u8, fallback_ch);
             }
         }
     }
 
-    (font_stack.primary.clone(), 0, ch)
+    (&font_stack.primary, 0, ch)
 }
 
 /// Rasterize text with the global default font stack.
@@ -1096,6 +1100,13 @@ impl TextMeasure {
             font_stack,
             font_size,
             font_revision,
+        }
+    }
+
+    pub(crate) fn size(&self, text: &str) -> (u32, u32) {
+        match &self.font_stack {
+            Some(stack) => measure_text_sized_with_font_stack(text, self.font_size, stack),
+            None => fallback_text_metrics(text, self.font_size),
         }
     }
 

@@ -142,6 +142,17 @@ pub trait RenderObject: Any {
         None
     }
 
+    /// Whether this render object expands to the offered viewport width.
+    /// Intrinsic overflow alone must not opt a child into stack redistribution.
+    fn fill_width(&self) -> bool {
+        false
+    }
+
+    /// Whether this render object expands to the offered viewport height.
+    fn fill_height(&self) -> bool {
+        false
+    }
+
     /// Receive this scope's unconsumed platform safe-area reservations.
     fn set_safe_area_insets(&mut self, _insets: EdgeInsets) {}
 
@@ -339,6 +350,15 @@ pub trait RenderObject: Any {
     /// as borders can repaint only themselves and retain their child records.
     fn update_needs_subtree_paint(&self) -> bool {
         true
+    }
+
+    /// Whether recording this object's own paint can wait while it is outside
+    /// the window. Opt in only for side-effect-free, self-contained paint whose
+    /// complete output is covered by `paint_outsets`, with no external reads.
+    /// The pipeline flushes deferred recordings before geometry, subtree or
+    /// composite changes can expose them. Custom objects default to eager paint.
+    fn can_defer_offscreen_paint(&self) -> bool {
+        false
     }
 
     /// Return the absolute bounds affected by repainting only this render object.
@@ -1016,7 +1036,13 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             .as_any()
             .downcast_ref::<crate::views::FrameRenderObject>()
         {
-            return matches!(frame.width_value(), Some(w) if !w.is_finite());
+            if let Some(width) = frame.width_value() {
+                return !width.is_finite();
+            }
+        }
+
+        if self.render_object.fill_width() {
+            return true;
         }
 
         if self
@@ -1041,7 +1067,13 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             .as_any()
             .downcast_ref::<crate::views::FrameRenderObject>()
         {
-            return matches!(frame.height_value(), Some(h) if !h.is_finite());
+            if let Some(height) = frame.height_value() {
+                return !height.is_finite();
+            }
+        }
+
+        if self.render_object.fill_height() {
+            return true;
         }
 
         if self

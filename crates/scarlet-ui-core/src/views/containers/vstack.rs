@@ -186,7 +186,12 @@ impl ElementRenderObject for VStackRenderObject {
                 };
                 let child_size = child.layout(child_constraints);
                 self.child_sizes[index] = child_size;
-                if constraints.max_height.is_finite()
+                // Hitting a height cap does not make intrinsic content
+                // flexible. Re-measuring such nested stacks doubles work at
+                // every overflowing ancestor. Only fill-height children opt
+                // into sharing the remaining main-axis space.
+                if child.fill_height()
+                    && constraints.max_height.is_finite()
                     && constraints.max_height > 0.0
                     && child_size.height + 0.5 >= constraints.max_height
                 {

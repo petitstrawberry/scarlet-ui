@@ -25,6 +25,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 const MAX_PRESENT_DAMAGE_RECTS: usize = 4;
+// Bound partial-damage bookkeeping when many elements change in one frame.
+const MAX_PARTIAL_PAINT_IDS: usize = 64;
 
 #[path = "context_menu.rs"]
 mod context_menu;
@@ -86,6 +88,7 @@ pub(crate) struct PaintTestCounters {
     pub(crate) retained_primitive_slot_syncs: usize,
     pub(crate) retained_primitive_scan_syncs: usize,
     pub(crate) window_backdrop_rebuilds: usize,
+    pub(crate) dense_damage_updates: usize,
 }
 
 /// RenderingPipeline integrates all components of the rendering system
@@ -112,6 +115,7 @@ pub struct RenderingPipeline {
     // retained picture. Use ordered dependency-aware replay for those scenes,
     // rather than the isolated CPU picture compositor.
     scene_reads_backdrop: bool,
+    scene_has_extensions: bool,
     select_overlay_active: bool,
     paint_caches: BTreeMap<ElementId, PaintCache>,
     window_backdrop_cache: Option<WindowBackdropCache>,
@@ -158,6 +162,7 @@ impl RenderingPipeline {
             paint_background_color: None,
             paint_enabled: true,
             scene_reads_backdrop: false,
+            scene_has_extensions: false,
             select_overlay_active: false,
             paint_caches: BTreeMap::new(),
             window_backdrop_cache: None,
@@ -793,6 +798,8 @@ impl RenderingPipeline {
             .element_tree
             .root()
             .is_some_and(Self::subtree_has_select_overlay);
+        #[cfg(test)]
+        let dense_update = self.pipeline_owner.last_paint_ids().len() > MAX_PARTIAL_PAINT_IDS;
         let mut force_full = self.paint_needs_full
             || self.context_menu.is_some()
             || (has_select_overlay && !self.pipeline_owner.last_composite_ids().is_empty())
@@ -845,6 +852,11 @@ impl RenderingPipeline {
         }
         self.dirty_scratch.ids.sort_unstable();
         self.dirty_scratch.ids.dedup();
+
+        #[cfg(test)]
+        if dense_update {
+            self.paint_test_counters.dense_damage_updates += 1;
+        }
 
         let mut has_dirty_rects = !force_full;
         if has_dirty_rects {
@@ -1019,10 +1031,25 @@ impl RenderingPipeline {
         }
         // Query without painting: painting may update damage-history cells.
         // Composite-only transforms cannot add or remove material commands.
-        let reads_backdrop = self
+        fn dependencies(element: &dyn Element) -> (bool, bool) {
+            let (mut reads, mut extensions) = element.render_object().map_or((false, false), |r| {
+                (r.reads_backdrop(), r.emits_paint_extension())
+            });
+            for child in element.children() {
+                let (child_reads, child_extensions) = dependencies(child.as_ref());
+                reads |= child_reads;
+                extensions |= child_extensions;
+                if reads && extensions {
+                    break;
+                }
+            }
+            (reads, extensions)
+        }
+        let (reads_backdrop, has_extensions) = self
             .element_tree
             .root()
-            .is_some_and(Self::subtree_reads_backdrop);
+            .map_or((false, false), dependencies);
+        self.scene_has_extensions = has_extensions;
         if reads_backdrop != self.scene_reads_backdrop {
             self.paint_caches.clear();
             self.layer_store.clear();
@@ -1053,7 +1080,13 @@ impl RenderingPipeline {
         if self.paint_backend.supports_retained_display_lists() {
             for id in &self.dirty_scratch.ids {
                 // Popup bounds saved after the previous frame take precedence.
-                if !self.last_paint_bounds.contains_key(id) {
+                if self
+                    .pipeline_owner
+                    .last_self_paint_ids()
+                    .binary_search(id)
+                    .is_err()
+                    && !self.last_paint_bounds.contains_key(id)
+                {
                     if let Some(bounds) = self.retained_paint.bounds(*id) {
                         self.last_paint_bounds.insert(*id, bounds);
                     }
@@ -1086,13 +1119,36 @@ impl RenderingPipeline {
         }
         if self.paint_backend.supports_retained_display_lists() {
             if let Some(root) = self.element_tree.root() {
-                if force_recording_rebuild || !self.pipeline_owner.last_paint_ids().is_empty() {
+                if force_recording_rebuild
+                    || !self.pipeline_owner.last_paint_ids().is_empty()
+                    || self.retained_paint.has_deferred_paint()
+                {
+                    // Self-only updates cannot move geometry or introduce children.
+                    // Flush all pending offscreen paint on any other kind of frame.
+                    let defer = !force_recording_rebuild
+                        && !self.pipeline_owner.last_paint_ids().is_empty()
+                        && self.pipeline_owner.last_paint_ids().len()
+                            == self.pipeline_owner.last_self_paint_ids().len()
+                        && self.pipeline_owner.last_composite_ids().is_empty()
+                        && self.pipeline_owner.last_children_ids().is_empty()
+                        && !self.scene_reads_backdrop
+                        && !self.scene_has_extensions
+                        && self
+                            .last_direct_scene
+                            .as_ref()
+                            .is_some_and(|s| s.is_self_contained() && !s.has_extensions());
                     self.retained_paint.sync_tree(
                         root,
                         self.pipeline_owner.last_paint_ids(),
                         self.pipeline_owner.last_self_paint_ids(),
                         self.pipeline_owner.last_children_ids(),
                         force_recording_rebuild,
+                        defer.then_some(Rect::from_xywh(
+                            0.,
+                            0.,
+                            self.window_size.width,
+                            self.window_size.height,
+                        )),
                     );
                 }
                 for id in self.pipeline_owner.last_composite_ids() {
@@ -2880,6 +2936,50 @@ impl RenderingPipeline {
             return;
         }
 
+        if self.dirty_scratch.ids.len() > MAX_PARTIAL_PAINT_IDS
+            && !crate::debug::repaint_boundary_log_enabled()
+        {
+            fn invalidate(
+                element: &dyn Element,
+                owner: LayerId,
+                ids: &[ElementId],
+                caches: &mut BTreeMap<ElementId, PaintCache>,
+                layers: &mut LayerStore,
+            ) {
+                let owner = if element
+                    .render_object()
+                    .and_then(|object| object.repaint_boundary_size())
+                    .is_some()
+                {
+                    LayerId::Boundary(element.id())
+                } else {
+                    owner
+                };
+                if ids.binary_search(&element.id()).is_ok() {
+                    layers.invalidate_layer(owner, element.id());
+                    if let LayerId::Boundary(id) = owner {
+                        if let Some(cache) = caches.get_mut(&id) {
+                            cache.valid = false;
+                            cache.invalidated_by = Some(element.id());
+                        }
+                    }
+                }
+                for child in element.children() {
+                    invalidate(child.as_ref(), owner, ids, caches, layers);
+                }
+            }
+            if let Some(root) = self.element_tree.root() {
+                invalidate(
+                    root,
+                    LayerId::Root,
+                    &self.dirty_scratch.ids,
+                    &mut self.paint_caches,
+                    &mut self.layer_store,
+                );
+            }
+            return;
+        }
+
         for index in 0..self.dirty_scratch.ids.len() {
             let dirty_id = self.dirty_scratch.ids[index];
             self.dirty_scratch.path.clear();
@@ -2990,6 +3090,22 @@ impl RenderingPipeline {
             return;
         }
 
+        // Resolve dense damage in one tree walk, including self-only paints.
+        // Per-ID path searches become quadratic for large sibling lists.
+        if dirty_ids.len() > MAX_PARTIAL_PAINT_IDS {
+            if let Some(root) = element_tree.root() {
+                Self::collect_dirty_paint_rects(
+                    root,
+                    Point::ZERO,
+                    None,
+                    dirty_ids,
+                    self_paint_ids,
+                    last_paint_bounds,
+                    rects,
+                );
+            }
+            return;
+        }
         for dirty_id in dirty_ids {
             path_scratch.clear();
             if !element_tree.find_path_ids_into(*dirty_id, path_scratch) {
@@ -3052,6 +3168,76 @@ impl RenderingPipeline {
 
         for child in element.children() {
             Self::collect_paint_bounds(child.as_ref(), abs, child_clip, bounds);
+        }
+    }
+
+    fn collect_dirty_paint_rects(
+        element: &dyn Element,
+        origin: Point,
+        active_clip: Option<Rect>,
+        dirty_ids: &[ElementId],
+        self_paint_ids: &[ElementId],
+        old_bounds: &BTreeMap<ElementId, Rect>,
+        rects: &mut Vec<Rect>,
+    ) {
+        let abs = Point::new(
+            origin.x + element.position().x,
+            origin.y + element.position().y,
+        );
+        let active_clip = if Self::is_expanded_select(element) {
+            None
+        } else {
+            active_clip
+        };
+        if dirty_ids.binary_search(&element.id()).is_ok() {
+            let paint_bounds = if self_paint_ids.binary_search(&element.id()).is_ok() {
+                element
+                    .render_object()
+                    .and_then(|r| r.self_paint_bounds(abs))
+                    .unwrap_or_else(|| Self::element_paint_bounds(element, abs))
+            } else {
+                Self::element_paint_bounds(element, abs)
+            };
+            let visible_bounds = active_clip
+                .and_then(|clip| Self::intersect_paint_bounds(paint_bounds, clip))
+                .unwrap_or_else(|| {
+                    if active_clip.is_some() {
+                        Rect::from_xywh(abs.x, abs.y, 0.0, 0.0)
+                    } else {
+                        paint_bounds
+                    }
+                });
+            if !Self::paint_bounds_is_empty(visible_bounds) {
+                rects.push(visible_bounds);
+            }
+            if self_paint_ids.binary_search(&element.id()).is_err()
+                && let Some(old) = old_bounds.get(&element.id())
+                && !Self::paint_bounds_is_empty(*old)
+            {
+                rects.push(*old);
+            }
+        }
+
+        let child_clip = match (active_clip, Self::clip_for_element(element, abs)) {
+            (Some(active), Some((clip, _))) => Some(
+                Self::intersect_paint_bounds(active, clip)
+                    .unwrap_or_else(|| Rect::from_xywh(abs.x, abs.y, 0.0, 0.0)),
+            ),
+            (Some(active), None) => Some(active),
+            (None, Some((clip, _))) => Some(clip),
+            (None, None) => None,
+        };
+
+        for child in element.children() {
+            Self::collect_dirty_paint_rects(
+                child.as_ref(),
+                abs,
+                child_clip,
+                dirty_ids,
+                self_paint_ids,
+                old_bounds,
+                rects,
+            );
         }
     }
 
@@ -3188,6 +3374,21 @@ impl RenderingPipeline {
     }
 
     fn merge_overlapping_rects(rects: &mut Vec<Rect>) {
+        if rects.len() > MAX_PARTIAL_PAINT_IDS {
+            let left = rects.iter().map(Rect::left).fold(f32::INFINITY, f32::min);
+            let top = rects.iter().map(Rect::top).fold(f32::INFINITY, f32::min);
+            let right = rects
+                .iter()
+                .map(Rect::right)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let bottom = rects
+                .iter()
+                .map(Rect::bottom)
+                .fold(f32::NEG_INFINITY, f32::max);
+            rects.clear();
+            rects.push(Rect::from_xywh(left, top, right - left, bottom - top));
+            return;
+        }
         // A bounding union can overlap an earlier rectangle that was skipped.
         // Repeat to a fixed point or alpha content is blended twice in that
         // overlap when the CPU backend replays each damage clip.
@@ -4464,6 +4665,151 @@ mod tests {
     #[derive(Clone)]
     struct PaintOnlyComponentHarness {
         color: State<crate::color::Color>,
+    }
+
+    #[derive(Clone)]
+    struct BulkPaintChildren(Vec<State<crate::color::Color>>);
+
+    impl crate::views::containers::ViewTuple for BulkPaintChildren {
+        fn create_elements(&self) -> Vec<Box<dyn Element>> {
+            self.clone_views()
+                .iter()
+                .map(|view| view.create_element())
+                .collect()
+        }
+        fn clone_views(&self) -> Vec<Box<dyn View>> {
+            self.0
+                .iter()
+                .map(|color| {
+                    Box::new(
+                        PaintOnlyComponentHarness {
+                            color: color.clone(),
+                        }
+                        .repaint_boundary(),
+                    ) as Box<dyn View>
+                })
+                .collect()
+        }
+        fn collect_listenables<'a>(&'a self, _: &mut Vec<&'a dyn crate::state::Listenable>) {}
+    }
+
+    #[test]
+    fn dense_mixed_self_damage_matches_individual_paths_with_clipping() {
+        let colors = (0..MAX_PARTIAL_PAINT_IDS + 8)
+            .map(|_| State::new(crate::state::generate_state_id(), crate::color::Color::RED))
+            .collect();
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(
+            Window::new(
+                "damage",
+                ScrollView::new(crate::views::VStack::new(BulkPaintChildren(colors)))
+                    .content_size(80.0, 2000.0)
+                    .frame(80.0, 100.0),
+            )
+            .decorated(false)
+            .size(Size::new(100.0, 120.0))
+            .create_element(),
+        );
+        pipeline.layout_initial();
+        let mut old = BTreeMap::new();
+        RenderingPipeline::collect_paint_bounds(
+            pipeline.element_tree.root().unwrap(),
+            Point::ZERO,
+            None,
+            &mut old,
+        );
+        let ids: Vec<_> = old.keys().copied().collect();
+        assert!(ids.len() > MAX_PARTIAL_PAINT_IDS);
+        // Old geometry must contribute only for subtree damage, never self-only.
+        for rect in old.values_mut() {
+            rect.origin.x -= 3.0;
+        }
+        let self_ids: Vec<_> = ids.iter().copied().step_by(2).collect();
+        let mut dense = Vec::new();
+        let mut path = Vec::new();
+        RenderingPipeline::paint_dirty_rects_into(
+            &pipeline.element_tree,
+            &old,
+            &ids,
+            &self_ids,
+            &mut path,
+            &mut dense,
+        );
+        let mut sparse = Vec::new();
+        for id in &ids {
+            let mut one = Vec::new();
+            RenderingPipeline::paint_dirty_rects_into(
+                &pipeline.element_tree,
+                &old,
+                &[*id],
+                &self_ids,
+                &mut path,
+                &mut one,
+            );
+            sparse.extend(one);
+        }
+        let normalize = |rects: Vec<Rect>| {
+            let mut rects: Vec<_> = rects
+                .into_iter()
+                .filter(|r| !RenderingPipeline::paint_bounds_is_empty(*r))
+                .map(|r| {
+                    (
+                        r.origin.x.to_bits(),
+                        r.origin.y.to_bits(),
+                        r.size.width.to_bits(),
+                        r.size.height.to_bits(),
+                    )
+                })
+                .collect();
+            rects.sort_unstable();
+            rects
+        };
+        assert_eq!(normalize(dense), normalize(sparse));
+        pipeline.teardown();
+    }
+
+    #[test]
+    fn dense_paint_changes_rebuild_cached_boundaries_and_match_a_fresh_frame() {
+        use crate::color::Color;
+        let colors: Vec<_> = (0..MAX_PARTIAL_PAINT_IDS + 8)
+            .map(|_| State::new(crate::state::generate_state_id(), Color::RED))
+            .collect();
+        let make_pipeline = || {
+            let mut pipeline = RenderingPipeline::new();
+            pipeline.set_root(
+                Window::new(
+                    "bulk paint",
+                    crate::views::VStack::new(BulkPaintChildren(colors.clone())),
+                )
+                .decorated(false)
+                .background_color(Color::rgb(20, 30, 40))
+                .size(Size::new(80.0, 120.0))
+                .create_element(),
+            );
+            pipeline.layout_initial();
+            pipeline
+        };
+        let pixels = |pipeline: &mut RenderingPipeline| match pipeline.render_for_present().unwrap()
+        {
+            PresentedFrame::Cpu { buffer, .. } => buffer.data().to_vec(),
+            _ => panic!("expected a rendered CPU frame"),
+        };
+        let mut updated = make_pipeline();
+        let before = pixels(&mut updated);
+        for color in &colors {
+            color.set(Color::rgba(40, 180, 90, 128));
+        }
+        let after = pixels(&mut updated);
+        assert!(after != before, "changed colors must reach cached pictures");
+        assert_eq!(updated.paint_test_counters.dense_damage_updates, 1);
+
+        let mut fresh = make_pipeline();
+        assert!(
+            after == pixels(&mut fresh),
+            "bulk repaint must match a fresh render, including alpha"
+        );
+        updated.teardown();
+        fresh.teardown();
     }
 
     fn build_paint_only_patch(view: &PaintOnlyComponentHarness) -> Box<dyn View> {

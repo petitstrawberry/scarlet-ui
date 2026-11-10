@@ -4,6 +4,11 @@ Run these commands from the repository root. For feature selection and backend
 boundaries, see the [platform guide](PLATFORM_GUIDE.md). Browser package commands
 and requirements are in the [samples guide](../samples/README.md).
 
+For cross-framework native measurements, see the
+[gui-bench adapter](../benchmarks/gui-bench/README.md). It uses the upstream
+scenario generator, sampler and report, with a pinned integration patch and
+documented comparison limits.
+
 Run facade tests:
 
 ```bash

@@ -169,7 +169,7 @@ fn create_sgfx_backend(
         instance.create_window_context(raw_display_handle, raw_window_handle, width, height)
     }
     .map_err(|_| Error::SurfaceCreationFailed)?;
-    println!("[ScarletUI] platform-winit renderer=sgfx backend={backend}");
+    eprintln!("[ScarletUI] platform-winit renderer=sgfx backend={backend}");
     SgfxWindowPaintBackend::new(window_context, window, width, height, transparent)
 }
 
@@ -1738,10 +1738,24 @@ impl PlatformWindow for WinitPlatformWindow {
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
-        let _ = self
+        if width == 0 || height == 0 {
+            return Err(Error::InvalidSize { width, height });
+        }
+        if let Some(observed) = self
             .window
-            .request_inner_size(LogicalSize::new(width as f32, height as f32));
-        self.current_size = Size::new(width as f32, height as f32);
+            .request_inner_size(LogicalSize::new(width as f32, height as f32))
+        {
+            // winit may confirm the applied size synchronously without a
+            // Resized event (notably on macOS). Only cache confirmed sizes;
+            // an asynchronous request must wait for the native configure.
+            let scale = self.window.scale_factor();
+            let width = physical_to_logical_len(observed.width, scale);
+            let height = physical_to_logical_len(observed.height, scale);
+            self.set_observed_logical_size(Size::new(width as f32, height as f32));
+            self.state
+                .borrow_mut()
+                .push(Event::Resize { width, height });
+        }
         Ok(())
     }
 

@@ -194,6 +194,13 @@ fn push_clipped(
 }
 
 impl DisplayList {
+    /// Conservative local-coordinate paint footprints for this immutable list.
+    /// The bounded scale cache lets renderers cull invisible recordings without
+    /// repeating text measurement or walking nested commands every frame.
+    pub fn paint_dependencies(&self, scale: u32) -> Arc<[PaintDependencies]> {
+        self.cached_dependencies(scale)
+    }
+
     // Immutable records can reuse glyph/geometry footprints across revisions of
     // their parent. Bound scale variants so moving a window cannot grow the cache.
     fn cached_dependencies(&self, scale: u32) -> Arc<[PaintDependencies]> {

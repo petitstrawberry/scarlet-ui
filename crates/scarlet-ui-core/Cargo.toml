@@ -10,6 +10,7 @@ std = ["dep:fontique", "dep:raw-window-handle", "dep:unicode-script"]
 preview = ["std", "dep:inventory", "dep:libloading"]
 
 [dependencies]
+hashbrown = { version = "=0.15.5", default-features = false, features = ["default-hasher", "inline-more"] }
 scarlet-scroll-motion = { path = "../scarlet-scroll-motion" }
 scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", rev = "97c99b0b3f2d651865a118500632f17725f7ecde", package = "scarlet-std", optional = true }
 libm = { version = "0.2", default-features = false }
@@ -19,6 +20,7 @@ bitflags = { version = "2.6", default-features = false }
 # Keep the shaper's parser separate from ab_glyph's: unifying ttf-parser
 # variable-font features makes ab_glyph reject macOS System Font outlines.
 rustybuzz = { version = "0.19.0", default-features = false }
+self_cell = { version = "1.2", default-features = false }
 ab_glyph = { version = "0.2", default-features = false, features = ["libm"] }
 zune-jpeg = { version = "0.5.8", default-features = false }
 libloading = { version = "0.9.0", optional = true }

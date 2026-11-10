@@ -1,0 +1,504 @@
+diff --git a/adapters/gpui/Cargo.toml b/adapters/gpui/Cargo.toml
+index 29a5068..e1ab3d1 100644
+--- a/adapters/gpui/Cargo.toml
++++ b/adapters/gpui/Cargo.toml
+@@ -9,6 +9,6 @@ anyhow.workspace = true
+ bench-core.workspace = true
+ clap.workspace = true
+ gpui = { path = "../../vendor/gpui-ce/crates/gpui", default-features = false, features = ["wayland", "x11"] }
+-gpui_platform = { path = "../../vendor/gpui-ce/crates/gpui_platform", features = ["font-kit", "wayland", "x11"] }
++gpui_platform = { path = "../../vendor/gpui-ce/crates/gpui_platform", features = ["font-kit", "wayland", "x11", "runtime_shaders"] }
+ serde_json.workspace = true
+ 
+diff --git a/adapters/gpui/src/main.rs b/adapters/gpui/src/main.rs
+index 55a4b12..e5b0789 100644
+--- a/adapters/gpui/src/main.rs
++++ b/adapters/gpui/src/main.rs
+@@ -43,32 +43,36 @@ impl From<ModeArg> for MeasurementMode {
+ struct BenchView {
+     spec: Scenario,
+     tick: u64,
+-    active: Vec<bool>,
+-    last_active: Vec<usize>,
++    ticks: Vec<u64>,
+     view_build_ns: Arc<AtomicU64>,
+ }
+ 
+ impl BenchView {
+     fn stimulate(&mut self) {
+-        for &index in &self.last_active {
+-            self.active[index] = false;
+-        }
+         self.tick += 1;
+-        self.last_active = bench_core::affected_indices(&self.spec, self.tick);
+-        for &index in &self.last_active {
+-            self.active[index] = true;
++        if matches!(
++            self.spec.workload,
++            Workload::PaintUpdate
++                | Workload::LayoutUpdate
++                | Workload::TextUpdate
++                | Workload::InputLatency
++        ) {
++            for index in bench_core::affected_indices(&self.spec, self.tick) {
++                self.ticks[index] += 1;
++            }
+         }
+     }
+ 
+     fn item(&self, id: usize, children: Vec<AnyElement>) -> AnyElement {
+-        let changed = self.active[id];
+-        let tick = self.tick;
++        let tick = self.ticks[id];
++        let changed = tick % 2 == 1;
+         let mut item = div()
+             .flex()
+             .flex_col()
+             .min_w(px(18.0))
+             .min_h(px(16.0))
+             .px_1()
++            .py(px(1.0))
+             .bg(
+                 if changed
+                     && matches!(
+@@ -83,9 +87,10 @@ impl BenchView {
+             )
+             .text_color(rgb(0xe8eefc))
+             .font_family("IBM Plex Sans")
+-            .text_sm();
++            .text_size(px(12.0))
++            .line_height(px(16.0));
+         if matches!(self.spec.workload, Workload::LayoutUpdate) && changed {
+-            item = item.pl_3().min_w(px(30.0 + (tick % 7) as f32));
++            item = item.pl_3().min_w(px(38.0));
+         }
+         if self.spec.style == StyleComplexity::Decorated {
+             item = item
+@@ -94,7 +99,7 @@ impl BenchView {
+                 .rounded_sm()
+                 .shadow_sm();
+         }
+-        let label = if matches!(self.spec.workload, Workload::TextUpdate) && changed {
++        let label = if matches!(self.spec.workload, Workload::TextUpdate) && tick > 0 {
+             format!("item {id:05} · {tick:04}")
+         } else {
+             format!("item {id:05}")
+@@ -219,6 +224,7 @@ fn drive(window: &Window, view: Entity<BenchView>, driver: Rc<Driver>) {
+                 .map(|v| now.duration_since(v).as_nanos() as u64),
+             observed_width: Some(u32::from(viewport.width)),
+             observed_height: Some(u32::from(viewport.height)),
++            output_scale_milli: Some((window.scale_factor() * 1000.0).round() as u32),
+             pipeline: if diagnostic {
+                 PipelineSample {
+                     view_build_ns: Some(driver.view_build_ns.load(Ordering::Relaxed)),
+@@ -332,6 +338,10 @@ fn main() -> Result<()> {
+         });
+         cx.open_window(
+             WindowOptions {
++                titlebar: Some(gpui::TitlebarOptions {
++                    title: Some("GPUI benchmark".into()),
++                    ..Default::default()
++                }),
+                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                 ..Default::default()
+             },
+@@ -339,8 +349,7 @@ fn main() -> Result<()> {
+                 let entity = cx.new(|_| BenchView {
+                     spec: spec.clone(),
+                     tick: 0,
+-                    active: vec![false; spec.nodes],
+-                    last_active: Vec::new(),
++                    ticks: vec![0; spec.nodes],
+                     view_build_ns: view_build_ns.clone(),
+                 });
+                 drive(window, entity.clone(), driver.clone());
+diff --git a/adapters/zgui/src/main.rs b/adapters/zgui/src/main.rs
+index 5f67c0e..7b17062 100644
+--- a/adapters/zgui/src/main.rs
++++ b/adapters/zgui/src/main.rs
+@@ -23,7 +23,7 @@ const FONT: &[u8] = include_bytes!("../../../assets/IBMPlexSans-Regular.ttf");
+ const SHEET: &str = zgui::css!(
+     r#"
+     :root { width: 100%; height: 100%; overflow: hidden; padding: 8px;
+-            background-color: #0b1020; color: #e8eefc; font-family: "IBM Plex Sans"; font-size: 12px }
++            background-color: #0b1020; color: #e8eefc; font-family: "IBM Plex Sans"; font-size: 12px; line-height: 16px }
+     .root { width: 100%; height: 100%; flex-direction: row; flex-wrap: wrap; gap: 4px; overflow: hidden }
+     .item { min-width: 18px; min-height: 16px; padding: 1px 4px; flex-direction: column;
+             background-color: #18243a; color: #e8eefc }
+@@ -126,7 +126,18 @@ fn document(spec: Scenario, stimulus: Stimulus) -> AnyView {
+         ),
+         Topology::Wide => {
+             let children = (1..spec.nodes)
+-                .map(|id| item(&spec, id, ticks[id], Vec::new()))
++                .map(|id| {
++                    if matches!(spec.workload, Workload::StructuralUpdate) {
++                        let present = present[id];
++                        let spec = spec.clone();
++                        let tick = ticks[id];
++                        AnyView::new(move || {
++                            present.get().then(|| item(&spec, id, tick, Vec::new()))
++                        })
++                    } else {
++                        item(&spec, id, ticks[id], Vec::new())
++                    }
++                })
+                 .collect();
+             item(&spec, 0, ticks[0], children)
+         }
+@@ -158,7 +169,7 @@ fn document(spec: Scenario, stimulus: Stimulus) -> AnyView {
+             Workload::Idle | Workload::ColdStart | Workload::ResizeStep | Workload::ResizeStorm
+         ) {
+             for index in bench_core::affected_indices(&update_spec, sequence) {
+-                ticks[index].set(sequence);
++                ticks[index].update(|tick| *tick += 1);
+             }
+         }
+     }));
+@@ -204,7 +215,13 @@ impl FrameProbe for Probe {
+         details.insert("scratch".into(), memory.scratch);
+         details.insert("atlases".into(), memory.atlases);
+         details.insert("buffers".into(), memory.buffers);
+-        let size = window.renderer().target().map(|v| v.size);
++        let size = window.renderer().target().map(|target| {
++            let scale = target.scale.get();
++            (
++                (target.size.width.max(0) as f32 / scale).round() as u32,
++                (target.size.height.max(0) as f32 / scale).round() as u32,
++            )
++        });
+         let phase = if sequence == 0 {
+             SamplePhase::Startup
+         } else if sequence <= self.spec.warmup_frames as u64 {
+@@ -224,8 +241,12 @@ impl FrameProbe for Probe {
+                 .stimulus_at
+                 .take()
+                 .map(|v| now.duration_since(v).as_nanos() as u64),
+-            observed_width: size.map(|s| s.width.max(0) as u32),
+-            observed_height: size.map(|s| s.height.max(0) as u32),
++            observed_width: size.map(|s| s.0),
++            observed_height: size.map(|s| s.1),
++            output_scale_milli: window
++                .renderer()
++                .target()
++                .map(|target| (target.scale.get() * 1000.0).round() as u32),
+             pipeline: if self.mode == MeasurementMode::Diagnostic {
+                 PipelineSample {
+                     view_build_ns: mark_delta(marks, "f.flush", "f.commands"),
+@@ -280,8 +301,11 @@ impl FrameProbe for Probe {
+                             zgui::geom::CssPx(560.0 + d * 2.0),
+                         ));
+                     }
+-                    _ => surface.request_redraw(),
++                    _ => {}
+                 }
++                // Repeated step sizes need a frame even when no configure is
++                // generated for an unchanged size.
++                surface.request_redraw();
+             }
+         }
+     }
+@@ -384,11 +408,7 @@ fn main() -> Result<()> {
+                 ))
+             })?;
+             let builder = zgui_render_wgpu::Builder::new();
+-            let drawable = builder
+-                .instance()
+-                .create_surface(handles)
+-                .map_err(|e| zgui_platform::PlatformError::Backend(e.to_string()))?;
+-            Ok(Box::new(builder.for_surface(target, drawable)?) as Box<dyn zgui_render::Renderer>)
++            Ok(Box::new(builder.for_surface(target, handles)?) as Box<dyn zgui_render::Renderer>)
+         },
+     );
+     let app = zgui::app()
+diff --git a/crates/bench-core/src/lib.rs b/crates/bench-core/src/lib.rs
+index 84ea9e2..442985a 100644
+--- a/crates/bench-core/src/lib.rs
++++ b/crates/bench-core/src/lib.rs
+@@ -13,15 +13,17 @@ pub enum Framework {
+     #[default]
+     Zgui,
+     Gpui,
++    Scarletui,
+ }
+ 
+ impl Framework {
+-    pub const ALL: [Self; 2] = [Self::Zgui, Self::Gpui];
++    pub const ALL: [Self; 3] = [Self::Zgui, Self::Gpui, Self::Scarletui];
+ 
+     pub fn as_str(self) -> &'static str {
+         match self {
+             Self::Zgui => "zgui",
+             Self::Gpui => "gpui",
++            Self::Scarletui => "scarletui",
+         }
+     }
+ }
+@@ -305,6 +307,8 @@ pub struct FrameSample {
+     pub stimulus_latency_ns: Option<u64>,
+     pub observed_width: Option<u32>,
+     pub observed_height: Option<u32>,
++    #[serde(default)]
++    pub output_scale_milli: Option<u32>,
+     pub pipeline: PipelineSample,
+     pub framework_memory: Option<FrameworkMemory>,
+     pub valid: bool,
+diff --git a/crates/gui-bench/src/main.rs b/crates/gui-bench/src/main.rs
+index fe55bde..c58a9b8 100644
+--- a/crates/gui-bench/src/main.rs
++++ b/crates/gui-bench/src/main.rs
+@@ -48,7 +48,7 @@ enum Commands {
+         #[arg(long, default_value_t = 3)]
+         repetitions: u32,
+         #[arg(long)]
+-        scenario: Option<String>,
++        scenario: Vec<String>,
+         #[arg(long, default_value = "results/latest.json")]
+         output: PathBuf,
+         #[arg(long)]
+@@ -81,12 +81,14 @@ impl From<PresetArg> for Preset {
+ enum FrameworkArg {
+     Zgui,
+     Gpui,
++    Scarletui,
+ }
+ impl From<FrameworkArg> for Framework {
+     fn from(v: FrameworkArg) -> Self {
+         match v {
+             FrameworkArg::Zgui => Self::Zgui,
+             FrameworkArg::Gpui => Self::Gpui,
++            FrameworkArg::Scarletui => Self::Scarletui,
+         }
+     }
+ }
+@@ -121,7 +123,7 @@ fn main() -> Result<()> {
+             framework,
+             diagnostic,
+             repetitions,
+-            scenario.as_deref(),
++            &scenario,
+             &output,
+             no_build,
+         ),
+@@ -169,15 +171,24 @@ fn run(
+     requested: Vec<FrameworkArg>,
+     diagnostic: bool,
+     repetitions: u32,
+-    only: Option<&str>,
++    only: &[String],
+     output: &Path,
+     no_build: bool,
+ ) -> Result<()> {
++    let frameworks: Vec<Framework> = if requested.is_empty() {
++        Framework::ALL.to_vec()
++    } else {
++        requested.into_iter().map(Into::into).collect()
++    };
+     if !no_build {
+-        // Build in separate Cargo invocations. The two upstream projects activate
+-        // mutually incompatible feature combinations in a unified dependency
+-        // graph, while the adapters themselves are separate processes.
+-        for package in ["bench-zgui", "bench-gpui"] {
++        // Each adapter is a separate process with an independent feature graph.
++        // Build only requested frameworks so an isolated adapter can run alone.
++        for framework in &frameworks {
++            let package = match framework {
++                Framework::Zgui => "bench-zgui",
++                Framework::Gpui => "bench-gpui",
++                Framework::Scarletui => "bench-scarletui",
++            };
+             let status = Command::new("cargo")
+                 .current_dir(workspace_root())
+                 .args(["build", "--profile", "bench-run", "-p", package])
+@@ -187,14 +198,9 @@ fn run(
+             }
+         }
+     }
+-    let frameworks: Vec<Framework> = if requested.is_empty() {
+-        Framework::ALL.to_vec()
+-    } else {
+-        requested.into_iter().map(Into::into).collect()
+-    };
+     let mut cases = bench_core::scenarios(preset);
+-    if let Some(filter) = only {
+-        cases.retain(|s| s.id.contains(filter));
++    if !only.is_empty() {
++        cases.retain(|scenario| only.iter().any(|filter| scenario.id.contains(filter)));
+     }
+     if cases.is_empty() {
+         bail!("no scenarios matched")
+@@ -215,8 +221,8 @@ fn run(
+         sources: source_metadata(),
+         conditions: Vec::new(),
+         notes: vec![
+-            "Headline and diagnostic passes are separate to expose instrumentation overhead."
+-                .into(),
++            "Headline and diagnostic passes are separate to expose instrumentation overhead.".into(),
++            "Framework order rotates by scenario index and repetition; matched conditions run consecutively.".into(),
+         ],
+     };
+     if let Some(parent) = output.parent() {
+@@ -224,10 +230,14 @@ fn run(
+     }
+     let total = frameworks.len() * modes.len() * cases.len() * repetitions as usize;
+     let mut n = 0;
+-    for framework in frameworks {
+-        for &mode in &modes {
+-            for spec in &cases {
+-                for repetition in 0..repetitions {
++    for &mode in &modes {
++        for (case_index, spec) in cases.iter().enumerate() {
++            for repetition in 0..repetitions {
++                // Keep matched cases close in time and rotate order across
++                // cases/repetitions to avoid always measuring one toolkit last.
++                for offset in 0..frameworks.len() {
++                    let framework =
++                        frameworks[(case_index + repetition as usize + offset) % frameworks.len()];
+                     n += 1;
+                     eprintln!(
+                         "[{n}/{total}] {} {:?} {} repetition {}",
+@@ -260,6 +270,7 @@ fn run_condition(
+         .join(match framework {
+             Framework::Zgui => "bench-zgui",
+             Framework::Gpui => "bench-gpui",
++            Framework::Scarletui => "bench-scarletui",
+         });
+     let mut child = Command::new(&exe)
+         .arg("--scenario")
+@@ -306,6 +317,12 @@ fn run_condition(
+     });
+     let mut frames = Vec::new();
+     let mut warnings = Vec::new();
++    if framework == Framework::Scarletui {
++        warnings.push("ScarletUI records SGFX CPU submission, not GPU completion or display scanout; internal pipeline stages are unavailable. Decorated shadows use its native Raised preset. Minimal workloads use aligned counters, font size and structural changes; decorated shadows use native presets.".into());
++    }
++    if !cfg!(target_os = "linux") {
++        warnings.push("Linux /proc and DRM resource counters are unavailable on this host; use Linux for resource comparisons.".into());
++    }
+     let mut meta = AdapterMetadata {
+         executable: exe.display().to_string(),
+         ..Default::default()
+@@ -447,7 +464,13 @@ fn host_metadata() -> HostMetadata {
+                     .and_then(|l| l.split_once(':'))
+                     .map(|x| x.1.trim().into())
+             })
+-            .unwrap_or_default(),
++            .unwrap_or_else(|| {
++                if cfg!(target_os = "macos") {
++                    cmd(&["sysctl", "-n", "machdep.cpu.brand_string"])
++                } else {
++                    String::new()
++                }
++            }),
+         gpu: lspci
+             .lines()
+             .filter(|l| {
+@@ -456,7 +479,9 @@ fn host_metadata() -> HostMetadata {
+             })
+             .map(str::to_string)
+             .collect(),
+-        display_server: if std::env::var_os("WAYLAND_DISPLAY").is_some() {
++        display_server: if cfg!(target_os = "macos") {
++            "appkit"
++        } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+             "wayland"
+         } else if std::env::var_os("DISPLAY").is_some() {
+             "x11"
+@@ -489,11 +514,34 @@ fn source(path: &Path) -> SourceMetadata {
+ }
+ fn source_metadata() -> BTreeMap<String, SourceMetadata> {
+     let root = workspace_root();
++    let vendor_path = root.join("vendor/gpui-ce");
++    let vendor: serde_json::Value = fs::read(vendor_path.join("GUI_BENCH_VENDOR.json"))
++        .ok()
++        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
++        .unwrap_or_default();
+     BTreeMap::from([
++        ("gui-bench".into(), source(&root)),
++        (
++            "scarlet-ui".into(),
++            source(&PathBuf::from(
++                option_env!("SCARLET_UI_BENCH_REPO")
++                    .map(str::to_owned)
++                    .unwrap_or_else(|| root.join("../scarlet-ui").display().to_string()),
++            )),
++        ),
+         ("zgui".into(), source(&root.join("../zgui"))),
+         (
+-            "gpui-ce-vendored-from".into(),
+-            source(&root.join("../gpui-ce")),
++            "gpui-ce-vendored".into(),
++            SourceMetadata {
++                path: vendor_path.display().to_string(),
++                revision: vendor
++                    .get("revision")
++                    .and_then(|value| value.as_str())
++                    .map(str::to_owned),
++                // The benchmark vendor already contains timing probes and the
++                // local manifest fix; the pinned harness plus patch is canonical.
++                dirty: Some(true),
++            },
+         ),
+     ])
+ }
+diff --git a/crates/gui-bench/src/report.rs b/crates/gui-bench/src/report.rs
+index 798fd67..56bc7d3 100644
+--- a/crates/gui-bench/src/report.rs
++++ b/crates/gui-bench/src/report.rs
+@@ -25,8 +25,8 @@ table{width:100%;border-collapse:collapse;margin:10px 0 24px;table-layout:fixed}
+ </style><script>/*__ECHARTS__*/</script></head><body>
+ <main><header><h1>GUI benchmark report</h1><div id="subtitle" class="muted"></div></header>
+ <div class="controls"><label>Scenario<select id="scenario"></select></label><label>Measurement mode<select id="mode"><option>headline</option><option>diagnostic</option></select></label></div>
+-<section><h2>At a glance</h2><p class="explanation">One summary row per framework for the selected scenario and measurement mode. Memory values are peaks across the completed repetitions.</p><div class="summary-list" id="summary"></div></section>
+-<section><h2>Frame-time distribution</h2><p class="explanation">The box spans the 25th to 75th percentile; its center is the median and its whiskers are the 5th and 95th percentiles. Lower and tighter is better.</p><div class="chart" id="dist"></div></section>
++<section><h2>At a glance</h2><p class="explanation">One summary row per framework. Headline timing is the median of per-repetition percentiles; incomplete groups have no headline percentile. Memory values are peaks across captured repetitions.</p><div class="summary-list" id="summary"></div></section>
++<section><h2>Frame-time distribution</h2><p class="explanation">The box spans the 25th to 75th percentile; its center is the median and its whiskers are the 5th and 95th percentiles. The distribution pools valid frames from complete repetitions. Incomplete groups are omitted here; captured partial samples remain in the timeline.</p><div class="chart" id="dist"></div></section>
+ <section><h2>Frame time over the run</h2><p class="explanation">Every valid measurement frame is shown in sequence. This makes periodic stalls, warm-state drift, and isolated long frames visible.</p><div class="chart" id="timeline"></div></section>
+ <section><h2>Process and graphics memory</h2><p class="explanation">PSS estimates the process's proportional system-memory cost. Driver VRAM is the per-process resident allocation reported by DRM or NVML; framework GPU memory is the framework's own allocator report when available.</p><div class="chart" id="resources"></div></section>
+ <section><h2>Rendering pipeline</h2><p class="explanation">Median CPU wall time attributed to each diagnostic pipeline stage. These are submission-side timings, not on-device GPU execution or compositor time.</p><div class="chart" id="pipeline"></div></section>
+@@ -35,10 +35,15 @@ table{width:100%;border-collapse:collapse;margin:10px 0 24px;table-layout:fixed}
+ <section><h2>Reproducibility environment</h2><p class="explanation">Run provenance captured alongside the raw samples. Source dirty state matters when comparing results across revisions.</p><table><tbody id="environment"></tbody></table></section>
+ </main>
+ <script>const DATA=/*__DATA__*/;
+-const colors={zgui:'#0072b2',gpui:'#d55e00'}, names={zgui:'zgui',gpui:'GPUI-CE'}, stageColors=['#0072b2','#e69f00','#009e73','#cc79a7','#56b4e9','#d55e00','#f0e442','#7b61a8','#555'];
++const colors={zgui:'#0072b2',gpui:'#d55e00',scarletui:'#009e73'}, names={zgui:'zgui',gpui:'GPUI-CE',scarletui:'ScarletUI'}, stageColors=['#0072b2','#e69f00','#009e73','#cc79a7','#56b4e9','#d55e00','#f0e442','#7b61a8','#555'];
+ const $=id=>document.getElementById(id), ms=ns=>ns==null?null:ns/1e6, mb=b=>b==null?null:b/1048576;
+ function pct(a,p){a=a.filter(Number.isFinite).sort((x,y)=>x-y);if(!a.length)return null;return a[Math.min(a.length-1,Math.floor((a.length-1)*p))]}
+ function fmt(v,u=' ms'){return v==null?'—':v.toFixed(v<10?2:1)+u}
++function completeRun(c){return c.status==='complete'&&c.frames.filter(f=>f.phase==='measurement'&&f.valid).length===c.scenario.sample_frames}
++function scaleCompatible(cs){return new Set(cs.flatMap(c=>c.frames.filter(f=>f.phase==='measurement').map(f=>f.output_scale_milli)).filter(Number.isFinite)).size<=1}
++
++function runPercentile(cs,key,p){if(!cs.every(completeRun)||!scaleCompatible(selected()))return null;const values=cs.map(c=>pct(c.frames.filter(f=>f.phase==='measurement'&&f.valid).map(f=>ms(f[key])),p)).filter(Number.isFinite).sort((a,b)=>a-b);if(!values.length)return null;const middle=Math.floor(values.length/2);return values.length%2?values[middle]:(values[middle-1]+values[middle])/2}
++
+ function rows(target,values){target.replaceChildren(...values.map(([key,value])=>{const row=document.createElement('tr'),heading=document.createElement('th'),cell=document.createElement('td');heading.textContent=key;cell.textContent=value??'—';row.append(heading,cell);return row}))}
+ const scenarios=[...new Map(DATA.conditions.map(c=>[c.scenario.id,c.scenario])).values()];
+ for(const s of scenarios){const o=document.createElement('option');o.value=s.id;o.textContent=`${s.workload} · ${s.nodes.toLocaleString()} nodes · ${s.topology} · ${Math.round(s.update_fraction*100)}%`; $('scenario').append(o)}
+@@ -50,12 +55,12 @@ function statusText(status){if(status==='complete')return'complete';if(status===
+ function base(){return{backgroundColor:'#fff',color:stageColors,textStyle:{color:'#000'},tooltip:{trigger:'axis',confine:true,backgroundColor:'#fff',borderColor:'#000',textStyle:{color:'#000'}},legend:{top:10,textStyle:{color:'#000'}},grid:{left:65,right:25,top:55,bottom:50},xAxis:{axisLabel:{color:'#000'},axisLine:{lineStyle:{color:'#000'}},splitLine:{show:false}},yAxis:{axisLabel:{color:'#000'},axisLine:{lineStyle:{color:'#000'}},splitLine:{lineStyle:{color:'#ddd'}}}}}
+ function render(){const cs=selected(), grouped=cs.reduce((a,c)=>((a[c.framework]??=[]).push(c),a),{}),spec=scenarios.find(s=>s.id===$('scenario').value);let vram=[];
+ for(const c of cs)vram.push(...c.resources.map(r=>mb(r.gpu_resident_bytes)));
+-const observed=[...new Set(cs.flatMap(c=>c.frames.filter(f=>f.phase==='measurement').map(f=>f.observed_width&&f.observed_height?`${f.observed_width}×${f.observed_height}`:null)).filter(Boolean))];rows($('configuration'),[['Scenario ID',spec?.id],['Workload',spec?.workload],['Nodes',spec?.nodes?.toLocaleString()],['Topology',spec?.topology],['Style complexity',spec?.style],['Update fraction',spec?`${(spec.update_fraction*100).toFixed(1)}%`:'—'],['Requested window',spec?`${spec.width}×${spec.height}`:'—'],['Observed window',observed.join(', ')||'—'],['Warmup frames',String(spec?.warmup_frames??'—')],['Measurement frames',String(spec?.sample_frames??'—')],['Seed',String(spec?.seed??'—')],['Mode',$('mode').value],['Frameworks',Object.keys(grouped).map(k=>names[k]).join(', ')||'—'],['Completed repetitions',`${cs.filter(c=>c.status==='complete').length}/${cs.length}`]]);
+-const maxFinite=a=>{a=a.filter(Number.isFinite);return a.length?Math.max(...a):null};const summaries=Object.entries(grouped).map(([k,v])=>{const card=document.createElement('article'),title=document.createElement('h3'),metrics=document.createElement('div'),statuses=[...new Set(v.map(c=>statusText(c.status)))];card.className='framework-summary';card.style.borderTopColor=colors[k];title.textContent=`${names[k]} — ${statuses.join(', ')}`;title.style.color=colors[k];metrics.className='metric-grid';const frameValues=v.flatMap(c=>c.frames.filter(f=>f.phase==='measurement'&&f.valid).map(f=>ms(f.frame_time_ns))),latencyValues=v.flatMap(c=>c.frames.filter(f=>f.phase==='measurement'&&f.valid).map(f=>ms(f.stimulus_latency_ns)));for(const [label,value] of [['Frame p50',fmt(pct(frameValues,.5))],['Frame p95',fmt(pct(frameValues,.95))],['Latency p95',fmt(pct(latencyValues,.95))],['Peak PSS',fmt(maxFinite(v.flatMap(c=>c.resources.map(r=>mb(r.pss_bytes)))),' MiB')],['Driver VRAM',fmt(maxFinite(v.flatMap(c=>c.resources.map(r=>mb(r.gpu_resident_bytes)))),' MiB')],['Framework GPU',fmt(maxFinite(v.flatMap(c=>c.frames.map(f=>mb(f.framework_memory?.gpu_bytes)))),' MiB')]]){const metric=document.createElement('div'),caption=document.createElement('div'),number=document.createElement('div');metric.className='metric';caption.className='muted';caption.textContent=label;number.className='value';number.textContent=value;metric.append(caption,number);metrics.append(metric)}card.append(title,metrics);return card});$('summary').replaceChildren(...summaries);
+-let o=base();o.xAxis={type:'value',name:'milliseconds',axisLabel:{color:'#000'}};o.yAxis={type:'category',data:Object.keys(grouped).map(k=>names[k]),axisLabel:{color:'#000'}};o.series=[{name:'frame time',type:'boxplot',data:Object.entries(grouped).map(([k,v])=>{const a=v.flatMap(c=>c.frames.filter(f=>f.phase==='measurement'&&f.valid).map(f=>ms(f.frame_time_ns))).filter(Number.isFinite);return{value:[pct(a,.05),pct(a,.25),pct(a,.5),pct(a,.75),pct(a,.95)],itemStyle:{color:colors[k]}}})}];charts[0].setOption(o,true);
++const observed=[...new Set(cs.flatMap(c=>c.frames.filter(f=>f.phase==='measurement').map(f=>f.observed_width&&f.observed_height?`${f.observed_width}×${f.observed_height}`:null)).filter(Boolean))];rows($('configuration'),[['Scenario ID',spec?.id],['Workload',spec?.workload],['Nodes',spec?.nodes?.toLocaleString()],['Topology',spec?.topology],['Style complexity',spec?.style],['Update fraction',spec?`${(spec.update_fraction*100).toFixed(1)}%`:'—'],['Requested window',spec?`${spec.width}×${spec.height}`:'—'],['Observed window',observed.join(', ')||'—'],['Output scale', [...new Set(cs.flatMap(c=>c.frames.map(f=>f.output_scale_milli)).filter(Number.isFinite))].map(v=>(v/1000)+'×').join(', ')||'—'],['Warmup frames',String(spec?.warmup_frames??'—')],['Measurement frames',String(spec?.sample_frames??'—')],['Seed',String(spec?.seed??'—')],['Mode',$('mode').value],['Frameworks',Object.keys(grouped).map(k=>names[k]).join(', ')||'—'],['Completed repetitions',`${cs.filter(c=>c.status==='complete').length}/${cs.length}`]]);
++const maxFinite=a=>{a=a.filter(Number.isFinite);return a.length?Math.max(...a):null};const summaries=Object.entries(grouped).map(([k,v])=>{const card=document.createElement('article'),title=document.createElement('h3'),metrics=document.createElement('div'),statuses=[...new Set(v.map(c=>statusText(c.status)))];card.className='framework-summary';card.style.borderTopColor=colors[k];title.textContent=`${names[k]} — ${scaleCompatible(cs)?statuses.join(', '):'incomparable output scale'}`;title.style.color=colors[k];metrics.className='metric-grid';const frameValues=v.flatMap(c=>c.frames.filter(f=>f.phase==='measurement'&&f.valid).map(f=>ms(f.frame_time_ns))),latencyValues=v.flatMap(c=>c.frames.filter(f=>f.phase==='measurement'&&f.valid).map(f=>ms(f.stimulus_latency_ns)));for(const [label,value] of [['Frame p50',fmt(runPercentile(v,'frame_time_ns',.5))],['Frame p95',fmt(runPercentile(v,'frame_time_ns',.95))],['Latency p95',fmt(runPercentile(v,'stimulus_latency_ns',.95))],['Peak PSS',fmt(maxFinite(v.flatMap(c=>c.resources.map(r=>mb(r.pss_bytes)))),' MiB')],['Driver VRAM',fmt(maxFinite(v.flatMap(c=>c.resources.map(r=>mb(r.gpu_resident_bytes)))),' MiB')],['Framework GPU',fmt(maxFinite(v.flatMap(c=>c.frames.map(f=>mb(f.framework_memory?.gpu_bytes)))),' MiB')]]){const metric=document.createElement('div'),caption=document.createElement('div'),number=document.createElement('div');metric.className='metric';caption.className='muted';caption.textContent=label;number.className='value';number.textContent=value;metric.append(caption,number);metrics.append(metric)}card.append(title,metrics);return card});$('summary').replaceChildren(...summaries);
++let o=base();o.xAxis={type:'value',name:'milliseconds',axisLabel:{color:'#000'}};o.yAxis={type:'category',data:Object.keys(grouped).map(k=>names[k]),axisLabel:{color:'#000'}};o.series=[{name:'frame time',type:'boxplot',data:Object.entries(grouped).map(([k,v])=>{const a=scaleCompatible(cs)&&v.every(completeRun)?v.flatMap(c=>c.frames.filter(f=>f.phase==='measurement'&&f.valid).map(f=>ms(f.frame_time_ns))).filter(Number.isFinite):[];return{value:[pct(a,.05),pct(a,.25),pct(a,.5),pct(a,.75),pct(a,.95)],itemStyle:{color:colors[k]}}})}];charts[0].setOption(o,true);
+ o=base();o.xAxis={type:'value',name:'frame',axisLabel:{color:'#000'}};o.yAxis={type:'value',name:'ms',axisLabel:{color:'#000'}};o.series=cs.map(c=>({name:`${names[c.framework]} #${c.repetition+1}`,type:'line',showSymbol:false,sampling:'lttb',data:c.frames.filter(f=>f.phase==='measurement'&&f.valid).map(f=>[f.sequence,ms(f.frame_time_ns)]),lineStyle:{color:colors[c.framework],type:c.repetition%2?'dashed':'solid'}}));charts[1].setOption(o,true);
+ o=base();o.xAxis={type:'value',name:'seconds',axisLabel:{color:'#000'}};o.yAxis={type:'value',name:'MiB',axisLabel:{color:'#000'}};o.series=cs.flatMap(c=>{const label=`${names[c.framework]} #${c.repetition+1}`;return[{name:`${label} PSS`,type:'line',showSymbol:false,data:c.resources.map(r=>[r.timestamp_ns/1e9,mb(r.pss_bytes)]),lineStyle:{color:colors[c.framework]}},{name:`${label} driver VRAM`,type:'line',showSymbol:false,data:c.resources.map(r=>[r.timestamp_ns/1e9,mb(r.gpu_resident_bytes)]),lineStyle:{color:colors[c.framework],type:'dashed'}},{name:`${label} framework GPU`,type:'line',showSymbol:false,data:c.frames.map(f=>[f.timestamp_ns/1e9,mb(f.framework_memory?.gpu_bytes)]),lineStyle:{color:colors[c.framework],type:'dotted'}}]});charts[2].setOption(o,true);
+ const stages=['view_build_ns','style_ns','layout_ns','prepaint_ns','paint_ns','gpu_prepare_ns','command_encode_ns','queue_submit_ns','present_ns'];o=base();o.xAxis={type:'category',data:Object.keys(grouped).map(k=>names[k]),axisLabel:{color:'#000'}};o.yAxis={type:'value',name:'ms',axisLabel:{color:'#000'}};o.series=stages.map(stage=>({name:stage.replace('_ns',''),type:'bar',stack:'pipeline',data:Object.entries(grouped).map(([k,v])=>pct(v.flatMap(c=>c.frames.map(f=>ms(f.pipeline[stage]))),.5))}));charts[3].setOption(o,true);
+-const missing=[...new Set(cs.flatMap(c=>c.warnings??[]))];for(const c of cs.filter(c=>c.status!=='complete'))missing.push(`${names[c.framework]} repetition ${c.repetition+1}: ${statusText(c.status)}; charts show any partial samples that were captured.`);if(!vram.some(Number.isFinite))missing.push('VRAM is unavailable: neither DRM fdinfo nor NVML exposed a per-process resident-memory counter.');if($('mode').value==='headline')missing.push('Pipeline stages are intentionally disabled in headline mode; select diagnostic mode after collecting diagnostic runs.');$('quality').textContent=`Data quality\n${missing.length?missing.map(x=>'• '+x).join('\n'):'• All requested counters were present.'}\n• “GPU” stages are CPU submission timings unless a sample explicitly sets device_gpu_timestamps=true.\n• Raw samples are embedded in this report and preserved in the source JSON.`;
++const missing=[...new Set(cs.flatMap(c=>c.warnings??[]))];if(!scaleCompatible(cs))missing.push('Output scales differ across repetitions/frameworks; headline percentiles are omitted because rendered pixel counts differ. Raw samples remain visible.');for(const c of cs.filter(c=>c.status!=='complete'))missing.push(`${names[c.framework]} repetition ${c.repetition+1}: ${statusText(c.status)}; charts show any partial samples that were captured.`);if(!vram.some(Number.isFinite))missing.push('VRAM is unavailable: neither DRM fdinfo nor NVML exposed a per-process resident-memory counter.');if($('mode').value==='headline')missing.push('Pipeline stages are intentionally disabled in headline mode; select diagnostic mode after collecting diagnostic runs.');$('quality').textContent=`Data quality\n${missing.length?missing.map(x=>'• '+x).join('\n'):'• All requested counters were present.'}\n• “GPU” stages are CPU submission timings unless a sample explicitly sets device_gpu_timestamps=true.\n• Raw samples are embedded in this report and preserved in the source JSON.`;
+ }
+ $('scenario').onchange=render;$('mode').onchange=render;window.onresize=()=>charts.forEach(c=>c.resize());render();</script></body></html>"#;
+diff --git a/vendor/gpui-ce/crates/gpui_macos/Cargo.toml b/vendor/gpui-ce/crates/gpui_macos/Cargo.toml
+index 97b3ea7..c382b8b 100644
+--- a/vendor/gpui-ce/crates/gpui_macos/Cargo.toml
++++ b/vendor/gpui-ce/crates/gpui_macos/Cargo.toml
+@@ -52,7 +52,7 @@ media.workspace = true
+ metal.workspace = true
+ objc.workspace = true
+ objc2.workspace = true
+-objc2-app-kit.workspace = true
++objc2-app-kit = { workspace = true, features = ["NSButton", "NSView", "NSWindow", "NSControl", "NSResponder"] }
+ objc2-foundation.workspace = true
+ objc2-user-notifications.workspace = true
+ parking_lot.workspace = true

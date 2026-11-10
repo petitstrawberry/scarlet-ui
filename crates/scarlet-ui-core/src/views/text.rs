@@ -193,6 +193,11 @@ pub struct TextRenderObject {
     color: Color,
     size: Size,
     buffer: Option<Buffer>,
+    // Intrinsic measurement is independent of parent constraints. Keep it with
+    // the label rather than depending on a small shared cache during relayout.
+    intrinsic_measurement: Option<(usize, (u32, u32))>,
+    #[cfg(test)]
+    measurement_count: usize,
 }
 
 impl TextRenderObject {
@@ -204,6 +209,9 @@ impl TextRenderObject {
             color,
             size: Size::ZERO,
             buffer: None,
+            intrinsic_measurement: None,
+            #[cfg(test)]
+            measurement_count: 0,
         }
     }
 
@@ -231,8 +239,22 @@ impl ElementRenderObject for TextRenderObject {
             );
         }
         // Use actual font measurement
-        let (measured_width, measured_height) =
-            graphics::measure_text_sized(&self.content, self.font_size);
+        let revision = graphics::text_font_revision();
+        let (measured_width, measured_height) = match self.intrinsic_measurement {
+            Some((cached_revision, size)) if cached_revision == revision => size,
+            _ => {
+                let measure = graphics::TextMeasure::new(&self.content, self.font_size);
+                let size = measure.size(&self.content);
+                // Capture the revision of the actual font stack used, including
+                // any fallback discovered while resolving this label.
+                self.intrinsic_measurement = Some((measure.font_revision(), size));
+                #[cfg(test)]
+                {
+                    self.measurement_count += 1;
+                }
+                size
+            }
+        };
 
         if crate::debug::is_enabled() {
             crate::logln!(
@@ -360,6 +382,9 @@ impl ElementRenderObject for TextRenderObject {
         if self.content == content && self.font_size == text.font_size && self.color == text.color {
             return UpdateResult::NoChange;
         }
+        if self.content != content || self.font_size != text.font_size {
+            self.intrinsic_measurement = None;
+        }
         self.content = content;
         self.font_size = text.font_size;
         self.color = text.color;
@@ -376,6 +401,46 @@ mod tests {
     use super::*;
     use crate::renderer::{CpuPaintRenderer, PaintCommand};
     use crate::state::{State, generate_state_id};
+
+    #[test]
+    fn dense_label_relayout_reuses_intrinsics_and_invalidates_content_size_and_font_revision() {
+        let mut labels: alloc::vec::Vec<_> = (0..1024)
+            .map(|i| TextRenderObject::new(alloc::format!("Label {i:04}"), 13., Color::BLACK))
+            .collect();
+        let loose = LayoutConstraints::loose(1000., 1000.);
+        let natural: alloc::vec::Vec<_> = labels.iter_mut().map(|l| l.layout(loose)).collect();
+        for (label, expected) in labels.iter_mut().zip(natural) {
+            let small = label.layout(LayoutConstraints::loose(2., 3.));
+            assert_eq!(
+                small,
+                Size::new(expected.width.min(2.), expected.height.min(3.))
+            );
+            assert_eq!(label.layout(loose), expected);
+            assert_eq!(
+                label.measurement_count, 1,
+                "shared cache eviction must not remeasure retained labels"
+            );
+        }
+        let label = &mut labels[0];
+        let text = Text::new("a different label").font_size(13.);
+        label.update(&text);
+        label.layout(loose);
+        assert_eq!(label.measurement_count, 2);
+        label.update(&text.clone().color(Color::RED));
+        label.layout(loose);
+        assert_eq!(label.measurement_count, 2);
+        label.update(&text.font_size(25.));
+        label.layout(loose);
+        assert_eq!(label.measurement_count, 3);
+        // A cached revision must never survive a different current font stack.
+        label.intrinsic_measurement = Some((usize::MAX, (1, 1)));
+        let refreshed = label.layout(loose);
+        assert_eq!(label.measurement_count, 4);
+        assert_eq!(refreshed, {
+            let (w, h) = graphics::measure_text_sized("a different label", 25.);
+            Size::new(w as f32, h as f32)
+        });
+    }
 
     #[test]
     fn constrained_text_pixels_stay_inside_layout_and_parent_clip() {

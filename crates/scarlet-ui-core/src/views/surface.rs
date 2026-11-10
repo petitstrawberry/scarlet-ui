@@ -213,6 +213,7 @@ struct SurfaceRenderObject<V: View> {
     clip_content: bool,
     material: Option<GlassMaterial>,
     size: Size,
+    repaint_subtree: bool,
     marker: PhantomData<fn() -> V>,
 }
 
@@ -228,6 +229,7 @@ impl<V: View> SurfaceRenderObject<V> {
             clip_content: view.clip_content,
             material: view.material,
             size: Size::ZERO,
+            repaint_subtree: true,
             marker: PhantomData,
         }
     }
@@ -339,18 +341,29 @@ impl<V: View + Clone> ElementRenderObject for SurfaceRenderObject<V> {
         self
     }
 
+    fn can_defer_offscreen_paint(&self) -> bool {
+        self.material.is_none()
+    }
+
+    fn update_needs_subtree_paint(&self) -> bool {
+        // Fill and border colors affect only this surface. Keep its children's
+        // retained text/geometry; clipping/material changes remain conservative.
+        self.repaint_subtree
+    }
+
     fn update(&mut self, new_view: &dyn View) -> UpdateResult {
         let Some(surface) = new_view.as_any().downcast_ref::<Surface<V>>() else {
             return UpdateResult::Replaced;
         };
-        let changed = self.role != surface.role
+        self.repaint_subtree = self.role != surface.role
             || self.elevation != surface.elevation
             || self.corner_radius != surface.corner_radius
-            || self.fill != surface.fill
-            || self.border_color != surface.border_color
             || self.bordered != surface.bordered
-            || self.clip_content != surface.clip_content;
-        let changed = changed || self.material != surface.material;
+            || self.clip_content != surface.clip_content
+            || self.material != surface.material;
+        let changed = self.repaint_subtree
+            || self.fill != surface.fill
+            || self.border_color != surface.border_color;
         self.role = surface.role;
         self.elevation = surface.elevation;
         self.corner_radius = surface.corner_radius;
@@ -378,6 +391,21 @@ mod tests {
         let mut render = SurfaceRenderObject::from_view(surface);
         render.layout(LayoutConstraints::tight(160.0, 90.0));
         render
+    }
+
+    #[test]
+    fn color_updates_only_repaint_self_but_clip_changes_repaint_children() {
+        let old = Surface::section(Spacer::new())
+            .fill(Color::RED)
+            .border_color(Color::BLUE);
+        let mut render = laid_out(&old);
+        let color = old.clone().fill(Color::GREEN).border_color(Color::RED);
+        assert!(matches!(render.update(&color), UpdateResult::Updated));
+        assert!(!render.update_needs_subtree_paint());
+        let shape = color.clone().corner_radius(3.0);
+        assert!(matches!(render.update(&shape), UpdateResult::Updated));
+        assert!(render.update_needs_subtree_paint());
+        assert!(matches!(render.update(&shape), UpdateResult::NoChange));
     }
 
     #[test]

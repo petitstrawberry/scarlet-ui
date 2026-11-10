@@ -18,6 +18,10 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use std::println;
 
+// Sparse updates benefit from targeted work. For a large dirty set, repeated
+// root searches cost more than a single traversal of the live tree.
+const MAX_TARGETED_UPDATES: usize = 64;
+
 /// Stable owner ID for dirty queues belonging to one rendering pipeline.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct PipelineId(u64);
@@ -362,13 +366,35 @@ impl PipelineOwner {
         let dirty_build = core::mem::take(&mut self.dirty_build);
         let rebuilt = !dirty_build.is_empty();
 
-        for id in dirty_build {
-            // Find the element in the tree
-            if let Some(element) = element_tree.find_element_mut(id) {
-                // Rebuild a fresh View description and reconcile it with the
-                // retained child Element/RenderObject subtree.
-                if matches!(element.rebuild(), crate::element::UpdateResult::Updated) {
-                    self.mark_needs_layout(id);
+        if dirty_build.len() > MAX_TARGETED_UPDATES {
+            fn rebuild(
+                element: &mut dyn crate::element::Element,
+                dirty: &BTreeSet<ElementId>,
+                layout: &mut BTreeSet<ElementId>,
+            ) {
+                if dirty.contains(&element.id())
+                    && matches!(element.rebuild(), crate::element::UpdateResult::Updated)
+                {
+                    layout.insert(element.id());
+                }
+                // Reconciliation can remove or replace children. Visit the
+                // resulting live children, never references saved before rebuild.
+                for child in element.children_mut() {
+                    rebuild(child.as_mut(), dirty, layout);
+                }
+            }
+            if let Some(root) = element_tree.root_mut() {
+                rebuild(root.as_mut(), &dirty_build, &mut self.dirty_layout);
+            }
+        } else {
+            for id in dirty_build {
+                // Find the element in the tree
+                if let Some(element) = element_tree.find_element_mut(id) {
+                    // Rebuild a fresh View description and reconcile it with the
+                    // retained child Element/RenderObject subtree.
+                    if matches!(element.rebuild(), crate::element::UpdateResult::Updated) {
+                        self.mark_needs_layout(id);
+                    }
                 }
             }
         }
@@ -386,6 +412,17 @@ impl PipelineOwner {
 
         // Create constraints from window size
         let constraints = LayoutConstraints::loose(window_size.width, window_size.height);
+
+        // One conservative layout also coalesces overlapping dirty subtrees.
+        // Finding an ancestor path separately for every node is quadratic for
+        // dense updates, before any actual layout has even taken place.
+        if dirty_layout.len() > MAX_TARGETED_UPDATES {
+            element_tree.layout(constraints);
+            if let Some(root) = element_tree.root() {
+                self.dirty_paint.insert(root.id());
+            }
+            return;
+        }
 
         let root_id = match element_tree.root() {
             Some(root) => root.id(),
@@ -539,6 +576,38 @@ impl PipelineOwner {
         self.dirty_composite.clear();
 
         if !render_legacy_paint {
+            if dirty_paint.len() + dirty_self_paint.len() > MAX_TARGETED_UPDATES {
+                fn render_dirty(
+                    element: &mut dyn crate::element::Element,
+                    subtree_ids: &BTreeSet<ElementId>,
+                    self_ids: &BTreeSet<ElementId>,
+                    inherited: bool,
+                ) {
+                    let subtree = inherited || subtree_ids.contains(&element.id());
+                    let own = subtree || self_ids.contains(&element.id());
+                    for child in element.children_mut() {
+                        render_dirty(child.as_mut(), subtree_ids, self_ids, subtree);
+                    }
+                    if own {
+                        let requires_buffer = element
+                            .render_object()
+                            .is_some_and(|object| object.requires_buffer_render_for_paint());
+                        if requires_buffer {
+                            if subtree {
+                                if let Some(object) = element.render_object_mut() {
+                                    object.render();
+                                }
+                            } else {
+                                element.render();
+                            }
+                        }
+                    }
+                }
+                if let Some(root) = element_tree.root_mut() {
+                    render_dirty(root.as_mut(), &dirty_paint, &dirty_self_paint, false);
+                }
+                return;
+            }
             for id in dirty_paint.iter().copied() {
                 if let Some(element) = element_tree.find_element_mut(id) {
                     Self::render_paint_buffers_recursive(element);
@@ -733,5 +802,190 @@ impl PipelineOwner {
 impl Default for PipelineOwner {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod dense_update_tests {
+    use super::*;
+    use crate::element::{Element, ElementRenderObject as RenderObject, UpdateResult};
+    use crate::view::View;
+    use alloc::{rc::Rc, vec::Vec};
+    use core::{any::Any, cell::RefCell};
+
+    #[derive(Default)]
+    struct Calls {
+        visits: usize,
+        rebuilt: Vec<ElementId>,
+        rendered: Vec<ElementId>,
+        layouts: usize,
+    }
+    struct Probe {
+        id: ElementId,
+        children: Vec<Box<dyn Element>>,
+        calls: Rc<RefCell<Calls>>,
+        remove_children_on_rebuild: bool,
+    }
+    impl Probe {
+        fn new(calls: &Rc<RefCell<Calls>>) -> Self {
+            Self {
+                id: ElementId::generate(),
+                children: Vec::new(),
+                calls: calls.clone(),
+                remove_children_on_rebuild: false,
+            }
+        }
+    }
+    impl Element for Probe {
+        fn id(&self) -> ElementId {
+            self.calls.borrow_mut().visits += 1;
+            self.id
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn children(&self) -> &[Box<dyn Element>] {
+            &self.children
+        }
+        fn children_mut(&mut self) -> &mut [Box<dyn Element>] {
+            &mut self.children
+        }
+        fn update(&mut self, _: &dyn View) -> UpdateResult {
+            UpdateResult::NoChange
+        }
+        fn rebuild(&mut self) -> UpdateResult {
+            self.calls.borrow_mut().rebuilt.push(self.id);
+            if self.remove_children_on_rebuild {
+                self.children.clear();
+            }
+            UpdateResult::Updated
+        }
+        fn layout(&mut self, c: LayoutConstraints) -> Size {
+            self.calls.borrow_mut().layouts += 1;
+            for child in &mut self.children {
+                child.layout(c);
+            }
+            Size::new(10., 10.)
+        }
+        fn render(&mut self) {
+            self.calls.borrow_mut().rendered.push(self.id);
+        }
+        fn render_object(&self) -> Option<&dyn RenderObject> {
+            Some(self)
+        }
+        fn render_object_mut(&mut self) -> Option<&mut dyn RenderObject> {
+            Some(self)
+        }
+    }
+    impl RenderObject for Probe {
+        fn layout(&mut self, c: LayoutConstraints) -> Size {
+            Element::layout(self, c)
+        }
+        fn size(&self) -> Size {
+            Size::new(10., 10.)
+        }
+        fn render(&mut self) {
+            Element::render(self);
+        }
+        fn requires_buffer_render_for_paint(&self) -> bool {
+            true
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn dense_build_visits_live_tree_once_and_skips_removed_dirty_children() {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut root = Probe::new(&calls);
+        let mut removed_parent = Probe::new(&calls);
+        let removed = Probe::new(&calls);
+        let removed_id = removed.id;
+        removed_parent.children.push(Box::new(removed));
+        removed_parent.remove_children_on_rebuild = true;
+        let mut owner = PipelineOwner::new();
+        owner.mark_needs_build(removed_parent.id);
+        owner.mark_needs_build(removed_id);
+        root.children.push(Box::new(removed_parent));
+        for _ in 0..128 {
+            let child = Probe::new(&calls);
+            owner.mark_needs_build(child.id);
+            root.children.push(Box::new(child));
+        }
+        let mut tree = ElementTree::new();
+        tree.set_root(Box::new(root));
+        owner.flush_build(&mut tree);
+        let calls = calls.borrow();
+        assert_eq!(calls.rebuilt.len(), 129);
+        assert!(!calls.rebuilt.contains(&removed_id));
+        assert_eq!(owner.dirty_layout.len(), 129);
+        assert!(
+            calls.visits < 520,
+            "dense rebuild must not search from the root per ID: {}",
+            calls.visits
+        );
+    }
+
+    #[test]
+    fn dense_paint_renders_overlapping_subtrees_once_and_preserves_self_only_scope() {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut root = Probe::new(&calls);
+        let mut owner = PipelineOwner::new();
+        let mut expected = BTreeSet::new();
+        for _ in 0..128 {
+            let mut parent = Probe::new(&calls);
+            let child = Probe::new(&calls);
+            owner.mark_needs_paint(parent.id);
+            owner.mark_needs_paint(child.id);
+            expected.insert(parent.id);
+            expected.insert(child.id);
+            parent.children.push(Box::new(child));
+            root.children.push(Box::new(parent));
+        }
+        let mut self_only = Probe::new(&calls);
+        owner.mark_needs_self_paint(self_only.id);
+        expected.insert(self_only.id);
+        self_only.children.push(Box::new(Probe::new(&calls)));
+        root.children.push(Box::new(self_only));
+        root.children.push(Box::new(Probe::new(&calls)));
+        let mut tree = ElementTree::new();
+        tree.set_root(Box::new(root));
+        owner.flush_paint(&mut tree, false);
+        let calls = calls.borrow();
+        assert_eq!(calls.rendered.len(), expected.len());
+        assert_eq!(
+            calls.rendered.iter().copied().collect::<BTreeSet<_>>(),
+            expected
+        );
+        assert!(
+            calls.visits < 1040,
+            "dense paint must not search from the root per ID: {}",
+            calls.visits
+        );
+    }
+
+    #[test]
+    fn dense_layout_coalesces_overlapping_roots() {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut root = Probe::new(&calls);
+        let root_id = root.id;
+        let mut owner = PipelineOwner::new();
+        for _ in 0..128 {
+            let child = Probe::new(&calls);
+            owner.mark_needs_layout(child.id);
+            root.children.push(Box::new(child));
+        }
+        let mut tree = ElementTree::new();
+        tree.set_root(Box::new(root));
+        owner.flush_layout(&mut tree, Size::new(100., 100.));
+        assert_eq!(calls.borrow().layouts, 129);
+        assert!(owner.dirty_paint.contains(&root_id));
     }
 }

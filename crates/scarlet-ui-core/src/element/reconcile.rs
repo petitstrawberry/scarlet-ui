@@ -113,6 +113,39 @@ pub(crate) fn update_children(
     new_views: Vec<Box<dyn View>>,
     mount_context: Option<MountContext>,
 ) -> UpdateResult {
+    // Most rebuilds keep the sibling order and keys. Update those slots in
+    // place instead of allocating a new vector and shifting every remaining
+    // sibling with remove(0). Keyed moves still use the general matcher below.
+    if children.len() == new_views.len()
+        && children
+            .iter()
+            .zip(&new_views)
+            .all(|(child, view)| keys_match(child.as_ref(), view.as_ref()))
+    {
+        let mut result = UpdateResult::NoChange;
+        for (index, view) in new_views.into_iter().enumerate() {
+            match children[index].update(view.as_ref()) {
+                UpdateResult::NoChange => {}
+                UpdateResult::Updated => {
+                    if let Some(context) = mount_context {
+                        crate::pipeline::mark_element_needs_layout(
+                            context.pipeline_id(),
+                            children[index].id(),
+                        );
+                    }
+                    result = UpdateResult::Updated;
+                }
+                UpdateResult::Replaced => {
+                    let mut child = Some(children.remove(index));
+                    replace_child(&mut child, view.as_ref(), mount_context, true);
+                    children.insert(index, child.expect("replacement child"));
+                    result = UpdateResult::Updated;
+                }
+            }
+        }
+        return result;
+    }
+
     let mut old_children = core::mem::take(children);
     let mut new_children = Vec::with_capacity(new_views.len());
     let mut result = UpdateResult::NoChange;
@@ -181,6 +214,34 @@ mod tests {
             child.as_ref().expect("child should exist").id(),
             original_id
         );
+    }
+
+    #[test]
+    fn stable_siblings_preserve_identity_around_type_replacement() {
+        let mut children: Vec<Box<dyn Element>> = (0usize..128)
+            .map(|i| Text::new("old").key(i).create_element())
+            .collect();
+        let ids: Vec<_> = children.iter().map(|c| c.id()).collect();
+        let views: Vec<Box<dyn View>> = (0usize..128)
+            .map(|i| {
+                if i == 64 {
+                    Box::new(crate::views::Spacer::new().key(i)) as Box<dyn View>
+                } else {
+                    Box::new(Text::new("new").key(i)) as Box<dyn View>
+                }
+            })
+            .collect();
+        assert!(matches!(
+            update_children(&mut children, views, None),
+            UpdateResult::Updated
+        ));
+        for (i, child) in children.iter().enumerate() {
+            if i == 64 {
+                assert_ne!(child.id(), ids[i]);
+            } else {
+                assert_eq!(child.id(), ids[i]);
+            }
+        }
     }
 
     #[test]
