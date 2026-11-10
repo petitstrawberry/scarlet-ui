@@ -939,10 +939,7 @@ impl ElementRenderObject for TabViewRenderObject {
             } else {
                 self.text_color
             };
-            let text_y = rect.origin.y
-                + ((self.tab_bar_height - graphics::line_height_sized(self.font_size) as f32)
-                    * 0.5)
-                    .max(0.0);
+            let text_y = rect.origin.y + style::control_text_y(self.tab_bar_height, self.font_size);
             ctx.draw_text(
                 Point::new(rect.origin.x + self.tab_padding, text_y),
                 label.clone(),
@@ -1379,6 +1376,67 @@ mod tests {
         }
     }
 
+    #[test]
+    fn buttons_and_tabs_share_a_label_independent_fractional_baseline() {
+        use crate::views::Button;
+        for font_size in [9.5, 13.0, 17.25] {
+            for height in [28.0, 35.0, 40.0] {
+                for label in [
+                    "Kureha",
+                    "Visible",
+                    "Appearance",
+                    "Acknowledgements",
+                    "gyp",
+                    "日本語",
+                    "+",
+                    "−",
+                ] {
+                    let mut button = Button::new(label)
+                        .header_style()
+                        .font_size(font_size)
+                        .create_element();
+                    button.layout(LayoutConstraints::tight(220.0, height));
+                    let mut button_paint = PaintContext::new();
+                    button
+                        .render_object()
+                        .unwrap()
+                        .paint(&mut button_paint, Point::ZERO);
+                    let content = TabViewContent {
+                        tabs: TabView::new(vec![TabItem::new(label, Spacer::new)])
+                            .font_size(font_size)
+                            .tab_bar_height(height)
+                            .tab_bar_placement(TabBarPlacement::Top),
+                    };
+                    let mut tabs = tab_render_object(&content);
+                    tabs.layout(LayoutConstraints::tight(220.0, 160.0));
+                    let mut tab_paint = PaintContext::new();
+                    tabs.paint(&mut tab_paint, Point::ZERO);
+                    let text_y = |paint: &PaintContext<'_>| {
+                        paint
+                            .commands()
+                            .iter()
+                            .find_map(|command| {
+                                if let PaintCommand::DrawText { position, .. } = command {
+                                    Some(position.y)
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap()
+                    };
+                    let metrics = graphics::font_metrics_sized(font_size);
+                    let baseline = text_y(&button_paint) + metrics.ascent;
+                    assert_eq!(text_y(&button_paint), text_y(&tab_paint), "{label}");
+                    assert!(
+                        ((baseline - metrics.ascent) - (height - baseline - metrics.descent)).abs()
+                            < 0.0001,
+                        "{label}: baseline={baseline}, metrics={metrics:?}"
+                    );
+                }
+            }
+        }
+    }
+
     fn styled_tabs(style: TabStyle, placement: TabBarPlacement) -> TabViewContent {
         TabViewContent {
             tabs: TabView::new(vec![
@@ -1781,16 +1839,16 @@ mod tests {
     }
 
     #[test]
-    fn label_vertical_alignment_uses_the_real_line_height() {
+    fn label_vertical_alignment_keeps_the_baseline_when_translated() {
         let mut tabs = tab_render_object(&styled_tabs(TabStyle::default(), TabBarPlacement::Top));
         tabs.layout(LayoutConstraints::tight(300.0, 180.0));
         let mut ctx = PaintContext::new();
         tabs.paint(&mut ctx, Point::new(10.0, 20.0));
-        let expected =
-            20.0 + ((30.0 - graphics::line_height_sized(tabs.font_size) as f32) * 0.5).max(0.0);
+        let metrics = graphics::font_metrics_sized(tabs.font_size);
+        let expected_baseline = 20.0 + (30.0 + metrics.ascent - metrics.descent) * 0.5;
         for command in ctx.commands() {
             if let PaintCommand::DrawText { position, .. } = command {
-                assert_eq!(position.y, expected);
+                assert!((position.y + metrics.ascent - expected_baseline).abs() < 0.0001);
             }
         }
     }

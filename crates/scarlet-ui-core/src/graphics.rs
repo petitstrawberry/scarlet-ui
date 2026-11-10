@@ -1102,6 +1102,58 @@ pub fn measure_text_sized_with_font_stack(
         })
 }
 
+/// Floating-point font metrics in logical pixels, relative to the baseline.
+/// Ascent and descent are positive distances; leading is extra inter-line space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FontMetrics {
+    pub ascent: f32,
+    pub descent: f32,
+    pub leading: f32,
+}
+
+impl FontMetrics {
+    /// Height of a single typographic line, excluding inter-line leading.
+    pub fn height(self) -> f32 {
+        self.ascent + self.descent
+    }
+
+    /// Baseline relative to the top of a vertically centered control.
+    /// This is independent of the label's ink (capitals, descenders or symbols).
+    pub fn centered_baseline(self, height: f32) -> f32 {
+        (height - self.height()) * 0.5 + self.ascent
+    }
+}
+
+/// Metrics of the primary UI face at the same em scale used by glyph drawing.
+/// Keep these fractional until rasterization; line spacing is not a control's
+/// single-line height. Without a font, preserve the existing em-height fallback.
+pub fn font_metrics_sized(font_size_px: f32) -> FontMetrics {
+    default_font_stack().map_or(
+        FontMetrics {
+            ascent: font_size_px.max(1.0),
+            descent: 0.0,
+            leading: 0.0,
+        },
+        |stack| font_metrics_sized_with_font_stack(font_size_px, &stack),
+    )
+}
+
+/// Baseline metrics for an explicit primary face. Fallback glyphs use this same
+/// primary baseline, as in `rasterize_text_with_font_stack`.
+pub fn font_metrics_sized_with_font_stack(
+    font_size_px: f32,
+    font_stack: &FontStack,
+) -> FontMetrics {
+    let scaled = font_stack
+        .primary
+        .as_scaled(em_scale(&font_stack.primary, font_size_px));
+    FontMetrics {
+        ascent: scaled.ascent(),
+        descent: -scaled.descent(),
+        leading: scaled.line_gap(),
+    }
+}
+
 /// Return the line advance used by text drawing for the default vector font.
 ///
 /// # Arguments

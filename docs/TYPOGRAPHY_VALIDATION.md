@@ -32,8 +32,8 @@ em, using macOS-like desktop density as the visual reference. Apps use 11–12
 for supporting text and larger sizes only for headings or prominent values.
 Output scaling, glyph advances and fallback sizing are unchanged.
 
-Menu items, popup rows, selects, tabs and bottom navigation align text using
-measured line height. Guesses such as `font_size * 1.2` and fixed 15/16-pixel
+Menu items, popup rows and bottom navigation align text using measured line
+metrics. Single-line buttons, selects and tabs use the baseline rule below. Guesses such as `font_size * 1.2` and fixed 15/16-pixel
 heights placed the corrected text too low. This is a control-layout correction,
 not an adjustment to the glyph baseline or a global upward pixel offset.
 
@@ -104,3 +104,30 @@ script shaping, ligatures, bidirectional layout or kerning. This correction
 changes size conversion and cache identity, not the shaping model. Join and
 variation controls do not draw replacement marks or add phantom width, even if
 the selected fonts omit them; a joined emoji may still draw as separate glyphs.
+
+
+## Single-line control baselines
+
+Buttons and TabView now share baseline placement based on floating-point primary
+font ascent and descent. For control height `H`, ascent `A` and positive descent
+`D`, the baseline is `(H - A - D) / 2 + A`. PaintCommand's top-origin is then
+`baseline - A`; logical coordinates stay fractional through recording. Inter-line
+leading and integer-rounded line advances are not used to center a single label.
+This also keeps labels with descenders, capitals, Japanese text and symbols on
+the same baseline rather than moving them according to their ink bounds.
+
+The reference is Qt 6's single-line text layout: QCommonStyle requests
+AlignVCenter for push-button labels; qt_format_text centers the line's height
+without initial/final inter-line leading. QFontMetricsF defines height as
+ascent + descent, with leading separate. These are independently implemented
+metric calculations; no Qt source is included.
+
+- https://doc.qt.io/qt-6/qfontmetricsf.html#height
+- https://github.com/qt/qtbase/blob/6.10/src/widgets/styles/qcommonstyle.cpp
+- https://github.com/qt/qtbase/blob/6.10/src/gui/painting/qpainter.cpp
+
+Regressions check known font-table metrics at fractional sizes, exclusion of
+leading, and equal button/tab baselines across labels and control heights.
+
+Validation: 734 core tests passed (5 optional tests ignored), followed by all 12
+button tests after adding fractional legacy/paint pixel parity coverage.

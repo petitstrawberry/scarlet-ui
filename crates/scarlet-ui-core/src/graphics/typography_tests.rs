@@ -163,3 +163,28 @@ fn missing_join_and_variation_controls_add_neither_ink_nor_width() {
         assert_eq!(measure.advance(ch), 0.0);
     }
 }
+
+#[test]
+fn centered_controls_use_fractional_ascent_descent_without_line_leading() {
+    let stack = stack();
+    for size in [9.5, 13.0, 17.25] {
+        let metrics = font_metrics_sized_with_font_stack(size, &stack);
+        assert!((metrics.ascent - size * 1.160).abs() < 0.0001);
+        assert!((metrics.descent - size * 0.288).abs() < 0.0001);
+        for height in [24.0, 31.0, 40.0] {
+            let baseline = metrics.centered_baseline(height);
+            let above = baseline - metrics.ascent;
+            let below = height - baseline - metrics.descent;
+            assert!((above - below).abs() < 0.0001);
+            let spaced = FontMetrics {
+                leading: 9.75,
+                ..metrics
+            };
+            assert_eq!(spaced.centered_baseline(height), baseline);
+            // Integer line-height placement must not silently return here.
+            let rounded_top =
+                (height - line_height_sized_with_font_stack(size, &stack) as f32) * 0.5;
+            assert!((above - rounded_top).abs() > 0.01);
+        }
+    }
+}

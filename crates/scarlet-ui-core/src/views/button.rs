@@ -546,7 +546,7 @@ impl ButtonRenderObject {
         };
         let width = text_width as f32 + icon_width + padding.left + padding.right;
         let height =
-            (graphics::line_height_sized(self.font_size) as f32 + padding.top + padding.bottom)
+            (graphics::font_metrics_sized(self.font_size).height() + padding.top + padding.bottom)
                 .max(minimum_height);
 
         Size { width, height }
@@ -742,12 +742,16 @@ impl ElementRenderObject for ButtonRenderObject {
                     background,
                 );
                 let (text_width, _) = graphics::measure_text_sized(&self.label, self.font_size);
-                canvas.draw_text_sized(
-                    ((width as i32 - text_width as i32) / 2).max(0),
-                    style::control_text_y(height as f32, self.font_size) as i32,
+                canvas.draw_text_at(
+                    Point::new(
+                        ((self.size.width - text_width as f32) * 0.5).max(0.0),
+                        style::control_text_y(self.size.height, self.font_size),
+                    ),
                     &self.label,
                     text_color,
                     self.font_size,
+                    None,
+                    None,
                 );
             }
             return;
@@ -978,6 +982,20 @@ mod tests {
         let mut render_object = button.build_render_object();
         render_object.layout(LayoutConstraints::unconstrained());
         render_object
+    }
+
+    #[test]
+    fn header_buffer_and_paint_keep_the_same_fractional_label_origin() {
+        let mut button = Button::new("Visible").header_style()
+            .font_size(17.25).background_color(Color::CLEAR).text_color(Color::WHITE)
+            .build_render_object();
+        button.layout(LayoutConstraints::tight(90.5, 29.5));
+        button.render();
+        let mut ctx = PaintContext::new();
+        button.paint(&mut ctx, Point::ZERO);
+        let mut expected = Buffer::from_logical_dimensions(91, 30);
+        crate::renderer::CpuPaintRenderer::execute_into_buffer(&mut expected, Color::CLEAR, &ctx, None);
+        assert_eq!(button.get_buffer().unwrap().as_slice(), expected.as_slice());
     }
 
     fn center_pixel(render_object: &ButtonRenderObject) -> u32 {
