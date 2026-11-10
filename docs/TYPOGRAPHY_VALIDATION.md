@@ -38,9 +38,9 @@ heights placed the corrected text too low. This is a control-layout correction,
 not an adjustment to the glyph baseline or a global upward pixel offset.
 
 Fractional line origins are retained through layout, recording and nested scroll
-translations. CPU and SGFX snap once to the nearest physical pixel; they do not
-truncate logical coordinates before applying output scale. Glyph baselines also
-round to the nearest physical pixel. This preserves a centered 9.5px origin at
+translations. CPU and SGFX translate the baseline before snapping to the nearest
+physical pixel, compensating the rounded ascent already stored in cached masks.
+They do not independently round the logical top and ascent. This preserves a centered 9.5px origin at
 2× as 19px instead of moving it up to 18px. Half-pixel ties use a consistent
 direction across the window origin so translated text meshes and raster tiles
 can retain their pixels without introducing an origin-dependent shift.
@@ -131,3 +131,12 @@ leading, and equal button/tab baselines across labels and control heights.
 
 Validation: 734 core tests passed (5 optional tests ignored), followed by all 12
 button tests after adding fractional legacy/paint pixel parity coverage.
+
+The physical-baseline follow-up also updates text damage bounds, cached-tile
+origins and retained SGFX replay anchors. This prevents a correct first paint
+from shifting on partial redraw or scrolling. Tests compare translated baseline
+positions at 100%, 125%, 150%, 200% and 300%, and compare retained GPU vertices
+against fresh submission at multiple fractional origins and scales.
+
+Final baseline/replay validation passed 736 core tests (5 optional tests ignored)
+and all 136 SGFX renderer tests.

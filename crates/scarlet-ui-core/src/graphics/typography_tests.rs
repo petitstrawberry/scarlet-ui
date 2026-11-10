@@ -188,3 +188,33 @@ fn centered_controls_use_fractional_ascent_descent_without_line_leading() {
         }
     }
 }
+
+#[test]
+fn centered_label_baseline_rounds_once_on_the_physical_grid() {
+    let stack = stack();
+    let mut independent_rounding_would_differ = false;
+    for size in [9.5, 13.0, 17.25] {
+        let logical = font_metrics_sized_with_font_stack(size, &stack);
+        for dpi in [1000, 1250, 1500, 2000, 3000] {
+            let scale = dpi as f32 / 1000.0;
+            let physical = font_metrics_sized_with_font_stack(size * scale, &stack);
+            for height in [24.0, 31.0, 40.0] {
+                for translation in [-10.25, 0.0, 0.5, 20.25] {
+                    let baseline = logical.centered_baseline(height) + translation;
+                    let top = baseline - logical.ascent;
+                    let glyph_baseline = libm::floorf(physical.ascent + 0.5) as i32;
+                    let actual =
+                        text_origin_y_physical(top, size, dpi, Some(&stack)) + glyph_baseline;
+                    let expected = text_origin_physical(baseline, dpi);
+                    assert_eq!(actual, expected, "size={size}, dpi={dpi}, height={height}");
+                    independent_rounding_would_differ |=
+                        text_origin_physical(top, dpi) + glyph_baseline != expected;
+                }
+            }
+        }
+    }
+    assert!(
+        independent_rounding_would_differ,
+        "fixture must catch double rounding"
+    );
+}

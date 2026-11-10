@@ -68,6 +68,25 @@ pub fn text_origin_physical(value: f32, scale_milli: u32) -> i32 {
     libm::floorf(value * (scale_milli.max(1) as f32 / 1000.) + 0.5) as i32
 }
 
+/// Place cached glyph masks by rounding the final baseline once. The masks
+/// already contain a rounded primary ascent; compensate it before applying the
+/// translated origin, rather than rounding top and ascent independently.
+#[doc(hidden)]
+pub fn text_origin_y_physical(
+    top: f32,
+    font_size: f32,
+    scale_milli: u32,
+    font_stack: Option<&FontStack>,
+) -> i32 {
+    let scale = scale_milli.max(1) as f32 / 1000.0;
+    let metrics = match font_stack {
+        Some(stack) => font_metrics_sized_with_font_stack(font_size * scale, stack),
+        None => font_metrics_sized(font_size * scale),
+    };
+    (libm::floorf(top * scale + metrics.ascent + 0.5)
+        - libm::floorf(metrics.ascent + 0.5)) as i32
+}
+
 #[cfg(all(test, feature = "std"))]
 mod scale_context_tests {
     #[test]
@@ -1618,7 +1637,7 @@ impl<'a> Canvas<'a> {
         clip: Option<PhysicalClip>,
     ) {
         let origin_x = text_origin_physical(x, self.scale_milli);
-        let origin_y = text_origin_physical(y, self.scale_milli);
+        let origin_y = text_origin_y_physical(y, font_size_px, self.scale_milli, Some(font_stack));
         let glyphs =
             rasterize_text_with_font_stack(text, font_size_px, self.scale_milli, font_stack);
 

@@ -86,7 +86,7 @@ struct Draw {
     source: DrawSource,
     vertex_buffer: Option<BufferId>,
     offset: [f32; 2],
-    // Text keeps the full logical origin; images/icons keep their fractional phase.
+    // Text keeps its logical x and baseline; images/icons keep their fractional phase.
     snap_phase: [f32; 2],
 }
 
@@ -1367,8 +1367,14 @@ impl SgfxPaintEncoder {
                     {
                         return Err(Error::InvalidFrame);
                     }
+                    let ascent = match font_stack {
+                        Some(stack) => scarlet_ui_core::graphics::font_metrics_sized_with_font_stack(*font_size_px * scale, stack),
+                        None => scarlet_ui_core::graphics::font_metrics_sized(*font_size_px * scale),
+                    }.ascent;
                     let origin_x = scale_text_origin(position.x, scale_milli);
-                    let origin_y = scale_text_origin(position.y, scale_milli);
+                    let origin_y = scarlet_ui_core::graphics::text_origin_y_physical(
+                        position.y, *font_size_px, scale_milli, font_stack.as_deref(),
+                    );
                     let color = ui_color(*color, opacity)?;
                     let glyphs = match font_stack {
                         Some(stack) => rasterize_text_cached_with_font_stack(
@@ -1415,7 +1421,7 @@ impl SgfxPaintEncoder {
                                 color,
                                 DrawSource::Glyph(texture),
                                 if self.recording_mesh {
-                                    [position.x, position.y]
+                                    [position.x, position.y + ascent / scale]
                                 } else {
                                     [0., 0.]
                                 },
