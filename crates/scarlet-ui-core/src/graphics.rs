@@ -450,6 +450,7 @@ fn next_font_stack_id() -> usize {
 struct FontFace {
     font: FontArc,
     index: u32,
+    id: usize,
 }
 impl core::ops::Deref for FontFace {
     type Target = FontArc;
@@ -457,10 +458,10 @@ impl core::ops::Deref for FontFace {
 }
 impl FontFace {
     fn from_slice(bytes: &'static [u8]) -> Result<Self, InvalidFont> {
-        Ok(Self { font: FontArc::try_from_slice(bytes)?, index: 0 })
+        Ok(Self { font: FontArc::try_from_slice(bytes)?, index: 0, id: next_font_stack_id() })
     }
     fn from_vec(bytes: Vec<u8>) -> Result<Self, InvalidFont> {
-        Ok(Self { font: FontArc::try_from_vec(bytes)?, index: 0 })
+        Ok(Self { font: FontArc::try_from_vec(bytes)?, index: 0, id: next_font_stack_id() })
     }
 }
 
@@ -815,7 +816,7 @@ fn load_fonts_from_rootfs_once() {
 
 #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
 fn discovered_font_ref(font: DiscoveredFont) -> Result<FontFace, InvalidFont> {
-    Ok(FontFace { font: FontArc::new(FontVec::try_from_vec_and_index(font.bytes, font.index)?), index: font.index })
+    Ok(FontFace { font: FontArc::new(FontVec::try_from_vec_and_index(font.bytes, font.index)?), index: font.index, id: next_font_stack_id() })
 }
 
 #[cfg(all(feature = "std", not(target_arch = "wasm32")))]
@@ -1024,7 +1025,7 @@ pub fn rasterize_text_with_font_stack(
         .as_scaled(em_scale(&font_stack.primary, physical_em));
     let layout = shaping::shape_text(text, physical_em, font_stack);
     let mut glyphs = Vec::with_capacity(layout.glyphs.len());
-    for positioned in layout.glyphs {
+    for positioned in &layout.glyphs {
         let face = if positioned.font_slot == 0 {
             &font_stack.primary
         } else {
@@ -1116,7 +1117,7 @@ impl TextMeasure {
 
     pub(crate) fn prefix_widths(&self, text: &str) -> Vec<f32> {
         if let Some(stack) = &self.font_stack {
-            shaping::shape_text(text, self.font_size, stack).prefix_widths
+            shaping::shape_text(text, self.font_size, stack).prefix_widths.clone()
         } else {
             let mut result = alloc::vec![0.0; text.len() + 1];
             let mut x = 0.0;

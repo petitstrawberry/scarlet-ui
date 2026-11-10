@@ -3,7 +3,7 @@
 //! OpenType positioning is delegated to Rustybuzz (the Rust HarfBuzz port).
 //! Coordinates stay fractional; only coverage masks quantize to raster phases.
 use super::*;
-use rustybuzz::{BufferFlags, Direction, Feature, UnicodeBuffer};
+use rustybuzz::{BufferFlags, Direction, ShapePlan, UnicodeBuffer};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub(super) struct PositionedGlyph {
@@ -20,7 +20,56 @@ pub(super) struct ShapedText {
     pub height: f32,
 }
 
-pub(super) fn shape_text(text: &str, size: f32, stack: &FontStack) -> ShapedText {
+struct LayoutEntry {
+    text: alloc::string::String,
+    size: u32,
+    stack: usize,
+    layout: Arc<ShapedText>,
+    bytes: usize,
+}
+static LAYOUTS: Mutex<Vec<LayoutEntry>> = Mutex::new(Vec::new());
+struct PlanEntry {
+    face: usize,
+    script: rustybuzz::Script,
+    plan: Arc<ShapePlan>,
+}
+static PLANS: Mutex<Vec<PlanEntry>> = Mutex::new(Vec::new());
+
+pub(super) fn shape_text(text: &str, size: f32, stack: &FontStack) -> Arc<ShapedText> {
+    let key = size.to_bits();
+    if let Some(entry) = LAYOUTS
+        .lock()
+        .iter()
+        .find(|e| e.size == key && e.stack == stack.cache_id() && e.text == text)
+    {
+        return Arc::clone(&entry.layout);
+    }
+    let layout = Arc::new(shape_uncached(text, size, stack));
+    let bytes = text.len()
+        + layout.prefix_widths.len() * core::mem::size_of::<f32>()
+        + layout.glyphs.len() * core::mem::size_of::<PositionedGlyph>();
+    // Large document rows keep their own layout. Bound both entry count and
+    // retained bytes; warm labels don't rebuild font plans or allocate glyphs.
+    if bytes <= 64 * 1024 {
+        let mut cache = LAYOUTS.lock();
+        while !cache.is_empty()
+            && (cache.len() >= 512
+                || cache.iter().map(|e| e.bytes).sum::<usize>() + bytes > 4 * 1024 * 1024)
+        {
+            cache.remove(0);
+        }
+        cache.push(LayoutEntry {
+            text: text.into(),
+            size: key,
+            stack: stack.cache_id(),
+            layout: Arc::clone(&layout),
+            bytes,
+        });
+    }
+    layout
+}
+
+fn shape_uncached(text: &str, size: f32, stack: &FontStack) -> ShapedText {
     let metrics = font_metrics_sized_with_font_stack(size, stack);
     let line_height = metrics.height() + metrics.leading;
     let mut result = ShapedText {
@@ -101,17 +150,36 @@ fn shape_run(
     // separate responsibility; don't silently reverse only their painted text.
     input.set_direction(Direction::LeftToRight);
     input.set_flags(BufferFlags::REMOVE_DEFAULT_IGNORABLES);
-    // Preserve code-font cells; proportional UI fonts retain standard ligatures.
-    let code_features = [
-        Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(b"liga"), 0, ..),
-        Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(b"clig"), 0, ..),
-    ];
-    let features = if face.is_monospaced() {
-        &code_features[..]
-    } else {
-        &[]
+    // Every face follows its own OpenType features. No font-name, family or
+    // monospace special cases, and no artificial tracking/width correction.
+    let script = input.script();
+    let plan = {
+        let mut plans = PLANS.lock();
+        if let Some(entry) = plans
+            .iter()
+            .find(|p| p.face == font.id && p.script == script)
+        {
+            Arc::clone(&entry.plan)
+        } else {
+            let plan = Arc::new(ShapePlan::new(
+                &face,
+                Direction::LeftToRight,
+                Some(script),
+                None,
+                &[],
+            ));
+            if plans.len() >= 64 {
+                plans.remove(0);
+            }
+            plans.push(PlanEntry {
+                face: font.id,
+                script,
+                plan: Arc::clone(&plan),
+            });
+            plan
+        }
     };
-    let shaped = rustybuzz::shape(&face, features, input);
+    let shaped = rustybuzz::shape_with_plan(&face, &plan, input);
     let factor = size / face.units_per_em() as f32;
     let infos = shaped.glyph_infos();
     let positions = shaped.glyph_positions();

@@ -101,8 +101,7 @@ text layout and rendering tests cover editing.
 
 Text measurement and rasterization now use OpenType glyph runs from Rustybuzz,
 including GPOS positioning, standard proportional-font ligatures and combining
-marks. Code fonts disable discretionary standard ligatures to preserve cells.
-The surrounding controls still use an LTR paragraph/caret model; full Unicode
+marks. The surrounding controls still use an LTR paragraph/caret model; full Unicode
 bidi itemization and color emoji rendering are not claimed.
 
 
@@ -175,7 +174,11 @@ separate parser preserves the exact pre-change System Font bytes and metrics;
 this was checked against an isolated baseline checkout. No font-family or font
 size adjustment is used to compensate for that dependency side effect.
 
-Validation for the shaped-text change: 739 core tests passed (5 optional tests
+Validation for the shaped-text change: 740 core tests passed (5 optional tests
 ignored), and 136 SGFX renderer tests passed. Warm-run allocation/cache tests,
 fractional retained replay, selection, wrapping, IME and touch scrolling are
 included in those suites.
+
+Parsed shaping plans are cached per face and script, and bounded shared layouts
+retain measured widths, glyph positions and caret clusters. All faces use the
+same OpenType feature policy; no font-name or monospace branches are applied.

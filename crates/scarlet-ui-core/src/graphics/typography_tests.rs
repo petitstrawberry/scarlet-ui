@@ -249,7 +249,7 @@ fn fractional_glyph_coverage_preserves_spacing_instead_of_truncating_each_origin
             let masks = rasterize_text_with_font_stack(text, 13.25, scale, &font);
             let scaled = font.primary.as_scaled(em_scale(&font.primary, size));
             let mut index = 0;
-            for glyph in layout.glyphs {
+            for glyph in &layout.glyphs {
                 let x = libm::floorf(glyph.x * 4. + 0.5) / 4.;
                 let baseline = libm::floorf(scaled.ascent() + glyph.y + 0.5);
                 let outline = font.primary.outline_glyph(ab_glyph::GlyphId(glyph.id)
@@ -286,4 +286,15 @@ fn shaping_uses_the_selected_collection_face() {
     assert_eq!(actual.width, expected.width);
     assert_eq!(actual.glyphs.len(), 3);
     assert_eq!(rasterize_text_with_font_stack("AVfi", 20., 2000, &font).len(), 3);
+}
+
+
+#[test]
+fn shaped_layout_cache_reuses_storage_and_separates_fonts_and_sizes() {
+    let font = shaping_stack();
+    let first = shaping::shape_text("AV fi", 13.25, &font);
+    let second = shaping::shape_text("AV fi", 13.25, &font);
+    assert!(Arc::ptr_eq(&first, &second));
+    assert!(!Arc::ptr_eq(&first, &shaping::shape_text("AV fi", 13.5, &font)));
+    assert!(!Arc::ptr_eq(&first, &shaping::shape_text("AV fi", 13.25, &stack())));
 }
