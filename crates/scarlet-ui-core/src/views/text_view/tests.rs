@@ -24,6 +24,8 @@ mod font_stack_tests;
 mod performance;
 #[path = "regressions.rs"]
 mod regressions;
+#[path = "selection_drag_tests.rs"]
+mod selection_drag_tests;
 #[path = "touch_scroll_tests.rs"]
 mod touch_scroll_tests;
 

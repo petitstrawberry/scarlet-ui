@@ -21,9 +21,9 @@ pub use decoration::{TextDiagnosticSpan, TextStyleSpan};
 
 pub use document::{EditDelta, TextDocument, TextPosition};
 pub(crate) use editing::{
-    apply_text_edit, handle_text_view_focus, handle_text_view_keyboard, handle_text_view_mouse,
-    handle_text_view_scroll_gesture, handle_text_view_text_input, handle_text_view_touch,
-    text_edit_state,
+    advance_text_selection_drag, apply_text_edit, handle_text_view_focus,
+    handle_text_view_keyboard, handle_text_view_mouse, handle_text_view_scroll_gesture,
+    handle_text_view_text_input, handle_text_view_touch, text_edit_state,
 };
 pub use layout::{TextViewLayout, VisualLine};
 pub use selection::{TabMode, TextSelection, TextViewScroll, WrapMode};
@@ -608,6 +608,7 @@ pub struct TextViewRenderObject {
     autofocus: bool,
     automatic_software_keyboard: bool,
     dragging: bool,
+    drag_pointer: Option<Point>,
     pub(crate) pointer_modifiers: crate::event::KeyModifiers,
     caret_rect: Option<State<Rect>>,
     desired_x: Option<f32>,
@@ -692,6 +693,7 @@ impl TextViewRenderObject {
             autofocus: view.autofocus,
             automatic_software_keyboard: view.automatic_software_keyboard,
             dragging: false,
+            drag_pointer: None,
             pointer_modifiers: crate::event::KeyModifiers::empty(),
             caret_rect: view.caret_rect.clone(),
             desired_x: None,
@@ -757,6 +759,32 @@ impl TextViewRenderObject {
             self.layout.content_width = base_width.max(composition_end);
         }
         self.scroll = self.layout.set_scroll(self.requested_scroll);
+    }
+
+    pub(crate) fn selection_drag_velocity(&self) -> Point {
+        let Some(point) = self.drag_pointer.filter(|_| self.dragging && self.focused) else {
+            return Point::ZERO;
+        };
+        let edge_speed = |value: f32, start: f32, end: f32| {
+            ((value - value.clamp(start, end.max(start))) * 12.0).clamp(-1800.0, 1800.0)
+        };
+        Point::new(
+            edge_speed(
+                point.x,
+                self.layout.text_origin_x,
+                self.size.width - self.padding,
+            ),
+            edge_speed(point.y, self.padding, self.visible_bottom() - self.padding),
+        )
+    }
+
+    pub(crate) fn selection_drag_needs_animation(&self) -> bool {
+        let speed = self.selection_drag_velocity();
+        let next = self.layout.clamp_scroll(TextViewScroll {
+            x: self.scroll.x + speed.x,
+            y: self.scroll.y + speed.y,
+        });
+        next != self.scroll
     }
 
     pub(super) fn visible_bottom(&self) -> f32 {
@@ -834,6 +862,8 @@ impl TextViewRenderObject {
     pub(crate) fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
         if !focused {
+            self.dragging = false;
+            self.drag_pointer = None;
             self.clear_preedit();
         }
     }

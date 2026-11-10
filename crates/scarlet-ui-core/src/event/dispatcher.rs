@@ -103,6 +103,7 @@ pub struct EventDispatcher {
     touch_routes: Vec<TouchRoute>,
     touch_arena: TouchArena,
     scroll_momentum: Option<MomentumRoute>,
+    pointer_drag_animation: Option<ElementId>,
     text_input_reveal_path: Vec<ElementId>,
     // Outer Option means queued; inner None is a queued restoration.
     pending_text_input_reveal: Option<Option<Rect>>,
@@ -161,6 +162,7 @@ impl EventDispatcher {
             touch_routes: Vec::new(),
             touch_arena: TouchArena::default(),
             scroll_momentum: None,
+            pointer_drag_animation: None,
             text_input_reveal_path: Vec::new(),
             pending_text_input_reveal: None,
         }
@@ -169,6 +171,7 @@ impl EventDispatcher {
     /// Set the root element ID
     pub fn set_root(&mut self, id: ElementId) {
         self.root_id = Some(id);
+        self.pointer_drag_animation = None;
         self.scroll_momentum = None;
         self.text_input_reveal_path.clear();
         self.pending_text_input_reveal = None;
@@ -179,6 +182,7 @@ impl EventDispatcher {
     /// Whether this window has scrolling motion or held-button repeats to advance.
     pub fn has_active_animation(&self) -> bool {
         self.scroll_momentum.is_some()
+            || self.pointer_drag_animation.is_some()
             || self
                 .touch_routes
                 .iter()
@@ -192,6 +196,16 @@ impl EventDispatcher {
         elapsed: Duration,
     ) -> bool {
         let mut advanced = self.advance_scroll_momentum(element_tree, elapsed);
+        if let Some(id) = self.pointer_drag_animation.take()
+            && self.left_button_down
+            && self.captured_id == Some(id)
+            && let Some(element) = element_tree.find_element_mut(id)
+        {
+            advanced |= element.advance_pointer_drag(elapsed);
+            if element.pointer_drag_needs_animation() {
+                self.pointer_drag_animation = Some(id);
+            }
+        }
         let mut repeat_targets = Vec::new();
         for route in &mut self.touch_routes {
             let Some(repeat) = route.press_repeat.as_mut() else {
@@ -255,6 +269,7 @@ impl EventDispatcher {
 
     /// Stop a fling when a new interaction or presentation suspension takes over.
     pub fn cancel_animations(&mut self, element_tree: &mut ElementTree) {
+        self.pointer_drag_animation = None;
         if let Some(route) = self.scroll_momentum.take() {
             Self::send_momentum_terminal(element_tree, &route, GesturePhase::Cancelled);
         }
@@ -421,6 +436,12 @@ impl EventDispatcher {
                 false
             }
         };
+        self.pointer_drag_animation = self.captured_id.filter(|id| {
+            self.left_button_down
+                && element_tree
+                    .find_element(*id)
+                    .is_some_and(|element| element.pointer_drag_needs_animation())
+        });
         if !self.left_button_down && self.touch_routes.is_empty() {
             if let Some(visible) = self.pending_text_input_reveal.take() {
                 return self.reveal_text_input(element_tree, visible) || handled;

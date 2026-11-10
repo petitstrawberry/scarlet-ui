@@ -366,6 +366,22 @@ impl TextViewLayout {
         Some(TextPosition::new(byte_for_x(line, local_x)))
     }
 
+    /// Resolve a captured selection drag to the nearest document position.
+    /// Unlike normal pointer hits, empty space below the last line maps to EOF.
+    pub(crate) fn hit_test_clamped(&self, point: Point) -> Option<TextPosition> {
+        let last = self.visual_lines.len().checked_sub(1)?;
+        let index = libm::floorf((point.y + self.scroll.y - self.padding) / self.line_height)
+            .max(0.0) as usize;
+        if index > last {
+            return Some(TextPosition::new(self.visual_lines[last].text_range.end));
+        }
+        let line = &self.visual_lines[index];
+        Some(TextPosition::new(byte_for_x(
+            line,
+            (point.x - line.x).max(0.0),
+        )))
+    }
+
     /// Compute the caret rectangle for a text position.
     ///
     /// # Arguments
