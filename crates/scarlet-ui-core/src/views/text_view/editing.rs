@@ -351,9 +351,13 @@ pub(crate) fn handle_text_view_mouse(
         MouseEvent::Moved { x, y } => handle_drag_selection(view, render_object, x, y),
         MouseEvent::ButtonReleased {
             button: MouseButton::Left,
+            x,
+            y,
             ..
         } => {
+            handle_drag_selection(view, render_object, x, y);
             render_object.dragging = false;
+            render_object.drag_pointer = None;
             true
         }
         MouseEvent::ButtonCancelled {
@@ -361,6 +365,7 @@ pub(crate) fn handle_text_view_mouse(
             ..
         } => {
             render_object.dragging = false;
+            render_object.drag_pointer = None;
             true
         }
         MouseEvent::Wheel {
@@ -470,6 +475,7 @@ fn handle_primary_click(
     click_count: u8,
 ) -> bool {
     render_object.set_focused(true);
+    render_object.drag_pointer = None;
     let Some(position) = hit_test_mouse(render_object, x, y) else {
         render_object.dragging = false;
         return false;
@@ -483,6 +489,7 @@ fn handle_primary_click(
                 caret: position,
             };
             render_object.dragging = true;
+            render_object.drag_pointer = Some(Point::new(x as f32, y as f32));
         }
         2 => {
             render_object.selection = word_selection(render_object, position.byte);
@@ -508,11 +515,56 @@ fn handle_drag_selection(
     if !render_object.dragging {
         return false;
     }
-    if let Some(position) = hit_test_mouse(render_object, x, y) {
-        render_object.selection.caret = position;
+    render_object.drag_pointer = Some(Point::new(x as f32, y as f32));
+    let layout = &render_object.layout;
+    // Capture already delivers the original drag outside the widget. Clamp
+    // only its text hit, retaining the real pointer for edge scrolling.
+    let point = Point::new(
+        (x as f32).clamp(
+            layout.text_origin_x,
+            (render_object.size.width - render_object.padding).max(layout.text_origin_x),
+        ),
+        (y as f32).clamp(
+            render_object.padding,
+            (render_object.visible_bottom() - render_object.padding - 0.01)
+                .max(render_object.padding),
+        ),
+    );
+    if let Some(position) = layout.hit_test_clamped(point) {
+        render_object.selection.caret = render_object.text_document.clamp_position(position);
         update_desired_x(render_object);
-        view.selection_state().set(render_object.selection);
+        if view.selection_state().get() != render_object.selection {
+            view.selection_state().set(render_object.selection);
+        }
         render_object.publish_caret_rect();
+    }
+    true
+}
+
+pub(crate) fn advance_text_selection_drag(
+    view: &TextView,
+    render_object: &mut TextViewRenderObject,
+    elapsed: core::time::Duration,
+) -> bool {
+    if !render_object.selection_drag_needs_animation() {
+        return false;
+    }
+    let speed = render_object.selection_drag_velocity();
+    let seconds = elapsed.as_secs_f32().min(0.05);
+    let before = render_object.scroll;
+    set_scroll(
+        view,
+        render_object,
+        super::TextViewScroll {
+            x: before.x + speed.x * seconds,
+            y: before.y + speed.y * seconds,
+        },
+    );
+    if before == render_object.scroll {
+        return false;
+    }
+    if let Some(point) = render_object.drag_pointer {
+        handle_drag_selection(view, render_object, point.x as i32, point.y as i32);
     }
     true
 }
