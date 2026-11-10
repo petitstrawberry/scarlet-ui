@@ -89,6 +89,8 @@ pub enum WrapMode {
     None,
     /// Soft-wrap visual lines without inserting newline characters.
     Soft,
+    /// Unicode soft wrapping with the source line indentation on continuation rows.
+    Code,
 }
 
 /// Tab insertion behavior for a text view.

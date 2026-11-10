@@ -16,6 +16,35 @@ use crate::{geometry::Point, graphics};
 
 use super::*;
 
+#[test]
+fn code_wrap_uses_cjk_breaks_preserves_indent_and_grapheme_boundaries() {
+    use unicode_segmentation::UnicodeSegmentation;
+    let source = alloc::format!("    let value = \"{}{}\";", "折り返し表示".repeat(8), "折り返し表示 long_source_code e\u{301} 👩‍💻 ".repeat(8));
+    let document = TextDocument::from_str(&source);
+    let mut layout = TextViewLayout::compute(&document, 14.0, 8.0, WrapMode::Code,
+        Size::new(340.0, 100.0), TextViewScroll::default(), true);
+    let boundaries: Vec<_> = source.grapheme_indices(true).map(|(byte,_)| byte).chain(core::iter::once(source.len())).collect();
+    let indent = graphics::measure_text_sized("    ", 14.0).0 as f32;
+    assert!(layout.visual_lines.len() > 4);
+    assert!(layout.visual_lines.iter().any(|line| {
+        let end = line.text_range.end;
+        end < source.len() && source[..end].chars().next_back().is_some_and(|c| "折り返し表示".contains(c))
+            && source[end..].chars().next().is_some_and(|c| "折り返し表示".contains(c))
+    }), "CJK opportunities must not fall back to the previous ASCII space");
+    for (index, line) in layout.visual_lines.iter().enumerate() {
+        assert!(boundaries.contains(&line.text_range.start));
+        assert!(boundaries.contains(&line.text_range.end));
+        assert!(line.x + line.width <= 332.0 + 1.0, "{line:?}");
+        if index > 0 { assert!((line.x - layout.visual_lines[0].x - indent).abs() <= 1.0); }
+    }
+    let before: Vec<_> = layout.visual_lines.iter().map(|line| line.x).collect();
+    layout.set_scroll(TextViewScroll { x: 0.0, y: layout.line_height * 2.0 });
+    assert_eq!(before, layout.visual_lines.iter().map(|line| line.x).collect::<Vec<_>>());
+    let line = &layout.visual_lines[2];
+    assert_eq!(layout.hit_test(Point::new(line.x, line.y + 1.0)).unwrap().byte, line.text_range.start);
+    assert_eq!(layout.visual_lines.iter().map(|line| &source[line.text_range.clone()]).collect::<String>(), source);
+}
+
 #[path = "decoration_tests.rs"]
 mod decoration_tests;
 #[path = "font_stack_tests.rs"]
