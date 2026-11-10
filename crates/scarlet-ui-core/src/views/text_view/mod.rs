@@ -21,6 +21,7 @@ pub use decoration::{TextDiagnosticSpan, TextStyleSpan};
 
 pub use document::{EditDelta, TextDocument, TextPosition};
 pub(crate) use editing::{
+    text_edit_state, apply_text_edit,
     handle_text_view_focus, handle_text_view_keyboard, handle_text_view_mouse,
     handle_text_view_scroll_gesture, handle_text_view_text_input, handle_text_view_touch,
 };

@@ -666,6 +666,9 @@ pub trait PlatformWindow: Any {
         false
     }
 
+    /// Synchronize shared-popup keyboard ownership before text input state.
+    fn sync_context_menu(&mut self, _open: bool) {}
+
     /// Synchronize focused text-input state with the backend.
     fn sync_text_input(&mut self, _state: Option<&TextInputElementState>) {}
 

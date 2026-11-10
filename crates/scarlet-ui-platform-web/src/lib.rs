@@ -280,6 +280,8 @@ struct WebWindow {
     )>,
     original_tab_index: Option<String>,
     menus: Rc<RefCell<menu::WebMenu>>,
+    context_menu_open: Rc<Cell<bool>>,
+    context_menu_restore_editor: bool,
     hover_handoff: menu::HoverHandoff,
     menu_touch: touch::MenuTouchRouting,
     text_input: Rc<text_input::TextInput>,
@@ -313,6 +315,8 @@ impl WebWindow {
             lifecycle_listeners: Vec::new(),
             original_tab_index,
             menus,
+            context_menu_open: Rc::new(Cell::new(false)),
+            context_menu_restore_editor: false,
             hover_handoff: menu::HoverHandoff::default(),
             menu_touch: touch::MenuTouchRouting::default(),
             applied_safe_area: safe_area.insets(),
@@ -337,6 +341,7 @@ impl WebWindow {
             let text_input = window.text_input.clone();
             let tap = tap.clone();
             let menus = window.menus.clone();
+            let context_menu_open = window.context_menu_open.clone();
             let callback = Closure::wrap(Box::new(move |e: PointerEvent| {
                 if e.pointer_type() != "touch" && !e.is_primary() {
                     return;
@@ -357,7 +362,11 @@ impl WebWindow {
                         // to the hidden editor. Internal blur retains selection.
                         text_input.focus_canvas();
                     }
-                    if e.is_primary() && e.button() == 0 && !menus.borrow().owns_pointer(y) {
+                    if e.is_primary()
+                        && e.button() == 0
+                        && !menus.borrow().owns_pointer(y)
+                        && !context_menu_open.get()
+                    {
                         tap.set(Some((e.pointer_id(), x, y)));
                     } else {
                         tap.set(None);
@@ -376,7 +385,9 @@ impl WebWindow {
                         if let Some(runner) = runner.upgrade() {
                             tick_now(&runner);
                         }
-                        text_input.focus_at(x, y);
+                        if !context_menu_open.get() {
+                            text_input.focus_at(x, y);
+                        }
                     }
                 };
                 if e.pointer_type() == "touch" {
@@ -438,6 +449,11 @@ impl WebWindow {
                     _ => MouseEvent::Moved { x, y },
                 };
                 events.borrow_mut().push_back(Event::Mouse(event));
+                if kind == "pointerdown" && button == MouseButton::Right {
+                    if let Some(runner) = runner.upgrade() {
+                        tick_now(&runner);
+                    }
+                }
                 finish_tap();
             }) as Box<dyn FnMut(PointerEvent)>);
             window
@@ -445,6 +461,13 @@ impl WebWindow {
                 .add_event_listener_with_callback(kind, callback.as_ref().unchecked_ref())?;
             window.listeners.push((kind, callback));
         }
+        // Only replace browser context menus when a shared popup actually opened.
+        let context_menu_open = window.context_menu_open.clone();
+        window.listen("contextmenu", move |event| {
+            if context_menu_open.get() {
+                event.prevent_default();
+            }
+        })?;
         // WebKit can dispatch a compatibility mousedown after touch pointerup,
         // even when pointerdown was cancelled. By then focus_at may have focused
         // the editor; the canvas's native mousedown focus would immediately blur
@@ -558,6 +581,7 @@ impl WebWindow {
             let held_keys = held_keys.clone();
             let text_input = self.text_input.clone();
             let menus = self.menus.clone();
+            let context_menu_open = self.context_menu_open.clone();
             self.listen(kind, move |event| {
                 let Some(key) = event.dyn_ref::<KeyboardEvent>() else {
                     return;
@@ -578,7 +602,7 @@ impl WebWindow {
                 let text_allowed =
                     alt_graph || (!modifiers.control && !modifiers.super_key && !modifiers.alt);
                 let down = kind == "keydown";
-                let menu_was_open = menus.borrow().is_open();
+                let menu_was_open = menus.borrow().is_open() || context_menu_open.get();
                 let mut events = events.borrow_mut();
                 let mut held = held_keys.borrow_mut();
                 if down {
@@ -633,7 +657,9 @@ impl WebWindow {
                 drop(held);
                 drop(events);
                 if down && text_allowed {
-                    text_input.keyboard_focus(|| !menu_was_open && !menus.borrow().is_open());
+                    text_input.keyboard_focus(|| {
+                        !menu_was_open && !menus.borrow().is_open() && !context_menu_open.get()
+                    });
                 }
             })?;
         }
@@ -877,8 +903,25 @@ impl PlatformWindow for WebWindow {
             return Some(event);
         }
     }
+    fn sync_context_menu(&mut self, open: bool) {
+        let was_open = self.context_menu_open.replace(open);
+        if open && !was_open {
+            self.context_menu_restore_editor = self.text_input.focused();
+            self.text_input.focus_canvas();
+        }
+    }
     fn sync_text_input(&mut self, state: Option<&scarlet_ui_core::element::TextInputElementState>) {
         self.text_input.sync(state, self.menus.borrow().height());
+        if !self.context_menu_open.get() && core::mem::take(&mut self.context_menu_restore_editor) {
+            let canvas_focused = self
+                .canvas
+                .owner_document()
+                .and_then(|doc| doc.active_element())
+                .is_some_and(|active| active == self.canvas.clone().into());
+            if canvas_focused && !self.menus.borrow().is_open() {
+                self.text_input.keyboard_focus(|| true);
+            }
+        }
     }
     fn wait_for_event(&mut self, _: std::time::Duration) {}
     fn output_scale_milli(&self) -> u32 {

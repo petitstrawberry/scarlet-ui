@@ -1233,6 +1233,55 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn shared_context_menu_owns_keyboard_and_restores_editor_selection() {
+        use scarlet_ui_core::platform::PlatformWindow;
+        let field = Field::new("selected");
+        field.bridge.element.set_selection_range(1, 4).unwrap();
+        field.send("select");
+        let before = field.bridge.state.borrow().clone().unwrap();
+        let mut window = crate::WebWindow {
+            canvas: field.bridge.canvas.clone(),
+            size: Size::new(300.0, 200.0),
+            scale: 1000,
+            events: field.bridge.events.clone(),
+            paint: None,
+            listeners: Vec::new(),
+            input_listeners: Vec::new(),
+            lifecycle_listeners: Vec::new(),
+            original_tab_index: Some("0".into()),
+            menus: Rc::default(),
+            context_menu_open: Rc::new(Cell::new(false)),
+            context_menu_restore_editor: false,
+            hover_handoff: Default::default(),
+            menu_touch: Default::default(),
+            text_input: field.bridge.clone(),
+            safe_area: Rc::new(
+                crate::safe_area::SafeArea::new(
+                    field.bridge.canvas.clone(),
+                    crate::safe_area::SafeAreaMode::Contained,
+                )
+                .unwrap(),
+            ),
+            applied_safe_area: scarlet_ui_core::geometry::EdgeInsets::ZERO,
+        };
+        window.install_keyboard_and_wheel().unwrap();
+        window.sync_context_menu(true);
+        window.sync_text_input(Some(&before));
+        assert!(window.context_menu_open.get());
+        assert!(!field.bridge.focused());
+        field
+            .bridge
+            .keyboard_focus(|| !window.context_menu_open.get());
+        assert!(!field.bridge.focused());
+        window.sync_context_menu(false);
+        window.sync_text_input(Some(&before));
+        assert!(field.bridge.focused());
+        assert_eq!(field.bridge.element.selection_start().unwrap(), Some(1));
+        assert_eq!(field.bridge.element.selection_end().unwrap(), Some(4));
+        assert_eq!(field.text.get(), "selected");
+    }
+
+    #[wasm_bindgen_test]
     fn null_related_target_during_explicit_focus_transfer_keeps_core_editor() {
         let field = Field::new("retained");
         // Use the production canvas focus listeners; the minimal Field fixture
@@ -1248,6 +1297,8 @@ mod tests {
             lifecycle_listeners: Vec::new(),
             original_tab_index: Some("0".into()),
             menus: Rc::default(),
+            context_menu_open: Rc::new(Cell::new(false)),
+            context_menu_restore_editor: false,
             hover_handoff: Default::default(),
             menu_touch: Default::default(),
             text_input: field.bridge.clone(),

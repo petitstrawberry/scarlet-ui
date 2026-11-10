@@ -26,8 +26,12 @@ use alloc::vec::Vec;
 
 const MAX_PRESENT_DAMAGE_RECTS: usize = 4;
 
+#[path = "context_menu.rs"]
+mod context_menu;
 #[path = "input_panel.rs"]
 mod input_panel;
+#[path = "text_editing.rs"]
+mod text_editing;
 const MAX_REPAINT_BOUNDARY_CACHE_PIXELS: u64 = 16_000_000;
 
 struct PaintCache {
@@ -92,7 +96,11 @@ pub struct RenderingPipeline {
     window_size: Size,
     scale_milli: u32,
     event_dispatcher: EventDispatcher,
+    text_editing: text_editing::TextEditing,
     overlays: input_panel::OverlayState,
+    context_menu: Option<context_menu::ContextMenuPopup>,
+    context_menu_swallow_release: bool,
+    legacy_context_menu_was_visible: bool,
     paint_renderer: Option<CpuPaintRenderer>,
     paint_backend: Box<dyn PaintBackend>,
     last_paint_bounds: BTreeMap<ElementId, Rect>,
@@ -133,7 +141,11 @@ impl RenderingPipeline {
             window_size: Size::new(800.0, 600.0),
             scale_milli: 1000,
             event_dispatcher: EventDispatcher::new(),
+            text_editing: Default::default(),
             overlays: Default::default(),
+            context_menu: None,
+            context_menu_swallow_release: false,
+            legacy_context_menu_was_visible: false,
             paint_renderer: None,
             paint_backend: Box::new(CpuPaintBackend::new(
                 Size::new(800.0, 600.0),
@@ -220,6 +232,10 @@ impl RenderingPipeline {
 
     /// Unmount the element tree and discard pending global dirty work.
     pub fn teardown(&mut self) {
+        self.set_text_clipboard(None);
+        self.context_menu = None;
+        self.context_menu_swallow_release = false;
+        self.legacy_context_menu_was_visible = false;
         self.cancel_animations();
         self.element_tree.clear_root();
         crate::pipeline::clear_global_dirty(self.pipeline_id());
@@ -299,6 +315,8 @@ impl RenderingPipeline {
 
     /// Set the root Element
     pub fn set_root(&mut self, root_element: Box<dyn Element>) {
+        self.context_menu = None;
+        self.context_menu_swallow_release = false;
         self.element_tree.set_root(root_element);
         self.retained_paint.clear();
         self.retained_backdrop = None;
@@ -592,6 +610,7 @@ impl RenderingPipeline {
 
     /// Set window size and resize compositor
     pub fn resize(&mut self, new_size: Size) {
+        self.context_menu = None;
         self.window_size = new_size;
         crate::graphics::set_current_scale_milli(self.scale_milli);
         if let Some(ref mut renderer) = self.renderer {
@@ -712,7 +731,10 @@ impl RenderingPipeline {
         if let Some(ref mut renderer) = self.renderer {
             renderer.set_background_color(background_color);
             if let Some(root) = self.element_tree.root() {
-                let dirty_ids = if popup_geometry_changed {
+                let dirty_ids = if popup_geometry_changed
+                    || self.context_menu.is_some()
+                    || self.legacy_context_menu_was_visible
+                {
                     &[]
                 } else {
                     self.pipeline_owner.last_paint_ids()
@@ -720,6 +742,10 @@ impl RenderingPipeline {
                 renderer.composite(root, dirty_ids);
             }
 
+            if let Some(popup) = self.context_menu.as_mut() {
+                popup.composite(renderer.buffer_mut());
+            }
+            self.legacy_context_menu_was_visible = self.context_menu.is_some();
             Some(renderer.buffer())
         } else {
             None
@@ -766,6 +792,7 @@ impl RenderingPipeline {
             .root()
             .is_some_and(Self::subtree_has_select_overlay);
         let mut force_full = self.paint_needs_full
+            || self.context_menu.is_some()
             || (has_select_overlay && !self.pipeline_owner.last_composite_ids().is_empty())
             || creating_renderer
             || self.paint_background_color != Some(background_color)
@@ -905,7 +932,10 @@ impl RenderingPipeline {
             );
             let overlay_painted =
                 Self::paint_select_overlays(&mut ctx, root, Point::ZERO, damage_clip);
-            backdrop_painted || base_painted || overlay_painted
+            if let Some(popup) = &self.context_menu {
+                popup.paint(&mut ctx);
+            }
+            backdrop_painted || base_painted || overlay_painted || self.context_menu.is_some()
         } else {
             false
         };
@@ -1128,6 +1158,9 @@ impl RenderingPipeline {
             if self.select_overlay_active {
                 Self::paint_select_overlays(&mut ctx, root, Point::ZERO, damage);
             }
+        }
+        if let Some(popup) = &self.context_menu {
+            popup.paint(&mut ctx);
         }
         let scene = ctx.into_display_list();
         let ctx = scene.context();
@@ -3464,6 +3497,75 @@ impl RenderingPipeline {
     /// In a full implementation, this would route events through the
     /// EventDispatcher to the target elements.
     pub fn handle_event(&mut self, _event: &crate::event::Event) -> bool {
+        self.invalidate_text_clipboard_for_event(_event);
+        if self.context_menu_swallow_release
+            && matches!(
+                _event,
+                crate::event::Event::Mouse(
+                    crate::event::MouseEvent::ButtonReleased { .. }
+                        | crate::event::MouseEvent::ButtonCancelled { .. }
+                )
+            )
+        {
+            self.context_menu_swallow_release = false;
+            return true;
+        }
+
+        if let Some(popup) = self.context_menu.as_mut() {
+            let (consume, dismiss) = popup.handle(_event);
+            if dismiss {
+                self.context_menu = None;
+                self.context_menu_swallow_release = matches!(
+                    _event,
+                    crate::event::Event::Mouse(crate::event::MouseEvent::ButtonPressed { .. })
+                );
+            }
+            if consume || dismiss {
+                self.request_redraw();
+            }
+            // A second secondary click can open another provider at its new
+            // position instead of requiring a separate dismissal click.
+            if consume
+                && !matches!(
+                    _event,
+                    crate::event::Event::Mouse(crate::event::MouseEvent::ButtonPressed {
+                        button: crate::event::MouseButton::Right,
+                        ..
+                    })
+                )
+            {
+                return true;
+            }
+        }
+        if let crate::event::Event::Mouse(crate::event::MouseEvent::ButtonPressed {
+            button: crate::event::MouseButton::Right,
+            x,
+            y,
+            ..
+        }) = _event
+        {
+            let point = Point::new(*x as f32, *y as f32);
+            let menu = self
+                .event_dispatcher
+                .hit_test_with_path(&self.element_tree, point)
+                .and_then(|hit| {
+                    hit.path.iter().rev().find_map(|element| {
+                        element
+                            .render_object()
+                            .and_then(|object| object.context_menu())
+                    })
+                })
+                .or_else(|| self.text_edit_context_menu(point));
+            if let Some(menu) = menu {
+                self.open_context_menu_at(menu, point);
+                return true;
+            }
+        }
+
+        if self.handle_text_edit_shortcut(_event) {
+            return true;
+        }
+
         if self.select_overlay_active
             || !matches!(
                 _event,
@@ -3493,6 +3595,25 @@ impl RenderingPipeline {
             );
         }
         handled
+    }
+
+    /// Whether a shared popup currently owns keyboard and pointer input.
+    pub fn context_menu_is_open(&self) -> bool {
+        self.context_menu.is_some()
+    }
+
+    /// Present a menu at a window-local logical position without moving core focus.
+    /// The popup is clamped to the window and dismisses on Escape or outside click.
+    pub fn open_context_menu_at(&mut self, menu: crate::views::Menu, point: Point) {
+        if menu.items().is_empty() {
+            return;
+        }
+        self.context_menu = Some(context_menu::ContextMenuPopup::new(
+            menu,
+            point,
+            self.window_size,
+        ));
+        self.request_redraw();
     }
 
     /// Whether a scroll owner needs another animation tick.

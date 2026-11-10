@@ -125,6 +125,15 @@ impl Clone for Box<dyn View> {
 ///     .frame(200.0, 50.0);
 /// ```
 pub trait ViewExt: View {
+    /// Attach a right-click menu, preserving the wrapped view's layout and focus.
+    /// Commands use the same callbacks, enabled states and separators as [`crate::views::Menu`].
+    fn context_menu(self, menu: crate::views::Menu) -> crate::views::modifiers::ContextMenu<Self>
+    where
+        Self: Sized + Clone,
+    {
+        crate::views::modifiers::ContextMenu::new(self, menu)
+    }
+
     /// Apply a shared appearance to rectangular bounds without adding padding.
     /// Set the returned surface's corner radius or clipping separately.
     fn surface_style(self, style: crate::views::SurfaceStyle) -> crate::views::Surface<Self>

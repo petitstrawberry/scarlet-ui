@@ -271,6 +271,15 @@ pub trait Application: Clone + 'static {
     /// Handle idle ticks on the application main thread.
     fn on_idle(&mut self) {}
 
+    /// A standard text widget clipboard operation failed. No destructive edit
+    /// has been applied. Override to display an application-specific message.
+    fn on_clipboard_error(
+        &mut self,
+        _ctx: &WindowContext,
+        _error: crate::clipboard::ClipboardError,
+    ) {
+    }
+
     /// Observe a frame accepted by its renderer/platform presentation path.
     ///
     /// Unlike [`Application::on_idle`], this is called only when a CPU or
@@ -514,6 +523,7 @@ impl ApplicationRunner {
             is_primary,
         };
 
+        pipeline.set_text_clipboard(window.text_clipboard().ok());
         app.on_window_created(&context, window.as_mut());
         sync_text_input(window.as_mut(), &pipeline);
         let frame_pacing_enabled =
@@ -634,6 +644,10 @@ impl ApplicationRunner {
         });
         for slot in slots.iter_mut() {
             sync_application_window(app, slot);
+            slot.pipeline.poll_text_clipboard();
+            if let Some(error) = slot.pipeline.take_text_clipboard_error() {
+                app.on_clipboard_error(&slot.context, error);
+            }
             sync_text_input(slot.window.as_mut(), &slot.pipeline);
             let elapsed = slot.animation_tick.elapsed();
             slot.animation_tick = Instant::now();
@@ -903,6 +917,7 @@ fn find_window_size_limits(element: &dyn Element) -> Option<WindowSizeLimits> {
 }
 
 fn sync_text_input(window: &mut dyn PlatformWindow, pipeline: &RenderingPipeline) {
+    window.sync_context_menu(pipeline.context_menu_is_open());
     let state = pipeline.focused_text_input_state();
     window.sync_text_input(state.as_ref());
 }
@@ -1168,6 +1183,9 @@ fn handle_window_event<A: Application>(
             }
         }
         Event::WindowSuspendedChanged { suspended } => {
+            slot.pipeline
+                .handle_event(&Event::WindowSuspendedChanged { suspended });
+            sync_text_input(slot.window.as_mut(), &slot.pipeline);
             if slot.suspended != suspended {
                 slot.suspended = suspended;
                 if suspended {

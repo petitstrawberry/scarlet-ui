@@ -30,3 +30,6 @@ pub use padding::{Padding, PaddingRenderObject};
 pub use repaint_boundary::{RepaintBoundary, RepaintBoundaryRenderObject};
 pub use safe_area::{SafeArea, SafeAreaRenderObject};
 pub use size::{SetSize, SizeRenderObject};
+
+mod context_menu;
+pub use context_menu::ContextMenu;
