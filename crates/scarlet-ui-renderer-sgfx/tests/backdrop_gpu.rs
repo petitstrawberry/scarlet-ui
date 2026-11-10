@@ -80,6 +80,73 @@ fn rgba(bytes: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
     [bytes[at + 2], bytes[at + 1], bytes[at], bytes[at + 3]]
 }
 
+#[derive(Debug)]
+struct PixelDifference {
+    max: u8,
+    mean: f64,
+    alpha_max: u8,
+    channels_over_two: usize,
+}
+
+impl PixelDifference {
+    fn between(actual: &[u8], expected: &[u8]) -> Self {
+        assert_eq!(actual.len(), expected.len());
+        assert!(!actual.is_empty() && actual.len() % 4 == 0);
+        let mut result = Self {
+            max: 0,
+            mean: 0.,
+            alpha_max: 0,
+            channels_over_two: 0,
+        };
+        let mut total = 0_u64;
+        for (index, (a, b)) in actual.iter().zip(expected).enumerate() {
+            let error = a.abs_diff(*b);
+            result.max = result.max.max(error);
+            total += u64::from(error);
+            result.channels_over_two += usize::from(error > 2);
+            if index % 4 == 3 {
+                result.alpha_max = result.alpha_max.max(error);
+            }
+        }
+        // Mean absolute error in 8-bit channel units, including alpha.
+        result.mean = total as f64 / actual.len() as f64;
+        result
+    }
+
+    fn within_retained_budget(&self, portable_glass: bool) -> bool {
+        // Fixed-pipeline glass accumulates each blur tap into UNORM8 scratch.
+        // Tile and window textures have different dimensions/UV interpolation;
+        // DX12 can round a few channels one unit farther apart after both passes.
+        // Keep analytic/no-glass coverage strict and reject widespread changes
+        // or larger alpha errors instead of allowing a larger per-channel error alone.
+        let max = if portable_glass { 3 } else { 2 };
+        self.max <= max && self.mean <= 0.05 && self.alpha_max <= 2
+    }
+}
+
+#[test]
+fn retained_pixel_budget_only_allows_sparse_portable_blur_rounding() {
+    let expected = vec![128; 400];
+    let mut actual = expected.clone();
+    actual[0] += 3;
+    let sparse = PixelDifference::between(&actual, &expected);
+    assert!(sparse.within_retained_budget(true));
+    assert!(!sparse.within_retained_budget(false));
+    actual[0] += 1;
+    assert!(!PixelDifference::between(&actual, &expected).within_retained_budget(true));
+    actual.copy_from_slice(&expected);
+    for pixel in actual.chunks_exact_mut(4) {
+        pixel[0] += 1;
+    }
+    assert!(!PixelDifference::between(&actual, &expected).within_retained_budget(true));
+    actual.copy_from_slice(&expected);
+    actual[3] += 1;
+    assert!(PixelDifference::between(&actual, &expected).within_retained_budget(true));
+    actual[3] += 2;
+    assert!(!PixelDifference::between(&actual, &expected).within_retained_budget(true));
+    assert!(PixelDifference::between(&expected, &expected).within_retained_budget(false));
+}
+
 #[test]
 fn fractional_text_mesh_replay_matches_full_frames_at_all_output_scales() {
     use scarlet_ui_core::{geometry::Point, graphics::FontStack};
@@ -675,10 +742,15 @@ fn retained_scroll_tiles_match_direct_pixels_including_local_glass() {
                     .unwrap();
                 let a = cached_resources.read_texture(cached_target).unwrap();
                 let b = direct_resources.read_texture(direct_target).unwrap();
-                let max = a.iter().zip(&b).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+                let difference = PixelDifference::between(&a, &b);
+                if difference.max > 2 {
+                    eprintln!(
+                        "retained pixel difference: analytic={analytic}, scale={scale}, glass_height={glass_height}, offset={offset}, {difference:?}"
+                    );
+                }
                 assert!(
-                    max <= 2,
-                    "tile seam or changed paint: analytic={analytic}, scale={scale}, glass_height={glass_height}, offset={offset}, max error={max}"
+                    difference.within_retained_budget(!analytic && glass_height > 0.),
+                    "tile seam or changed paint: analytic={analytic}, scale={scale}, glass_height={glass_height}, offset={offset}, {difference:?}"
                 );
             }
         }

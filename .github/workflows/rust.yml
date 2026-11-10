@@ -30,6 +30,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Test toolchain acquisition retries
+      run: python3 tools/ci/test_install_scarlet_toolchain.py
     - name: Install Linux font discovery and software GPU dependencies
       run: |
         sudo apt-get update
@@ -45,9 +47,7 @@ jobs:
           extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
     - name: Install the pinned Scarlet Rust toolchain
       if: matrix.toolchain == 'scarlet'
-      run: |
-        scarlet_toolchain_path="$(nix build "${SCARLET_TOOLCHAIN}^out" --no-link --print-out-paths)"
-        echo "$scarlet_toolchain_path/bin" >> "$GITHUB_PATH"
+      run: bash tools/ci/install-scarlet-toolchain.sh
     - name: Install upstream Rust for portability checks
       if: matrix.toolchain == 'upstream'
       run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
@@ -133,9 +133,7 @@ jobs:
             extra-substituters = https://scarlet-rust-toolchain.cachix.org
             extra-trusted-public-keys = scarlet-rust-toolchain.cachix.org-1:p+coBExi0nNTIvWF/oM9H9/1/GhwFtqGZ2Vs+4pYl6o=
       - name: Install the pinned Scarlet Rust toolchain
-        run: |
-          scarlet_toolchain_path="$(nix build "${SCARLET_TOOLCHAIN}^out" --no-link --print-out-paths)"
-          echo "$scarlet_toolchain_path/bin" >> "$GITHUB_PATH"
+        run: bash tools/ci/install-scarlet-toolchain.sh
       - name: Check SGFX core source identity
         run: cargo tree --locked -p scarlet-ui --no-default-features --features std,platform-sws --target '${{ matrix.target }}' --invert sgfx-core
       - name: Check std-enabled SWS integration
