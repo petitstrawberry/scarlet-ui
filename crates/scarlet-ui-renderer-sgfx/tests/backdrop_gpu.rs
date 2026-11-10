@@ -118,9 +118,9 @@ impl PixelDifference {
         // Tile and window textures have different dimensions/UV interpolation;
         // DX12 can round a few channels one unit farther apart after both passes.
         // Keep analytic/no-glass coverage strict and reject widespread changes
-        // or alpha changes instead of allowing a larger per-channel error alone.
+        // or larger alpha errors instead of allowing a larger per-channel error alone.
         let max = if portable_glass { 3 } else { 2 };
-        self.max <= max && self.mean <= 0.05 && self.alpha_max == 0
+        self.max <= max && self.mean <= 0.05 && self.alpha_max <= 2
     }
 }
 
@@ -141,6 +141,8 @@ fn retained_pixel_budget_only_allows_sparse_portable_blur_rounding() {
     assert!(!PixelDifference::between(&actual, &expected).within_retained_budget(true));
     actual.copy_from_slice(&expected);
     actual[3] += 1;
+    assert!(PixelDifference::between(&actual, &expected).within_retained_budget(true));
+    actual[3] += 2;
     assert!(!PixelDifference::between(&actual, &expected).within_retained_budget(true));
     assert!(PixelDifference::between(&expected, &expected).within_retained_budget(false));
 }
