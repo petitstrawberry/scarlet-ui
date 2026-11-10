@@ -610,7 +610,9 @@ impl RenderingPipeline {
 
     /// Set window size and resize compositor
     pub fn resize(&mut self, new_size: Size) {
-        self.context_menu = None;
+        if new_size != self.window_size {
+            self.context_menu = None;
+        }
         self.window_size = new_size;
         crate::graphics::set_current_scale_milli(self.scale_milli);
         if let Some(ref mut renderer) = self.renderer {

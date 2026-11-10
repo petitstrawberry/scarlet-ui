@@ -21,7 +21,8 @@ the view updates the menu used on the next opening.
 
 Click and release a command to activate it. Up/Down skip disabled commands and
 separators; Enter activates the highlighted command. Escape, Tab, an outside
-click, scrolling, window resizing or focus loss dismiss the popup. An outside
+click, a changed window size or focus loss dismiss the popup. Wheel input is
+consumed while the popup is open, including trailing trackpad packets. An outside
 click is consumed rather than activating content behind it. Menu shortcuts are
 labels, not newly registered global keyboard shortcuts. Hierarchical submenus
 and touch long-press invocation are not supported by this context-menu API.
