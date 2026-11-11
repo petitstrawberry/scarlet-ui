@@ -23,7 +23,23 @@ const MENU_CHECK_GUTTER: f32 = 16.0;
 const MENU_FONT_SIZE: f32 = 13.0;
 const MENU_SHORTCUT_GAP: f32 = 24.0;
 
+/// Leading column reserved for checkmarks. Menus without any checked row
+/// skip it so labels sit at the same inset as the trailing edge instead of
+/// looking shifted right. Menus are rebuilt when toggles change, so rows do
+/// not shift while a menu stays open.
+fn leading_check_gutter(items: &[MenuItemContent]) -> f32 {
+    if items
+        .iter()
+        .any(|item| item.checked && !matches!(item.action, MenuAction::Separator))
+    {
+        MENU_CHECK_GUTTER
+    } else {
+        0.0
+    }
+}
+
 fn preferred_menu_width(items: &[MenuItemContent]) -> f32 {
+    let check_gutter = leading_check_gutter(items);
     let submenu_gutter = if items
         .iter()
         .any(|item| matches!(item.action, MenuAction::Submenu))
@@ -41,7 +57,7 @@ fn preferred_menu_width(items: &[MenuItemContent]) -> f32 {
                 MENU_SHORTCUT_GAP + graphics::measure_text_sized(shortcut, MENU_FONT_SIZE).0 as f32
             });
             MENU_TEXT_INSET * 2.0
-                + MENU_CHECK_GUTTER
+                + check_gutter
                 + label_width
                 + shortcut_width
                 + submenu_gutter
@@ -540,7 +556,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
                     }
 
                     // Draw text
-                    let text_x = (MENU_TEXT_INSET + MENU_CHECK_GUTTER) as i32;
+                    let text_x = (MENU_TEXT_INSET + leading_check_gutter(&self.items)) as i32;
                     let text_y = current_y as i32 + ((item_height as i32 - 16) / 2).max(0);
 
                     let text_color = if item.enabled {
@@ -634,6 +650,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
             .items
             .iter()
             .any(|item| matches!(item.action, MenuAction::Submenu));
+        let check_gutter = leading_check_gutter(&self.items);
 
         for (i, item) in self.items.iter().enumerate() {
             if matches!(item.action, MenuAction::Separator) {
@@ -690,7 +707,7 @@ impl crate::element::ElementRenderObject for MenuRenderObject {
                 );
             }
             ctx.draw_text(
-                Point::new(origin.x + MENU_TEXT_INSET + MENU_CHECK_GUTTER, text_y),
+                Point::new(origin.x + MENU_TEXT_INSET + check_gutter, text_y),
                 item.label.clone(),
                 item_text_color,
                 font_size,
@@ -913,6 +930,26 @@ mod tests {
             )));
         }
         assert_eq!(menu.size.height, 69.0, "separator reserves breathing room");
+    }
+
+    #[test]
+    fn unchecked_menus_balance_label_and_shortcut_insets() {
+        let _environment = install_test_input_environment(pointer_environment());
+        let items = alloc::vec![MenuItemContent::new("Open File...").shortcut("Ctrl+O")];
+        let width = Menu::new(items.clone()).preferred_width();
+        let mut menu = MenuRenderObject::new(items, 24.0, width);
+        menu.layout(LayoutConstraints::unconstrained());
+        let mut paint = PaintContext::new();
+        menu.paint(&mut paint, Point::ZERO);
+        let shortcut_width = graphics::measure_text_sized("Ctrl+O", MENU_FONT_SIZE).0 as f32;
+        assert!(paint.commands().iter().any(|command| matches!(command,
+            PaintCommand::DrawText { text, position, .. }
+                if text == "Open File..." && position.x == MENU_TEXT_INSET
+        )));
+        assert!(paint.commands().iter().any(|command| matches!(command,
+            PaintCommand::DrawText { text, position, .. }
+                if text == "Ctrl+O" && width - (position.x + shortcut_width) == MENU_TEXT_INSET
+        )));
     }
 
     #[test]
