@@ -136,6 +136,40 @@ pub enum ScrollOffsetUpdate {
 /// - Rendering to a buffer
 /// - Hit testing
 pub trait RenderObject: Any {
+    fn has_visual_animation(&self) -> bool {
+        false
+    }
+    fn advance_visual_animation(&mut self, _elapsed: core::time::Duration) -> bool {
+        false
+    }
+    fn finish_visual_animation(&mut self) -> bool {
+        false
+    }
+
+    /// Update policy inherited by children during reconciliation.
+    fn child_update_transaction(
+        &self,
+        transaction: crate::animation::Transaction,
+    ) -> crate::animation::Transaction {
+        transaction
+    }
+
+    /// Multiplied with ancestor opacity during paint, without changing layout.
+    fn subtree_opacity(&self) -> f32 {
+        1.0
+    }
+    fn has_opacity_scope(&self) -> bool {
+        false
+    }
+    /// Presentation metadata changed while recorded child drawing stays valid.
+    fn update_needs_composite(&self) -> bool {
+        false
+    }
+    /// This property changes the presentation of descendants outside layout bounds.
+    fn presentation_affects_subtree_bounds(&self) -> bool {
+        false
+    }
+
     /// Build the current right-click menu. The pipeline presents it above the scene
     /// without changing keyboard focus. Called only when opening the menu.
     fn context_menu(&self) -> Option<crate::views::Menu> {
@@ -572,6 +606,7 @@ pub struct RenderElement<V: View + Clone, R: RenderObject> {
     pipeline_id: PipelineId,
     subscriptions: Vec<SubscriptionId>,
     mounted: bool,
+    animation_registered: bool,
     activation_key: Option<crate::event::KeyCode>,
     render_object_builder: Option<fn(&V) -> R>,
     render_object_updater: Option<fn(&mut R, &V) -> UpdateResult>,
@@ -621,6 +656,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
+            animation_registered: false,
             activation_key: None,
             render_object_builder: None,
             render_object_updater: None,
@@ -647,6 +683,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
+            animation_registered: false,
             activation_key: None,
             render_object_builder: Some(render_object_builder),
             render_object_updater: None,
@@ -668,6 +705,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
+            animation_registered: false,
             activation_key: None,
             render_object_builder: None,
             render_object_updater: None,
@@ -701,6 +739,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
+            animation_registered: false,
             activation_key: None,
             render_object_builder: Some(render_object_builder),
             render_object_updater: None,
@@ -747,6 +786,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
             pipeline_id: PipelineId::default(),
             subscriptions: Vec::new(),
             mounted: false,
+            animation_registered: false,
             activation_key: None,
             render_object_builder: Some(render_object_builder),
             render_object_updater: Some(render_object_updater),
@@ -829,8 +869,53 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
         self.mounted.then(|| MountContext::new(self.pipeline_id))
     }
 
+    fn sync_visual_animation(&mut self) {
+        let active = self.mounted && self.render_object.has_visual_animation();
+        if active != self.animation_registered {
+            crate::animation::set_active(self.pipeline_id, self.id, active);
+            self.animation_registered = active;
+        }
+    }
+
+    fn visual_animation_changed(&mut self, changed: bool) -> bool {
+        self.sync_visual_animation();
+        if !changed || !self.mounted {
+            return changed;
+        }
+        if self.render_object.update_needs_layout() {
+            crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
+        } else {
+            match self
+                .render_object
+                .apply_view_scroll_offset(&mut self.children)
+            {
+                ScrollOffsetUpdate::NeedsComposite => {
+                    crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id)
+                }
+                ScrollOffsetUpdate::ChildrenChanged => {
+                    crate::pipeline::mark_element_children_changed(self.pipeline_id, self.id)
+                }
+                ScrollOffsetUpdate::NeedsPaint => {
+                    crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id)
+                }
+                ScrollOffsetUpdate::None => {
+                    if self.render_object.update_needs_composite() {
+                        crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id);
+                    } else if self.render_object.update_needs_subtree_paint() {
+                        crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
+                    } else {
+                        crate::pipeline::mark_element_needs_self_paint(self.pipeline_id, self.id);
+                    }
+                }
+            }
+        }
+        true
+    }
+
     fn update_render_object_from_view(&mut self) -> (UpdateResult, bool) {
         let needs_layout = self.render_object.update_needs_layout();
+        let forced_finish = crate::animation::current_transaction().disables_animations
+            && self.render_object.finish_visual_animation();
         let update_result = if let Some(updater) = self.render_object_updater {
             updater(&mut self.render_object, &self.view)
         } else {
@@ -845,6 +930,7 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
                 (UpdateResult::Updated, true)
             }
             UpdateResult::Updated => (UpdateResult::Updated, needs_layout),
+            UpdateResult::NoChange if forced_finish => (UpdateResult::Updated, needs_layout),
             UpdateResult::NoChange => (UpdateResult::NoChange, false),
         }
     }
@@ -855,11 +941,26 @@ impl<V: View + Clone, R: RenderObject> RenderElement<V, R> {
         };
         let child_views = builder(&self.view);
         let mount_context = self.mount_context();
-        crate::element::update_children(&mut self.children, child_views, mount_context)
+        let transaction = self
+            .render_object
+            .child_update_transaction(crate::animation::current_transaction());
+        crate::animation::with_transaction(transaction, || {
+            crate::element::update_children(&mut self.children, child_views, mount_context)
+        })
     }
 }
 
 impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
+    fn advance_visual_animation(&mut self, elapsed: core::time::Duration) -> bool {
+        let changed = self.render_object.advance_visual_animation(elapsed);
+        self.visual_animation_changed(changed)
+    }
+
+    fn finish_visual_animation(&mut self) -> bool {
+        let changed = self.render_object.finish_visual_animation();
+        self.visual_animation_changed(changed)
+    }
+
     fn id(&self) -> ElementId {
         self.id
     }
@@ -916,6 +1017,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             }
             return UpdateResult::Replaced;
         }
+        self.sync_visual_animation();
         let child_result = self.update_children_from_view();
         if self.mounted {
             self.subscribe_view_listenables();
@@ -945,7 +1047,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             if needs_layout {
                 crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
             } else if matches!(render_result, UpdateResult::Updated) {
-                if self.render_object.update_needs_subtree_paint() {
+                if self.render_object.update_needs_composite() {
+                    crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id);
+                } else if self.render_object.update_needs_subtree_paint() {
                     crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                 } else {
                     crate::pipeline::mark_element_needs_self_paint(self.pipeline_id, self.id);
@@ -964,6 +1068,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
         if matches!(render_result, UpdateResult::Replaced) {
             return UpdateResult::Replaced;
         }
+        self.sync_visual_animation();
         let child_result = self.update_children_from_view();
         let needs_layout = matches!(child_result, UpdateResult::Updated)
             || (matches!(render_result, UpdateResult::Updated) && render_needs_layout);
@@ -989,7 +1094,9 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             if needs_layout {
                 crate::pipeline::mark_element_needs_layout(self.pipeline_id, self.id);
             } else if matches!(render_result, UpdateResult::Updated) {
-                if self.render_object.update_needs_subtree_paint() {
+                if self.render_object.update_needs_composite() {
+                    crate::pipeline::mark_element_needs_composite(self.pipeline_id, self.id);
+                } else if self.render_object.update_needs_subtree_paint() {
                     crate::pipeline::mark_element_needs_paint(self.pipeline_id, self.id);
                 } else {
                     crate::pipeline::mark_element_needs_self_paint(self.pipeline_id, self.id);
@@ -1006,6 +1113,7 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
     fn mount(&mut self, ctx: &MountContext) {
         self.pipeline_id = ctx.pipeline_id();
         self.mounted = true;
+        self.sync_visual_animation();
         self.subscribe_view_listenables();
         for child in &mut self.children {
             child.mount(ctx);
@@ -1017,6 +1125,10 @@ impl<V: View + Clone, R: RenderObject> Element for RenderElement<V, R> {
             child.unmount();
         }
         self.unsubscribe_view_listenables();
+        if self.animation_registered {
+            crate::animation::set_active(self.pipeline_id, self.id, false);
+            self.animation_registered = false;
+        }
         self.mounted = false;
     }
 

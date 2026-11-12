@@ -161,6 +161,16 @@ impl LayoutConstraints {
 /// Elements are mutable and handle layout, rendering, and event handling.
 /// They are created by Views and managed by the ElementTree.
 pub trait Element {
+    /// Advance a registered visual property animation without rebuilding Views.
+    fn advance_visual_animation(&mut self, _elapsed: core::time::Duration) -> bool {
+        false
+    }
+
+    /// Resolve a visual animation to its model target when motion is cancelled.
+    fn finish_visual_animation(&mut self) -> bool {
+        false
+    }
+
     /// Receive unconsumed safe-area reservations from the parent layout scope.
     /// Custom elements that create children during layout should retain this
     /// value and deliver it to those children before laying them out.

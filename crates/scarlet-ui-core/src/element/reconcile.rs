@@ -12,6 +12,25 @@ fn keys_match(element: &dyn Element, view: &dyn View) -> bool {
     element.view_key() == view.key()
 }
 
+fn update_retained_child(
+    child: &mut Box<dyn Element>,
+    view: &dyn View,
+    mount_context: Option<MountContext>,
+) -> UpdateResult {
+    let queued = mount_context.and_then(|context| {
+        let owner = context.pipeline_id();
+        crate::animation::pending::transaction_for_child(owner, child.id())
+            .map(|transaction| (owner, transaction))
+    });
+    if let Some((owner, transaction)) = queued {
+        crate::animation::pending::with_element_transaction(owner, transaction, || {
+            child.update(view)
+        })
+    } else {
+        child.update(view)
+    }
+}
+
 fn replace_child(
     child: &mut Option<Box<dyn Element>>,
     new_view: &dyn View,
@@ -63,7 +82,7 @@ pub(crate) fn update_child(
             UpdateResult::Updated
         }
         (Some(old_child), Some(view)) if keys_match(old_child.as_ref(), view) => {
-            match old_child.update(view) {
+            match update_retained_child(old_child, view, mount_context) {
                 UpdateResult::Replaced => {
                     replace_child(child, view, mount_context, true);
                     UpdateResult::Updated
@@ -124,7 +143,7 @@ pub(crate) fn update_children(
     {
         let mut result = UpdateResult::NoChange;
         for (index, view) in new_views.into_iter().enumerate() {
-            match children[index].update(view.as_ref()) {
+            match update_retained_child(&mut children[index], view.as_ref(), mount_context) {
                 UpdateResult::NoChange => {}
                 UpdateResult::Updated => {
                     if let Some(context) = mount_context {

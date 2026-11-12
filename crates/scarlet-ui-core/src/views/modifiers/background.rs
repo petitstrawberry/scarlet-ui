@@ -2,6 +2,7 @@
 //!
 //! Adds a background color behind a child view.
 
+use crate::animation::{Animated, Animation, current_transaction};
 use crate::color::Color;
 use crate::element::LayoutConstraints;
 use crate::element::{Element, ElementRenderObject, RenderElement, UpdateResult};
@@ -12,6 +13,7 @@ use crate::view::View;
 use alloc::boxed::Box;
 use alloc::vec;
 use core::any::Any;
+use core::time::Duration;
 
 /// Background view modifier - adds a background color
 #[derive(Clone)]
@@ -61,12 +63,11 @@ impl<V: View + Clone> View for Background<V> {
                 render
             },
             |render, view| {
-                if render.color == view.color && render.hover_color == view.hover_color {
-                    return UpdateResult::NoChange;
-                }
-                render.color = view.color;
-                render.hover_color = view.hover_color;
-                UpdateResult::Updated
+                render.update_colors(
+                    view.color,
+                    view.hover_color,
+                    current_transaction().effective_animation(),
+                )
             },
             |view| vec![view.inner.clone_view()],
         ))
@@ -83,7 +84,7 @@ impl<V: View + Clone> View for Background<V> {
 
 /// Background RenderObject
 pub struct BackgroundRenderObject {
-    color: Color,
+    color: Animated<Color>,
     hover_color: Option<Color>,
     hovered: bool,
     size: Size,
@@ -93,7 +94,7 @@ impl BackgroundRenderObject {
     /// Create a new BackgroundRenderObject
     pub fn new(color: Color) -> Self {
         Self {
-            color,
+            color: Animated::new(color),
             hover_color: None,
             hovered: false,
             size: Size::ZERO,
@@ -102,14 +103,29 @@ impl BackgroundRenderObject {
 
     /// Get the background color
     pub fn get_color(&self) -> Color {
-        self.color
+        self.color.value()
+    }
+
+    fn update_colors(
+        &mut self,
+        color: Color,
+        hover_color: Option<Color>,
+        animation: Option<Animation>,
+    ) -> UpdateResult {
+        let changed = self.color.retarget(color, animation) || self.hover_color != hover_color;
+        self.hover_color = hover_color;
+        if changed {
+            UpdateResult::Updated
+        } else {
+            UpdateResult::NoChange
+        }
     }
 
     fn current_color(&self) -> Color {
         if self.hovered {
-            self.hover_color.unwrap_or(self.color)
+            self.hover_color.unwrap_or_else(|| self.color.value())
         } else {
-            self.color
+            self.color.value()
         }
     }
 }
@@ -117,6 +133,22 @@ impl BackgroundRenderObject {
 impl ElementRenderObject for BackgroundRenderObject {
     fn update_needs_layout(&self) -> bool {
         false
+    }
+
+    fn update_needs_subtree_paint(&self) -> bool {
+        false
+    }
+
+    fn has_visual_animation(&self) -> bool {
+        self.color.is_active()
+    }
+
+    fn advance_visual_animation(&mut self, delta: Duration) -> bool {
+        self.color.advance(delta)
+    }
+
+    fn finish_visual_animation(&mut self) -> bool {
+        self.color.finish()
     }
 
     fn handle_event(&mut self, event: &Event, phase: Phase) -> bool {
@@ -206,6 +238,82 @@ mod tests {
     use crate::views::{GridView, Spacer, Window};
     use alloc::rc::Rc;
     use core::cell::Cell;
+
+    #[test]
+    fn animated_base_color_preserves_instant_hover_and_only_repaints_itself() {
+        let mut render = BackgroundRenderObject::new(Color::BLACK);
+        let animation = Some(Animation::linear(Duration::from_secs(1)));
+        assert!(!render.has_visual_animation());
+        assert!(!render.update_needs_layout());
+        assert!(!render.update_needs_subtree_paint());
+        assert!(matches!(
+            render.update_colors(Color::WHITE, Some(Color::RED), animation),
+            UpdateResult::Updated
+        ));
+        assert_eq!(render.get_color(), Color::BLACK);
+        assert!(render.advance_visual_animation(Duration::from_millis(250)));
+        assert_eq!(render.current_color(), Color::gray(0.25));
+        assert!(render.handle_event(
+            &Event::Mouse(MouseEvent::Entered { x: 1, y: 1 }),
+            Phase::Target
+        ));
+        assert_eq!(render.current_color(), Color::RED);
+        assert!(matches!(
+            render.update_colors(Color::WHITE, Some(Color::RED), None),
+            UpdateResult::NoChange
+        ));
+        render.advance_visual_animation(Duration::from_millis(250));
+        assert_eq!(render.get_color(), Color::gray(0.5));
+        assert_eq!(render.current_color(), Color::RED);
+        assert!(render.handle_event(
+            &Event::Mouse(MouseEvent::Exited { x: -1, y: -1 }),
+            Phase::Target
+        ));
+        assert_eq!(render.current_color(), Color::gray(0.5));
+
+        // Interrupt the base transition from its displayed color.
+        render.update_colors(Color::BLACK, Some(Color::RED), animation);
+        assert_eq!(render.get_color(), Color::gray(0.5));
+        render.advance_visual_animation(Duration::from_millis(500));
+        assert_eq!(render.get_color(), Color::gray(0.25));
+        assert!(render.finish_visual_animation());
+        assert_eq!(render.get_color(), Color::BLACK);
+        assert!(!render.has_visual_animation());
+        assert!(!render.finish_visual_animation());
+    }
+
+    #[test]
+    fn background_view_uses_transaction_policy_without_animating_initial_mount() {
+        use crate::animation::{with_animation, without_animation};
+        let animation = Animation::linear(Duration::from_secs(1));
+        let mut element = with_animation(animation, || {
+            Background::new(Spacer::new(), Color::BLACK).create_element()
+        });
+        assert!(!element.render_object().unwrap().has_visual_animation());
+        with_animation(animation, || {
+            element.update(&Background::new(Spacer::new(), Color::WHITE))
+        });
+        element
+            .render_object_mut()
+            .unwrap()
+            .advance_visual_animation(Duration::from_millis(500));
+        let render = element
+            .render_object()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BackgroundRenderObject>()
+            .unwrap();
+        assert_eq!(render.get_color(), Color::gray(0.5));
+        without_animation(|| element.update(&Background::new(Spacer::new(), Color::RED)));
+        let render = element
+            .render_object()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BackgroundRenderObject>()
+            .unwrap();
+        assert_eq!(render.get_color(), Color::RED);
+        assert!(!render.has_visual_animation());
+    }
 
     #[test]
     fn preserves_the_nonzero_child_axis_during_loose_measurement() {

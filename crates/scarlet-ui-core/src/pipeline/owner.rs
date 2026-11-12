@@ -71,6 +71,7 @@ impl MountContext {
 #[derive(Default)]
 struct DirtyQueues {
     build: BTreeSet<ElementId>,
+    transactions: BTreeMap<ElementId, crate::animation::Transaction>,
     layout: BTreeSet<ElementId>,
     paint: BTreeSet<ElementId>,
     self_paint: BTreeSet<ElementId>,
@@ -93,9 +94,15 @@ pub fn mark_element_dirty(owner: PipelineId, id: ElementId) {
             id.get()
         );
     }
+    let transaction = crate::animation::current_transaction();
     let mut queues = GLOBAL_DIRTY.lock();
     let queue = queues.entry(owner).or_default();
     queue.build.insert(id);
+    if transaction == crate::animation::Transaction::default() {
+        queue.transactions.remove(&id);
+    } else {
+        queue.transactions.insert(id, transaction);
+    }
     if crate::debug::is_enabled() {
         println!("[PipelineOwner] Dirty count: {}", queue.build.len());
     }
@@ -176,6 +183,7 @@ pub struct PipelineOwner {
     pipeline_id: PipelineId,
     /// Elements that need rebuilding (State changed)
     dirty_build: BTreeSet<ElementId>,
+    build_transactions: BTreeMap<ElementId, crate::animation::Transaction>,
     /// Elements that need relayouting
     dirty_layout: BTreeSet<ElementId>,
     /// Elements that need repainting
@@ -207,6 +215,7 @@ impl PipelineOwner {
         Self {
             pipeline_id,
             dirty_build: BTreeSet::new(),
+            build_transactions: BTreeMap::new(),
             dirty_layout: BTreeSet::new(),
             dirty_paint: BTreeSet::new(),
             dirty_self_paint: BTreeSet::new(),
@@ -225,6 +234,12 @@ impl PipelineOwner {
         match phase {
             DirtyPhase::Build => {
                 self.dirty_build.insert(id);
+                let transaction = crate::animation::current_transaction();
+                if transaction == crate::animation::Transaction::default() {
+                    self.build_transactions.remove(&id);
+                } else {
+                    self.build_transactions.insert(id, transaction);
+                }
             }
             DirtyPhase::Layout => {
                 self.dirty_layout.insert(id);
@@ -339,13 +354,18 @@ impl PipelineOwner {
         let mut queues = GLOBAL_DIRTY.lock();
         let queue = queues.entry(self.pipeline_id).or_default();
         let dirty_build = core::mem::take(&mut queue.build);
+        let transactions = core::mem::take(&mut queue.transactions);
         let dirty_layout = core::mem::take(&mut queue.layout);
         let dirty_paint = core::mem::take(&mut queue.paint);
         let dirty_self_paint = core::mem::take(&mut queue.self_paint);
         self.dirty_children.append(&mut queue.children);
 
         for id in dirty_build {
-            self.mark_needs_build(id);
+            self.dirty_build.insert(id);
+            self.build_transactions.remove(&id);
+            if let Some(transaction) = transactions.get(&id) {
+                self.build_transactions.insert(id, *transaction);
+            }
         }
         for id in dirty_layout {
             self.mark_needs_layout(id);
@@ -364,40 +384,70 @@ impl PipelineOwner {
     /// Flush the build phase
     fn flush_build(&mut self, element_tree: &mut ElementTree) {
         let dirty_build = core::mem::take(&mut self.dirty_build);
+        let transactions = core::mem::take(&mut self.build_transactions);
         let rebuilt = !dirty_build.is_empty();
 
-        if dirty_build.len() > MAX_TARGETED_UPDATES {
-            fn rebuild(
-                element: &mut dyn crate::element::Element,
-                dirty: &BTreeSet<ElementId>,
-                layout: &mut BTreeSet<ElementId>,
-            ) {
-                if dirty.contains(&element.id())
-                    && matches!(element.rebuild(), crate::element::UpdateResult::Updated)
-                {
-                    layout.insert(element.id());
-                }
-                // Reconciliation can remove or replace children. Visit the
-                // resulting live children, never references saved before rebuild.
-                for child in element.children_mut() {
-                    rebuild(child.as_mut(), dirty, layout);
-                }
-            }
-            if let Some(root) = element_tree.root_mut() {
-                rebuild(root.as_mut(), &dirty_build, &mut self.dirty_layout);
-            }
-        } else {
-            for id in dirty_build {
-                // Find the element in the tree
-                if let Some(element) = element_tree.find_element_mut(id) {
-                    // Rebuild a fresh View description and reconcile it with the
-                    // retained child Element/RenderObject subtree.
-                    if matches!(element.rebuild(), crate::element::UpdateResult::Updated) {
-                        self.mark_needs_layout(id);
+        crate::animation::pending::with_pending_builds(
+            self.pipeline_id,
+            &dirty_build,
+            &transactions,
+            || {
+                if dirty_build.len() > MAX_TARGETED_UPDATES {
+                    fn rebuild(
+                        owner: PipelineId,
+                        element: &mut dyn crate::element::Element,
+                        dirty: &BTreeSet<ElementId>,
+                        transactions: &BTreeMap<ElementId, crate::animation::Transaction>,
+                        layout: &mut BTreeSet<ElementId>,
+                    ) {
+                        if dirty.contains(&element.id())
+                            && matches!(
+                                crate::animation::pending::with_element_transaction(
+                                    owner,
+                                    transactions.get(&element.id()).copied().unwrap_or_default(),
+                                    || element.rebuild()
+                                ),
+                                crate::element::UpdateResult::Updated
+                            )
+                        {
+                            layout.insert(element.id());
+                        }
+                        // Reconciliation can remove or replace children. Visit the
+                        // resulting live children, never references saved before rebuild.
+                        for child in element.children_mut() {
+                            rebuild(owner, child.as_mut(), dirty, transactions, layout);
+                        }
+                    }
+                    if let Some(root) = element_tree.root_mut() {
+                        rebuild(
+                            self.pipeline_id,
+                            root.as_mut(),
+                            &dirty_build,
+                            &transactions,
+                            &mut self.dirty_layout,
+                        );
+                    }
+                } else {
+                    for id in dirty_build.iter().copied() {
+                        // Find the element in the tree
+                        if let Some(element) = element_tree.find_element_mut(id) {
+                            // Rebuild a fresh View description and reconcile it with the
+                            // retained child Element/RenderObject subtree.
+                            if matches!(
+                                crate::animation::pending::with_element_transaction(
+                                    self.pipeline_id,
+                                    transactions.get(&id).copied().unwrap_or_default(),
+                                    || element.rebuild()
+                                ),
+                                crate::element::UpdateResult::Updated
+                            ) {
+                                self.mark_needs_layout(id);
+                            }
+                        }
                     }
                 }
-            }
-        }
+            },
+        );
         if rebuilt && element_tree.safe_area_insets() != crate::geometry::EdgeInsets::ZERO {
             element_tree.apply_safe_area_insets();
         }
@@ -812,6 +862,220 @@ mod dense_update_tests {
     use crate::view::View;
     use alloc::{rc::Rc, vec::Vec};
     use core::{any::Any, cell::RefCell};
+
+    #[derive(Clone)]
+    struct AnimatedChild {
+        expanded: State<bool>,
+        key: crate::view::ViewKey,
+        local_animation: Option<crate::animation::Animation>,
+    }
+
+    impl AnimatedChild {
+        fn body(&self) -> Box<dyn View> {
+            use crate::view::ViewExt;
+            let expanded = self.expanded.get();
+            let frame =
+                crate::views::Spacer::new().frame(if expanded { 100.0 } else { 20.0 }, 20.0);
+            match self.local_animation {
+                Some(animation) => Box::new(frame.animation(animation, expanded)),
+                None => Box::new(frame),
+            }
+        }
+    }
+
+    impl View for AnimatedChild {
+        fn create_element(&self) -> Box<dyn Element> {
+            Box::new(crate::element::ComponentElement::new_with_builder(
+                self.clone(),
+                Self::body,
+            ))
+        }
+        fn listenables(&self) -> Vec<&dyn crate::state::Listenable> {
+            alloc::vec![&self.expanded]
+        }
+        fn key(&self) -> Option<&crate::view::ViewKey> {
+            Some(&self.key)
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ChildReconciliation {
+        Single,
+        StableSiblings,
+        KeyedMove,
+    }
+
+    #[derive(Clone)]
+    struct AnimatedParent {
+        changed: State<bool>,
+        child: AnimatedChild,
+        sibling: AnimatedChild,
+        mode: ChildReconciliation,
+    }
+
+    impl AnimatedParent {
+        fn body(&self) -> Box<dyn View> {
+            match self.mode {
+                ChildReconciliation::Single => Box::new(self.child.clone()),
+                ChildReconciliation::KeyedMove if self.changed.get() => Box::new(
+                    crate::views::HStack::new((self.sibling.clone(), self.child.clone())),
+                ),
+                _ => Box::new(crate::views::HStack::new((
+                    self.child.clone(),
+                    self.sibling.clone(),
+                ))),
+            }
+        }
+    }
+
+    impl View for AnimatedParent {
+        fn create_element(&self) -> Box<dyn Element> {
+            Box::new(crate::element::ComponentElement::new_with_builder(
+                self.clone(),
+                Self::body,
+            ))
+        }
+        fn listenables(&self) -> Vec<&dyn crate::state::Listenable> {
+            alloc::vec![&self.changed]
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    fn animated_child_id(element: &dyn Element, state: StateId) -> Option<ElementId> {
+        if let Some(component) = element
+            .as_any()
+            .downcast_ref::<crate::element::ComponentElement<AnimatedChild>>()
+            && component.view().expanded.id() == state
+        {
+            return Some(element.id());
+        }
+        element
+            .children()
+            .iter()
+            .find_map(|child| animated_child_id(child.as_ref(), state))
+    }
+
+    fn animated_frame(
+        element: &mut dyn Element,
+    ) -> Option<&mut crate::views::modifiers::FrameRenderObject> {
+        if element.render_object().is_some_and(|object| {
+            object
+                .as_any()
+                .is::<crate::views::modifiers::FrameRenderObject>()
+        }) {
+            return element.render_object_mut()?.as_any_mut().downcast_mut();
+        }
+        element
+            .children_mut()
+            .iter_mut()
+            .find_map(|child| animated_frame(child.as_mut()))
+    }
+
+    #[test]
+    fn queued_descendant_policy_is_used_on_first_update_in_sparse_and_dense_builds() {
+        use crate::animation::{Animation, Transaction, with_animation, with_transaction};
+        use crate::state::generate_state_id;
+        use core::time::Duration;
+
+        let parent_animation = Animation::linear(Duration::from_millis(400));
+        let child_animation = Animation::linear(Duration::from_millis(100));
+        let local_animation = Animation::linear(Duration::from_millis(200));
+        let policies = [
+            Transaction {
+                animation: Some(child_animation),
+                disables_animations: false,
+            },
+            Transaction::default(),
+            Transaction {
+                animation: None,
+                disables_animations: true,
+            },
+        ];
+        for dense in [false, true] {
+            for mode in [
+                ChildReconciliation::Single,
+                ChildReconciliation::StableSiblings,
+                ChildReconciliation::KeyedMove,
+            ] {
+                for parent_policy in [None, Some(parent_animation)] {
+                    for local in [None, Some(local_animation)] {
+                        for policy in policies {
+                            let child = AnimatedChild {
+                                expanded: State::new(generate_state_id(), false),
+                                key: 1usize.into(),
+                                local_animation: local,
+                            };
+                            let parent = AnimatedParent {
+                                changed: State::new(generate_state_id(), false),
+                                child: child.clone(),
+                                sibling: AnimatedChild {
+                                    expanded: State::new(generate_state_id(), false),
+                                    key: 2usize.into(),
+                                    local_animation: None,
+                                },
+                                mode,
+                            };
+                            let owner_id = PipelineId::generate();
+                            let mut owner = PipelineOwner::with_pipeline_id(owner_id);
+                            let mut tree = ElementTree::with_pipeline_id(owner_id);
+                            tree.set_root(parent.create_element());
+                            let root = tree.root().unwrap();
+                            let child_id = animated_child_id(root, child.expanded.id()).unwrap();
+                            assert!(
+                                root.id() < child_id,
+                                "sparse traversal must rebuild the ancestor first"
+                            );
+
+                            with_animation(parent_policy, || parent.changed.set(true));
+                            with_animation(Animation::linear(Duration::from_millis(800)), || {
+                                child.expanded.set(true)
+                            });
+                            owner.collect_global_dirty();
+                            // A later notification, even with the same value,
+                            // must replace an already-collected animation policy.
+                            with_transaction(policy, || child.expanded.set(true));
+                            owner.collect_global_dirty();
+                            if dense {
+                                // Stale IDs force the live-tree traversal branch.
+                                for _ in 0..MAX_TARGETED_UPDATES {
+                                    owner.mark_needs_build(ElementId::generate());
+                                }
+                            }
+                            owner.flush_build(&mut tree);
+
+                            let frame =
+                                animated_frame(tree.find_element_mut(child_id).unwrap().as_mut())
+                                    .unwrap();
+                            let expected = if policy.disables_animations {
+                                100.0
+                            } else if local.is_some() {
+                                40.0
+                            } else if policy.animation.is_some() {
+                                60.0
+                            } else {
+                                100.0
+                            };
+                            frame.advance_visual_animation(Duration::from_millis(50));
+                            assert_eq!(
+                                frame.width_value(),
+                                Some(expected),
+                                "dense={dense} mode={mode:?} parent={parent_policy:?} child={policy:?} local={local:?}"
+                            );
+                            // The frame ignores identical targets, so a late
+                            // child rebuild cannot repair a wrong first policy.
+                            tree.clear_root();
+                            clear_global_dirty(owner_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[derive(Default)]
     struct Calls {

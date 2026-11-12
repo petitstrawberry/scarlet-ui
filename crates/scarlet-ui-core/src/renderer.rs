@@ -361,6 +361,7 @@ impl<'a> PaintBuffer<'a> {
 pub struct PaintContext<'a> {
     commands: Vec<PaintCommand>,
     buffers: Vec<PaintBuffer<'a>>,
+    subtree_opacity: f32,
 }
 
 impl Default for PaintContext<'_> {
@@ -368,6 +369,7 @@ impl Default for PaintContext<'_> {
         Self {
             commands: Vec::new(),
             buffers: Vec::new(),
+            subtree_opacity: 1.0,
         }
     }
 }
@@ -418,6 +420,7 @@ impl<'a> PaintContext<'a> {
             flat: core::cell::OnceCell::new(),
             footprints: core::cell::RefCell::new(Vec::new()),
             context: PaintContext {
+                subtree_opacity: self.subtree_opacity,
                 commands: self.commands,
                 buffers: self
                     .buffers
@@ -485,6 +488,7 @@ impl<'a> PaintContext<'a> {
 
     fn into_owned(self) -> PaintContext<'static> {
         PaintContext {
+            subtree_opacity: self.subtree_opacity,
             commands: self.commands,
             buffers: self
                 .buffers
@@ -651,11 +655,20 @@ impl<'a> PaintContext<'a> {
             |value: f32, origin: f32| ((value + origin) * scale) as i32 as f32 / scale - origin;
         for (index, command) in result.commands.iter_mut().enumerate() {
             match command {
-                PaintCommand::DrawText { position, font_size_px, font_stack, .. } => {
+                PaintCommand::DrawText {
+                    position,
+                    font_size_px,
+                    font_stack,
+                    ..
+                } => {
                     let ascent = match font_stack {
-                        Some(stack) => crate::graphics::font_metrics_sized_with_font_stack(*font_size_px * scale, stack),
+                        Some(stack) => crate::graphics::font_metrics_sized_with_font_stack(
+                            *font_size_px * scale,
+                            stack,
+                        ),
                         None => crate::graphics::font_metrics_sized(*font_size_px * scale),
-                    }.ascent;
+                    }
+                    .ascent;
                     text_positions.push((
                         index,
                         Point::new(
@@ -1073,6 +1086,26 @@ impl<'a> PaintContext<'a> {
         self.commands.push(PaintCommand::SetOpacity { opacity });
     }
 
+    pub(crate) fn subtree_opacity(&self) -> f32 {
+        self.subtree_opacity
+    }
+
+    pub(crate) fn push_subtree_opacity(&mut self, opacity: f32) -> f32 {
+        let previous = self.subtree_opacity;
+        self.subtree_opacity *= opacity;
+        if opacity != 1.0 {
+            self.set_opacity(self.subtree_opacity);
+        }
+        previous
+    }
+
+    pub(crate) fn restore_subtree_opacity(&mut self, previous: f32) {
+        if previous != self.subtree_opacity {
+            self.set_opacity(previous);
+        }
+        self.subtree_opacity = previous;
+    }
+
     /// Insert renderer-specific content into the paint list.
     ///
     /// # Arguments
@@ -1178,7 +1211,10 @@ impl<'a> PaintContext<'a> {
                     // font advance alone misses italic and fallback overhangs.
                     let x = crate::graphics::text_origin_physical(position.x, scale_milli) as f32;
                     let y = crate::graphics::text_origin_y_physical(
-                        position.y, *font_size_px, scale_milli, font_stack.as_deref(),
+                        position.y,
+                        *font_size_px,
+                        scale_milli,
+                        font_stack.as_deref(),
                     ) as f32;
                     let glyphs = match font_stack {
                         Some(stack) => crate::graphics::rasterize_text_cached_with_font_stack(
@@ -1330,6 +1366,7 @@ impl<'a> PaintContext<'a> {
     pub fn clear(&mut self) {
         self.commands.clear();
         self.buffers.clear();
+        self.subtree_opacity = 1.0;
     }
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
@@ -1732,8 +1769,11 @@ fn command_paint_bounds(
         } => {
             let x = crate::graphics::text_origin_physical(position.x, scale_milli) as f32;
             let y = crate::graphics::text_origin_y_physical(
-                        position.y, *font_size_px, scale_milli, font_stack.as_deref(),
-                    ) as f32;
+                position.y,
+                *font_size_px,
+                scale_milli,
+                font_stack.as_deref(),
+            ) as f32;
             let mut bounds = None;
             let glyphs = match font_stack {
                 Some(stack) => crate::graphics::rasterize_text_cached_with_font_stack(
@@ -5258,8 +5298,8 @@ mod tests {
             // The fixture's ascent is 1160 units/em. Translate the floating
             // baseline first, then snap once; glyph masks cache its local snap.
             let ascent = 12.0 * 1.160;
-            let expected_y = (libm::floorf((15.75 + ascent) * factor + 0.5) as i32
-                + glyph.y - libm::floorf(ascent * factor + 0.5) as i32) as u32;
+            let expected_y = (libm::floorf((15.75 + ascent) * factor + 0.5) as i32 + glyph.y
+                - libm::floorf(ascent * factor + 0.5) as i32) as u32;
             let first_ink_row = (0..expected.buffer().height())
                 .find(|y| {
                     (0..expected.buffer().width())

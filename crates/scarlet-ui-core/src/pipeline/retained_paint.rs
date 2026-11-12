@@ -20,6 +20,7 @@ struct Node {
     position: Point,
     bounds: Rect,
     clip: Option<(Rect, f32)>,
+    opacity: f32,
     children: Vec<ElementId>,
     paint: Option<Arc<DisplayList>>,
     overlay: Option<Arc<DisplayList>>,
@@ -109,6 +110,7 @@ impl RetainedPaint {
             position: Point::ZERO,
             bounds: Rect::default(),
             clip: None,
+            opacity: 1.0,
             children: Vec::new(),
             paint: None,
             overlay: None,
@@ -121,13 +123,17 @@ impl RetainedPaint {
         let abs = Point::new(origin.x + position.x, origin.y + position.y);
         let bounds = RenderingPipeline::element_paint_bounds(element, Point::ZERO);
         let clip = RenderingPipeline::clip_for_element(element, Point::ZERO);
+        let opacity = element.render_object().map_or(1.0, |r| r.subtree_opacity());
         let moved = node.position != position;
         let children_changed = !node
             .children
             .iter()
             .copied()
             .eq(element.children().iter().map(|child| child.id()));
-        let changed = node.bounds != bounds || node.clip != clip || children_changed;
+        let changed = node.bounds != bounds
+            || node.clip != clip
+            || node.opacity != opacity
+            || children_changed;
         let old_paint = node.paint.as_ref().map_or(0, |list| list.identity());
         let old_overlay = node.overlay.as_ref().map_or(0, |list| list.identity());
         node.generation = self.generation;
@@ -135,6 +141,7 @@ impl RetainedPaint {
         node.position = position;
         node.bounds = bounds;
         node.clip = clip;
+        node.opacity = opacity;
         if children_changed {
             node.children.clear();
             node.children
@@ -318,10 +325,12 @@ impl RetainedPaint {
         let moved = node.position != element.position();
         let bounds = RenderingPipeline::element_paint_bounds(element, Point::ZERO);
         let clip = RenderingPipeline::clip_for_element(element, Point::ZERO);
-        let mut changed = node.bounds != bounds || node.clip != clip;
+        let opacity = element.render_object().map_or(1.0, |r| r.subtree_opacity());
+        let mut changed = node.bounds != bounds || node.clip != clip || node.opacity != opacity;
         node.position = element.position();
         node.bounds = bounds;
         node.clip = clip;
+        node.opacity = opacity;
         let mut context = PaintContext::new();
         RenderingPipeline::paint_element_overlay(&mut context, element, Point::ZERO);
         let same_overlay = node
@@ -422,7 +431,7 @@ impl RetainedPaint {
             Point::new(abs.x + node.bounds.origin.x, abs.y + node.bounds.origin.y),
             node.bounds.size,
         );
-        if use_groups {
+        if use_groups && context.subtree_opacity() == 1.0 && node.opacity == 1.0 {
             if let Some((_, list)) = &node.group {
                 if active_clip.is_none_or(|clip| intersect(bounds, clip).is_some())
                     && damage.is_none_or(|rects| RenderingPipeline::overlaps_any(bounds, rects))
@@ -432,6 +441,7 @@ impl RetainedPaint {
                 return;
             }
         }
+        let previous_opacity = context.push_subtree_opacity(node.opacity);
         if active_clip.is_none_or(|clip| intersect(bounds, clip).is_some())
             && damage.is_none_or(|rects| RenderingPipeline::overlaps_any(bounds, rects))
         {
@@ -452,6 +462,7 @@ impl RetainedPaint {
                     list.is_self_contained() && !list.has_extensions() && !list.reads_backdrop()
                 })
             {
+                context.restore_subtree_opacity(previous_opacity);
                 return;
             }
         }
@@ -487,6 +498,7 @@ impl RetainedPaint {
         if node.clip.is_some() {
             context.pop_clip();
         }
+        context.restore_subtree_opacity(previous_opacity);
     }
 }
 
@@ -611,6 +623,7 @@ mod tests {
         let outset = picture(Rect::from_xywh(-10., 0., 20., 20.), Color::RED);
         let hidden = picture(Rect::from_xywh(-100., 0., 200., 20.), Color::BLUE);
         let node = |position, clip, paint, overlay, children| Node {
+            opacity: 1.0,
             generation: 1,
             parent: None,
             subtree_stamp: 1,

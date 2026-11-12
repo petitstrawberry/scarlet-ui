@@ -46,6 +46,7 @@ extern crate scarlet_std as std;
 // Import procedural macros crate (derives work automatically)
 extern crate scarlet_ui_macros;
 
+pub mod animation;
 pub mod application;
 pub mod buffer;
 pub mod clipboard;
@@ -108,6 +109,10 @@ macro_rules! logln {
 pub(crate) use logln;
 
 // Re-exports for convenience
+pub use animation::{
+    Animatable, AnimatedValue, Animation, Transaction, with_animation, with_transaction,
+    without_animation,
+};
 pub use application::{Application, ApplicationRunner};
 pub use buffer::Buffer;
 pub use color::system::{
@@ -159,8 +164,8 @@ pub use scene::{Scene, SceneBuilder, SceneWindowKey, WindowContext, WindowGroup,
 pub use state::{InvalidationKind, Listenable, State, StateId, SubscriptionId, generate_state_id};
 pub use view::{View, ViewExt, ViewKey};
 pub use views::modifiers::{
-    AlignmentFrame, Background, Border, Clip, Focusable, Frame, OnKey, OnMouseButton, OnMouseDelta,
-    Padding, SafeArea, SetSize,
+    AlignmentFrame, AnimationScope, Background, Border, Clip, Focusable, Frame, OffsetView, OnKey,
+    OnMouseButton, OnMouseDelta, Opacity, Padding, SafeArea, SetSize,
 };
 pub use views::{
     BitmapImage, CanvasView, ContentShell, Divider, DividerOrientation, GridView, HeaderBar,
@@ -191,6 +196,10 @@ pub use scarlet_ui_macros::preview;
 
 /// Prelude module for convenient imports
 pub mod prelude {
+    pub use crate::animation::{
+        Animatable, AnimatedValue, Animation, Transaction, with_animation, with_transaction,
+        without_animation,
+    };
     pub use crate::application::{Application, ApplicationRunner};
     pub use crate::color::{Color, ColorPalette, ColorScheme, SemanticColor};
     pub use crate::command::{dismiss_window, open_new_window, open_window};

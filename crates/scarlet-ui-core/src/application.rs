@@ -542,6 +542,7 @@ impl ApplicationRunner {
             suspended: false,
             retry_render: false,
             animation_tick: Instant::now(),
+            visual_animation_tick: Instant::now(),
             _app: PhantomData,
         })
     }
@@ -652,9 +653,22 @@ impl ApplicationRunner {
             let elapsed = slot.animation_tick.elapsed();
             slot.animation_tick = Instant::now();
             if !slot.suspended && slot.pipeline.has_active_animation() {
-                slot.pipeline.advance_animations(elapsed);
+                // Interaction deadlines (including held-button repeats) are
+                // independent of the platform's next display opportunity.
+                slot.pipeline.advance_interaction_animations(elapsed);
             }
             let frame_granted = !slot.frame_pacing_enabled || slot.frame_ready;
+            if !slot.pipeline.has_visual_animation() || slot.suspended {
+                slot.visual_animation_tick = Instant::now();
+            } else if frame_granted
+                && !slot.presented_this_cycle
+                && (slot.frame_pacing_enabled
+                    || slot.visual_animation_tick.elapsed() >= Duration::from_millis(16))
+            {
+                let elapsed = slot.visual_animation_tick.elapsed();
+                slot.visual_animation_tick = Instant::now();
+                slot.pipeline.advance_visual_animations(elapsed);
+            }
             if (slot.pipeline.has_dirty() || slot.retry_render)
                 && !slot.presented_this_cycle
                 && !slot.suspended
@@ -677,12 +691,26 @@ impl ApplicationRunner {
                         request_next_frame(slot);
                         app.on_frame_presented(&slot.context);
                     }
-                    Presentation::Idle => {}
+                    Presentation::Idle => {
+                        if slot.pipeline.has_visual_animation() {
+                            request_next_frame(slot);
+                        }
+                    }
                 }
             } else {
                 // A failed metadata update must not depend on another frame,
                 // animation, or input event to get a retry.
                 slot.menu_sync.publish(slot.window.as_mut());
+            }
+            // Quantized properties can produce no damage on an intermediate
+            // sample. Consume/rearm the grant so an active track cannot stall.
+            if frame_granted
+                && !slot.presented_this_cycle
+                && !slot.suspended
+                && slot.pipeline.has_visual_animation()
+                && slot.frame_ready
+            {
+                request_next_frame(slot);
             }
         }
 
@@ -813,6 +841,7 @@ struct WindowSlot<A: Application> {
     suspended: bool,
     retry_render: bool,
     animation_tick: Instant,
+    visual_animation_tick: Instant,
     _app: PhantomData<A>,
 }
 
@@ -1615,6 +1644,7 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
 
 #[cfg(test)]
 mod tests {
+    include!("application_animation_tests.rs");
     use super::*;
     use alloc::rc::Rc;
     use core::cell::{Cell, RefCell};

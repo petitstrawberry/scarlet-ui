@@ -125,6 +125,38 @@ impl Clone for Box<dyn View> {
 ///     .frame(200.0, 50.0);
 /// ```
 pub trait ViewExt: View {
+    /// Animate supported descendant properties when `value` changes.
+    /// Initial insertion is immediate. An unchanged value inherits the current
+    /// transaction; `None` disables the inherited animation for a changed value.
+    fn animation<K: Clone + PartialEq + 'static>(
+        self,
+        animation: impl Into<Option<crate::animation::Animation>>,
+        value: K,
+    ) -> crate::views::modifiers::AnimationScope<Self, K>
+    where
+        Self: Sized + Clone,
+    {
+        crate::views::modifiers::AnimationScope::new(self, animation.into(), value)
+    }
+
+    /// Move content and its hit-testing coordinates without changing its layout footprint.
+    fn offset(self, x: f32, y: f32) -> crate::views::modifiers::OffsetView<Self>
+    where
+        Self: Sized + Clone,
+    {
+        crate::views::modifiers::OffsetView::new(self, x, y)
+    }
+
+    /// Multiply descendant drawing opacity, clamped to 0..=1.
+    /// This modulates drawing primitives; it does not allocate an isolated
+    /// offscreen group for overlapping translucent content.
+    fn opacity(self, opacity: f32) -> crate::views::modifiers::Opacity<Self>
+    where
+        Self: Sized + Clone,
+    {
+        crate::views::modifiers::Opacity::new(self, opacity)
+    }
+
     /// Attach a right-click menu, preserving the wrapped view's layout and focus.
     /// Commands use the same callbacks, enabled states and separators as [`crate::views::Menu`].
     fn context_menu(self, menu: crate::views::Menu) -> crate::views::modifiers::ContextMenu<Self>

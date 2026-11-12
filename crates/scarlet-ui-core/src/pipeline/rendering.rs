@@ -99,6 +99,7 @@ pub struct RenderingPipeline {
     window_size: Size,
     scale_milli: u32,
     event_dispatcher: EventDispatcher,
+    visual_animations: crate::animation::VisualAnimations,
     text_editing: text_editing::TextEditing,
     overlays: input_panel::OverlayState,
     context_menu: Option<context_menu::ContextMenuPopup>,
@@ -116,6 +117,7 @@ pub struct RenderingPipeline {
     // rather than the isolated CPU picture compositor.
     scene_reads_backdrop: bool,
     scene_has_extensions: bool,
+    scene_has_opacity: bool,
     select_overlay_active: bool,
     paint_caches: BTreeMap<ElementId, PaintCache>,
     window_backdrop_cache: Option<WindowBackdropCache>,
@@ -145,6 +147,7 @@ impl RenderingPipeline {
             window_size: Size::new(800.0, 600.0),
             scale_milli: 1000,
             event_dispatcher: EventDispatcher::new(),
+            visual_animations: Default::default(),
             text_editing: Default::default(),
             overlays: Default::default(),
             context_menu: None,
@@ -163,6 +166,7 @@ impl RenderingPipeline {
             paint_enabled: true,
             scene_reads_backdrop: false,
             scene_has_extensions: false,
+            scene_has_opacity: false,
             select_overlay_active: false,
             paint_caches: BTreeMap::new(),
             window_backdrop_cache: None,
@@ -242,6 +246,7 @@ impl RenderingPipeline {
         self.context_menu_swallow_release = false;
         self.legacy_context_menu_was_visible = false;
         self.cancel_animations();
+        self.visual_animations.clear(self.pipeline_id());
         self.element_tree.clear_root();
         crate::pipeline::clear_global_dirty(self.pipeline_id());
         self.renderer = None;
@@ -764,7 +769,10 @@ impl RenderingPipeline {
         background_color: crate::color::Color,
     ) -> crate::error::Result<PresentedFrame<'_>> {
         self.refresh_backdrop_dependency();
-        if self.scene_reads_backdrop || !self.paint_backend.uses_cpu_picture_cache() {
+        if self.scene_reads_backdrop
+            || self.scene_has_opacity
+            || !self.paint_backend.uses_cpu_picture_cache()
+        {
             return self.render_direct_paint_path(background_color);
         }
         let size = self.window_size;
@@ -1031,31 +1039,38 @@ impl RenderingPipeline {
         }
         // Query without painting: painting may update damage-history cells.
         // Composite-only transforms cannot add or remove material commands.
-        fn dependencies(element: &dyn Element) -> (bool, bool) {
-            let (mut reads, mut extensions) = element.render_object().map_or((false, false), |r| {
-                (r.reads_backdrop(), r.emits_paint_extension())
-            });
+        fn dependencies(element: &dyn Element) -> (bool, bool, bool) {
+            let (mut reads, mut extensions, mut opacity) =
+                element.render_object().map_or((false, false, false), |r| {
+                    (
+                        r.reads_backdrop(),
+                        r.emits_paint_extension(),
+                        r.has_opacity_scope(),
+                    )
+                });
             for child in element.children() {
-                let (child_reads, child_extensions) = dependencies(child.as_ref());
+                let (child_reads, child_extensions, child_opacity) = dependencies(child.as_ref());
                 reads |= child_reads;
                 extensions |= child_extensions;
-                if reads && extensions {
+                opacity |= child_opacity;
+                if reads && extensions && opacity {
                     break;
                 }
             }
-            (reads, extensions)
+            (reads, extensions, opacity)
         }
-        let (reads_backdrop, has_extensions) = self
+        let (reads_backdrop, has_extensions, has_opacity) = self
             .element_tree
             .root()
-            .map_or((false, false), dependencies);
+            .map_or((false, false, false), dependencies);
         self.scene_has_extensions = has_extensions;
-        if reads_backdrop != self.scene_reads_backdrop {
+        if reads_backdrop != self.scene_reads_backdrop || has_opacity != self.scene_has_opacity {
             self.paint_caches.clear();
             self.layer_store.clear();
             self.paint_needs_full = true;
         }
         self.scene_reads_backdrop = reads_backdrop;
+        self.scene_has_opacity = has_opacity;
     }
 
     /// GPU backends and backdrop-dependent CPU scenes encode commands directly. Repaint
@@ -1306,6 +1321,8 @@ impl RenderingPipeline {
         origin: Point,
         damage: Option<&[Rect]>,
     ) {
+        let opacity = element.render_object().map_or(1.0, |r| r.subtree_opacity());
+        let previous_opacity = ctx.push_subtree_opacity(opacity);
         let abs = Point::new(
             origin.x + element.position().x,
             origin.y + element.position().y,
@@ -1326,6 +1343,7 @@ impl RenderingPipeline {
         if clip.is_some() {
             ctx.pop_clip();
         }
+        ctx.restore_subtree_opacity(previous_opacity);
     }
 
     fn prepare_retained_composite_path(
@@ -3026,10 +3044,47 @@ impl RenderingPipeline {
     }
 
     pub(crate) fn element_paint_bounds(element: &dyn Element, absolute_origin: Point) -> Rect {
+        if element
+            .render_object()
+            .is_some_and(|r| r.presentation_affects_subtree_bounds())
+        {
+            return Self::presentation_subtree_bounds(element, absolute_origin);
+        }
+        Self::own_element_paint_bounds(element, absolute_origin)
+    }
+
+    fn own_element_paint_bounds(element: &dyn Element, absolute_origin: Point) -> Rect {
         element.render_object().map_or_else(
             || Rect::new(absolute_origin, element.bounds().size),
             |render_object| Self::render_object_paint_bounds(render_object, absolute_origin),
         )
+    }
+
+    fn presentation_subtree_bounds(element: &dyn Element, origin: Point) -> Rect {
+        let mut bounds = Self::own_element_paint_bounds(element, origin);
+        let clip = Self::clip_for_element(element, origin);
+        for child in element.children() {
+            let position = child.position();
+            let mut child_bounds = Self::presentation_subtree_bounds(
+                child.as_ref(),
+                Point::new(origin.x + position.x, origin.y + position.y),
+            );
+            if let Some((clip, _)) = clip {
+                let Some(clipped) = Self::intersect_paint_bounds(child_bounds, clip) else {
+                    continue;
+                };
+                child_bounds = clipped;
+            }
+            let left = bounds.left().min(child_bounds.left());
+            let top = bounds.top().min(child_bounds.top());
+            bounds = Rect::from_xywh(
+                left,
+                top,
+                bounds.right().max(child_bounds.right()) - left,
+                bounds.bottom().max(child_bounds.bottom()) - top,
+            );
+        }
+        bounds
     }
 
     pub(crate) fn render_object_paint_bounds(
@@ -3821,19 +3876,41 @@ impl RenderingPipeline {
 
     /// Whether a scroll owner needs another animation tick.
     pub fn has_active_animation(&self) -> bool {
-        self.event_dispatcher.has_active_animation()
+        self.event_dispatcher.has_active_animation() || self.has_visual_animation()
+    }
+
+    /// Whether declarative presentation properties need a display frame.
+    pub fn has_visual_animation(&self) -> bool {
+        self.visual_animations.is_active(self.pipeline_id())
+    }
+
+    /// Advance only declarative presentation properties, at most once per frame grant.
+    pub fn advance_visual_animations(&mut self, elapsed: core::time::Duration) -> bool {
+        self.visual_animations
+            .advance(self.pipeline_id(), &mut self.element_tree, elapsed, false)
+    }
+
+    pub(crate) fn advance_interaction_animations(&mut self, elapsed: core::time::Duration) -> bool {
+        self.event_dispatcher
+            .advance_animations(&mut self.element_tree, elapsed)
     }
 
     /// Advance animations using elapsed monotonic time from the application loop.
     pub fn advance_animations(&mut self, elapsed: core::time::Duration) -> bool {
-        self.event_dispatcher
-            .advance_animations(&mut self.element_tree, elapsed)
+        let interaction = self.advance_interaction_animations(elapsed);
+        self.advance_visual_animations(elapsed) || interaction
     }
 
     /// Cancel animations when the window stops presenting.
     pub fn cancel_animations(&mut self) {
         self.event_dispatcher
             .cancel_animations(&mut self.element_tree);
+        self.visual_animations.advance(
+            self.pipeline_id(),
+            &mut self.element_tree,
+            core::time::Duration::ZERO,
+            true,
+        );
     }
 
     /// Take emitted events from the event dispatcher
