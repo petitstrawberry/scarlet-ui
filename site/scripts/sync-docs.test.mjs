@@ -18,6 +18,10 @@ test('inline and reference links resolve against original source location', () =
   assert.ok(result.includes(`![Image](${assetBase}docs/shot.png "Screenshot")`));
   assert.ok(result.includes(`[link]: </reference/browser-samples/> "Guide"`));
 });
+test('animation guide links resolve to the imported canonical documentation', () => {
+  assert.equal(rewriteDestination('ANIMATIONS.md#animation-lab', 'docs/README.md'), '/reference/animations/#animation-lab');
+  assert.equal(rewriteDestination('../docs/ANIMATIONS.md', 'samples/README.md'), '/reference/animations/');
+});
 test('external URLs, local anchors, protocol-relative and mail links remain unchanged', () => {
   for (const url of ['https://example.test/x', '#heading', '//example.test/x', 'mailto:hello@example.test']) {
     assert.equal(rewriteDestination(url, 'README.md'), url);

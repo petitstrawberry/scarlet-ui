@@ -207,6 +207,9 @@ try {
   assert.equal((await page.locator('.platform-list').textContent()).trim(),'Linux · macOS · Windows · Scarlet · Web');
   const tryLink=page.getByRole('link',{name:'Try in your browser',exact:true});
   assert.equal(await tryLink.getAttribute('href'),'/try/');
+  for(const route of ['widget-factory','animation-lab']) {
+    assert.equal(await page.locator(`.demo-gallery a[href="/${route}/"]`).count(),1);
+  }
   assert.equal(await page.locator('#check-gpu').count(),0);
   const specimen=page.locator('.hero [data-scarlet-specimen]');
   const canvas=specimen.locator('canvas');
@@ -454,8 +457,10 @@ try {
   await tryLink.click();
   await page.waitForURL(origin+'/try/');
   setPhase('browser samples');
-  assert.equal(await page.locator('a[href="/widget-factory/"]').count(),1);
-  assert.equal(await page.locator('a[href="/counter/"]').count(),1);
+  for(const route of ['widget-factory','animation-lab','counter']) {
+    assert.equal(await page.locator(`.sl-markdown-content a[href="/${route}/"]`).count(),1);
+  }
+  assert.equal(await page.locator('.sl-markdown-content a[href="/reference/animations/"]').count(),1);
   }
   const capability=await page.evaluate(async()=>{
     if(!isSecureContext || !navigator.gpu) return {ok:false,reason:'Secure WebGPU is unavailable'};
@@ -521,6 +526,39 @@ try {
   await page.mouse.click(150,135);await page.mouse.move(500,500);
   await untilPixels('counter-2',img=>hasTextOnWhite(img,countRegion,50) && changedPixels(incremented,img,countRegion)>12);
   report.checks.push('two Counter clicks change rendered count glyphs');
+
+  await ready('/animation-lab/','scarlet_ui_animation_lab');
+  setPhase('Animation Lab rendering and lifecycle');
+  await page.mouse.move(2,2);
+  const labArea=()=>({x:0,y:0,...page.viewportSize()});
+  const labColor=(r,g,b)=>Math.max(r,g,b)-Math.min(r,g,b)>35 && Math.min(r,g,b)<220;
+  const labInitial=await untilPixels('animation-lab-initial',img=>coloredPixels(img,labArea(),labColor).count>400);
+  await untilPixels('animation-lab-moving',img=>changedPixels(labInitial,img,labArea())>64);
+  // Exercise the shipped public lifecycle. These comparisons need no tab or
+  // control coordinates and remain independent of the artwork's exact phase.
+  await page.evaluate(async()=> (await import('./pkg/scarlet_ui_animation_lab.js')).pause());
+  let labPrevious=await screenshot('animation-lab-pausing');
+  let labStableFrames=0;
+  const labPaused=await untilPixels('animation-lab-paused',img=>{
+    labStableFrames=changedPixels(labPrevious,img,labArea())===0 ? labStableFrames+1 : 0;
+    labPrevious=img;
+    return labStableFrames>=2;
+  });
+  await sleep(300);
+  assert.equal(changedPixels(labPaused,await screenshot('animation-lab-paused-retained'),labArea()),0,
+    'Animation Lab pause() must keep the presented frame still');
+  await page.evaluate(async()=> (await import('./pkg/scarlet_ui_animation_lab.js')).resume());
+  await untilPixels('animation-lab-resumed',img=>changedPixels(labPaused,img,labArea())>64);
+  await page.setViewportSize({width:390,height:844});
+  await untilPixels('animation-lab-narrow',img=>coloredPixels(img,labArea(),labColor).count>200);
+  const labCanvas=await page.locator('#ui').boundingBox();
+  assert.ok(labCanvas && labCanvas.width>0 && labCanvas.height>0,'Animation Lab canvas must remain visible after resize');
+  assert.ok(labCanvas.x>=0 && labCanvas.y>=0 && labCanvas.x+labCanvas.width<=390 && labCanvas.y+labCanvas.height<=844,
+    'Animation Lab canvas must fit the narrow viewport');
+  assert.equal(await page.evaluate(async()=> (await import('./pkg/scarlet_ui_animation_lab.js')).runtime_error()),undefined);
+  await page.evaluate(async()=> (await import('./pkg/scarlet_ui_animation_lab.js')).stop());
+  report.checks.push('Animation Lab renders moving pixels, public pause/resume freezes and restarts motion, narrow canvas remains visible, stop completes');
+  await page.setViewportSize({width:960,height:640});
 
   await ready('/widget-factory/','scarlet_ui_widget_factory');
   await untilPixels('factory-overview',img=>hasTextOnWhite(img,sidebarRegion,200));

@@ -27,7 +27,7 @@ class PackageValidation(unittest.TestCase):
         (self.root / 'assets/counter-example.png').touch()
         (self.root / 'try').mkdir()
         (self.root / 'index.html').write_text('<a href="/try/">Try</a><a href="/guide/">Guide</a><link href="/_astro/theme.css"><img src="./assets/widget-factory.png">')
-        (self.root / 'try/index.html').write_text('<a href="../">Home</a><a href="../counter/">Counter</a><a href="../widget-factory/">Factory</a><link href="/_astro/theme.css"><script src="../capability.js"></script>')
+        (self.root / 'try/index.html').write_text('<a href="../">Home</a><a href="../counter/">Counter</a><a href="../widget-factory/">Factory</a><a href="../animation-lab/">Animation Lab</a><link href="/_astro/theme.css"><script src="../capability.js"></script>')
         self.api = self.root / 'docs'
         for package in builder.API_PACKAGES:
             folder = self.api / package.replace('-', '_')
@@ -46,7 +46,9 @@ class PackageValidation(unittest.TestCase):
             folder = self.root / route
             (folder / 'pkg').mkdir(parents=True)
             (folder / 'index.html').write_text(f"<script>import('./pkg/{module}.js')</script>")
-            (folder / 'pkg' / f'{module}.js').write_text(f"new URL('{module}_bg.wasm', import.meta.url)")
+            (folder / 'pkg' / f'{module}.js').write_text(
+                f"new URL('{module}_bg.wasm', import.meta.url)\n" +
+                '\n'.join(f'export function {name}() {{}}' for name in builder.LIFECYCLE_EXPORTS))
             (folder / 'pkg' / f'{module}_bg.wasm').write_bytes(b'\0asm\x01\0\0\0')
 
     def test_api_reference_has_crates_sources_search_and_static_assets(self):
@@ -316,6 +318,44 @@ class PackageValidation(unittest.TestCase):
         (self.root / 'counter/pkg/scarlet_ui_web_counter.js').unlink()
         with self.assertRaisesRegex(ValueError, 'Missing WASM reference'):
             builder.validate(self.root)
+
+    def test_animation_lab_is_a_packaged_standalone_sample(self):
+        self.assertIn(('animation-lab', 'scarlet-ui-animation-lab', 'scarlet_ui_animation_lab'), builder.DEMOS)
+        builder.validate(self.root)
+        for asset in ('index.html', 'pkg/scarlet_ui_animation_lab.js', 'pkg/scarlet_ui_animation_lab_bg.wasm'):
+            file = self.root / 'animation-lab' / asset
+            original = file.read_bytes()
+            with self.subTest(missing=asset):
+                file.unlink()
+                try:
+                    with self.assertRaises(ValueError):
+                        builder.validate(self.root)
+                finally:
+                    file.write_bytes(original)
+
+    def test_animation_lab_must_import_its_own_module(self):
+        (self.root / 'animation-lab/index.html').write_text(
+            "<script>import('../widget-factory/pkg/scarlet_ui_widget_factory.js')</script>")
+        with self.assertRaisesRegex(ValueError, 'Missing module import'):
+            builder.validate(self.root)
+
+    def test_lifecycle_exports_are_required_for_every_sample(self):
+        for route, _, module in builder.DEMOS:
+            glue = self.root / route / 'pkg' / f'{module}.js'
+            original = glue.read_text()
+            for name in ('start', 'stop', 'runtime_error', 'pause', 'resume'):
+                with self.subTest(route=route, missing=name):
+                    glue.write_text(original.replace(f'export function {name}()', f'function {name}()'))
+                    try:
+                        with self.assertRaisesRegex(ValueError, f'Missing sample lifecycle exports:.*{name}'):
+                            builder.validate(self.root)
+                    finally:
+                        glue.write_text(original)
+
+    def test_async_start_export_is_supported(self):
+        glue = self.root / 'animation-lab/pkg/scarlet_ui_animation_lab.js'
+        glue.write_text(glue.read_text().replace('export function start(', 'export async function start('))
+        builder.validate(self.root)
 
 
 if __name__ == '__main__':

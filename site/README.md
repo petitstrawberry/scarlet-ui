@@ -26,6 +26,7 @@ files under `site/src/content/docs/reference/`:
 | `browser-samples.md` | `samples/README.md` |
 | `preview-protocol.md` | `docs/PREVIEW_PROTOCOL.md` |
 | `application-guide.md` | `docs/APPLICATION_GUIDE.md` |
+| `animations.md` | `docs/ANIMATIONS.md` |
 | `platform-guide.md` | `docs/PLATFORM_GUIDE.md` |
 | `live-preview.md` | `docs/LIVE_PREVIEW.md` |
 | `development.md` | `docs/DEVELOPMENT.md` |
@@ -88,8 +89,12 @@ artifact. A local build does not publish the site.
 
 The native toolkit is the primary entry point. Browser requirements and current
 backend limitations belong in the documentation and browser demo entry, not in
-the root homepage. Existing `/counter/` and `/widget-factory/` applications remain
-separate canvas samples.
+the root homepage. `/widget-factory/` and `/animation-lab/` are the two full demo
+applications, linked from the homepage, Try page and sidebar. `/counter/` remains
+the small reactive-state example. Animation Lab combines Play, Basics and Layout
+in one canvas application, with its canonical guide at `/reference/animations/`.
+The demo cards use Starlight's existing components; no extra live module loads
+on the homepage until a visitor follows a demo link.
 
 The starter was taken from the official `withastro/starlight` repository's
 `examples/basics` at `6c9ca431629bbd37d969876f5f4281b5f5a34d38`.

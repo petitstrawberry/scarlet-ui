@@ -14,6 +14,7 @@ export const documents = [
   { source: 'samples/README.md', slug: 'browser-samples' },
   { source: 'docs/PREVIEW_PROTOCOL.md', slug: 'preview-protocol' },
   { source: 'docs/APPLICATION_GUIDE.md', slug: 'application-guide' },
+  { source: 'docs/ANIMATIONS.md', slug: 'animations' },
   { source: 'docs/PLATFORM_GUIDE.md', slug: 'platform-guide' },
   { source: 'docs/LIVE_PREVIEW.md', slug: 'live-preview' },
   { source: 'docs/DEVELOPMENT.md', slug: 'development' },

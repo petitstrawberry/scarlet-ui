@@ -16,4 +16,5 @@ members = [
     "tools/preview",
     "examples/preview-demo",
     "examples/widget-factory",
+    "examples/animation-lab",
 ]

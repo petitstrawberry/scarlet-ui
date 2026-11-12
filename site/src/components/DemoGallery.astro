@@ -1,0 +1,24 @@
+---
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+---
+
+<section class="demo-gallery" aria-labelledby="demo-gallery-title">
+  <h2 id="demo-gallery-title">Explore the demos</h2>
+  <p>Get hands-on with shared Rust views, from everyday controls to playful motion.</p>
+  <CardGrid>
+    <LinkCard
+      title="Widget Factory"
+      href="/widget-factory/"
+      description="Explore controls, text editing, menus and a 3D canvas."
+    />
+    <LinkCard
+      title="Animation Lab"
+      href="/animation-lab/"
+      description="Spin a loader, follow a zigzag gauge and play with springs, colors and layout."
+    />
+  </CardGrid>
+</section>
+
+<style>
+  .demo-gallery { margin-block-start: 3rem; }
+</style>

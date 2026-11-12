@@ -3,10 +3,9 @@
 The project website uses the official Astro Starlight theme in `site/`.
 It introduces ScarletUI as a cross-platform Rust toolkit and publishes selected
 repository documentation without modifying the original Markdown sources.
-The homepage embeds a small real ScarletUI/SGFX icon browser. It is not
+The homepage embeds a small real ScarletUI/SGFX drawing canvas. It is not
 an HTML recreation: supported browsers load the same Widget Factory Wasm
-module and render Tabler icons through IconView, with reactive category, icon
-selection and stroke-width controls. A second, independent counter pairs its
+module, with drawing, undo, color and stroke-width controls. A second, independent counter pairs its
 compiled Rust view source with the actual rendered result below the hero.
 
 The surrounding documentation remains usable without JavaScript or WebGPU.
@@ -30,7 +29,8 @@ python3 tools/build-web-samples.py --check target/web-samples
 python3 -m http.server 8765 --bind 127.0.0.1 --directory target/web-samples
 ```
 
-Open `http://localhost:8765/`. The build compiles both examples with
+Open `http://localhost:8765/`. The build compiles Widget Factory, Animation Lab
+and Counter with
 `--release --locked`, imports the existing reference documentation, builds
 Starlight, generates the native rustdoc API reference and matching JavaScript/Wasm
 bindings, validates local links,
@@ -47,9 +47,27 @@ credentials, backend service or browser security flags are required.
 
 Routes: `/` introduction, `/getting-started/`, `/reference/` guides, `/docs/`
 rustdoc API reference, `/try/`
-browser selection, `/counter/`, and `/widget-factory/`. The two full-window
-sample URLs are unchanged. `site/README.md` describes the theme and document
+browser selection, `/counter/`, `/widget-factory/`, and `/animation-lab/`.
+The animation guide is imported at `/reference/animations/`.
+`site/README.md` describes the theme and document
 import/update path; original `docs/` files remain authoritative.
+
+## Animation Lab
+
+Open [Animation Lab](https://ui.scarlet-os.org/animation-lab/) for one application
+with **Play**, **Basics** and **Layout** pages. Play brings together a spinning
+loader, a zigzag gauge, a bouncing jelly and confetti. Use **Load again**,
+**Celebrate!**, **Mix colors**, **Speed up**, **Pause** and **Reset** to experiment;
+Basics and Layout demonstrate animated view properties and arrangements.
+
+The shared native/browser implementation lives in `examples/animation-lab`.
+The package is `scarlet-ui-animation-lab`; its browser entry imports
+`./pkg/scarlet_ui_animation_lab.js`. All samples expose `start`, `stop`,
+`runtime_error`, `pause` and `resume`; the package validator checks those
+generated JavaScript exports along with the matching Wasm artifact.
+The Animation Lab browser smoke checks actual moving pixels and pause/resume,
+without relying on a fixed animation phase. Read the canonical
+[animation guide](../docs/ANIMATIONS.md) for the API and native launch command.
 
 ## GitHub Pages
 
@@ -80,6 +98,7 @@ messages and the specimen's asynchronous visibility/disposal races. Browser
 checks additionally inspect real GPU pixels, drawing/color/stroke-width changes,
 independent counter state, full-demo clicks and slider changes,
 pause/resume state, wheel scrolling, narrow layouts, links and Back navigation.
+Animation Lab adds moving-pixel, public pause/resume, narrow-canvas and stop checks.
 The software-Chromium smoke also uses simulated touch to test Factory internal
 scrolling, cancellation/repeated gestures, taps and Slider drags. This is not
 physical iOS/Safari device coverage.
@@ -105,9 +124,10 @@ No security-weakening flags are recommended for normal visitors.
 - Linux host: existing full workspace suite except target-specific SWS,
   including preview tooling. The preview demo dylib currently exceeds MSVC's
   export limit; Windows native preview support is not claimed.
-- Web: the platform's 20 pure menu/damage tests run on a Linux host, followed by
-  counter/Factory `wasm32-unknown-unknown` builds. Pure logic tests are not browser
-  tests. Static packaging has its own path/capability validation.
+- Web: the platform's pure menu/damage tests run on a Linux host. The combined
+  website package builds Counter, Widget Factory and Animation Lab for
+  `wasm32-unknown-unknown`. Pure logic tests are not browser tests.
+  Static packaging has its own path/capability validation.
 - The separate isolated software-WebGPU job renders and clicks actual canvas
   pixels. See `tools/web-smoke/README.md` for its scoped security conditions and
   fail-closed sandbox/adapter assertions; it is not a hardware-GPU benchmark.

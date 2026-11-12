@@ -18,8 +18,10 @@ from urllib.parse import urlsplit, unquote
 ROOT = Path(__file__).resolve().parents[1]
 DEMOS = (
     ('widget-factory', 'scarlet-ui-widget-factory', 'scarlet_ui_widget_factory'),
+    ('animation-lab', 'scarlet-ui-animation-lab', 'scarlet_ui_animation_lab'),
     ('counter', 'scarlet-ui-web-counter', 'scarlet_ui_web_counter'),
 )
+LIFECYCLE_EXPORTS = ('start', 'stop', 'runtime_error', 'pause', 'resume')
 MARKER = '.scarletui-samples'
 API_PACKAGES = (
     'scarlet-ui', 'scarlet-ui-core', 'scarlet-ui-macros',
@@ -88,10 +90,16 @@ def validate(directory: Path) -> None:
         page = directory / route / 'index.html'
         glue = directory / route / 'pkg' / f'{module}.js'
         wasm = directory / route / 'pkg' / f'{module}_bg.wasm'
+        if not page.is_file():
+            raise ValueError(f'Missing sample page: {page}')
         if f'./pkg/{module}.js' not in page.read_text():
             raise ValueError(f'Missing module import: {page}')
         if not glue.is_file() or f'{module}_bg.wasm' not in glue.read_text():
             raise ValueError(f'Missing WASM reference: {glue}')
+        exports = set(re.findall(r'^export (?:async )?function (\w+)\(', glue.read_text(), re.MULTILINE))
+        missing = set(LIFECYCLE_EXPORTS) - exports
+        if missing:
+            raise ValueError(f'Missing sample lifecycle exports: {glue}: {", ".join(sorted(missing))}')
         if not wasm.is_file() or wasm.read_bytes()[:8] != b'\0asm\x01\0\0\0':
             raise ValueError(f'Invalid WASM artifact: {wasm}')
     validate_api_docs(directory / 'docs')

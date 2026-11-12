@@ -2084,6 +2084,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "scarlet-ui-animation-lab"
+version = "1.0.0"
+dependencies = [
+ "console_error_panic_hook",
+ "scarlet-ui",
+ "scarlet-ui-macros",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
+]
+
+[[package]]
 name = "scarlet-ui-core"
 version = "1.0.0"
 dependencies = [

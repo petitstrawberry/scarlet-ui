@@ -6,6 +6,7 @@ The repository files below are the documentation sources; the website imports th
 ## Application and platform guides
 
 - [Application guide](APPLICATION_GUIDE.md): scenes, windows, layout, input, and common views.
+- [Animations](ANIMATIONS.md): state-driven transitions, scoped animations, interruption, and immediate updates.
 - [Platforms and backends](PLATFORM_GUIDE.md): feature selection, SGFX dependencies, crate layout, and platform integration.
 - [Live preview](LIVE_PREVIEW.md): preview declarations, host commands, state ownership, and reload.
 - [Preview server protocol](PREVIEW_PROTOCOL.md): editor integration and the complete Protocol v1 wire format.

@@ -64,6 +64,11 @@ The report records actual WebGPU adapter information as well as compositor data.
 - Counter title/count pixels must render against a white background (black or
   blank frames do not pass). Two actual clicks must change the
   count glyph pixels while retaining the title.
+- Animation Lab must present colored artwork that changes over time. Its public
+  `pause()` export must freeze the presented frame; `resume()` must restore motion.
+  The canvas must remain inside a narrow viewport, without a runtime error,
+  and `stop()` must complete. These checks use no fixed artwork snapshots or
+  tab/control coordinates; they do not assert every Lab interaction.
 - Factory sidebar renders; Controls navigation exposes a red toggle. A click
   removes its red pixels, and a shared View menu action restores them.
 - Resize retains toggle state, and another click uses its new rendered position.

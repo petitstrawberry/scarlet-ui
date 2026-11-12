@@ -17,10 +17,16 @@ export default defineConfig({
         { label: 'Introduction', slug: '' },
         { label: 'Getting started', slug: 'getting-started' },
         { label: 'Try in your browser', slug: 'try' },
+        { label: 'Demos', items: [
+          { label: 'Widget Factory', link: '/widget-factory/' },
+          { label: 'Animation Lab', link: '/animation-lab/' },
+          { label: 'Counter', link: '/counter/' },
+        ] },
         { label: 'Guides', items: [
           { label: 'Project overview', slug: 'reference/project' },
           { label: 'Documentation index', slug: 'reference/documentation' },
           { label: 'Application guide', slug: 'reference/application-guide' },
+          { label: 'Animations', slug: 'reference/animations' },
           { label: 'Platforms and backends', slug: 'reference/platform-guide' },
           { label: 'Live preview', slug: 'reference/live-preview' },
           { label: 'Development', slug: 'reference/development' },
