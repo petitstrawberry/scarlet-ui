@@ -870,8 +870,10 @@ try {
         const menu=await untilPixels(`factory-hidpi-${dpr}-menu`,frame=>
           changedPixels(controls,frame,scaled({x:150,y:32,width:230,height:70}))>100);
         await page.mouse.move(190,48);
+        // At both widths the submenu flips left to stay inside the viewport.
+        // Probe outside the parent menu so its hover highlight cannot pass.
         await untilPixels(`factory-hidpi-${dpr}-submenu`,frame=>
-          changedPixels(menu,frame,scaled({x:width>450?340:4,y:32,width:110,height:70}))>100);
+          changedPixels(menu,frame,scaled({x:4,y:32,width:110,height:70}))>100);
         await page.keyboard.press('Escape');
         await page.keyboard.press('Escape');
         await page.mouse.move(width*.6,height*.5);
