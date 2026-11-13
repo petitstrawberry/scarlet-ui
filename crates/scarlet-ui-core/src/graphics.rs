@@ -1144,6 +1144,14 @@ impl TextMeasure {
     pub(crate) fn rounded_width(advance: f32) -> f32 {
         ceil_i32(advance).max(0) as f32
     }
+
+    /// Distance between the origins of two lines, as text drawing advances.
+    pub(crate) fn line_height(&self) -> f32 {
+        match &self.font_stack {
+            Some(stack) => line_height_sized_with_font_stack(self.font_size, stack) as f32,
+            None => fallback_line_height(self.font_size) as f32,
+        }
+    }
 }
 
 pub(crate) fn text_font_revision() -> usize {

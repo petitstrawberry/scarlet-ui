@@ -10,8 +10,10 @@ use crate::geometry::{Point, Rect, Size};
 use crate::graphics;
 use crate::renderer::PaintContext;
 use crate::view::View;
+use super::text_fit::{self, Truncation};
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::any::Any;
 
 /// Semantic type sizes for titles, content and supporting labels.
@@ -75,14 +77,17 @@ impl TextTone {
 
 /// Text View - displays a string of text.
 ///
-/// Text retains its measured line layout and clips overflow to the allocated
-/// size; constraining its width does not introduce automatic line wrapping.
+/// Text takes its natural width when it can. Given less, it shortens the line
+/// with an ellipsis ([`Self::truncation`], at the end by default), or wraps
+/// onto more lines when [`Self::line_limit`] allows them.
 #[derive(Clone)]
 pub struct Text {
     content: String,
     content_state: Option<crate::state::State<String>>,
     font_size: f32,
     color: Color,
+    truncation: Truncation,
+    line_limit: Option<usize>,
 }
 
 impl Text {
@@ -95,6 +100,8 @@ impl Text {
             content_state: None,
             font_size: TextStyle::Body.font_size(),
             color: palette.text_primary(),
+            truncation: Truncation::Tail,
+            line_limit: Some(1),
         }
     }
 
@@ -143,6 +150,21 @@ impl Text {
         self
     }
 
+    /// Where a line that does not fit is shortened with an ellipsis: at the
+    /// end (the default), the start, or the middle (good for paths).
+    pub fn truncation(mut self, truncation: Truncation) -> Self {
+        self.truncation = truncation;
+        self
+    }
+
+    /// How many lines the text may wrap onto when its width is limited:
+    /// `Some(1)` (the default) keeps one line, `None` allows as many as it
+    /// needs. Text left over after the last line ends in an ellipsis.
+    pub fn line_limit(mut self, lines: Option<usize>) -> Self {
+        self.line_limit = lines;
+        self
+    }
+
     /// Get the text content
     pub fn content(&self) -> &str {
         &self.content
@@ -168,10 +190,10 @@ impl Text {
 
 impl View for Text {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::new(
-            self.clone(),
-            TextRenderObject::new(self.content_for_render(), self.font_size, self.color),
-        ))
+        let mut render = TextRenderObject::new(self.content_for_render(), self.font_size, self.color);
+        render.truncation = self.truncation;
+        render.line_limit = self.line_limit;
+        Box::new(RenderElement::new(self.clone(), render))
     }
 
     fn listenables(&self) -> alloc::vec::Vec<&dyn crate::state::Listenable> {
@@ -191,6 +213,14 @@ pub struct TextRenderObject {
     content: String,
     font_size: f32,
     color: Color,
+    truncation: Truncation,
+    line_limit: Option<usize>,
+    /// The lines drawn, fitted to the last width; the content when it fits.
+    lines: Vec<String>,
+    line_height: f32,
+    /// The width and font revision `lines` were fitted for, and the size
+    /// they take.
+    fitted: Option<(u32, usize, Size)>,
     size: Size,
     buffer: Option<Buffer>,
     // Intrinsic measurement is independent of parent constraints. Keep it with
@@ -204,9 +234,14 @@ impl TextRenderObject {
     /// Create a new TextRenderObject
     pub fn new(content: String, font_size: f32, color: Color) -> Self {
         Self {
+            lines: alloc::vec![content.clone()],
             content,
             font_size,
             color,
+            truncation: Truncation::Tail,
+            line_limit: Some(1),
+            line_height: 0.0,
+            fitted: None,
             size: Size::ZERO,
             buffer: None,
             intrinsic_measurement: None,
@@ -269,9 +304,42 @@ impl ElementRenderObject for TextRenderObject {
         let mut width = measured_width as f32;
         let mut height = measured_height as f32;
 
-        // Apply max constraints (don't exceed maximum)
-        if constraints.max_width.is_finite() {
-            width = width.min(constraints.max_width.max(0.0));
+        let limit = constraints.max_width.max(0.0);
+        if constraints.max_width.is_finite() && width > limit {
+            // Too wide: shorten with an ellipsis, or wrap onto more lines.
+            let revision = self.intrinsic_measurement.map_or(0, |(revision, _)| revision);
+            let fitted = match self.fitted {
+                Some((bits, fitted_revision, size))
+                    if bits == limit.to_bits() && fitted_revision == revision =>
+                {
+                    size
+                }
+                _ => {
+                    let measure = graphics::TextMeasure::new(&self.content, self.font_size);
+                    self.lines = text_fit::fit(
+                        &self.content,
+                        &measure,
+                        limit,
+                        self.line_limit,
+                        self.truncation,
+                    );
+                    self.line_height = measure.line_height();
+                    let widest = self
+                        .lines
+                        .iter()
+                        .map(|line| measure.size(line).0)
+                        .max()
+                        .unwrap_or(0) as f32;
+                    let extra = self.lines.len().saturating_sub(1) as f32 * self.line_height;
+                    let size = Size::new(widest.min(limit), height + extra);
+                    self.fitted = Some((limit.to_bits(), revision, size));
+                    size
+                }
+            };
+            width = fitted.width;
+            height = fitted.height;
+        } else if self.fitted.take().is_some() {
+            self.lines = alloc::vec![self.content.clone()];
         }
         if constraints.max_height.is_finite() {
             height = height.min(constraints.max_height.max(0.0));
@@ -346,7 +414,10 @@ impl ElementRenderObject for TextRenderObject {
             canvas.fill_rect(0, 0, width, height, Color::TRANSPARENT);
 
             // Draw text
-            canvas.draw_text_sized(0, 0, &self.content, self.color, self.font_size);
+            for (index, line) in self.lines.iter().enumerate() {
+                let y = libm::roundf(index as f32 * self.line_height) as i32;
+                canvas.draw_text_sized(0, y, line, self.color, self.font_size);
+            }
         } else {
             if crate::debug::is_enabled() {
                 crate::logln!("[TextRenderObject] render: NO BUFFER!");
@@ -369,7 +440,10 @@ impl ElementRenderObject for TextRenderObject {
         // Match the bounds of the CPU text buffer. Ancestor clips (including
         // edge-to-edge scroll viewports) can be wider than this text's layout.
         ctx.push_clip(Rect::new(origin, self.size));
-        ctx.draw_text(origin, self.content.clone(), self.color, self.font_size);
+        for (index, line) in self.lines.iter().enumerate() {
+            let point = Point::new(origin.x, origin.y + index as f32 * self.line_height);
+            ctx.draw_text(point, line.clone(), self.color, self.font_size);
+        }
         ctx.pop_clip();
         true
     }
@@ -379,12 +453,22 @@ impl ElementRenderObject for TextRenderObject {
             return UpdateResult::Replaced;
         };
         let content = text.content_for_render();
-        if self.content == content && self.font_size == text.font_size && self.color == text.color {
+        if self.content == content
+            && self.font_size == text.font_size
+            && self.color == text.color
+            && self.truncation == text.truncation
+            && self.line_limit == text.line_limit
+        {
             return UpdateResult::NoChange;
         }
         if self.content != content || self.font_size != text.font_size {
             self.intrinsic_measurement = None;
         }
+        // Fit again at the next layout.
+        self.fitted = None;
+        self.lines = alloc::vec![content.clone()];
+        self.truncation = text.truncation;
+        self.line_limit = text.line_limit;
         self.content = content;
         self.font_size = text.font_size;
         self.color = text.color;
@@ -404,17 +488,18 @@ mod tests {
 
     #[test]
     fn dense_label_relayout_reuses_intrinsics_and_invalidates_content_size_and_font_revision() {
+        // The first ellipsis may load a fallback face, which moves the font
+        // revision once; settle it before counting measurements.
+        graphics::measure_text_sized(text_fit::ELLIPSIS, 13.);
         let mut labels: alloc::vec::Vec<_> = (0..1024)
             .map(|i| TextRenderObject::new(alloc::format!("Label {i:04}"), 13., Color::BLACK))
             .collect();
         let loose = LayoutConstraints::loose(1000., 1000.);
         let natural: alloc::vec::Vec<_> = labels.iter_mut().map(|l| l.layout(loose)).collect();
         for (label, expected) in labels.iter_mut().zip(natural) {
+            // Too narrow for even the ellipsis: nothing is drawn.
             let small = label.layout(LayoutConstraints::loose(2., 3.));
-            assert_eq!(
-                small,
-                Size::new(expected.width.min(2.), expected.height.min(3.))
-            );
+            assert_eq!(small, Size::new(0., expected.height.min(3.)));
             assert_eq!(label.layout(loose), expected);
             assert_eq!(
                 label.measurement_count, 1,
@@ -452,8 +537,10 @@ mod tests {
         let natural = text.layout(LayoutConstraints::loose(f32::INFINITY, f32::INFINITY));
         assert!(natural.width > 40.0);
         for (width, height) in [(40.0, natural.height), (40.0, 8.0)] {
+            // Shortened with an ellipsis to fit, never wider than given.
             let size = text.layout(LayoutConstraints::loose(width, height));
-            assert_eq!(size, Size::new(width, height));
+            assert!(size.width > 20.0 && size.width <= width, "{size:?}");
+            assert_eq!(size.height, height);
             let origin = Point::new(12.0, 10.0);
             let mut ctx = PaintContext::new();
             // The parent clips the left edge; Text must also clip its right
@@ -499,6 +586,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn narrow_text_draws_an_ellipsis_or_wraps_and_widens_back() {
+        let content = "Staged changes in a folder with a long name";
+        let natural = graphics::measure_text_sized(content, 13.).0 as f32;
+        let mut text = TextRenderObject::new(String::from(content), 13., Color::BLACK);
+        let one_line = text.layout(LayoutConstraints::loose(natural, 100.));
+        let narrow = text.layout(LayoutConstraints::loose(natural / 2., 100.));
+        assert!(narrow.width <= natural / 2. && narrow.height == one_line.height);
+        assert_eq!(text.lines.len(), 1);
+        assert!(text.lines[0].ends_with(text_fit::ELLIPSIS), "{:?}", text.lines);
+        let mut ctx = PaintContext::new();
+        text.paint(&mut ctx, Point::ZERO);
+        let drawn: alloc::vec::Vec<_> = ctx
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::DrawText { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(drawn, text.lines);
+        // Given its width back, the whole label returns.
+        assert_eq!(text.layout(LayoutConstraints::loose(natural, 100.)), one_line);
+        assert_eq!(text.lines, [content]);
+
+        text.line_limit = None;
+        text.fitted = None;
+        let wrapped = text.layout(LayoutConstraints::loose(natural / 2., 100.));
+        assert!(text.lines.len() >= 2 && !text.lines.concat().contains(text_fit::ELLIPSIS));
+        assert!(wrapped.height > one_line.height && wrapped.width <= natural / 2.);
     }
 
     #[test]

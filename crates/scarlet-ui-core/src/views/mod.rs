@@ -33,6 +33,7 @@ mod tab;
 mod tab_pane;
 mod text;
 pub(crate) mod text_field;
+mod text_fit;
 mod text_grid;
 pub(crate) mod text_grid_boxdraw;
 pub mod text_view;
@@ -72,6 +73,7 @@ pub use surface::{ChromeStyle, ElevationRole, GlassMaterial, Surface, SurfaceRol
 pub use tab_pane::TabPane;
 pub use tab::{TabBarPlacement, TabBarPosition, TabItem, TabStyle, TabView, TabViewRenderObject};
 pub use text::{Text, TextRenderObject, TextStyle, TextTone};
+pub use text_fit::Truncation;
 pub use text_field::{TextField, TextFieldRenderObject};
 pub use text_grid::{
     TextGrid, TextGridBuffer, TextGridCell, TextGridCursor, TextGridRenderObject,
