@@ -67,6 +67,10 @@ impl AnimationLab {
         // the change in the first card's position (44 px at a 715 px viewport).
         ScrollView::new(NaturalContent(page).key("animation-lab-page"))
             .vertical()
+            // These pages scroll vertically. Browser pixel wheels have no
+            // reliable gesture identity, so requiring a 4:1 axis ratio on
+            // every sample drops ordinary diagonal finger motion mid-scroll.
+            .exclusive_wheel_axis_lock(1.0, 0.0)
             .on_geometry_change(
                 |geometry| {
                     let insets = geometry.safe_area_insets();
@@ -178,7 +182,9 @@ impl Application for AnimationLab {
             .placement(WindowPlacement::At { x: 60, y: 50 })
     }
     fn on_window_created(&mut self, _: &WindowContext, window: &mut dyn PlatformWindow) {
-        self.width.set(window.size().width);
+        // Initial layout has already measured the page inside navigation.
+        // Overwriting it with the full window width includes the sidebar and
+        // leaves the right-hand content clipped until the next resize.
         for code in &self.code {
             code.attach_clipboard(window.text_clipboard().ok());
         }

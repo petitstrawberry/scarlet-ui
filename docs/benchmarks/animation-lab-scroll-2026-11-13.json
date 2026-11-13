@@ -1,0 +1,576 @@
+{
+  "browser": [
+    {
+      "name": "baseline-basics-sustained",
+      "file": "traces/baseline-basics-sustained-1794548335015793000.json",
+      "viewport": {
+        "width": 900,
+        "height": 760,
+        "dpr": 1,
+        "canvasWidth": 900,
+        "canvasHeight": 760
+      },
+      "wheel_events": 80,
+      "input_duration_s": 3.95,
+      "raf_callback_cpu": {
+        "samples": 244,
+        "p50_ms": 0.3,
+        "p95_ms": 2.1,
+        "max_ms": 2.9,
+        "over_16_67_ms": 0
+      },
+      "raf_intervals": {
+        "samples": 244,
+        "p50_ms": 16.7,
+        "p95_ms": 17.4,
+        "max_ms": 17.7,
+        "over_16_67_ms": 145
+      },
+      "whole_capture_summary": {
+        "frames": 600,
+        "wheelEvents": 80,
+        "intervalP50": 16.699999999953434,
+        "intervalP95": 17.400000000023283,
+        "intervalMax": 17.70000000001164,
+        "cpuP50": 0.19999998807907104,
+        "cpuP95": 1.899999976158142,
+        "cpuMax": 2.899999976158142,
+        "over25ms": 0,
+        "over50ms": 0
+      }
+    },
+    {
+      "name": "baseline-chrome-basics",
+      "file": "traces/baseline-chrome-basics-1794548840814136000.json",
+      "viewport": {
+        "width": 900,
+        "height": 760,
+        "dpr": 1,
+        "canvasWidth": 900,
+        "canvasHeight": 760
+      },
+      "wheel_events": 80,
+      "input_duration_s": 4.066,
+      "raf_callback_cpu": {
+        "samples": 246,
+        "p50_ms": 0.5,
+        "p95_ms": 3.9,
+        "max_ms": 5.4,
+        "over_16_67_ms": 0
+      },
+      "raf_intervals": {
+        "samples": 246,
+        "p50_ms": 16.7,
+        "p95_ms": 17.6,
+        "max_ms": 66.7,
+        "over_16_67_ms": 140
+      },
+      "whole_capture_summary": {
+        "frames": 596,
+        "wheelEvents": 80,
+        "intervalP50": 16.699999999982538,
+        "intervalP95": 17.5,
+        "intervalMax": 66.70000000001164,
+        "cpuP50": 0.29999998211860657,
+        "cpuP95": 3,
+        "cpuMax": 6.300000011920929,
+        "over25ms": 2,
+        "over50ms": 1
+      }
+    },
+    {
+      "name": "baseline-chrome-layout",
+      "file": "traces/baseline-chrome-layout-1794548875166664000.json",
+      "viewport": {
+        "width": 900,
+        "height": 760,
+        "dpr": 1,
+        "canvasWidth": 900,
+        "canvasHeight": 760
+      },
+      "wheel_events": 80,
+      "input_duration_s": 3.95,
+      "raf_callback_cpu": {
+        "samples": 244,
+        "p50_ms": 0.8,
+        "p95_ms": 11.3,
+        "max_ms": 17.6,
+        "over_16_67_ms": 1
+      },
+      "raf_intervals": {
+        "samples": 244,
+        "p50_ms": 16.7,
+        "p95_ms": 16.9,
+        "max_ms": 17.7,
+        "over_16_67_ms": 149
+      },
+      "whole_capture_summary": {
+        "frames": 593,
+        "wheelEvents": 80,
+        "intervalP50": 16.699999999982538,
+        "intervalP95": 17.39999999999418,
+        "intervalMax": 50,
+        "cpuP50": 0.30000001192092896,
+        "cpuP95": 9.699999988079071,
+        "cpuMax": 46.30000001192093,
+        "over25ms": 6,
+        "over50ms": 0
+      }
+    },
+    {
+      "name": "baseline-chrome-play",
+      "file": "traces/baseline-chrome-play-1794548676815410000.json",
+      "viewport": {
+        "width": 900,
+        "height": 760,
+        "dpr": 1,
+        "canvasWidth": 900,
+        "canvasHeight": 760
+      },
+      "wheel_events": 80,
+      "input_duration_s": 6.299,
+      "raf_callback_cpu": {
+        "samples": 370,
+        "p50_ms": 16.4,
+        "p95_ms": 23.4,
+        "max_ms": 60.8,
+        "over_16_67_ms": 172
+      },
+      "raf_intervals": {
+        "samples": 370,
+        "p50_ms": 16.7,
+        "p95_ms": 17.6,
+        "max_ms": 66.7,
+        "over_16_67_ms": 224
+      },
+      "whole_capture_summary": {
+        "frames": 568,
+        "wheelEvents": 80,
+        "intervalP50": 16.69999999999709,
+        "intervalP95": 17.599999999998545,
+        "intervalMax": 133.40000000000146,
+        "cpuP50": 16.099999994039536,
+        "cpuP95": 23.80000001192093,
+        "cpuMax": 66.59999999403954,
+        "over25ms": 17,
+        "over50ms": 4
+      }
+    },
+    {
+      "name": "baseline-layout-sustained",
+      "file": "traces/baseline-layout-sustained-1794548377537068000.json",
+      "viewport": {
+        "width": 900,
+        "height": 760,
+        "dpr": 1,
+        "canvasWidth": 900,
+        "canvasHeight": 760
+      },
+      "wheel_events": 80,
+      "input_duration_s": 3.95,
+      "raf_callback_cpu": {
+        "samples": 243,
+        "p50_ms": 0.3,
+        "p95_ms": 3,
+        "max_ms": 3.3,
+        "over_16_67_ms": 0
+      },
+      "raf_intervals": {
+        "samples": 243,
+        "p50_ms": 16.7,
+        "p95_ms": 17.1,
+        "max_ms": 17.7,
+        "over_16_67_ms": 152
+      },
+      "whole_capture_summary": {
+        "frames": 600,
+        "wheelEvents": 80,
+        "intervalP50": 16.699999999953434,
+        "intervalP95": 16.79999999998836,
+        "intervalMax": 17.70000000001164,
+        "cpuP50": 0.09999999403953552,
+        "cpuP95": 2.5999999940395355,
+        "cpuMax": 3.300000011920929,
+        "over25ms": 0,
+        "over50ms": 0
+      }
+    },
+    {
+      "name": "baseline-play-sustained",
+      "file": "traces/baseline-play-sustained-1794548303710661000.json",
+      "viewport": {
+        "width": 900,
+        "height": 760,
+        "dpr": 1,
+        "canvasWidth": 900,
+        "canvasHeight": 760
+      },
+      "wheel_events": 80,
+      "input_duration_s": 6.834,
+      "raf_callback_cpu": {
+        "samples": 415,
+        "p50_ms": 15.5,
+        "p95_ms": 17.8,
+        "max_ms": 19.5,
+        "over_16_67_ms": 108
+      },
+      "raf_intervals": {
+        "samples": 415,
+        "p50_ms": 16.7,
+        "p95_ms": 17.5,
+        "max_ms": 34,
+        "over_16_67_ms": 247
+      },
+      "whole_capture_summary": {
+        "frames": 586,
+        "wheelEvents": 80,
+        "intervalP50": 16.699999999953434,
+        "intervalP95": 17.400000000023283,
+        "intervalMax": 116.70000000001164,
+        "cpuP50": 14.400000005960464,
+        "cpuP95": 17.69999998807907,
+        "cpuMax": 19.5,
+        "over25ms": 5,
+        "over50ms": 2
+      }
+    },
+    {
+      "name": "optimized-basics-sustained",
+      "file": "traces/optimized-basics-sustained-1794550432345033000.json",
+      "viewport": {
+        "width": 900,
+        "height": 760,
+        "dpr": 1,
+        "canvasWidth": 900,
+        "canvasHeight": 760
+      },
+      "wheel_events": 80,
+      "input_duration_s": 4.05,
+      "raf_callback_cpu": {
+        "samples": 249,
+        "p50_ms": 0.2,
+        "p95_ms": 1.2,
+        "max_ms": 1.5,
+        "over_16_67_ms": 0
+      },
+      "raf_intervals": {
+        "samples": 249,
+        "p50_ms": 16.7,
+        "p95_ms": 17.5,
+        "max_ms": 17.7,
+        "over_16_67_ms": 143
+      },
+      "whole_capture_summary": {
+        "frames": 600,
+        "wheelEvents": 80,
+        "intervalP50": 16.699999999982538,
+        "intervalP95": 17.599999999976717,
+        "intervalMax": 17.70000000001164,
+        "cpuP50": 0.09999999403953552,
+        "cpuP95": 1.0999999940395355,
+        "cpuMax": 1.5,
+        "over25ms": 0,
+        "over50ms": 0
+      }
+    },
+    {
+      "name": "optimized-chrome-basics",
+      "file": "traces/optimized-chrome-basics-1794550174068532000.json",
+      "viewport": {
+        "width": 900,
+        "height": 760,
+        "dpr": 1,
+        "canvasWidth": 900,
+        "canvasHeight": 760
+      },
+      "wheel_events": 80,
+      "input_duration_s": 4.437,
+      "raf_callback_cpu": {
+        "samples": 271,
+        "p50_ms": 0.7,
+        "p95_ms": 4.7,
+        "max_ms": 7.9,
+        "over_16_67_ms": 0
+      },
+      "raf_intervals": {
+        "samples": 271,
+        "p50_ms": 16.7,
+        "p95_ms": 17.4,
+        "max_ms": 33.8,
+        "over_16_67_ms": 183
+      },
+      "whole_capture_summary": {
+        "frames": 598,
+        "wheelEvents": 80,
+        "intervalP50": 16.69999999999709,
+        "intervalP95": 17.30000000000291,
+        "intervalMax": 33.80000000000291,
+        "cpuP50": 0.30000001192092896,
+        "cpuP95": 4.199999988079071,
+        "cpuMax": 7.9000000059604645,
+        "over25ms": 1,
+        "over50ms": 0
+      }
+    },
+    {
+      "name": "optimized-chrome-layout",
+      "file": "traces/optimized-chrome-layout-1794550215844072000.json",
+      "viewport": {
+        "width": 900,
+        "height": 760,
+        "dpr": 1,
+        "canvasWidth": 900,
+        "canvasHeight": 760
+      },
+      "wheel_events": 80,
+      "input_duration_s": 3.953,
+      "raf_callback_cpu": {
+        "samples": 243,
+        "p50_ms": 0.8,
+        "p95_ms": 8.3,
+        "max_ms": 11.6,
+        "over_16_67_ms": 0
+      },
+      "raf_intervals": {
+        "samples": 243,
+        "p50_ms": 16.7,
+        "p95_ms": 17.2,
+        "max_ms": 17.7,
+        "over_16_67_ms": 160
+      },
+      "whole_capture_summary": {
+        "frames": 600,
+        "wheelEvents": 80,
+        "intervalP50": 16.699999999982538,
+        "intervalP95": 17.5,
+        "intervalMax": 17.70000000001164,
+        "cpuP50": 0.30000001192092896,
+        "cpuP95": 7.5999999940395355,
+        "cpuMax": 11.599999994039536,
+        "over25ms": 0,
+        "over50ms": 0
+      }
+    },
+    {
+      "name": "optimized-chrome-play",
+      "file": "traces/optimized-chrome-play-1794550106621589000.json",
+      "viewport": {
+        "width": 900,
+        "height": 760,
+        "dpr": 1,
+        "canvasWidth": 900,
+        "canvasHeight": 760
+      },
+      "wheel_events": 80,
+      "input_duration_s": 5.855,
+      "raf_callback_cpu": {
+        "samples": 350,
+        "p50_ms": 11.5,
+        "p95_ms": 18.9,
+        "max_ms": 45,
+        "over_16_67_ms": 44
+      },
+      "raf_intervals": {
+        "samples": 350,
+        "p50_ms": 16.7,
+        "p95_ms": 17.6,
+        "max_ms": 51,
+        "over_16_67_ms": 238
+      },
+      "whole_capture_summary": {
+        "frames": 583,
+        "wheelEvents": 80,
+        "intervalP50": 16.700000000000728,
+        "intervalP95": 17.599999999998545,
+        "intervalMax": 83.40000000000146,
+        "cpuP50": 10.900000005960464,
+        "cpuP95": 18.400000005960464,
+        "cpuMax": 86.90000000596046,
+        "over25ms": 10,
+        "over50ms": 3
+      }
+    },
+    {
+      "name": "optimized-layout-sustained",
+      "file": "traces/optimized-layout-sustained-1794550514652699000.json",
+      "viewport": {
+        "width": 900,
+        "height": 760,
+        "dpr": 1,
+        "canvasWidth": 900,
+        "canvasHeight": 760
+      },
+      "wheel_events": 80,
+      "input_duration_s": 4.5,
+      "raf_callback_cpu": {
+        "samples": 277,
+        "p50_ms": 0.3,
+        "p95_ms": 3.4,
+        "max_ms": 7,
+        "over_16_67_ms": 0
+      },
+      "raf_intervals": {
+        "samples": 277,
+        "p50_ms": 16.7,
+        "p95_ms": 17.4,
+        "max_ms": 17.7,
+        "over_16_67_ms": 169
+      },
+      "whole_capture_summary": {
+        "frames": 600,
+        "wheelEvents": 80,
+        "intervalP50": 16.699999999982538,
+        "intervalP95": 17.5,
+        "intervalMax": 17.70000000001164,
+        "cpuP50": 0.10000002384185791,
+        "cpuP95": 2.7000000178813934,
+        "cpuMax": 7,
+        "over25ms": 0,
+        "over50ms": 0
+      }
+    },
+    {
+      "name": "optimized-play-sustained",
+      "file": "traces/optimized-play-sustained-1794550341271111000.json",
+      "viewport": {
+        "width": 900,
+        "height": 760,
+        "dpr": 1,
+        "canvasWidth": 900,
+        "canvasHeight": 760
+      },
+      "wheel_events": 80,
+      "input_duration_s": 5.301,
+      "raf_callback_cpu": {
+        "samples": 325,
+        "p50_ms": 7.4,
+        "p95_ms": 8.5,
+        "max_ms": 10.6,
+        "over_16_67_ms": 0
+      },
+      "raf_intervals": {
+        "samples": 325,
+        "p50_ms": 16.7,
+        "p95_ms": 17.6,
+        "max_ms": 17.7,
+        "over_16_67_ms": 188
+      },
+      "whole_capture_summary": {
+        "frames": 600,
+        "wheelEvents": 80,
+        "intervalP50": 16.69999999999709,
+        "intervalP95": 17.59999999999127,
+        "intervalMax": 17.80000000000291,
+        "cpuP50": 6,
+        "cpuP95": 8.300000011920929,
+        "cpuMax": 10.599999994039536,
+        "over25ms": 0,
+        "over50ms": 0
+      }
+    }
+  ],
+  "native": [
+    {
+      "name": "baseline-play",
+      "file": "baseline-native-frames.log",
+      "byte_range": [
+        235426,
+        370063
+      ],
+      "render_cpu": {
+        "samples": 847,
+        "p50_ms": 13.97,
+        "p95_ms": 15.943,
+        "max_ms": 20.051,
+        "over_16_67_ms": 31
+      },
+      "backend_cpu": {
+        "samples": 847,
+        "p50_ms": 12.798,
+        "p95_ms": 14.833,
+        "max_ms": 18.821,
+        "over_16_67_ms": 14
+      }
+    },
+    {
+      "name": "baseline-basics",
+      "file": "baseline-native-frames.log",
+      "byte_range": [
+        439553,
+        444862
+      ],
+      "render_cpu": {
+        "samples": 12,
+        "p50_ms": 1.102,
+        "p95_ms": 12.621,
+        "max_ms": 12.621,
+        "over_16_67_ms": 0
+      },
+      "backend_cpu": {
+        "samples": 12,
+        "p50_ms": 1.033,
+        "p95_ms": 12.535,
+        "max_ms": 12.535,
+        "over_16_67_ms": 0
+      }
+    },
+    {
+      "name": "baseline-layout",
+      "file": "baseline-native-frames.log",
+      "byte_range": [
+        445344,
+        457323
+      ],
+      "render_cpu": {
+        "samples": 41,
+        "p50_ms": 2.51,
+        "p95_ms": 2.755,
+        "max_ms": 5.307,
+        "over_16_67_ms": 0
+      },
+      "backend_cpu": {
+        "samples": 41,
+        "p50_ms": 2.472,
+        "p95_ms": 2.721,
+        "max_ms": 4.726,
+        "over_16_67_ms": 0
+      }
+    }
+  ],
+  "notes": [
+    "Browser figures are the actual app requestAnimationFrame callback wall time; intervals are browser callback opportunities, not confirmed presentations.",
+    "Browser active windows extend from the first delivered wheel through 100ms after the last. Inputs are CUA-generated pixel wheel events, not a physical trackpad trace.",
+    "Native figures are SCARLET_UI_FRAME_LOG render/submit wall times, with logging enabled identically before and after; they exclude physical scanout.",
+    "Compare before/after within the same backend and viewport; browser DPR1 and native DPR2 are different rendering conditions.",
+    "Untouched local edits recorded in initial-working-tree.patch are common to both baselines and optimized builds."
+  ],
+  "provenance": {
+    "baseline": {
+      "commit": "2aa328e8e0a9e68d1e5c027f1be038c0fb0e1ace",
+      "dirty": true,
+      "preserved_user_changes": [
+        " M benchmarks/gui-bench/README.md",
+        " M benchmarks/gui-bench/prepare.py",
+        " M crates/scarlet-ui-core/src/event/dispatcher.rs",
+        " M crates/scarlet-ui/examples/scroll-benchmark.rs",
+        " M docs/SCROLL_PERFORMANCE.md",
+        "?? crates/scarlet-ui-core/examples/animation-dispatch.rs",
+        "?? crates/scarlet-ui-core/src/event/path_origins_tests.rs"
+      ]
+    },
+    "common_local_patch_sha256": "e4c7204ca207b84ff89311e1bb67ecb14d72648ce425aa50f0bef90174daf16a",
+    "optimized": {
+      "base": "2aa328e8e0a9e68d1e5c027f1be038c0fb0e1ace",
+      "source_sha256": {
+        "crates/scarlet-ui-renderer-sgfx/src/geometry.rs": "fd0ffed10dccfc487cb83dbbf3e5a48880a2711bd1bf7d8e45f25f98e3119724",
+        "crates/scarlet-ui-platform-web/src/lib.rs": "45718c055c3938c0d8b411839c716d647b75f182621e927d8b4554562e9b6648",
+        "crates/scarlet-ui-platform-web/src/frame_pacing.rs": "4e811362849df51f0e35e02513f82845388935ea6060ecc45dddc28a073acf3f",
+        "examples/animation-lab/src/lab.rs": "548d525027892779ed1515b01c8d295b5248b56654a1e02fc7b71cd40534cecc"
+      },
+      "native_sha256": "bd65a3c58985b6456747d5c627f322329d3831e6b1e0f1aa0050d377ff48fa1d",
+      "wasm_sha256": "6c95e42a47c8168bfaeb092c9e2dfe93c1aad83a06f836bdefce6751f21c0fd0"
+    },
+    "raw_artifacts": "artifacts/web-scroll/2026-11-13 (local capture directory; not included in the PR)",
+    "comparison_scope": "Recorded before the later View code, compact-card spacing and initial-width UI fixes. Local dispatcher/benchmark edits were common to both measured builds but are not part of the PR."
+  }
+}

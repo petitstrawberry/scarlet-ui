@@ -250,6 +250,24 @@ struct FillEdge {
     end: Point2,
 }
 
+impl FillEdge {
+    fn minimum_y(self) -> f32 {
+        self.start.y.min(self.end.y)
+    }
+
+    fn maximum_y(self) -> f32 {
+        self.start.y.max(self.end.y)
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TessellationWork {
+    paths: usize,
+    intersection_candidates: usize,
+    band_edge_visits: usize,
+}
+
 /// Stateful tessellator for one paint list.
 // Local meshes survive frame lowering. Translation, color and clip are applied
 // on replay, so scrolling/hover does not rebuild identical shadow layers.
@@ -300,6 +318,8 @@ pub(crate) struct Tessellator {
     clip_stack: Vec<ClipShape>,
     vertices: Vec<Vertex>,
     pub(crate) shape_cache: ShapeCache,
+    #[cfg(test)]
+    tessellation_work: TessellationWork,
 }
 
 impl Tessellator {
@@ -320,6 +340,8 @@ impl Tessellator {
             clip_stack: Vec::new(),
             vertices: Vec::new(),
             shape_cache: ShapeCache::default(),
+            #[cfg(test)]
+            tessellation_work: TessellationWork::default(),
         })
     }
 
@@ -379,6 +401,12 @@ impl Tessellator {
 
     pub(crate) fn fill_path(&mut self, path: &[Point]) -> Result<Option<GeometryRange>> {
         let mut points = Vec::new();
+        let (mut left, mut top, mut right, mut bottom) = (
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        );
         points
             .try_reserve(path.len())
             .map_err(|_| Error::FrameTooComplex)?;
@@ -387,6 +415,10 @@ impl Tessellator {
             if !point.is_finite() {
                 return Err(Error::InvalidFrame);
             }
+            left = left.min(point.x);
+            top = top.min(point.y);
+            right = right.max(point.x);
+            bottom = bottom.max(point.y);
             if points.last().is_none_or(|last| !points_near(*last, point)) {
                 points.push(point);
             }
@@ -395,6 +427,25 @@ impl Tessellator {
             points.pop();
         }
         if points.len() < 3 {
+            return Ok(None);
+        }
+
+        // Validate the entire path before culling. A cold scroll tile can select
+        // a large recording while only a few of its paths reach this scissor.
+        // Keep a device-pixel margin for boundary rounding, as for cached shapes.
+        let Some(clip) = self.effective_scissor() else {
+            return Ok(None);
+        };
+        // Unclipped full-frame lowering also records local meshes for later
+        // translation. Their offscreen vertices must survive that recording.
+        // Tile/damage bounds and explicit clips can safely reject whole paths.
+        let full_frame = FloatRect::new(0., 0., self.frame_width as f32, self.frame_height as f32);
+        if (self.render_bounds != full_frame || !self.clip_stack.is_empty())
+            && (right < clip.x as f32 - 1.
+                || bottom < clip.y as f32 - 1.
+                || left > (clip.x + clip.width) as f32 + 1.
+                || top > (clip.y + clip.height) as f32 + 1.)
+        {
             return Ok(None);
         }
 
@@ -991,6 +1042,10 @@ impl Tessellator {
     }
 
     fn tessellate_even_odd(&mut self, points: &[Point2]) -> Result<()> {
+        #[cfg(test)]
+        {
+            self.tessellation_work.paths += 1;
+        }
         let mut edges = Vec::new();
         let mut bands = Vec::new();
         edges
@@ -1015,13 +1070,41 @@ impl Tessellator {
         // boundaries the left-to-right edge order is stable, so pairing
         // crossings produces the exact even-odd interior, including
         // self-intersecting paths.
-        for left in 0..edges.len() {
-            for right in left + 1..edges.len() {
+        // Sweep overlapping Y intervals rather than testing every edge pair.
+        // This still considers all possible self-intersections; sampled circles
+        // and curves usually have only a few overlapping edges at each height.
+        let mut order = Vec::new();
+        order
+            .try_reserve(edges.len())
+            .map_err(|_| Error::FrameTooComplex)?;
+        order.extend(0..edges.len());
+        order.sort_unstable_by(|&left, &right| {
+            edges[left]
+                .minimum_y()
+                .partial_cmp(&edges[right].minimum_y())
+                .unwrap_or(core::cmp::Ordering::Equal)
+                .then_with(|| left.cmp(&right))
+        });
+        let mut active: Vec<usize> = Vec::new();
+        active
+            .try_reserve(edges.len())
+            .map_err(|_| Error::FrameTooComplex)?;
+        for &index in &order {
+            let minimum = edges[index].minimum_y();
+            active.retain(|&other| edges[other].maximum_y() > minimum);
+            for &other in &active {
+                // Keep the original argument order, including its f32 rounding.
+                let (left, right) = (index.min(other), index.max(other));
+                #[cfg(test)]
+                {
+                    self.tessellation_work.intersection_candidates += 1;
+                }
                 if let Some(y) = edge_intersection_y(edges[left], edges[right]) {
                     bands.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
                     bands.push(y);
                 }
             }
+            active.push(index);
         }
         bands.sort_by(|left, right| {
             left.partial_cmp(right)
@@ -1030,6 +1113,11 @@ impl Tessellator {
         bands.dedup_by(|left, right| (*left - *right).abs() <= 0.0001);
 
         let mut crossings: Vec<(f32, usize)> = Vec::new();
+        crossings
+            .try_reserve(edges.len())
+            .map_err(|_| Error::FrameTooComplex)?;
+        active.clear();
+        let mut next_edge = 0;
         for band in bands.windows(2) {
             let top = band[0];
             let bottom = band[1];
@@ -1038,20 +1126,24 @@ impl Tessellator {
             }
             let middle = top + (bottom - top) * 0.5;
             crossings.clear();
-            for (index, edge) in edges.iter().copied().enumerate() {
-                let minimum = edge.start.y.min(edge.end.y);
-                let maximum = edge.start.y.max(edge.end.y);
-                if middle > minimum && middle < maximum {
-                    crossings
-                        .try_reserve(1)
-                        .map_err(|_| Error::FrameTooComplex)?;
-                    crossings.push((edge_x_at(edge, middle), index));
+            while next_edge < order.len() && edges[order[next_edge]].minimum_y() < middle {
+                active.push(order[next_edge]);
+                next_edge += 1;
+            }
+            active.retain(|&index| middle < edges[index].maximum_y());
+            for &index in &active {
+                #[cfg(test)]
+                {
+                    self.tessellation_work.band_edge_visits += 1;
                 }
+                crossings.push((edge_x_at(edges[index], middle), index));
             }
             crossings.sort_by(|left, right| {
                 left.0
                     .partial_cmp(&right.0)
                     .unwrap_or(core::cmp::Ordering::Equal)
+                    // The old stable sort encountered equal Xs in edge order.
+                    .then_with(|| left.1.cmp(&right.1))
             });
             for pair in crossings.chunks_exact(2) {
                 let left = edges[pair[0].1];
@@ -1412,6 +1504,360 @@ fn cosine(angle: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Frozen pre-sweep implementation: an independent oracle for band boundaries,
+    // edge tie ordering, and the resulting clipped triangles.
+    fn reference_tessellate(tess: &mut Tessellator, points: &[Point2]) -> Result<()> {
+        let mut edges = Vec::new();
+        let mut bands = Vec::new();
+        edges
+            .try_reserve(points.len())
+            .map_err(|_| Error::FrameTooComplex)?;
+        bands
+            .try_reserve(points.len())
+            .map_err(|_| Error::FrameTooComplex)?;
+        for index in 0..points.len() {
+            let start = points[index];
+            let end = points[(index + 1) % points.len()];
+            bands.push(start.y);
+            if (start.y - end.y).abs() > 0.0001 {
+                edges.push(FillEdge { start, end });
+            }
+        }
+        if edges.len() < 2 {
+            return Ok(());
+        }
+
+        // Edge crossings are band boundaries too. Between consecutive
+        // boundaries the left-to-right edge order is stable, so pairing
+        // crossings produces the exact even-odd interior, including
+        // self-intersecting paths.
+        for left in 0..edges.len() {
+            for right in left + 1..edges.len() {
+                if let Some(y) = edge_intersection_y(edges[left], edges[right]) {
+                    bands.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
+                    bands.push(y);
+                }
+            }
+        }
+        bands.sort_by(|left, right| {
+            left.partial_cmp(right)
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
+        bands.dedup_by(|left, right| (*left - *right).abs() <= 0.0001);
+
+        let mut crossings: Vec<(f32, usize)> = Vec::new();
+        for band in bands.windows(2) {
+            let top = band[0];
+            let bottom = band[1];
+            if bottom - top <= 0.0001 {
+                continue;
+            }
+            let middle = top + (bottom - top) * 0.5;
+            crossings.clear();
+            for (index, edge) in edges.iter().copied().enumerate() {
+                let minimum = edge.start.y.min(edge.end.y);
+                let maximum = edge.start.y.max(edge.end.y);
+                if middle > minimum && middle < maximum {
+                    crossings
+                        .try_reserve(1)
+                        .map_err(|_| Error::FrameTooComplex)?;
+                    crossings.push((edge_x_at(edge, middle), index));
+                }
+            }
+            crossings.sort_by(|left, right| {
+                left.0
+                    .partial_cmp(&right.0)
+                    .unwrap_or(core::cmp::Ordering::Equal)
+            });
+            for pair in crossings.chunks_exact(2) {
+                let left = edges[pair[0].1];
+                let right = edges[pair[1].1];
+                let left_top = edge_x_at(left, top);
+                let left_bottom = edge_x_at(left, bottom);
+                let right_top = edge_x_at(right, top);
+                let right_bottom = edge_x_at(right, bottom);
+                if (right_top - left_top).abs() <= 0.0001
+                    && (right_bottom - left_bottom).abs() <= 0.0001
+                {
+                    continue;
+                }
+                let top_left = Point2::new(left_top, top);
+                let top_right = Point2::new(right_top, top);
+                let bottom_right = Point2::new(right_bottom, bottom);
+                let bottom_left = Point2::new(left_bottom, bottom);
+                tess.push_triangle([
+                    Vertex::solid(top_left),
+                    Vertex::solid(top_right),
+                    Vertex::solid(bottom_right),
+                ])?;
+                tess.push_triangle([
+                    Vertex::solid(top_left),
+                    Vertex::solid(bottom_right),
+                    Vertex::solid(bottom_left),
+                ])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn path_test_tessellator(scale: u32, clip: usize) -> Tessellator {
+        let mut tess =
+            Tessellator::new(scale, 1200, 1200, FloatRect::new(0., 0., 1200., 1200.)).unwrap();
+        if clip != 0 {
+            tess.push_clip(
+                Rect::from_xywh(45.25, 40.125, 100.5, 104.25),
+                if clip == 2 { 23.75 } else { 0. },
+            )
+            .unwrap();
+            tess.push_clip(Rect::from_xywh(30.125, 55.5, 120.75, 100.), 0.)
+                .unwrap();
+        }
+        tess
+    }
+
+    fn assert_path_matches_reference(path: &[Point], scale: u32, origin: Point, clip: usize) {
+        let path = path
+            .iter()
+            .map(|p| Point::new(p.x + origin.x, p.y + origin.y))
+            .collect::<Vec<_>>();
+        let mut actual = path_test_tessellator(scale, clip);
+        let result = actual.fill_path(&path).unwrap();
+        let mut expected = path_test_tessellator(scale, clip);
+        let mut points = Vec::new();
+        for point in &path {
+            let point = Point2::new(point.x * expected.scale, point.y * expected.scale);
+            if points.last().is_none_or(|last| !points_near(*last, point)) {
+                points.push(point);
+            }
+        }
+        if points.len() > 2 && points_near(points[0], points[points.len() - 1]) {
+            points.pop();
+        }
+        if points.len() >= 3 {
+            reference_tessellate(&mut expected, &points).unwrap();
+        }
+        let expected_range = expected.finish_range(0).unwrap();
+        let range = |r: Option<GeometryRange>| {
+            r.map(|r| {
+                (
+                    r.first_vertex,
+                    r.vertex_count,
+                    r.scissor.x,
+                    r.scissor.y,
+                    r.scissor.width,
+                    r.scissor.height,
+                )
+            })
+        };
+        assert_eq!(
+            range(result),
+            range(expected_range),
+            "scale={scale}, origin={origin:?}, clip={clip}, path={path:?}"
+        );
+        for (index, (a, b)) in actual.vertices.iter().zip(&expected.vertices).enumerate() {
+            assert_eq!(
+                (a.position, a.color, a.tex_coord),
+                (b.position, b.color, b.tex_coord),
+                "vertex={index}, scale={scale}, origin={origin:?}, clip={clip}, path={path:?}"
+            );
+        }
+    }
+
+    fn sampled_path(count: usize, f: impl Fn(f32) -> Point) -> Vec<Point> {
+        (0..count)
+            .map(|i| f(core::f32::consts::TAU * i as f32 / count as f32))
+            .collect()
+    }
+
+    #[test]
+    fn scanline_sweep_matches_original_artwork_and_even_odd_intersections() {
+        let polygon = |points: &[(f32, f32)]| {
+            points
+                .iter()
+                .map(|&(x, y)| Point::new(x, y))
+                .collect::<Vec<_>>()
+        };
+        let mut paths = alloc::vec![
+            polygon(&[(20., 20.), (140., 20.), (140., 140.), (20., 140.)]),
+            polygon(&[(20., 20.), (140., 140.), (20., 140.), (140., 20.)]),
+            // Retraced bridge connects an outer contour to a hole.
+            polygon(&[
+                (20., 20.),
+                (140., 20.),
+                (140., 140.),
+                (20., 140.),
+                (20., 20.),
+                (50., 50.),
+                (50., 110.),
+                (110., 110.),
+                (110., 50.),
+                (50., 50.),
+                (20., 20.),
+            ]),
+            // Coincident edges must still cancel in the even-odd rule.
+            polygon(&[
+                (20., 20.),
+                (140., 20.),
+                (140., 140.),
+                (20., 140.),
+                (20., 20.),
+                (140., 20.),
+                (140., 140.),
+                (20., 140.),
+            ]),
+            polygon(&[(20., 40.), (80., 40.00005), (140., 40.0002), (80., 80.)]),
+            polygon(&[(20., 20.), (20., 20.), (140., 20.), (80., 140.), (20., 20.)]),
+            polygon(&[(20., 20.), (80., 80.), (140., 140.)]),
+            sampled_path(48, |a| Point::new(
+                80. + 50. * libm::cosf(a),
+                80. + 50. * libm::sinf(a)
+            )),
+            sampled_path(48, |a| Point::new(
+                80. + 60. * libm::cosf(a),
+                80. + 25. * libm::sinf(a)
+            )),
+            sampled_path(60, |a| {
+                let r = 50. * (0.76 + 0.24 * libm::cosf(5. * a));
+                Point::new(80. + r * libm::cosf(a + 0.2), 80. + r * libm::sinf(a + 0.2))
+            }),
+            sampled_path(48, |a| {
+                let s = libm::sinf(a);
+                let h = 13. * libm::cosf(a)
+                    - 5. * libm::cosf(2. * a)
+                    - 2. * libm::cosf(3. * a)
+                    - libm::cosf(4. * a);
+                Point::new(80. + 50. * s * s * s, 80. - 50. * h / 16.)
+            }),
+        ];
+        let pentagon = sampled_path(5, |a| {
+            Point::new(80. + 60. * libm::cosf(a), 80. + 60. * libm::sinf(a))
+        });
+        paths.push([0, 2, 4, 1, 3].map(|i| pentagon[i]).to_vec());
+        for path in &paths {
+            for reverse in [false, true] {
+                let mut path = path.clone();
+                if reverse {
+                    path.reverse();
+                }
+                for scale in [1000, 1250, 1333, 2000, 3000] {
+                    for origin in [
+                        Point::ZERO,
+                        Point::new(0.25, 0.5),
+                        Point::new(-13.125, 17.75),
+                    ] {
+                        for clip in 0..3 {
+                            assert_path_matches_reference(&path, scale, origin, clip);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scanline_sweep_matches_original_for_unordered_and_coincident_edges() {
+        let mut seed = 0x1234_5678_u32;
+        let mut coordinate = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            30. + (seed % 800) as f32 / 8.
+        };
+        for count in 3..=32 {
+            for _ in 0..4 {
+                let path = (0..count)
+                    .map(|_| Point::new(coordinate(), coordinate()))
+                    .collect::<Vec<_>>();
+                for scale in [1000, 1333] {
+                    assert_path_matches_reference(&path, scale, Point::new(0.25, -0.125), 0);
+                    assert_path_matches_reference(&path, scale, Point::new(-3.75, 2.5), 2);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sampled_circle_sweep_avoids_quadratic_candidate_scans() {
+        let path = sampled_path(48, |a| {
+            Point::new(80. + 30. * libm::cosf(a), 80. + 30. * libm::sinf(a))
+        });
+        let mut tess = path_test_tessellator(2000, 0);
+        tess.fill_path(&path).unwrap().unwrap();
+        let work = &tess.tessellation_work;
+        assert_eq!(work.paths, 1);
+        assert!(work.intersection_candidates <= path.len() * 3);
+        assert!(work.band_edge_visits <= path.len() * 3);
+        assert!(work.intersection_candidates * 4 < path.len() * (path.len() - 1) / 2);
+        std::eprintln!(
+            "48-point circle: intersection candidates={}, active band edges={} (old pair checks={})",
+            work.intersection_candidates,
+            work.band_edge_visits,
+            path.len() * (path.len() - 1) / 2,
+        );
+    }
+
+    #[test]
+    fn offscreen_paths_skip_tessellation_but_still_validate_all_coordinates() {
+        let path = [
+            Point::new(400., 400.),
+            Point::new(440., 400.),
+            Point::new(420., 440.),
+        ];
+        for clip in [false, true] {
+            let mut tess =
+                Tessellator::new(1000, 1200, 1200, FloatRect::new(10., 10., 100., 100.)).unwrap();
+            if clip {
+                tess.push_clip(Rect::from_xywh(20., 20., 40., 40.), 12.)
+                    .unwrap();
+            }
+            assert!(tess.fill_path(&path).unwrap().is_none());
+            assert_eq!(tess.tessellation_work.paths, 0);
+            assert!(tess.vertices.is_empty());
+            let mut invalid = path;
+            invalid[2].x = f32::NAN;
+            assert!(matches!(tess.fill_path(&invalid), Err(Error::InvalidFrame)));
+        }
+        let mut tess =
+            Tessellator::new(1000, 1200, 1200, FloatRect::new(10., 10., 100., 100.)).unwrap();
+        let crossing = [
+            Point::new(109.75, 30.),
+            Point::new(115., 25.),
+            Point::new(115., 35.),
+        ];
+        assert!(tess.fill_path(&crossing).unwrap().is_some());
+        assert_eq!(tess.tessellation_work.paths, 1);
+    }
+
+    #[test]
+    fn full_frame_path_recording_keeps_geometry_for_later_translation() {
+        for scale in [1000, 2000] {
+            let side = 100 * scale / 1000;
+            let full = FloatRect::new(0., 0., side as f32, side as f32);
+            let mut tess = Tessellator::new(scale, side, side, full).unwrap();
+            let path = [
+                Point::new(20., 20.),
+                Point::new(40., 20.),
+                Point::new(30., 40.),
+            ];
+            assert!(tess.fill_path(&path).unwrap().is_some());
+            for offset in [-100., 100.] {
+                let outside = path.map(|p| Point::new(p.x + offset, p.y));
+                assert!(tess.fill_path(&outside).unwrap().is_some());
+            }
+            assert_eq!(tess.tessellation_work.paths, 3);
+
+            // An explicit local clip moves with the recording, so omitted paths
+            // cannot become visible after translation.
+            tess.push_clip(Rect::from_xywh(0., 0., 100., 100.), 0.)
+                .unwrap();
+            for offset in [-100., 100.] {
+                let outside = path.map(|p| Point::new(p.x + offset, p.y));
+                assert!(tess.fill_path(&outside).unwrap().is_none());
+            }
+            assert_eq!(tess.tessellation_work.paths, 3);
+        }
+    }
 
     #[test]
     fn fully_clipped_shapes_do_not_generate_or_evict_cached_meshes() {

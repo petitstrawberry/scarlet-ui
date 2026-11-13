@@ -728,7 +728,7 @@ mod tests {
                 tick: None,
                 frame: None,
                 error: None,
-                paused: false,
+                pacing: Rc::default(),
                 text_input: Weak::new(),
             }));
             let bridge = TextInput::new(canvas, events.clone(), Rc::downgrade(&runner)).unwrap();
@@ -802,11 +802,214 @@ mod tests {
                 .unwrap();
             self.send("input");
         }
+        fn platform_window(&self) -> crate::WebWindow {
+            crate::WebWindow {
+                canvas: self.bridge.canvas.clone(),
+                size: crate::canvas_size(&self.bridge.canvas),
+                scale: crate::scale_milli(),
+                events: self.bridge.events.clone(),
+                pacing: self._runner.borrow().pacing.clone(),
+                paint: None,
+                listeners: Vec::new(),
+                input_listeners: Vec::new(),
+                lifecycle_listeners: Vec::new(),
+                original_tab_index: Some("0".into()),
+                menus: Rc::default(),
+                context_menu_open: Rc::new(Cell::new(false)),
+                context_menu_restore_editor: false,
+                hover_handoff: Default::default(),
+                menu_touch: Default::default(),
+                text_input: self.bridge.clone(),
+                safe_area: Rc::new(
+                    crate::safe_area::SafeArea::new(
+                        self.bridge.canvas.clone(),
+                        crate::safe_area::SafeAreaMode::Contained,
+                    )
+                    .unwrap(),
+                ),
+                applied_safe_area: scarlet_ui_core::geometry::EdgeInsets::ZERO,
+            }
+        }
     }
     impl Drop for Field {
         fn drop(&mut self) {
             self.bridge.canvas.remove();
         }
+    }
+
+    #[wasm_bindgen_test]
+    fn frame_pacing_preserves_synchronous_edits_and_input_order() {
+        use scarlet_ui_core::{
+            event::{MouseEvent, ScrollSource, WheelPhase},
+            platform::PlatformWindow,
+        };
+        let field = Field::new("old");
+        let mut window = field.platform_window();
+        assert!(window.frame_callbacks_supported());
+        window.request_frame().unwrap();
+        window.request_frame().unwrap();
+        field.input("edited", 6);
+        assert_eq!(
+            field.text.get(),
+            "edited",
+            "editing still drains synchronously"
+        );
+        assert!(
+            window.poll_event().is_none(),
+            "editing must not grant a frame"
+        );
+
+        // More than a runner batch: readiness precedes input without merging,
+        // dropping, or reordering any wheel samples.
+        for delta_y in 1..=80 {
+            field
+                .bridge
+                .events
+                .borrow_mut()
+                .push_back(Event::Mouse(MouseEvent::Wheel {
+                    delta_x: 0,
+                    delta_y,
+                    x: 10,
+                    y: 40,
+                    phase: WheelPhase::Moved,
+                    source: ScrollSource::Unknown,
+                }));
+        }
+        let pacing = field._runner.borrow().pacing.clone();
+        pacing.on_animation_frame(8.0);
+        assert!(matches!(
+            window.poll_event(),
+            Some(Event::FrameReady {
+                presentation_time_ns: 8_000_000
+            })
+        ));
+        for expected in 1..=80 {
+            assert!(
+                matches!(window.poll_event(), Some(Event::Mouse(MouseEvent::Wheel {
+                delta_y,
+                source: ScrollSource::Unknown,
+                phase: WheelPhase::Moved,
+                ..
+            })) if delta_y == expected)
+            );
+        }
+        assert!(window.poll_event().is_none());
+        window.request_frame().unwrap();
+        crate::tick_now(&field._runner);
+        assert!(window.poll_event().is_none());
+        pacing.on_animation_frame(16.0);
+        assert!(matches!(
+            window.poll_event(),
+            Some(Event::FrameReady {
+                presentation_time_ns: 16_000_000
+            })
+        ));
+        assert!(window.poll_event().is_none());
+    }
+
+    #[wasm_bindgen_test]
+    fn frame_pacing_rearms_after_pause_resume_inside_a_synchronous_tick() {
+        let field = Field::new("retained");
+        let window = field.platform_window();
+        let app = Rc::new(crate::WebApp {
+            state: field._runner.clone(),
+            safe_area: window.safe_area.clone(),
+        });
+        let weak_app = Rc::downgrade(&app);
+        let invoked = Cell::new(false);
+        field._runner.borrow_mut().tick = Some(Box::new(move || {
+            if !invoked.replace(true) {
+                let app = weak_app.upgrade().unwrap();
+                app.pause();
+                app.resume();
+            }
+            Ok(Some(std::time::Duration::ZERO))
+        }));
+        window.pacing.request();
+        crate::schedule_frame(&field._runner);
+        assert!(field._runner.borrow().frame.is_some());
+        crate::tick_now(&field._runner);
+        assert!(app.is_running());
+        let scheduled = field._runner.borrow().frame.is_some();
+        assert!(window.pacing.take_ready().is_none());
+        app.pause(); // Cancel before leaving this synchronous browser test.
+        assert!(scheduled, "reentrant resume must leave a pending rAF");
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn frame_pacing_uses_real_raf_across_pause_resume_and_termination() {
+        use scarlet_ui_core::platform::PlatformWindow;
+        use std::task::{Poll, Waker};
+        let field = Field::new("retained");
+        let mut window = field.platform_window();
+        let app = crate::WebApp {
+            state: field._runner.clone(),
+            safe_area: window.safe_area.clone(),
+        };
+        window.request_frame().unwrap();
+        let timestamps = Rc::new(RefCell::new(Vec::new()));
+        let observed = timestamps.clone();
+        let waker: Rc<RefCell<Option<Waker>>> = Rc::default();
+        let wake_tick = waker.clone();
+        field._runner.borrow_mut().tick = Some(Box::new(move || {
+            let mut granted = None;
+            while let Some(event) = window.poll_event() {
+                if let Event::FrameReady {
+                    presentation_time_ns,
+                } = event
+                {
+                    assert!(granted.replace(presentation_time_ns).is_none());
+                }
+            }
+            // Browser selectionchange callbacks may synchronously tick between
+            // rAFs; they drain normally without consuming the pending request.
+            let Some(presentation_time_ns) = granted else {
+                return Ok(Some(std::time::Duration::ZERO));
+            };
+            observed.borrow_mut().push(presentation_time_ns);
+            if observed.borrow().len() == 3 {
+                if let Some(waker) = wake_tick.borrow_mut().take() {
+                    waker.wake();
+                }
+                Ok(None)
+            } else {
+                window.request_frame().unwrap();
+                Ok(Some(std::time::Duration::ZERO))
+            }
+        }));
+        crate::schedule_frame(&field._runner);
+        crate::schedule_frame(&field._runner); // Repeated scheduling is idempotent.
+        app.pause();
+        assert!(!app.is_running());
+        assert!(field._runner.borrow().frame.is_none());
+        app.resume();
+        app.resume();
+        assert!(app.is_running());
+        assert!(field._runner.borrow().frame.is_some());
+        crate::tick_now(&field._runner);
+        assert!(
+            timestamps.borrow().is_empty(),
+            "resume/input is not a frame"
+        );
+        std::future::poll_fn(|cx| {
+            if timestamps.borrow().len() == 3 {
+                Poll::Ready(())
+            } else {
+                *waker.borrow_mut() = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await;
+        assert!(timestamps.borrow().windows(2).all(|pair| pair[1] > pair[0]));
+        assert!(field._runner.borrow().tick.is_none());
+        assert!(field._runner.borrow().frame.is_none());
+        assert!(!app.is_running());
+        app.resume();
+        crate::schedule_frame(&field._runner);
+        assert!(
+            field._runner.borrow().frame.is_none(),
+            "terminal ticks cannot restart"
+        );
     }
 
     #[wasm_bindgen_test]
@@ -1244,6 +1447,7 @@ mod tests {
             size: Size::new(300.0, 200.0),
             scale: 1000,
             events: field.bridge.events.clone(),
+            pacing: field._runner.borrow().pacing.clone(),
             paint: None,
             listeners: Vec::new(),
             input_listeners: Vec::new(),
@@ -1291,6 +1495,7 @@ mod tests {
             size: Size::new(300.0, 200.0),
             scale: 1000,
             events: field.bridge.events.clone(),
+            pacing: field._runner.borrow().pacing.clone(),
             paint: None,
             listeners: Vec::new(),
             input_listeners: Vec::new(),

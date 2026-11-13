@@ -80,6 +80,34 @@ fn declarative_animation_waits_for_frame_grants_and_finishes_on_suspend() {
     ApplicationRunner::run_cycle(runner.backend.as_mut(), &mut app, &mut slots, &mut state)
         .unwrap();
     assert_eq!(opacity(&slots[0]), once);
+    // Web rAF is already paced by the display. Its grants must advance even
+    // when less than the fallback timer's 16 ms has elapsed (e.g. 120 Hz).
+    for presentation_time_ns in [8_000_000, 16_000_000, 24_000_000] {
+        let before = opacity(&slots[0]);
+        slots[0].visual_animation_tick = Instant::now() - Duration::from_millis(8);
+        handle_window_event(
+            &mut app,
+            &mut slots[0],
+            Event::FrameReady {
+                presentation_time_ns,
+            },
+            &mut Vec::new(),
+        )
+        .unwrap();
+        ApplicationRunner::run_cycle(runner.backend.as_mut(), &mut app, &mut slots, &mut state)
+            .unwrap();
+        assert!(opacity(&slots[0]) < before, "each fast frame must advance");
+        assert!(!slots[0].frame_ready);
+        assert!(slots[0].frame_request_outstanding);
+        let once = opacity(&slots[0]);
+        ApplicationRunner::run_cycle(runner.backend.as_mut(), &mut app, &mut slots, &mut state)
+            .unwrap();
+        assert_eq!(
+            opacity(&slots[0]),
+            once,
+            "an input tick is not another frame"
+        );
+    }
     handle_window_event(
         &mut app,
         &mut slots[0],

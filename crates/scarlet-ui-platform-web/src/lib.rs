@@ -2,6 +2,7 @@
 #![cfg(target_arch = "wasm32")]
 
 mod damage;
+mod frame_pacing;
 mod menu;
 mod paint;
 mod safe_area;
@@ -50,7 +51,7 @@ struct FrameLoop {
     tick: Option<Tick>,
     frame: Option<gloo_render::AnimationFrame>,
     error: Option<String>,
-    paused: bool,
+    pacing: Rc<frame_pacing::FramePacing>,
     text_input: std::rc::Weak<text_input::TextInput>,
 }
 
@@ -84,7 +85,7 @@ impl WebApp {
     /// Whether the application is still accepting animation frames.
     pub fn is_running(&self) -> bool {
         let state = self.state.borrow();
-        !state.paused && state.tick.is_some()
+        !state.pacing.is_paused() && state.tick.is_some()
     }
     /// Suspend animation frames while retaining application state and GPU resources.
     /// The embedding page should blur/inert the canvas while it is paused;
@@ -97,7 +98,7 @@ impl WebApp {
             editor.suspend();
         }
         let mut state = self.state.borrow_mut();
-        state.paused = true;
+        state.pacing.pause();
         state.frame.take();
     }
 
@@ -105,9 +106,9 @@ impl WebApp {
     /// A terminally stopped or failed application cannot be restarted this way.
     pub fn resume(&self) {
         let restart = {
-            let mut state = self.state.borrow_mut();
-            let restart = state.paused && state.tick.is_some();
-            state.paused = false;
+            let state = self.state.borrow();
+            let restart = state.pacing.is_paused() && state.tick.is_some();
+            state.pacing.resume();
             restart
         };
         let editor = self.state.borrow().text_input.upgrade();
@@ -126,18 +127,26 @@ impl WebApp {
 }
 
 fn schedule_frame(state: &Rc<RefCell<FrameLoop>>) {
-    if state.borrow().paused {
-        return;
+    {
+        let state = state.borrow();
+        if state.pacing.is_paused() || state.tick.is_none() || state.frame.is_some() {
+            return;
+        }
     }
     let weak = Rc::downgrade(state);
-    let frame = gloo_render::request_animation_frame(move |_| {
+    let frame = gloo_render::request_animation_frame(move |timestamp_ms| {
         let Some(state) = weak.upgrade() else {
             return;
         };
-        tick_now(&state);
-        if state.borrow().tick.is_some() {
-            schedule_frame(&state);
+        {
+            let mut state = state.borrow_mut();
+            state.frame.take();
+            if state.pacing.is_paused() || state.tick.is_none() {
+                return;
+            }
+            state.pacing.on_animation_frame(timestamp_ms);
         }
+        tick_now(&state);
     });
     state.borrow_mut().frame = Some(frame);
 }
@@ -145,14 +154,20 @@ fn schedule_frame(state: &Rc<RefCell<FrameLoop>>) {
 // Pointer and DOM editing callbacks also drain the runner synchronously. Taking
 // the callback out prevents reentrant focus/select events from borrowing it.
 fn tick_now(state: &Rc<RefCell<FrameLoop>>) {
-    if state.borrow().paused {
+    if state.borrow().pacing.is_paused() {
         return;
     }
     let Some(mut tick) = state.borrow_mut().tick.take() else {
         return;
     };
     match tick() {
-        Ok(Some(_)) => state.borrow_mut().tick = Some(tick),
+        Ok(Some(_)) => {
+            state.borrow_mut().tick = Some(tick);
+            // A synchronous pause/resume may have cancelled rAF while the
+            // callback was taken. Rearm after restoring it; the scheduling
+            // guard preserves one loop, including idle hooks without demand.
+            schedule_frame(state);
+        }
         Ok(None) => {
             state.borrow_mut().frame.take();
         }
@@ -201,11 +216,12 @@ pub async fn run_with_options<A: Application + View>(
     menus.borrow_mut().resize(size);
     let paint = paint::WebPaint::new(gpu, canvas.width(), canvas.height(), menus.clone())
         .map_err(js_error)?;
+    let pacing = Rc::new(frame_pacing::FramePacing::default());
     let state = Rc::new(RefCell::new(FrameLoop {
         tick: None,
         frame: None,
         error: None,
-        paused: false,
+        pacing: pacing.clone(),
         text_input: std::rc::Weak::new(),
     }));
     let window = WebWindow::new_canvas(
@@ -216,6 +232,7 @@ pub async fn run_with_options<A: Application + View>(
         menus,
         Rc::downgrade(&state),
         safe_area.clone(),
+        pacing,
     )?;
     state.borrow_mut().text_input = Rc::downgrade(&window.text_input);
     let tick = ApplicationRunner::new(Box::new(WebBackend(Some(window))))
@@ -270,6 +287,7 @@ struct WebWindow {
     size: Size,
     scale: u32,
     events: Rc<RefCell<VecDeque<Event>>>,
+    pacing: Rc<frame_pacing::FramePacing>,
     paint: Option<Box<dyn PaintBackend>>,
     listeners: Vec<(&'static str, Closure<dyn FnMut(PointerEvent)>)>,
     input_listeners: Vec<(&'static str, Closure<dyn FnMut(web_sys::Event)>)>,
@@ -297,6 +315,7 @@ impl WebWindow {
         menus: Rc<RefCell<menu::WebMenu>>,
         runner: std::rc::Weak<RefCell<FrameLoop>>,
         safe_area: Rc<safe_area::SafeArea>,
+        pacing: Rc<frame_pacing::FramePacing>,
     ) -> std::result::Result<Self, JsValue> {
         let original_tab_index = canvas.get_attribute("tabindex");
         canvas.set_tab_index(0);
@@ -308,6 +327,7 @@ impl WebWindow {
             size,
             scale,
             events,
+            pacing,
             text_input,
             paint: Some(paint),
             listeners: Vec::new(),
@@ -821,6 +841,13 @@ impl PlatformWindow for WebWindow {
         Err(Error::WindowCreationFailed)
     }
     fn poll_event(&mut self) -> Option<Event> {
+        // Display readiness must not sit behind the bounded input batch. This
+        // does not reorder input or synthesize a grant on synchronous ticks.
+        if let Some(presentation_time_ns) = self.pacing.take_ready() {
+            return Some(Event::FrameReady {
+                presentation_time_ns,
+            });
+        }
         let canvas_size = canvas_size(&self.canvas);
         let scale = scale_milli();
         let changed = canvas_size != self.size || scale != self.scale;
@@ -924,6 +951,13 @@ impl PlatformWindow for WebWindow {
         }
     }
     fn wait_for_event(&mut self, _: std::time::Duration) {}
+    fn frame_callbacks_supported(&self) -> bool {
+        true
+    }
+    fn request_frame(&mut self) -> Result<()> {
+        self.pacing.request();
+        Ok(())
+    }
     fn output_scale_milli(&self) -> u32 {
         self.scale
     }
