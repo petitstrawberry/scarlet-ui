@@ -213,6 +213,7 @@ impl LayoutLab {
                         model: model.clone(),
                         actions: actions.clone(),
                         width,
+                        code: self.code.clone(),
                     }
                     .key(id as u64),
                 ) as Box<dyn View>
@@ -228,7 +229,6 @@ impl LayoutLab {
             Text::new("A workspace that moves with you.").font_size(14.0).color(p.muted),
             layout_picker(&model, &actions, p, width.min(360.0)),
             controls(&model, &actions, p, width),
-            code_links(&self.code, width),
             Text::new(caption).font_size(14.0).color(p.ink),
             Text::new(format!("SAMPLE SET {:02}", model.revision % 100 + 1)).font_size(11.0).color(p.muted),
             ZStack::new(Views(cards)).alignment(Alignment::TopLeading).frame(width, height),
@@ -322,6 +322,7 @@ struct MetricCard {
     model: Model,
     actions: Actions,
     width: f32,
+    code: CodeBrowser,
 }
 impl MetricCard {
     fn content(&self) -> impl View + Clone + 'static {
@@ -329,7 +330,13 @@ impl MetricCard {
         let pose = card_pose(&self.model, self.id, self.width);
         let selected = self.model.layout == Layout::Spotlight && self.model.selected == self.id;
         let value_x = if pose.row { pose.width * 0.30 } else { 16.0 };
-        let value_y = if pose.row { 18.0 } else { 72.0 };
+        let value_y = if pose.row {
+            18.0
+        } else if pose.small {
+            60.0
+        } else {
+            72.0
+        };
         let chart_x = if pose.row {
             pose.width * 0.46
         } else if pose.small {
@@ -345,7 +352,7 @@ impl MetricCard {
             164.0
         };
         let chart_width = if pose.row {
-            pose.width * 0.27
+            (pose.width - chart_x - 242.0).max(0.0)
         } else {
             (pose.width - chart_x - 16.0).max(0.0)
         };
@@ -359,11 +366,18 @@ impl MetricCard {
         let button_width = if pose.row {
             100.0
         } else {
-            (pose.width - 32.0).max(0.0)
+            ((pose.width - 42.0) * 0.5).max(0.0)
         };
         let button_height = if pose.small { 36.0 } else { 40.0 };
+        let button_x = if pose.row { pose.width - 226.0 } else { 16.0 };
+        let button_y = if pose.row {
+            (pose.height - button_height) * 0.5
+        } else {
+            pose.height - button_height - 14.0
+        };
         let actions = self.actions.clone();
         let id = self.id;
+        let code = self.code.clone();
         let surface = if selected {
             if self.model.dark {
                 rgb(47, 48, 57)
@@ -424,14 +438,11 @@ impl MetricCard {
             )
             .on_click(move || actions.focus(id))
             .frame(button_width, button_height)
-            .offset(
-                if pose.row { pose.width - 116.0 } else { 16.0 },
-                if pose.row {
-                    (pose.height - button_height) * 0.5
-                } else {
-                    pose.height - button_height - 14.0
-                },
-            ),
+            .offset(button_x, button_y),
+            glass_button("View code", p, false)
+                .on_click(move || code.open(ExampleId::Charts))
+                .frame(button_width, button_height)
+                .offset(button_x + button_width + 10.0, button_y),
         ))
         .alignment(Alignment::TopLeading)
         .frame(pose.width, pose.height)
@@ -601,31 +612,4 @@ fn controls(
     ZStack::new(Views(buttons))
         .alignment(Alignment::TopLeading)
         .frame(width, (4 / columns) as f32 * 52.0 - 10.0)
-}
-
-fn code_links(code: &CodeBrowser, width: f32) -> impl View + Clone + 'static + use<> {
-    let columns = if width >= 600.0 { 3 } else { 1 };
-    let cell = ((width - (columns - 1) as f32 * 10.0) / columns as f32).max(0.0);
-    let links = [
-        (ExampleId::Layout, "Layout code"),
-        (ExampleId::Charts, "Chart code"),
-        (ExampleId::Theme, "Theme code"),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(i, (id, label))| {
-        Box::new(
-            code.button(id, label, cell)
-                .frame(cell, 42.0)
-                .offset(
-                    (i % columns) as f32 * (cell + 10.0),
-                    (i / columns) as f32 * 52.0,
-                )
-                .key(i as u64),
-        ) as Box<dyn View>
-    })
-    .collect();
-    ZStack::new(Views(links))
-        .alignment(Alignment::TopLeading)
-        .frame(width, (3 / columns) as f32 * 52.0 - 10.0)
 }

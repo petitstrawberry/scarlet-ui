@@ -184,6 +184,20 @@ impl CodePage {
             let example = id.example();
             rows.push(Box::new(prose(example.title, width, 25.0, INK)));
             rows.push(Box::new(prose(example.summary, width, 14.0, MUTED)));
+            if matches!(id, ExampleId::Charts | ExampleId::Layout | ExampleId::Theme) {
+                let cell = ((width - 16.0) / 3.0).max(0.0);
+                let topics = [
+                    (ExampleId::Charts, "Chart"),
+                    (ExampleId::Layout, "Layout"),
+                    (ExampleId::Theme, "Theme"),
+                ]
+                .into_iter()
+                .map(|(topic, label)| {
+                    Box::new(self.browser.button(topic, label, cell)) as Box<dyn View>
+                })
+                .collect();
+                rows.push(Box::new(HStack::new(Views(topics)).spacing(8.0)));
+            }
             let mut files = Vec::new();
             for section in &example.sections {
                 if !files.contains(&section.file) {

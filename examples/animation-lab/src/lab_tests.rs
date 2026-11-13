@@ -134,6 +134,61 @@ fn responsive_page_reconciliation_does_not_scroll_past_its_heading() {
     assert_eq!(page_bounds(&pipeline).top(), scrolled_top);
 }
 
+#[test]
+fn vertical_pages_accept_browser_wheel_samples_with_diagonal_jitter() {
+    let _lab = LAB_PIPELINE_TESTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let app = AnimationLab::new(false);
+    for selected in 0..3 {
+        app.navigation().selected_index_state().set(selected);
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_paint_backend(Box::new(HeadlessPaint));
+        pipeline.set_root(
+            Window::new("Animation Lab", app.clone())
+                .content_safe_area(scarlet_ui::SafeAreaEdges::NONE)
+                .size(Size::new(715.0, 640.0))
+                .create_element(),
+        );
+        pipeline.layout_initial();
+        for _ in 0..3 {
+            pipeline.render_for_present().unwrap();
+        }
+        // Browsers report pixel wheels without a reliable device identity or
+        // gesture boundaries. Vertical motion must not stop when a finger also
+        // moves a few pixels sideways partway through the scroll.
+        for (dx, dy) in [(0, -20), (4, -8), (-3, -8), (1, -4)] {
+            let before = page_bounds(&pipeline).top();
+            pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+                x: 500,
+                y: 350,
+                delta_x: dx,
+                delta_y: dy,
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Unknown,
+            }));
+            pipeline.render_for_present().unwrap();
+            assert!(
+                page_bounds(&pipeline).top() < before,
+                "page {selected} dropped vertical wheel ({dx}, {dy})"
+            );
+        }
+        // A genuinely horizontal sample still belongs to a horizontal child
+        // or ancestor; loosening the page must not capture a guessed gesture.
+        let before = page_bounds(&pipeline).top();
+        pipeline.handle_event(&Event::Mouse(MouseEvent::Wheel {
+            x: 500,
+            y: 350,
+            delta_x: -20,
+            delta_y: -4,
+            phase: WheelPhase::Moved,
+            source: ScrollSource::Unknown,
+        }));
+        pipeline.render_for_present().unwrap();
+        assert_eq!(page_bounds(&pipeline).top(), before);
+    }
+}
+
 /// Keep the real retained paint/event path, without rasterizing entire source files.
 #[derive(Default)]
 struct RecordedFrame {
@@ -425,9 +480,9 @@ fn demo_code_buttons_open_the_matching_source_and_header_returns_without_model_w
         (0, "View code", 3, ExampleId::Confetti, SourceFile::Play),
         (1, "View code", 0, ExampleId::Explicit, SourceFile::Basics),
         (1, "View code", 1, ExampleId::Implicit, SourceFile::Basics),
-        (2, "Layout code", 0, ExampleId::Layout, SourceFile::Layout),
-        (2, "Chart code", 0, ExampleId::Charts, SourceFile::Layout),
-        (2, "Theme code", 0, ExampleId::Theme, SourceFile::Layout),
+        (2, "View code", 0, ExampleId::Charts, SourceFile::Layout),
+        (2, "View code", 1, ExampleId::Charts, SourceFile::Layout),
+        (2, "View code", 2, ExampleId::Charts, SourceFile::Layout),
     ];
     for width in [390.0, 1120.0] {
         let app = AnimationLab::new(false);
@@ -570,7 +625,7 @@ fn page_background_reaches_all_viewport_edges_while_demo_and_source_controls_sta
     for width in [390.0, 1120.0] {
         let app = AnimationLab::new(false);
         let (mut pipeline, recording) = mounted_lab(&app, width, insets);
-        for (page, label) in [(0, "View code"), (1, "View code"), (2, "Layout code")] {
+        for (page, label) in [(0, "View code"), (1, "View code"), (2, "View code")] {
             app.selected.set(page);
             settle(&mut pipeline);
             let expected = if page == 2 {
@@ -609,7 +664,7 @@ fn page_background_reaches_all_viewport_edges_while_demo_and_source_controls_sta
             "the fixture must exercise a real surface color change"
         );
         assert_safe_page(&pipeline, &recording, dark);
-        click_button(&mut pipeline, "Theme code", 0);
+        click_button(&mut pipeline, "View code", 0);
         assert_safe_page(&pipeline, &recording, crate::code::SURFACE);
         click_button(&mut pipeline, "Back to demo", 0);
         assert_safe_page(&pipeline, &recording, dark);
