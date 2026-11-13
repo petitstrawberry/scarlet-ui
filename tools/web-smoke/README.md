@@ -9,6 +9,10 @@ not change the Chrome/sandbox requirements of the GPU smoke below.
 
 This bounded smoke test serves a previously built `target/web-samples` artifact
 on an ephemeral `127.0.0.1` port. It does not open the public Pages site.
+Animation Lab's source-reader check opens the rendered code button, switches to
+the full Rust file, copies it, and returns through the header. Clipboard read/write
+permissions are granted only to that ephemeral localhost context for this check,
+then cleared; the copied value is the bundled public example source.
 
 ```sh
 cd tools/web-smoke

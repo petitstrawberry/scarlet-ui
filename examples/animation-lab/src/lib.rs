@@ -1,10 +1,12 @@
 //! WebGPU entry point for the same Animation Lab used on native.
 #![cfg(target_arch = "wasm32")]
 mod basics;
+mod code;
 mod lab;
 mod layout;
 mod paint;
 mod play;
+mod source;
 use wasm_bindgen::{JsCast, prelude::*};
 
 thread_local! {

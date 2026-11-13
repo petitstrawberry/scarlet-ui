@@ -1,5 +1,5 @@
 //! One application, with the same pages on native and WebGPU.
-use crate::{basics::Basics, layout::LayoutLab, play::Playground};
+use crate::{basics::Basics, code::CodeBrowser, layout::LayoutLab, play::Playground};
 use core::{any::Any, time::Duration};
 use scarlet_ui::{
     NavigationLink, NavigationView, PlatformWindow, WindowContext,
@@ -21,6 +21,8 @@ const SURFACE: Color = Color::rgb_f32(1.0, 0.988, 0.996);
 #[derive(Clone)]
 pub(crate) struct AnimationLab {
     width: State<f32>,
+    selected: State<usize>,
+    code: [CodeBrowser; 3],
     play: Playground,
     basics: Basics,
     layout: LayoutLab,
@@ -33,12 +35,15 @@ struct Playback {
     smoke: bool,
     step: usize,
     frames: usize,
+    surface: Option<Color>,
 }
 
 impl AnimationLab {
     pub(crate) fn new(smoke: bool) -> Self {
-        Self {
+        let mut app = Self {
             width: State::new(scarlet_ui::state::generate_state_id(), 1000.0),
+            selected: State::new(scarlet_ui::state::generate_state_id(), 0),
+            code: std::array::from_fn(|_| CodeBrowser::default()),
             play: Playground::default(),
             basics: Basics::default(),
             layout: LayoutLab::default(),
@@ -48,8 +53,11 @@ impl AnimationLab {
                 smoke,
                 step: 0,
                 frames: 0,
+                surface: None,
             })),
-        }
+        };
+        app.selected = app.navigation().selected_index_state().clone();
+        app
     }
     fn scroll_page<V: View + Clone>(&self, page: V) -> impl View + Clone + use<V> {
         let width = self.width.clone();
@@ -67,34 +75,74 @@ impl AnimationLab {
                 move |next| width.set(next),
             )
     }
-    fn header(icon: Icon) -> NavigationHeader {
+    fn header(icon: Icon, code: CodeBrowser) -> NavigationHeader {
         NavigationHeader::toolbar(move || {
-            scarlet_ui::hstack! {
-                IconView::new(icon).size(IconSize::Medium),
-                Text::new("Animation Lab").text_style(TextStyle::Headline),
-                Spacer::new(),
-            }
+            let leading: Box<dyn View> = if code.is_open() {
+                Box::new(code.back_button())
+            } else {
+                Box::new(IconView::new(icon).size(IconSize::Medium))
+            };
+            HStack::new(Views(vec![
+                leading,
+                Box::new(
+                    Text::new(if code.is_open() {
+                        "Source code"
+                    } else {
+                        "Animation Lab"
+                    })
+                    .text_style(TextStyle::Headline),
+                ),
+                Box::new(Spacer::new()),
+            ]))
             .spacing(10.0)
         })
+    }
+    fn page(&self, index: usize) -> impl View + Clone + 'static + use<> {
+        let code = self.code[index].clone();
+        let width = self.width.get();
+        let body: Box<dyn View> = if code.is_open() {
+            Box::new(code.page(width))
+        } else {
+            match index {
+                0 => Box::new(self.play.page(width, code.clone())),
+                1 => Box::new(self.basics.page(width, code.clone())),
+                _ => Box::new(self.layout.page(width, code.clone())),
+            }
+        };
+        // Source locations start at their heading; resizing/wrapping keeps the location.
+        self.scroll_page(VStack::new(Views(vec![body])).alignment(Alignment::Leading))
+            .key(code.location_key())
+    }
+    fn surface(&self) -> Color {
+        let selected = self.selected.get().min(2);
+        if self.code[selected].is_open() {
+            crate::code::SURFACE
+        } else if selected == 2 {
+            self.layout.background_color()
+        } else {
+            SURFACE
+        }
     }
     fn navigation(&self) -> NavigationView<(NavigationLink, NavigationLink, NavigationLink)> {
         let play = self.clone();
         let basics = self.clone();
         let layout = self.clone();
         scarlet_ui::navigation! {
-            NavigationLink::new("Play", move || play.scroll_page(play.play.page(play.width.get())))
-                .icon(Icon::Heart).custom_header(Self::header(Icon::Heart)),
-            NavigationLink::new("Basics", move || basics.scroll_page(basics.basics.page(basics.width.get())))
-                .icon(Icon::Adjustments).custom_header(Self::header(Icon::Adjustments)),
-            NavigationLink::new("Layout", move || layout.scroll_page(layout.layout.page(layout.width.get())))
-                .icon(Icon::LayoutGrid).custom_header(Self::header(Icon::LayoutGrid)),
+            NavigationLink::new("Play", move || play.page(0))
+                .icon(Icon::Heart).custom_header(Self::header(Icon::Heart, self.code[0].clone())),
+            NavigationLink::new("Basics", move || basics.page(1))
+                .icon(Icon::Adjustments).custom_header(Self::header(Icon::Adjustments, self.code[1].clone())),
+            NavigationLink::new("Layout", move || layout.page(2))
+                .icon(Icon::LayoutGrid).custom_header(Self::header(Icon::LayoutGrid, self.code[2].clone())),
         }.presentation(NavigationPresentation::Automatic)
             .floating_bar_bottom_overlap(if cfg!(target_arch = "wasm32") { 12.0 } else { 0.0 })
             .shows_icons(true).sidebar_width(174.0)
             .minimum_content_size(Size::new(420.0, 0.0))
     }
     fn content(&self) -> impl View + Clone + 'static {
-        self.navigation().background(SURFACE)
+        // The window consumes no safe-area padding. Paint the full viewport;
+        // NavigationView and ScrollView still keep controls inside the safe area.
+        self.navigation().background(self.surface())
     }
     pub(crate) fn wake(&self) {
         self.play.wake();
@@ -109,7 +157,12 @@ impl View for AnimationLab {
         ))
     }
     fn listenables(&self) -> Vec<&dyn scarlet_ui::state::Listenable> {
-        vec![&self.width]
+        let mut states: Vec<&dyn scarlet_ui::state::Listenable> = vec![&self.width, &self.selected];
+        states.extend(self.layout.listenables());
+        for code in &self.code {
+            states.extend(code.listenables());
+        }
+        states
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -126,6 +179,9 @@ impl Application for AnimationLab {
     }
     fn on_window_created(&mut self, _: &WindowContext, window: &mut dyn PlatformWindow) {
         self.width.set(window.size().width);
+        for code in &self.code {
+            code.attach_clipboard(window.text_clipboard().ok());
+        }
         self.playback.borrow_mut().started = Instant::now();
     }
     fn on_frame_presented(&mut self, _: &WindowContext) {
@@ -137,6 +193,14 @@ impl Application for AnimationLab {
         }
     }
     fn on_idle(&mut self) {
+        for code in &self.code {
+            code.poll_copy();
+        }
+        let surface = self.surface();
+        if self.playback.borrow().surface != Some(surface) {
+            self.playback.borrow_mut().surface = Some(surface);
+            sync_browser_surface(surface);
+        }
         let action = {
             let mut p = self.playback.borrow_mut();
             let elapsed = p.started.elapsed();
@@ -257,8 +321,9 @@ impl ElementRenderObject for NaturalLayout {
         self.0
     }
     fn render(&mut self) {}
-    fn paint(&self, context: &mut PaintContext<'_>, origin: Point) -> bool {
-        context.fill_rect(Rect::new(origin, self.0), SURFACE);
+    fn paint(&self, _: &mut PaintContext<'_>, _: Point) -> bool {
+        // The viewport owns the surface, including the safe area. An opaque
+        // page-height fill here would cut the theme transition off at its edges.
         true
     }
     fn as_any(&self) -> &dyn Any {
@@ -267,6 +332,30 @@ impl ElementRenderObject for NaturalLayout {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+}
+
+fn sync_browser_surface(color: Color) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+        if let Some(root) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+            .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let _ = root.style().set_property(
+                "--lab-surface",
+                &format!(
+                    "rgb({},{},{})",
+                    (color.r * 255.0).round() as u8,
+                    (color.g * 255.0).round() as u8,
+                    (color.b * 255.0).round() as u8
+                ),
+            );
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = color;
 }
 
 #[cfg(test)]

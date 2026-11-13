@@ -1,5 +1,7 @@
 //! Responsive card/layout transitions; no timer or application-level idle loop.
 
+use crate::code::CodeBrowser;
+use crate::source::ExampleId;
 use core::time::Duration;
 use scarlet_ui::{
     element::{ComponentElement, Element},
@@ -66,7 +68,10 @@ impl Actions {
         self.0.update(|s| s.revision = s.revision.wrapping_add(1));
     }
     fn theme(&self) {
-        self.0.update(|s| s.dark = !s.dark);
+        // Include the full-window background in the same transition as the cards.
+        with_animation(Animation::spring(Duration::from_millis(850), 0.82), || {
+            self.0.update(|s| s.dark = !s.dark);
+        });
     }
     fn reset(&self) {
         without_animation(|| self.0.set(Model::default()));
@@ -81,6 +86,9 @@ struct Palette {
     muted: Color,
     line: Color,
     well: Color,
+    control: Color,
+    selected: Color,
+    selected_ink: Color,
 }
 impl Palette {
     fn new(dark: bool) -> Self {
@@ -92,6 +100,9 @@ impl Palette {
                 muted: rgb(153, 166, 184),
                 line: rgb(54, 68, 87),
                 well: rgb(39, 51, 69),
+                control: rgb(51, 65, 85),
+                selected: rgb(183, 212, 255),
+                selected_ink: rgb(17, 35, 59),
             }
         } else {
             Self {
@@ -101,6 +112,9 @@ impl Palette {
                 muted: rgb(112, 119, 130),
                 line: rgb(225, 225, 222),
                 well: rgb(232, 232, 228),
+                control: rgb(222, 230, 240),
+                selected: rgb(43, 62, 88),
+                selected_ink: Color::WHITE,
             }
         }
     }
@@ -132,6 +146,7 @@ impl ViewTuple for Views {
 pub(crate) struct LayoutLab {
     state: State<Model>,
     width: f32,
+    code: CodeBrowser,
 }
 
 impl Default for LayoutLab {
@@ -139,20 +154,25 @@ impl Default for LayoutLab {
         Self {
             state: State::new(generate_state_id(), Model::default()),
             width: 960.0,
+            code: CodeBrowser::default(),
         }
     }
 }
 
 impl LayoutLab {
+    pub(crate) fn background_color(&self) -> Color {
+        Palette::new(self.state.get().dark).canvas
+    }
     /// Full viewport width including 16/24 px padding. The shell supplies a
     /// ScrollView with natural-height measurement; this component owns State.
-    pub(crate) fn page(&self, width: f32) -> Self {
+    pub(crate) fn page(&self, width: f32, code: CodeBrowser) -> Self {
         Self {
             width: if width.is_finite() {
                 width.max(0.0)
             } else {
                 self.width
             },
+            code,
             ..self.clone()
         }
     }
@@ -208,6 +228,7 @@ impl LayoutLab {
             Text::new("A workspace that moves with you.").font_size(14.0).color(p.muted),
             layout_picker(&model, &actions, p, width.min(360.0)),
             controls(&model, &actions, p, width),
+            code_links(&self.code, width),
             Text::new(caption).font_size(14.0).color(p.ink),
             Text::new(format!("SAMPLE SET {:02}", model.revision % 100 + 1)).font_size(11.0).color(p.muted),
             ZStack::new(Views(cards)).alignment(Alignment::TopLeading).frame(width, height),
@@ -340,6 +361,7 @@ impl MetricCard {
         } else {
             (pose.width - 32.0).max(0.0)
         };
+        let button_height = if pose.small { 36.0 } else { 40.0 };
         let actions = self.actions.clone();
         let id = self.id;
         let surface = if selected {
@@ -395,31 +417,28 @@ impl MetricCard {
             .color(p.muted)
             .offset(16.0, 276.0)
             .opacity(if pose.row || pose.small { 0.0 } else { 1.0 }),
-            Button::new(if selected { "Back to board" } else { "Focus" })
-                .font_size(13.0)
-                .background_color(Color::CLEAR)
-                .border_color(Color::CLEAR)
-                .text_color(p.ink)
-                .on_click(move || actions.focus(id))
-                .frame(button_width, if pose.small { 28.0 } else { 38.0 })
-                .background(p.well)
-                .clip_radius(10.0)
-                .offset(
-                    if pose.row { pose.width - 116.0 } else { 16.0 },
-                    if pose.row {
-                        39.0
-                    } else {
-                        pose.height - if pose.small { 42.0 } else { 54.0 }
-                    },
-                ),
+            solid_button(
+                if selected { "Back to board" } else { "Focus" },
+                p,
+                selected,
+            )
+            .on_click(move || actions.focus(id))
+            .frame(button_width, button_height)
+            .offset(
+                if pose.row { pose.width - 116.0 } else { 16.0 },
+                if pose.row {
+                    (pose.height - button_height) * 0.5
+                } else {
+                    pose.height - button_height - 14.0
+                },
+            ),
         ))
         .alignment(Alignment::TopLeading)
         .frame(pose.width, pose.height)
         .background(surface)
         .clip_radius(18.0)
-        .border_rounded(p.line, 1.0, 18.0)
+        .border_rounded(if selected { p.selected } else { p.line }, 1.0, 18.0)
         .offset(pose.x, pose.y)
-        .opacity(if pose.small { 0.74 } else { 1.0 })
     }
 }
 
@@ -473,6 +492,17 @@ impl MiniChart {
     }
 }
 
+fn solid_button(label: &str, p: Palette, selected: bool) -> Button {
+    // Explicit fills opt out of Button's backdrop material. Keep interactive
+    // labels opaque even when the compact charts are visually de-emphasized.
+    Button::new(label)
+        .font_size(13.0)
+        .padding(6.0)
+        .background_color(if selected { p.selected } else { p.control })
+        .border_color(Color::CLEAR)
+        .text_color(if selected { p.selected_ink } else { p.ink })
+}
+
 fn layout_picker(
     model: &Model,
     actions: &Actions,
@@ -497,7 +527,7 @@ fn layout_picker(
                     .background_color(Color::CLEAR)
                     .border_color(Color::CLEAR)
                     .text_color(if index == selected {
-                        Color::WHITE
+                        p.selected_ink
                     } else {
                         p.ink
                     })
@@ -509,7 +539,7 @@ fn layout_picker(
     ZStack::new((
         Spacer::new()
             .frame((slot_width - 6.0).max(0.0), 34.0)
-            .background(rgb(67, 82, 104))
+            .background(p.selected)
             .clip_radius(9.0)
             .offset(3.0 + selected as f32 * slot_width, 4.0),
         HStack::new(Views(buttons)).spacing(0.0),
@@ -550,11 +580,7 @@ fn controls(
         .map(|(i, label)| {
             let actions = actions.clone();
             Box::new(
-                Button::new(label)
-                    .font_size(13.0)
-                    .background_color(Color::CLEAR)
-                    .border_color(Color::CLEAR)
-                    .text_color(p.ink)
+                solid_button(label, p, false)
                     .on_click(move || match i {
                         0 => actions.shuffle(),
                         1 => actions.refresh(),
@@ -562,8 +588,6 @@ fn controls(
                         _ => actions.reset(),
                     })
                     .frame(cell, 42.0)
-                    .background(p.card)
-                    .clip_radius(12.0)
                     .offset(
                         (i % columns) as f32 * (cell + 10.0),
                         (i / columns) as f32 * 52.0,
@@ -575,4 +599,31 @@ fn controls(
     ZStack::new(Views(buttons))
         .alignment(Alignment::TopLeading)
         .frame(width, (4 / columns) as f32 * 52.0 - 10.0)
+}
+
+fn code_links(code: &CodeBrowser, width: f32) -> impl View + Clone + 'static + use<> {
+    let columns = if width >= 600.0 { 3 } else { 1 };
+    let cell = ((width - (columns - 1) as f32 * 10.0) / columns as f32).max(0.0);
+    let links = [
+        (ExampleId::Layout, "Layout code"),
+        (ExampleId::Charts, "Chart code"),
+        (ExampleId::Theme, "Theme code"),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (id, label))| {
+        Box::new(
+            code.button(id, label, cell)
+                .frame(cell, 42.0)
+                .offset(
+                    (i % columns) as f32 * (cell + 10.0),
+                    (i / columns) as f32 * 52.0,
+                )
+                .key(i as u64),
+        ) as Box<dyn View>
+    })
+    .collect();
+    ZStack::new(Views(links))
+        .alignment(Alignment::TopLeading)
+        .frame(width, (3 / columns) as f32 * 52.0 - 10.0)
 }

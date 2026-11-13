@@ -1,5 +1,5 @@
 //! Playful custom drawing on the shared presentation clock.
-use crate::lab::Views;
+use crate::{code::CodeBrowser, lab::Views, source::ExampleId};
 use core::{any::Any, time::Duration};
 use scarlet_ui::{
     animation::AnimatedValue,
@@ -270,6 +270,7 @@ fn stage_card(
     caption: &str,
     index: usize,
     width: f32,
+    code: CodeBrowser,
 ) -> impl View + Clone + 'static + use<> {
     let tints = [
         rgb(255, 239, 243),
@@ -285,6 +286,7 @@ fn stage_card(
         }.alignment(Alignment::Leading),
         PlaygroundStage { scene, model: model.clone() }.frame(inner, STAGE.height).clip_radius(12.0),
         Text::new(caption).font_size(12.0).color(MUTED),
+        code.button([ExampleId::Donut, ExampleId::Zigzag, ExampleId::Jelly, ExampleId::Confetti][index], "View code", inner),
     }.alignment(Alignment::Leading).spacing(8.0).padding(16.0)
         .frame_width(width).background(tints[(index + model.palette) % tints.len()]).clip_radius(22.0)
         .animation(Animation::ease_in_out(Duration::from_millis(450)), model.palette)
@@ -321,10 +323,15 @@ impl Default for Playground {
 }
 
 impl Playground {
-    pub(crate) fn page(&self, width: f32) -> impl View + Clone + 'static + use<> {
+    pub(crate) fn page(
+        &self,
+        width: f32,
+        code: CodeBrowser,
+    ) -> impl View + Clone + 'static + use<> {
         PlayPage {
             state: self.state.clone(),
             width,
+            code,
         }
     }
     pub(crate) fn wake(&self) {
@@ -354,6 +361,7 @@ impl Playground {
 struct PlayPage {
     state: State<Model>,
     width: f32,
+    code: CodeBrowser,
 }
 
 impl View for PlayPage {
@@ -442,8 +450,18 @@ impl PlayPage {
         .iter()
         .enumerate()
         .map(|(i, (scene, title, caption))| {
-            Box::new(stage_card(*scene, &model, title, caption, i, card_width).key(i as u64))
-                as Box<dyn View>
+            Box::new(
+                stage_card(
+                    *scene,
+                    &model,
+                    title,
+                    caption,
+                    i,
+                    card_width,
+                    self.code.clone(),
+                )
+                .key(i as u64),
+            ) as Box<dyn View>
         })
         .collect();
         let card_rows = cards

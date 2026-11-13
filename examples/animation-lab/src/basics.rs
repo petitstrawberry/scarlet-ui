@@ -1,5 +1,6 @@
 //! Explicit and implicit motion. The shell owns scrolling and measures natural height.
 
+use crate::{code::CodeBrowser, source::ExampleId};
 use core::time::Duration;
 use scarlet_ui::{
     element::{ComponentElement, Element},
@@ -10,13 +11,14 @@ use scarlet_ui::{
 const INK: Color = Color::rgb_f32(0.12, 0.16, 0.24);
 const MUTED: Color = Color::rgb_f32(0.38, 0.43, 0.52);
 const OUTLINE: Color = Color::rgb_f32(0.79, 0.82, 0.88);
-const PANEL_HEIGHT: f32 = 376.0;
+const PANEL_HEIGHT: f32 = 422.0;
 
 #[derive(Clone)]
 pub(crate) struct Basics {
     explicit: State<bool>,
     implicit: State<bool>,
     width: f32,
+    code: CodeBrowser,
 }
 
 impl Default for Basics {
@@ -25,6 +27,7 @@ impl Default for Basics {
             explicit: State::new(generate_state_id(), false),
             implicit: State::new(generate_state_id(), false),
             width: 800.0,
+            code: CodeBrowser::default(),
         }
     }
 }
@@ -32,8 +35,9 @@ impl Default for Basics {
 impl Basics {
     /// Full viewport width, including this page's 16/24 px horizontal padding.
     /// Clones share State; mounting this component subscribes to both controls.
-    pub(crate) fn page(&self, width: f32) -> Self {
+    pub(crate) fn page(&self, width: f32, code: CodeBrowser) -> Self {
         Self {
+            code,
             width: if width.is_finite() {
                 width.max(0.0)
             } else {
@@ -89,6 +93,8 @@ impl Basics {
             ),
             move || toggle_explicit.toggle_explicit(),
             move || without_animation(|| reset_explicit.set(false)),
+            self.code.clone(),
+            ExampleId::Explicit,
         )
         .key(0u64);
         let second = panel(
@@ -108,6 +114,8 @@ impl Basics {
             ),
             move || toggle_implicit.update(|value| *value = !*value),
             move || without_animation(|| reset_implicit.set(false)),
+            self.code.clone(),
+            ExampleId::Implicit,
         )
         .offset(
             if columns == 2 {
@@ -208,6 +216,8 @@ fn panel(
     stage: impl View + Clone + 'static,
     on_toggle: impl Fn() + 'static,
     on_reset: impl Fn() + 'static,
+    code: CodeBrowser,
+    example: ExampleId,
 ) -> impl View + Clone + 'static {
     let inner = (width - 32.0).max(0.0);
     let reset_width = ((inner - 10.0) * 0.36).max(0.0);
@@ -223,6 +233,7 @@ fn panel(
                 .on_click(on_reset).frame(reset_width, 38.0),
         }.spacing(10.0),
         Text::new("Outlines mark both endpoints.").font_size(12.0).color(MUTED),
+        code.button(example, "View code", inner),
     }.alignment(Alignment::Leading).spacing(10.0).padding(16.0).frame(width, PANEL_HEIGHT)
         .background(Color::WHITE).clip_radius(14.0).border_rounded(OUTLINE, 1.0, 14.0)
 }

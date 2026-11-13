@@ -2,6 +2,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod basics;
 #[cfg(not(target_arch = "wasm32"))]
+mod code;
+#[cfg(not(target_arch = "wasm32"))]
 mod lab;
 #[cfg(not(target_arch = "wasm32"))]
 mod layout;
@@ -9,6 +11,8 @@ mod layout;
 mod paint;
 #[cfg(not(target_arch = "wasm32"))]
 mod play;
+#[cfg(not(target_arch = "wasm32"))]
+mod source;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> scarlet_ui::Result<()> {

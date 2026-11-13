@@ -16,6 +16,19 @@ SCARLET_UI_ANIMATION_LAB_SMOKE=1 cargo run --release -p scarlet-ui-animation-lab
   interruption and immediate reset.
 - **Layout**: composed cards, chart updates, layout changes, shuffle, and theme.
 
+Each Play card and Basics panel has a **View code** button. Layout offers
+**Layout code**, **Chart code**, and **Theme code**. The in-app reader explains
+the state change, animation, and drawing, then shows excerpts taken directly
+from the sources compiled into that build. File tabs open the complete module;
+**Copy excerpt / Copy file** and **Wrap: on/off** make the code reusable on
+wide and narrow screens. **Back to demo** preserves the demo's model.
+Excerpts are intentionally partial; use the full modules for imports and shared
+helpers. They are read-only examples, not an editor or live compiler.
+
+Page backgrounds extend behind the navigation chrome and device safe areas;
+content and controls continue to respect those insets. Layout's action buttons
+use opaque, borderless fills with clear contrast in both themes.
+
 NavigationView shows a sidebar on wide windows and bottom navigation on narrow
 ones, matching Widget Factory. The app keeps each page's model while switching pages. Only the selected page
 has mounted render objects, so hidden looping drawings do not keep animating.
@@ -38,6 +51,7 @@ points share `src/lab.rs`, `play.rs`, `basics.rs`, `layout.rs`, and `paint.rs`.
 The browser exports `start`, `stop`, `pause`, `resume`, and `runtime_error` and
 pauses its frame loop while the page is hidden. The embedded font uses the
 license in `../web-counter/assets/LICENSE`.
+The code reader embeds DejaVu Sans Mono with its license in `assets/LICENSE`.
 
 `python3 tools/build-web-samples.py` packages `/animation-lab/` with the existing
 site, Widget Factory, Counter, API reference and guides. The existing Web samples

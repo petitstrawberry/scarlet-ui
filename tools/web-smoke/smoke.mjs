@@ -527,6 +527,7 @@ try {
   await untilPixels('counter-2',img=>hasTextOnWhite(img,countRegion,50) && changedPixels(incremented,img,countRegion)>12);
   report.checks.push('two Counter clicks change rendered count glyphs');
 
+  await page.setViewportSize({width:1280,height:900});
   await ready('/animation-lab/','scarlet_ui_animation_lab');
   setPhase('Animation Lab rendering and lifecycle');
   await page.mouse.move(2,2);
@@ -549,6 +550,28 @@ try {
     'Animation Lab pause() must keep the presented frame still');
   await page.evaluate(async()=> (await import('./pkg/scarlet_ui_animation_lab.js')).resume());
   await untilPixels('animation-lab-resumed',img=>changedPixels(labPaused,img,labArea())>64);
+
+  setPhase('Animation Lab source walkthrough and full file');
+  // Open the visible Donut card's source, then its complete play.rs module.
+  // The Rust integration test covers all nine entry points and safe-area hit routing.
+  await page.mouse.click(468,486);await page.mouse.move(1250,80);
+  const codeArea={x:214,y:340,width:1034,height:400};
+  const codeBackground=(r,g,b)=>r<40&&g<50&&b<65;
+  await untilPixels('animation-lab-walkthrough',img=>coloredPixels(img,codeArea,codeBackground).count>10000);
+  await page.mouse.click(732,182);
+  await untilPixels('animation-lab-full-source',img=>coloredPixels(img,{x:260,y:350,width:900,height:160},codeBackground).count>100000);
+  // These permissions belong only to this ephemeral localhost test context.
+  // Confirm Copy file transfers the original source, not wrapped display lines.
+  await context.grantPermissions(['clipboard-read','clipboard-write'],{origin});
+  await page.mouse.click(1184,312);
+  await page.waitForFunction(async()=>{
+    const text=await navigator.clipboard.readText();
+    return text.startsWith('//! Playful custom drawing')&&text.includes('fn start_clock(&mut self)');
+  },null,{timeout:5000});
+  await context.clearPermissions();
+  await page.mouse.click(270,32);await page.mouse.move(1250,80);
+  await untilPixels('animation-lab-back-to-demo',img=>coloredPixels(img,codeArea,codeBackground).count<500);
+  report.checks.push('Animation Lab source button opens a real-code walkthrough, full file renders, Copy file transfers original Rust source, standard header returns to the demo');
   await page.setViewportSize({width:390,height:844});
   await untilPixels('animation-lab-narrow',img=>coloredPixels(img,labArea(),labColor).count>200);
   const labCanvas=await page.locator('#ui').boundingBox();
