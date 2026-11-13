@@ -122,6 +122,87 @@ impl HStackRenderObject {
     }
 }
 
+/// Whether `element` lays out several children (a stack, say) rather than
+/// wrapping a single one in modifiers.
+fn is_container(element: &dyn Element) -> bool {
+    let mut element = element;
+    loop {
+        match element.children() {
+            [] => return false,
+            [only] => element = only.as_ref(),
+            _ => return true,
+        }
+    }
+}
+
+impl HStackRenderObject {
+    /// Narrows the widest fixed children until the row fits `available`,
+    /// leaving narrower ones alone: the width cap is lowered like a water
+    /// level, so a long label shortens before a one-letter mark does.
+    /// Children that keep their width (fixed frames, icons) are skipped, and
+    /// so are nested stacks that already fill what they were offered: laying
+    /// those out again would repeat their whole subtree at every level.
+    /// Returns the new total width of the fixed children.
+    fn narrow_to_fit(
+        &mut self,
+        children: &mut [Box<dyn Element>],
+        constraints: LayoutConstraints,
+        mut total: f32,
+        available: f32,
+    ) -> f32 {
+        let mut candidates: Vec<usize> = (0..children.len())
+            .filter(|&index| {
+                let width = self.child_sizes[index].width;
+                width > 0.0
+                    && children[index].flex_factor() == 0
+                    && !self.greedy_indices.contains(&index)
+                    && !(is_container(children[index].as_ref())
+                        && width + 0.5 >= constraints.max_width)
+            })
+            .collect();
+        for _ in 0..3 {
+            let excess = total - available.max(0.0);
+            if excess <= 0.5 || candidates.is_empty() {
+                break;
+            }
+            // The level where the widths above it add up to the excess.
+            let mut widths: Vec<f32> = candidates
+                .iter()
+                .map(|&index| self.child_sizes[index].width)
+                .collect();
+            widths.sort_by(|a, b| b.total_cmp(a));
+            let mut level = 0.0;
+            let mut above = 0.0;
+            for (count, width) in widths.iter().enumerate() {
+                above += width;
+                let candidate = (above - excess) / (count + 1) as f32;
+                if widths.get(count + 1).is_none_or(|next| candidate >= *next) {
+                    level = candidate.max(0.0);
+                    break;
+                }
+            }
+            let mut narrowed = Vec::new();
+            for &index in &candidates {
+                let old = self.child_sizes[index];
+                if old.width <= level + 0.5 {
+                    narrowed.push(index);
+                    continue;
+                }
+                let size = children[index]
+                    .layout(LayoutConstraints::new(0.0, level, 0.0, constraints.max_height));
+                if size.width < old.width - 0.5 && size.width > 0.0 {
+                    narrowed.push(index);
+                }
+                total += size.width - old.width;
+                self.child_sizes[index] = size;
+            }
+            // Only children that gave way can be asked again.
+            candidates = narrowed;
+        }
+        total
+    }
+}
+
 impl ElementRenderObject for HStackRenderObject {
     fn update_needs_layout(&self) -> bool {
         true
@@ -199,6 +280,24 @@ impl ElementRenderObject for HStackRenderObject {
                     max_height = max_height.max(child_size.height);
                 }
             }
+        }
+
+        if constraints.max_width.is_finite()
+            && fixed_total_width + spacing_total > constraints.max_width + 0.5
+        {
+            fixed_total_width = self.narrow_to_fit(
+                children,
+                constraints,
+                fixed_total_width,
+                constraints.max_width - spacing_total,
+            );
+            max_height = self
+                .child_sizes
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !self.greedy_indices.contains(index))
+                .map(|(_, size)| size.height)
+                .fold(0.0, f32::max);
         }
 
         if flex_total == 0

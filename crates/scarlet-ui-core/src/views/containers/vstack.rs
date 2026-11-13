@@ -278,7 +278,9 @@ impl ElementRenderObject for VStackRenderObject {
                     "[VStackRenderObject::layout] loose width, using max_width from content"
                 );
             }
-            max_width
+            // Fill-width children are measured without a width limit (a text
+            // view then asks for its default 400 px); never exceed the offer.
+            max_width.min(constraints.max_width)
         };
 
         let final_height = if constraints.min_height == constraints.max_height

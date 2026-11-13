@@ -78,7 +78,73 @@ mod tests {
                     Size::new(800.0, 16.0)
                 }
             );
-            assert_eq!(calls.get(), 65);
+            if vertical {
+                assert_eq!(calls.get(), 65);
+            } else {
+                // Rows that overflow lay their leaf out once more to narrow
+                // it; nested stacks that already fill their row are not
+                // repeated, so the count stays linear in the depth.
+                assert!(calls.get() < 2 * 65, "{} leaf layouts", calls.get());
+            }
+        }
+    }
+
+    #[test]
+    fn overflowing_rows_shorten_long_labels_first_and_keep_fixed_items() {
+        use crate::views::Spacer;
+        let long = "a_rather_long_file_name_that_does_not_fit.rs";
+        for width in [400.0, 160.0, 120.0, 70.0] {
+            let mut row = HStack::new((
+                Text::new("").frame(16.0, 16.0),
+                Text::new(long).font_size(13.0),
+                Text::new("src/views").font_size(11.0),
+                Spacer::new(),
+                Text::new("M").font_size(11.0),
+                Text::new("+").frame(26.0, 20.0),
+            ))
+            .spacing(4.0)
+            .create_element();
+            let size = row.layout(LayoutConstraints::tight(width, 27.0));
+            assert_eq!(size.width, width);
+            let children = row.children();
+            let right = |i: usize| children[i].position().x + children[i].bounds().size.width;
+            // Everything stays inside the row, in order.
+            for i in 0..children.len() {
+                assert!(right(i) <= width + 0.5, "width {width}: child {i} ends at {}", right(i));
+            }
+            // The fixed icon and button keep their size; the mark stays whole.
+            assert_eq!(children[0].bounds().size.width, 16.0);
+            assert_eq!(children[5].bounds().size.width, 26.0);
+            let mark = crate::graphics::measure_text_sized("M", 11.0).0 as f32;
+            if width >= 120.0 {
+                assert_eq!(children[4].bounds().size.width, mark, "width {width}");
+            }
+            if width < 300.0 {
+                // The long label gave way first.
+                let natural = crate::graphics::measure_text_sized(long, 13.0).0 as f32;
+                assert!(children[1].bounds().size.width < natural);
+            }
+        }
+    }
+
+    #[test]
+    fn a_filling_text_view_in_a_loose_stack_takes_the_offered_width() {
+        use crate::state::{State, generate_state_id};
+        use crate::views::{TextSelection, TextView};
+        // A text view measured without a width limit asks for 400 px; the
+        // stack must still stay within what its parent offers.
+        let text = State::new(generate_state_id(), alloc::string::String::new());
+        let selection = State::new(generate_state_id(), TextSelection::default());
+        let mut column = VStack::new((
+            Text::new("main"),
+            TextView::new(text, selection).frame(f32::INFINITY, 76.0),
+            Text::new("Commit").frame(f32::INFINITY, 28.0),
+        ))
+        .create_element();
+        let size = column.layout(LayoutConstraints::loose(210.0, 400.0));
+        assert_eq!(size.width, 210.0);
+        for child in &column.children()[1..] {
+            assert_eq!(child.bounds().size.width, 210.0);
         }
     }
 
