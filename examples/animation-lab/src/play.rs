@@ -300,13 +300,10 @@ fn control(
 ) -> impl View + Clone + 'static {
     Button::new(label)
         .font_size(13.0)
-        .background_color(Color::CLEAR)
-        .border_color(Color::CLEAR)
+        .material(GlassMaterial::button().tint(color.with_opacity(0.78)))
         .text_color(INK)
         .on_click(callback)
         .frame(width, 42.0)
-        .background(color)
-        .clip_radius(13.0)
 }
 
 #[derive(Clone)]

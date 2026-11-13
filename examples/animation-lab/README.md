@@ -26,8 +26,9 @@ Excerpts are intentionally partial; use the full modules for imports and shared
 helpers. They are read-only examples, not an editor or live compiler.
 
 Page backgrounds extend behind the navigation chrome and device safe areas;
-content and controls continue to respect those insets. Layout's action buttons
-use opaque, borderless fills with clear contrast in both themes.
+content and controls continue to respect those insets. Colored action buttons
+tint the standard glass material, preserving its optics and interaction feedback
+with clear label contrast. Header buttons retain the standard header style.
 
 NavigationView shows a sidebar on wide windows and bottom navigation on narrow
 ones, matching Widget Factory. The app keeps each page's model while switching pages. Only the selected page

@@ -417,7 +417,7 @@ impl MetricCard {
             .color(p.muted)
             .offset(16.0, 276.0)
             .opacity(if pose.row || pose.small { 0.0 } else { 1.0 }),
-            solid_button(
+            glass_button(
                 if selected { "Back to board" } else { "Focus" },
                 p,
                 selected,
@@ -492,14 +492,16 @@ impl MiniChart {
     }
 }
 
-fn solid_button(label: &str, p: Palette, selected: bool) -> Button {
-    // Explicit fills opt out of Button's backdrop material. Keep interactive
-    // labels opaque even when the compact charts are visually de-emphasized.
+fn glass_button(label: &str, p: Palette, selected: bool) -> Button {
+    // Tint the shared material without replacing its optics or fading labels.
     Button::new(label)
         .font_size(13.0)
         .padding(6.0)
-        .background_color(if selected { p.selected } else { p.control })
-        .border_color(Color::CLEAR)
+        .material(
+            GlassMaterial::button().tint(
+                (if selected { p.selected } else { p.control }).with_opacity(0.78),
+            ),
+        )
         .text_color(if selected { p.selected_ink } else { p.ink })
 }
 
@@ -580,7 +582,7 @@ fn controls(
         .map(|(i, label)| {
             let actions = actions.clone();
             Box::new(
-                solid_button(label, p, false)
+                glass_button(label, p, false)
                     .on_click(move || match i {
                         0 => actions.shuffle(),
                         1 => actions.refresh(),

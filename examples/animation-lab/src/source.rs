@@ -271,7 +271,7 @@ fn layout_example() -> Example {
             "The model selects Board, Rows, or Spotlight. The actions change that model; model.key() tells the parent animation scope what changed.",
             "Each card keeps its id as its key. The shared scope uses an 850 ms spring with damping 0.82, so existing cards move to their new targets.",
             "card_pose calculates the geometry for each layout. The Rows branch below uses 116 px rows on wide content and 208 px stacked cards on narrower content.",
-            "The card applies the pose through frame and offset. Compact cards dim their charts while keeping buttons opaque. Open layout.rs for the Board and Spotlight poses and the complete card body.",
+            "The card applies the pose through frame and offset. Compact cards dim their charts while keeping button labels fully opaque. Open layout.rs for the Board and Spotlight poses and the complete card body.",
         ],
         sections: vec![
             section(

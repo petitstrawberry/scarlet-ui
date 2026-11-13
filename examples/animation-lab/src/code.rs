@@ -149,8 +149,10 @@ impl CodeBrowser {
 fn action_button(label: &str) -> Button {
     Button::new(label)
         .font_size(13.0)
-        .background_color(Color::rgb(227u8, 234u8, 248u8))
-        .border_color(Color::CLEAR)
+        .material(
+            GlassMaterial::button()
+                .tint(Color::rgb(227u8, 234u8, 248u8).with_opacity(0.78)),
+        )
         .text_color(INK)
 }
 
@@ -209,7 +211,12 @@ impl CodePage {
                     let selected = browser.file.get() == file;
                     Box::new(
                         action_button(&label)
-                            .background_color(if selected { INK } else { Color::WHITE })
+                            .material(
+                                GlassMaterial::button().tint(
+                                    (if selected { INK } else { Color::WHITE })
+                                        .with_opacity(0.78),
+                                ),
+                            )
                             .text_color(if selected { Color::WHITE } else { INK })
                             .on_click(move || {
                                 browser.file.set(file);

@@ -227,9 +227,9 @@ fn panel(
         stage,
         Text::new(if expanded { "Target B / expanded / 50%" } else { "Target A / compact / 100%" }).font_size(13.0).color(INK),
         scarlet_ui::hstack! {
-            Button::new("Animate / reverse").font_size(13.0).background_color(INK).text_color(Color::WHITE).border_color(INK)
+            Button::new("Animate / reverse").font_size(13.0).material(GlassMaterial::button().tint(INK.with_opacity(0.78))).text_color(Color::WHITE)
                 .on_click(on_toggle).frame((inner - reset_width - 10.0).max(0.0), 38.0),
-            Button::new("Reset to A").font_size(13.0).background_color(Color::rgb(241u8, 244u8, 249u8)).text_color(INK).border_color(OUTLINE)
+            Button::new("Reset to A").font_size(13.0).material(GlassMaterial::button().tint(Color::rgb(241u8, 244u8, 249u8).with_opacity(0.78))).text_color(INK)
                 .on_click(on_reset).frame(reset_width, 38.0),
         }.spacing(10.0),
         Text::new("Outlines mark both endpoints.").font_size(12.0).color(MUTED),
