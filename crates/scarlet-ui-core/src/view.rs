@@ -270,7 +270,7 @@ pub trait ViewExt: View {
         crate::views::Background::new(self, color)
     }
 
-    /// Set a fixed frame size for this view
+    /// Set a fixed frame size, centering content that is smaller than the frame
     ///
     /// # Arguments
     /// * `width` - The fixed width
@@ -282,7 +282,7 @@ pub trait ViewExt: View {
         crate::views::Frame::new(self, width, height)
     }
 
-    /// Set a fixed width for this view
+    /// Set a fixed width, centering content that is narrower than the frame
     ///
     /// # Arguments
     /// * `width` - The fixed width
@@ -293,7 +293,7 @@ pub trait ViewExt: View {
         crate::views::Frame::width(self, width)
     }
 
-    /// Set a fixed height for this view
+    /// Set a fixed height, centering content that is shorter than the frame
     ///
     /// # Arguments
     /// * `height` - The fixed height

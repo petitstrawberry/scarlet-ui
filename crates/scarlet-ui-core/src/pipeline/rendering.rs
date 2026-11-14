@@ -5050,8 +5050,10 @@ mod tests {
         let damage = damage.expect("paint-only state update should remain partial");
 
         assert!(!damage.is_empty());
+        // The intrinsic 40x40 patch is centered inside its 800x600 frame.
+        // Damage must follow that child-local placement, not cover the frame.
         assert!(damage.iter().all(|&(x, y, width, height)| {
-            x.saturating_add(width) <= 40 && y.saturating_add(height) <= 40
+            x >= 380 && y >= 280 && x.saturating_add(width) <= 420 && y.saturating_add(height) <= 320
         }));
     }
 

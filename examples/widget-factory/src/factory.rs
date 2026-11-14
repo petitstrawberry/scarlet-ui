@@ -783,7 +783,7 @@ impl WidgetFactory {
             )
         } else {
             Either::B(
-                hstack![label.frame_width(150.0), control]
+                hstack![label.frame_width(150.0).content_alignment(Alignment::Leading), control]
                     .spacing(18.0)
                     .alignment(alignment)
                     .frame_width(self.row_width()),
@@ -884,14 +884,14 @@ impl WidgetFactory {
         ScrollView::new(
             vstack! {
                 Text::new("ScrollView content").font_size(16.0),
-                hstack![Text::new("Track 01").frame_width(150.0), ProgressView::new(0.20).frame(260.0, 18.0)].spacing(18.0),
-                hstack![Text::new("Track 02").frame_width(150.0), ProgressView::new(0.42).frame(260.0, 18.0)].spacing(18.0),
-                hstack![Text::new("Track 03").frame_width(150.0), ProgressView::new(0.64).frame(260.0, 18.0)].spacing(18.0),
-                hstack![Text::new("Track 04").frame_width(150.0), ProgressView::new(0.82).frame(260.0, 18.0)].spacing(18.0),
-                hstack![Text::new("Track 05").frame_width(150.0), ProgressView::new(0.34).frame(260.0, 18.0)].spacing(18.0),
-                hstack![Text::new("Track 06").frame_width(150.0), ProgressView::new(0.56).frame(260.0, 18.0)].spacing(18.0),
-                hstack![Text::new("Track 07").frame_width(150.0), ProgressView::new(0.74).frame(260.0, 18.0)].spacing(18.0),
-                hstack![Text::new("Track 08").frame_width(150.0), ProgressView::new(0.12).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 01").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.20).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 02").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.42).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 03").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.64).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 04").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.82).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 05").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.34).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 06").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.56).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 07").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.74).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 08").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.12).frame(260.0, 18.0)].spacing(18.0),
             }
             .spacing(8.0)
             .alignment(Alignment::Leading)
@@ -1606,6 +1606,56 @@ mod tests {
         assert_eq!(&edited[headings[0].range.clone()], "# Another");
         assert!(diagnostics.is_empty());
         assert_eq!(text_decorations(""), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn slider_rows_center_tracks_and_keep_the_label_column_leading() {
+        fn find<T: 'static>(element: &dyn Element, origin: Point) -> Option<Rect> {
+            let origin = Point::new(
+                origin.x + element.position().x,
+                origin.y + element.position().y,
+            );
+            if element
+                .render_object()
+                .is_some_and(|r| r.as_any().is::<T>())
+            {
+                return Some(Rect::new(origin, element.bounds().size));
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| find::<T>(child.as_ref(), origin))
+        }
+        let app = WidgetFactory::new();
+        for width in [600.0, 800.0] {
+            app.page_width.set(width);
+            let rows: Vec<Box<dyn View>> = vec![
+                Box::new(app.row("Slider", app.slider())),
+                Box::new(
+                    app.row(
+                        "Disabled",
+                        Slider::new(app.slider_value.clone())
+                            .enabled(false)
+                            .frame(app.demo_width(280.0), 26.0),
+                    ),
+                ),
+            ];
+            for row in rows {
+                let mut root = row.create_element();
+                root.layout(LayoutConstraints::loose(width, 100.0));
+                let label = find::<scarlet_ui::views::TextRenderObject>(root.as_ref(), Point::ZERO)
+                    .unwrap();
+                let slider =
+                    find::<scarlet_ui::views::SliderRenderObject>(root.as_ref(), Point::ZERO)
+                        .unwrap();
+                assert_eq!(label.origin.x, 0.0);
+                assert_eq!(
+                    label.origin.y + label.size.height / 2.0,
+                    slider.origin.y + slider.size.height / 2.0
+                );
+                assert!(slider.right() <= app.row_width());
+            }
+        }
     }
 
     #[test]
