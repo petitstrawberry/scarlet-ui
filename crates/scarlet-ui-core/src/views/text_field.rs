@@ -43,8 +43,11 @@ pub struct TextField {
     material: Option<style::GlassMaterial>,
     border_color: Color,
     focused_border_color: Color,
+    custom_focus_color: bool,
     text_color: Color,
     placeholder_color: Color,
+    /// Behind selected text; `None` derives it from the background.
+    selection_color: Option<Color>,
     font_size: f32,
     padding: Option<f32>,
     enabled: bool,
@@ -68,8 +71,10 @@ impl TextField {
             material: Some(style::GlassMaterial::editing()),
             border_color: palette.border(),
             focused_border_color: style::focus_highlight(&palette),
+            custom_focus_color: false,
             text_color: palette.text(),
             placeholder_color: palette.text_secondary(),
+            selection_color: None,
             font_size: style::CONTROL_FONT_SIZE,
             padding: None,
             enabled: true,
@@ -210,6 +215,7 @@ impl TextField {
     /// The updated text field.
     pub fn focused_border_color(mut self, color: Color) -> Self {
         self.focused_border_color = color;
+        self.custom_focus_color = true;
         self.material = None;
         self
     }
@@ -225,6 +231,17 @@ impl TextField {
     /// The updated text field.
     pub fn text_color(mut self, color: Color) -> Self {
         self.text_color = color;
+        self
+    }
+
+    /// Set the color behind selected text, as [`TextView::selection_color`]
+    /// does. Without it, the default palette's accent is blended over the
+    /// field's background color, so a field given a dark background keeps
+    /// light text readable when selected.
+    ///
+    /// [`TextView::selection_color`]: super::text_view::TextView::selection_color
+    pub fn selection_color(mut self, color: Color) -> Self {
+        self.selection_color = Some(color);
         self
     }
 
@@ -296,8 +313,10 @@ pub struct TextFieldRenderObject {
     material: Option<style::GlassMaterial>,
     border_color: Color,
     focused_border_color: Color,
+    custom_focus_color: bool,
     text_color: Color,
     placeholder_color: Color,
+    selection_color: Option<Color>,
     font_size: f32,
     padding: Option<f32>,
     enabled: bool,
@@ -333,8 +352,10 @@ impl TextFieldRenderObject {
             material: view.material,
             border_color: view.border_color,
             focused_border_color: view.focused_border_color,
+            custom_focus_color: view.custom_focus_color,
             text_color: view.text_color,
             placeholder_color: view.placeholder_color,
+            selection_color: view.selection_color,
             font_size: view.font_size,
             padding: view.padding,
             enabled: view.enabled,
@@ -497,11 +518,12 @@ impl ElementRenderObject for TextFieldRenderObject {
                 material,
             );
             if self.focused && self.enabled {
-                style::glass_control_focus(
-                    ctx,
-                    crate::geometry::Rect::new(origin, self.size),
-                    material,
-                );
+                let rect = crate::geometry::Rect::new(origin, self.size);
+                if self.custom_focus_color {
+                    style::focus_indicator(ctx, rect, self.focused_border_color);
+                } else {
+                    style::glass_control_focus(ctx, rect, material);
+                }
             }
             paint::paint_text_view_content
         } else {
@@ -597,11 +619,11 @@ impl TextFieldRenderObject {
     }
 
     fn selection_color(&self) -> Color {
-        let palette = ColorPalette::default();
-        style::text_selection_highlight(
-            palette.primary(),
-            style::surface_color(&palette, style::SurfaceRole::Canvas),
-        )
+        self.selection_color.unwrap_or_else(|| {
+            // Over the field's own background: over the default (light)
+            // canvas, a dark field's light text would vanish when selected.
+            style::text_selection_highlight(ColorPalette::default().primary(), self.background_color)
+        })
     }
 }
 
@@ -1220,6 +1242,32 @@ mod tests {
         }
     }
 
+    /// Selected text stays readable: the highlight follows the field's
+    /// background unless the app gives its own (its theme's, say).
+    #[test]
+    fn selection_follows_the_background_or_the_given_color() {
+        let state = || State::new(StateId::new(1), String::from("text"));
+        let luma = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+        let dark = Color::rgb(30, 30, 30);
+        let field = TextField::new(state()).background_color(dark);
+        let highlight = TextFieldRenderObject::from_view(&field).selection_color();
+        assert!(
+            luma(highlight) < 0.35,
+            "a dark field gets a dark highlight under its light text: {highlight:?}"
+        );
+        let light = TextFieldRenderObject::from_view(&TextField::new(state())).selection_color();
+        assert!(luma(light) > 0.6, "the default field keeps its light highlight: {light:?}");
+        let given = Color::rgba(80, 120, 200, 0.4);
+        let field = TextField::new(state())
+            .background_color(dark)
+            .selection_color(given);
+        assert_eq!(TextFieldRenderObject::from_view(&field).selection_color(), given);
+        // Still after an update from the same view.
+        let mut object = TextFieldRenderObject::from_view(&TextField::new(state()));
+        object.update(&field);
+        assert_eq!(object.selection_color(), given);
+    }
+
     #[test]
     fn default_field_uses_editing_material_and_uniform_state_faces() {
         let text = State::new(crate::state::generate_state_id(), String::from("Name"));
@@ -1306,6 +1354,27 @@ mod tests {
             object.set_focused(false);
             assert_eq!(glass_tint(&object), material.tint);
             assert_eq!(object.size(), Size::new(160.0, 36.0));
+        }
+    }
+
+    #[test]
+    fn glass_focus_ring_uses_the_explicit_theme_color_after_updates() {
+        let text = State::new(crate::state::generate_state_id(), String::new());
+        let mut object = TextFieldRenderObject::from_view(&TextField::new(text.clone()));
+        for color in [Color::rgb(51, 114, 187), Color::rgb(138, 180, 230)] {
+            let view = TextField::new(text.clone())
+                .focused_border_color(color)
+                .material(style::GlassMaterial::editing())
+                .autofocus(true);
+            object.update(&view);
+            object.layout(LayoutConstraints::tight(160.0, 36.0));
+            object.set_focused(true);
+            let mut context = PaintContext::new();
+            object.paint(&mut context, Point::ZERO);
+            assert!(object.reads_backdrop());
+            assert!(context.commands().iter().any(|command| matches!(
+                command, PaintCommand::StrokeRoundedRect { color: tint, .. } if *tint == color
+            )));
         }
     }
 
