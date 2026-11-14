@@ -1,6 +1,7 @@
 //! Layout computation for the multi-line text view.
 
 use alloc::borrow::Cow;
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -49,6 +50,9 @@ pub struct TextViewLayout {
     show_line_numbers: bool,
     font_revision: usize,
     font_stack: Option<Arc<graphics::FontStack>>,
+    // Only lines in the current document are retained. Entries use line-relative
+    // byte offsets, so inserting a line does not invalidate the following lines.
+    measured_lines: BTreeMap<String, Arc<Vec<VisualLine>>>,
 }
 
 /// A measured visual line fragment.
@@ -126,6 +130,30 @@ impl TextViewLayout {
         show_line_numbers: bool,
         font_stack: Option<&Arc<graphics::FontStack>>,
     ) -> Self {
+        Self::compute_reusing(
+            document,
+            font_size,
+            padding,
+            wrap_mode,
+            size,
+            scroll,
+            show_line_numbers,
+            font_stack,
+            None,
+        )
+    }
+
+    pub(super) fn compute_reusing(
+        document: &TextDocument,
+        font_size: f32,
+        padding: f32,
+        wrap_mode: WrapMode,
+        size: Size,
+        scroll: TextViewScroll,
+        show_line_numbers: bool,
+        font_stack: Option<&Arc<graphics::FontStack>>,
+        previous: Option<&Self>,
+    ) -> Self {
         let line_height = match font_stack {
             Some(stack) => graphics::line_height_sized_with_font_stack(font_size, stack),
             None => graphics::line_height_sized(font_size),
@@ -164,6 +192,15 @@ impl TextViewLayout {
         let viewport_width = (size.width - padding * 2.0 - gutter_width).max(1.0);
         let viewport_height = (size.height - padding * 2.0).max(1.0);
         let mut visual_lines = Vec::new();
+        let previous = previous.filter(|old| {
+            old.font_size == font_size
+                && old.wrap_mode == wrap_mode
+                && (wrap_mode == WrapMode::None || old.viewport_width == viewport_width)
+                && old.font_stack.is_some() == font_stack.is_some()
+                && old.font_revision
+                    == font_stack.map_or_else(graphics::text_font_revision, |s| s.cache_id())
+        });
+        let mut measured_lines: BTreeMap<String, Arc<Vec<VisualLine>>> = BTreeMap::new();
 
         if document.line_count() == 0 {
             visual_lines.push(VisualLine::new(
@@ -183,29 +220,51 @@ impl TextViewLayout {
                     .line_text(logical_line)
                     .unwrap_or(Cow::Borrowed(""));
                 let display = strip_line_ending(&line_text);
-                match wrap_mode {
-                    WrapMode::None => push_visual_line(
-                        &mut visual_lines,
-                        logical_line,
-                        range.start..range.start + display.len(),
-                        display.to_string(),
-                        text_origin_x - scroll.x,
-                        padding,
-                        &measure,
-                    ),
-                    WrapMode::Soft | WrapMode::Code | WrapMode::CodeAnywhere => push_wrapped_lines(
-                        &mut visual_lines,
-                        logical_line,
-                        range.start,
-                        display,
-                        text_origin_x - scroll.x,
-                        padding,
-                        viewport_width,
-                        matches!(wrap_mode, WrapMode::Code | WrapMode::CodeAnywhere),
-                        wrap_mode != WrapMode::CodeAnywhere,
-                        &measure,
-                    ),
+                let cached = measured_lines
+                    .get(display)
+                    .or_else(|| previous.and_then(|old| old.measured_lines.get(display)))
+                    .cloned();
+                let measured = cached.unwrap_or_else(|| {
+                    let mut fragments = Vec::new();
+                    match wrap_mode {
+                        WrapMode::None => push_visual_line(
+                            &mut fragments,
+                            0,
+                            0..display.len(),
+                            display.to_string(),
+                            0.0,
+                            padding,
+                            &measure,
+                        ),
+                        WrapMode::Soft | WrapMode::Code | WrapMode::CodeAnywhere => {
+                            push_wrapped_lines(
+                                &mut fragments,
+                                0,
+                                0,
+                                display,
+                                0.0,
+                                padding,
+                                viewport_width,
+                                matches!(wrap_mode, WrapMode::Code | WrapMode::CodeAnywhere),
+                                wrap_mode != WrapMode::CodeAnywhere,
+                                &measure,
+                            )
+                        }
+                    }
+                    Arc::new(fragments)
+                });
+                for fragment in measured.iter() {
+                    let mut line = fragment.clone();
+                    line.logical_line = logical_line;
+                    line.text_range =
+                        line.text_range.start + range.start..line.text_range.end + range.start;
+                    for (byte, _) in &mut line.caret_stops {
+                        *byte += range.start;
+                    }
+                    line.x += text_origin_x - scroll.x;
+                    visual_lines.push(line);
                 }
+                measured_lines.insert(display.to_string(), measured);
             }
         }
 
@@ -228,6 +287,7 @@ impl TextViewLayout {
             visible_range(clip_scroll_y, clip_height, line_height, visual_lines.len());
 
         Self {
+            measured_lines,
             line_height,
             content_width,
             content_height,
@@ -406,7 +466,10 @@ impl TextViewLayout {
     /// A widget-local caret rectangle.
     pub fn cursor_rect(&self, position: TextPosition, document: &TextDocument) -> Rect {
         let byte = position.byte.min(document.len());
-        if let Ok(index) = self.inlay_carets.binary_search_by_key(&byte, |entry| entry.0) {
+        if let Ok(index) = self
+            .inlay_carets
+            .binary_search_by_key(&byte, |entry| entry.0)
+        {
             let (_, row, advance) = self.inlay_carets[index];
             let line = &self.visual_lines[row];
             return Rect::from_xywh(line.x + advance, line.y, 1.0, self.line_height);
@@ -484,7 +547,9 @@ impl TextViewLayout {
 
 impl VisualLine {
     /// Display text for this fragment, with tabs expanded for painting.
-    pub fn display_text(&self) -> &str { &self.text }
+    pub fn display_text(&self) -> &str {
+        &self.text
+    }
 
     /// Map a display-text byte boundary back to the original document.
     pub fn source_byte_at_display_byte(&self, byte: usize) -> usize {
@@ -506,8 +571,11 @@ impl VisualLine {
         document_to_display_offsets: Vec<usize>,
         measure: &graphics::TextMeasure,
     ) -> Self {
-        let prefix_widths = measure.prefix_widths(&text).into_iter()
-            .map(graphics::TextMeasure::rounded_width).collect();
+        let prefix_widths = measure
+            .prefix_widths(&text)
+            .into_iter()
+            .map(graphics::TextMeasure::rounded_width)
+            .collect();
         let mut line = Self {
             logical_line,
             text_range,
@@ -668,18 +736,37 @@ fn push_wrapped_lines(
     let (display, offsets) = expand_tabs_with_offsets(text, DEFAULT_TAB_WIDTH);
     let widths = measure.prefix_widths(&display);
     let mut opportunities = unicode_linebreak::linebreaks(text).peekable();
-    let graphemes: Vec<_> = text.grapheme_indices(true).map(|(start, grapheme)| {
-        let end = start + grapheme.len();
-        while opportunities.peek().is_some_and(|(byte, _)| *byte < end) {
-            opportunities.next();
-        }
-        let may_break = opportunities.peek().is_some_and(|(byte, _)| *byte == end);
-        (start, end, may_break, widths[offsets[end]] - widths[offsets[start]])
-    }).collect();
-    let indent_end = text.char_indices().find(|(_, ch)| !matches!(ch, ' ' | '\t')).map_or(text.len(), |(byte, _)| byte);
-    let indent = if preserve_indent { widths[offsets[indent_end]] } else { 0.0 };
+    let graphemes: Vec<_> = text
+        .grapheme_indices(true)
+        .map(|(start, grapheme)| {
+            let end = start + grapheme.len();
+            while opportunities.peek().is_some_and(|(byte, _)| *byte < end) {
+                opportunities.next();
+            }
+            let may_break = opportunities.peek().is_some_and(|(byte, _)| *byte == end);
+            (
+                start,
+                end,
+                may_break,
+                widths[offsets[end]] - widths[offsets[start]],
+            )
+        })
+        .collect();
+    let indent_end = text
+        .char_indices()
+        .find(|(_, ch)| !matches!(ch, ' ' | '\t'))
+        .map_or(text.len(), |(byte, _)| byte);
+    let indent = if preserve_indent {
+        widths[offsets[indent_end]]
+    } else {
+        0.0
+    };
     // Deep indentation must not consume the continuation's entire viewport.
-    let indent = if indent < max_width * 0.5 { indent } else { 0.0 };
+    let indent = if indent < max_width * 0.5 {
+        indent
+    } else {
+        0.0
+    };
     let mut start = 0;
     while start < graphemes.len() {
         let mut end = start;
@@ -768,4 +855,104 @@ fn strip_line_ending(text: &str) -> &str {
     text.strip_suffix("\r\n")
         .or_else(|| text.strip_suffix('\n'))
         .unwrap_or(text)
+}
+
+#[cfg(test)]
+mod reuse_tests {
+    use super::super::TextInlayHint;
+    use super::*;
+
+    #[test]
+    fn reused_lines_match_fresh_layout_after_edits_resizes_and_hint_changes() {
+        let source = "fn main() {\r\n\tlet 名前 = \"👩‍💻 e\u{301}\";\n    unchanged_long_line_with_many_words_and_more_words();\n}\n";
+        for mode in [
+            WrapMode::None,
+            WrapMode::Soft,
+            WrapMode::Code,
+            WrapMode::CodeAnywhere,
+        ] {
+            let mut previous = TextViewLayout::compute(
+                &TextDocument::from_str(source),
+                14.0,
+                8.0,
+                mode,
+                Size::new(230.0, 180.0),
+                TextViewScroll::default(),
+                true,
+            );
+            for (text, width, font, hint) in [
+                (alloc::format!("// inserted\n{source}"), 230.0, 14.0, false),
+                (source.replace("名前", "name"), 230.0, 14.0, true),
+                (source.into(), 170.0, 14.0, true),
+                (source.into(), 170.0, 18.0, false),
+                ("".into(), 170.0, 18.0, false),
+            ] {
+                let document = TextDocument::from_str(&text);
+                let hints = if hint {
+                    alloc::vec![TextInlayHint {
+                        byte: text.find(" =").unwrap(),
+                        label: ": &str".into(),
+                        color: Color::BLACK
+                    }]
+                } else {
+                    Vec::new()
+                };
+                let size = Size::new(width, 140.0);
+                let scroll = TextViewScroll { x: 3.0, y: 12.0 };
+                let reused = TextViewLayout::compute_with_inlay_hints_reusing(
+                    &document,
+                    font,
+                    8.0,
+                    mode,
+                    size,
+                    scroll,
+                    true,
+                    None,
+                    &hints,
+                    Some(&previous),
+                );
+                let fresh = TextViewLayout::compute_with_inlay_hints(
+                    &document, font, 8.0, mode, size, scroll, true, None, &hints,
+                );
+                assert_eq!(
+                    alloc::format!("{:?}", reused.visual_lines),
+                    alloc::format!("{:?}", fresh.visual_lines)
+                );
+                assert_eq!(reused.inlay_carets, fresh.inlay_carets);
+                assert_eq!(reused.content_height, fresh.content_height);
+                assert_eq!(reused.content_width, fresh.content_width);
+                assert_eq!(reused.visible_lines, fresh.visible_lines);
+                previous = reused;
+            }
+        }
+    }
+
+    #[test]
+    fn unchanged_lines_reuse_measurements_without_retaining_removed_lines() {
+        let old = TextViewLayout::compute(
+            &TextDocument::from_str("removed\nunchanged\n"),
+            14.0,
+            8.0,
+            WrapMode::None,
+            Size::new(300.0, 100.0),
+            TextViewScroll::default(),
+            true,
+        );
+        let new = TextViewLayout::compute_reusing(
+            &TextDocument::from_str("added\nunchanged\n"),
+            14.0,
+            8.0,
+            WrapMode::None,
+            Size::new(300.0, 100.0),
+            TextViewScroll::default(),
+            true,
+            None,
+            Some(&old),
+        );
+        assert!(Arc::ptr_eq(
+            &old.measured_lines["unchanged"],
+            &new.measured_lines["unchanged"]
+        ));
+        assert!(!new.measured_lines.contains_key("removed"));
+    }
 }
