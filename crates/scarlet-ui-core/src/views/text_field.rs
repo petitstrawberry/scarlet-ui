@@ -43,6 +43,7 @@ pub struct TextField {
     material: Option<style::GlassMaterial>,
     border_color: Color,
     focused_border_color: Color,
+    custom_focus_color: bool,
     text_color: Color,
     placeholder_color: Color,
     /// Behind selected text; `None` derives it from the background.
@@ -70,6 +71,7 @@ impl TextField {
             material: Some(style::GlassMaterial::editing()),
             border_color: palette.border(),
             focused_border_color: style::focus_highlight(&palette),
+            custom_focus_color: false,
             text_color: palette.text(),
             placeholder_color: palette.text_secondary(),
             selection_color: None,
@@ -213,6 +215,7 @@ impl TextField {
     /// The updated text field.
     pub fn focused_border_color(mut self, color: Color) -> Self {
         self.focused_border_color = color;
+        self.custom_focus_color = true;
         self.material = None;
         self
     }
@@ -310,6 +313,7 @@ pub struct TextFieldRenderObject {
     material: Option<style::GlassMaterial>,
     border_color: Color,
     focused_border_color: Color,
+    custom_focus_color: bool,
     text_color: Color,
     placeholder_color: Color,
     selection_color: Option<Color>,
@@ -348,6 +352,7 @@ impl TextFieldRenderObject {
             material: view.material,
             border_color: view.border_color,
             focused_border_color: view.focused_border_color,
+            custom_focus_color: view.custom_focus_color,
             text_color: view.text_color,
             placeholder_color: view.placeholder_color,
             selection_color: view.selection_color,
@@ -513,11 +518,12 @@ impl ElementRenderObject for TextFieldRenderObject {
                 material,
             );
             if self.focused && self.enabled {
-                style::glass_control_focus(
-                    ctx,
-                    crate::geometry::Rect::new(origin, self.size),
-                    material,
-                );
+                let rect = crate::geometry::Rect::new(origin, self.size);
+                if self.custom_focus_color {
+                    style::focus_indicator(ctx, rect, self.focused_border_color);
+                } else {
+                    style::glass_control_focus(ctx, rect, material);
+                }
             }
             paint::paint_text_view_content
         } else {
@@ -1348,6 +1354,27 @@ mod tests {
             object.set_focused(false);
             assert_eq!(glass_tint(&object), material.tint);
             assert_eq!(object.size(), Size::new(160.0, 36.0));
+        }
+    }
+
+    #[test]
+    fn glass_focus_ring_uses_the_explicit_theme_color_after_updates() {
+        let text = State::new(crate::state::generate_state_id(), String::new());
+        let mut object = TextFieldRenderObject::from_view(&TextField::new(text.clone()));
+        for color in [Color::rgb(51, 114, 187), Color::rgb(138, 180, 230)] {
+            let view = TextField::new(text.clone())
+                .focused_border_color(color)
+                .material(style::GlassMaterial::editing())
+                .autofocus(true);
+            object.update(&view);
+            object.layout(LayoutConstraints::tight(160.0, 36.0));
+            object.set_focused(true);
+            let mut context = PaintContext::new();
+            object.paint(&mut context, Point::ZERO);
+            assert!(object.reads_backdrop());
+            assert!(context.commands().iter().any(|command| matches!(
+                command, PaintCommand::StrokeRoundedRect { color: tint, .. } if *tint == color
+            )));
         }
     }
 
