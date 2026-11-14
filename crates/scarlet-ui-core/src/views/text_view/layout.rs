@@ -41,7 +41,9 @@ pub struct TextViewLayout {
     pub(crate) viewport_height: f32,
     pub(crate) text_origin_x: f32,
     pub(crate) scroll: TextViewScroll,
-    document: TextDocument,
+    pub(super) document: TextDocument,
+    pub(super) inlay_hints: Vec<super::TextInlayHint>,
+    pub(super) inlay_carets: Vec<(usize, usize, f32)>,
     wrap_mode: WrapMode,
     size: Size,
     show_line_numbers: bool,
@@ -66,9 +68,10 @@ pub struct VisualLine {
     /// Measured text width in logical pixels.
     pub width: f32,
     text: String,
-    document_to_display_offsets: Vec<usize>,
+    pub(super) document_to_display_offsets: Vec<usize>,
     prefix_widths: Vec<f32>,
-    caret_stops: Vec<(usize, f32)>,
+    pub(super) caret_stops: Vec<(usize, f32)>,
+    pub(super) inlay_spans: Vec<(Range<usize>, Color)>,
 }
 
 impl TextViewLayout {
@@ -239,6 +242,8 @@ impl TextViewLayout {
             text_origin_x,
             scroll,
             document: document.clone(),
+            inlay_hints: Vec::new(),
+            inlay_carets: Vec::new(),
             wrap_mode,
             size,
             show_line_numbers,
@@ -401,6 +406,11 @@ impl TextViewLayout {
     /// A widget-local caret rectangle.
     pub fn cursor_rect(&self, position: TextPosition, document: &TextDocument) -> Rect {
         let byte = position.byte.min(document.len());
+        if let Ok(index) = self.inlay_carets.binary_search_by_key(&byte, |entry| entry.0) {
+            let (_, row, advance) = self.inlay_carets[index];
+            let line = &self.visual_lines[row];
+            return Rect::from_xywh(line.x + advance, line.y, 1.0, self.line_height);
+        }
         let line_index = self
             .visual_lines
             .partition_point(|line| line.text_range.end < byte)
@@ -508,6 +518,7 @@ impl VisualLine {
             document_to_display_offsets,
             prefix_widths,
             caret_stops: Vec::new(),
+            inlay_spans: Vec::new(),
         };
         line.width = *line.prefix_widths.last().unwrap_or(&0.0);
         line.caret_stops.push((line.text_range.start, 0.0));

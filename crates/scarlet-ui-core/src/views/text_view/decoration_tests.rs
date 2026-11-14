@@ -357,3 +357,43 @@ fn public_prelude_exports_decoration_types() {
         color: blue(),
     };
 }
+
+#[test]
+fn virtual_type_hints_wrap_and_map_hits_without_changing_source() {
+    let source = "\tlet 日本 = f();\nlet b = 日本;";
+    let anchor = source.find(" =").unwrap();
+    let hint = TextInlayHint { byte: anchor, label: ": Option<日本語>".into(), color: red() };
+    for mode in [WrapMode::None, WrapMode::Soft, WrapMode::Code, WrapMode::CodeAnywhere] {
+        let view = editor(source).wrap_mode(mode).inlay_hints(vec![hint.clone()]);
+        let object = render_object_with_size(&view, if mode == WrapMode::None { 700. } else { 155. }, 600.);
+        assert_eq!(object.text_document.as_str(), source);
+        let painted = text_commands(&object);
+        assert_eq!(painted.iter().filter(|(_, color, _)| *color == red()).map(|(s, _, _)| s.as_str()).collect::<String>(), hint.label);
+        for line in &object.layout.visual_lines {
+            assert!(source.is_char_boundary(line.text_range.start));
+            assert!(source.is_char_boundary(line.text_range.end));
+            for (range, _) in &line.inlay_spans {
+                let x = line.x + line.display_advance(range.start) + 1.;
+                assert_eq!(object.layout.hit_test(Point::new(x, line.y + 1.)).unwrap().byte, anchor);
+            }
+        }
+        let caret = object.layout.cursor_rect(TextPosition::new(anchor), &object.text_document);
+        assert_eq!(object.layout.hit_test(Point::new(caret.origin.x, caret.origin.y + 1.)).unwrap().byte, anchor);
+    }
+}
+
+#[test]
+fn virtual_labels_are_removed_on_edit_and_toggle_reflows() {
+    let source = "let value = 1;";
+    let view = editor(source).autofocus(true).inlay_hints(vec![TextInlayHint { byte: 9, label: ": i32".into(), color: red() }]);
+    let mut object = render_object_with_size(&view, 400., 100.);
+    let width = object.layout.max_line_width;
+    let plain = editor(source).autofocus(true);
+    object.update(&plain);
+    assert!(object.layout.max_line_width < width);
+    object.update(&view);
+    object.selection = TextSelection::collapsed(9);
+    super::super::editing::handle_text_view_text_input(&view, &mut object, &Event::TextInputCommit { context_id: 1, serial: 1, text: "x".into() });
+    assert!(object.inlay_hints.is_empty());
+    assert_eq!(object.text_document.as_str(), "let valuex = 1;");
+}

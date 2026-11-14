@@ -181,7 +181,7 @@ pub use views::{
 };
 pub use views::{
     EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,
-    TextStyleSpan, TextView, TextViewHit, TextViewRenderObject, TextViewScroll, WrapMode,
+    TextInlayHint, TextStyleSpan, TextView, TextViewHit, TextViewRenderObject, TextViewScroll, WrapMode,
 };
 pub use views::{
     NavigationHeader, NavigationLink, NavigationPresentation, NavigationSidebarStyle,
@@ -253,7 +253,7 @@ pub mod prelude {
     };
     pub use crate::views::{
         EditDelta, TabMode, TextDiagnosticSpan, TextDocument, TextPosition, TextSelection,
-        TextStyleSpan, TextView, TextViewHit, TextViewRenderObject, TextViewScroll, WrapMode,
+        TextInlayHint, TextStyleSpan, TextView, TextViewHit, TextViewRenderObject, TextViewScroll, WrapMode,
     };
     pub use crate::views::{Menu, MenuAction, MenuBar, MenuItem, MenuItemContent};
     pub use crate::views::{

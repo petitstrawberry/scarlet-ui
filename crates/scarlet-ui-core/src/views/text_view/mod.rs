@@ -4,6 +4,8 @@ mod decoration;
 mod document;
 mod editing;
 mod layout;
+mod inlay;
+pub use inlay::TextInlayHint;
 pub(crate) mod paint;
 mod selection;
 #[cfg(test)]
@@ -79,6 +81,7 @@ pub struct TextView {
     material: Option<style::GlassMaterial>,
     text_color: Color,
     decorations: TextDecorations,
+    inlay_hints: Vec<TextInlayHint>,
     placeholder_color: Color,
     selection_color: Color,
     current_line_color: Color,
@@ -104,6 +107,13 @@ impl TextView {
         callback: impl Fn(crate::clipboard::TextEditAction) + 'static,
     ) -> Self {
         self.on_edit_action = Some(Arc::new(callback));
+        self
+    }
+
+    /// Insert display-only labels at original document byte positions.
+    /// Labels participate in wrapping and hit testing, never editing or copying.
+    pub fn inlay_hints(mut self, hints: Vec<TextInlayHint>) -> Self {
+        self.inlay_hints = hints;
         self
     }
 
@@ -174,6 +184,7 @@ impl TextView {
             material: Some(style::GlassMaterial::editing()),
             text_color: palette.text(),
             decorations: TextDecorations::default(),
+            inlay_hints: Vec::new(),
             placeholder_color: palette.text_secondary(),
             selection_color: style::text_selection_highlight(
                 palette.primary(),
@@ -626,6 +637,7 @@ pub struct TextViewRenderObject {
     material: Option<style::GlassMaterial>,
     text_color: Color,
     decorations: TextDecorations,
+    inlay_hints: Vec<TextInlayHint>,
     placeholder_color: Color,
     selection_color: Color,
     current_line_color: Color,
@@ -718,6 +730,7 @@ impl TextViewRenderObject {
             material: view.material,
             text_color: view.text_color,
             decorations: view.decorations.clone(),
+            inlay_hints: view.inlay_hints.clone(),
             placeholder_color: view.placeholder_color,
             selection_color: view.selection_color,
             current_line_color: view.current_line_color,
@@ -728,7 +741,7 @@ impl TextViewRenderObject {
     }
 
     pub(crate) fn compute_layout(&mut self) {
-        if !self.layout.matches_with_font_stack(
+        if self.layout.inlay_hints != self.inlay_hints || !self.layout.matches_with_font_stack(
             &self.text_document,
             self.font_size,
             self.padding,
@@ -737,7 +750,7 @@ impl TextViewRenderObject {
             self.line_numbers,
             self.font_stack.as_ref(),
         ) {
-            self.layout = TextViewLayout::compute_with_font_stack(
+            self.layout = TextViewLayout::compute_with_inlay_hints(
                 &self.text_document,
                 self.font_size,
                 self.padding,
@@ -746,6 +759,7 @@ impl TextViewRenderObject {
                 self.scroll,
                 self.line_numbers,
                 self.font_stack.as_ref(),
+                &self.inlay_hints,
             );
         }
         self.layout.set_viewport(self.size);
@@ -1150,6 +1164,7 @@ impl ElementRenderObject for TextViewRenderObject {
         self.material = view.material;
         self.text_color = view.text_color;
         self.decorations = view.decorations.clone();
+        self.inlay_hints = view.inlay_hints.clone();
         self.placeholder_color = view.placeholder_color;
         self.selection_color = view.selection_color;
         self.current_line_color = view.current_line_color;
