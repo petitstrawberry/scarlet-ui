@@ -1400,7 +1400,7 @@ pub enum BackendFrame<'a> {
         /// Rendered pixel buffer.
         buffer: &'a Buffer,
     },
-    /// Frame already presented by an external backend.
+    /// Frame accepted by an external backend which owns safe presentation.
     External,
 }
 
@@ -1444,8 +1444,8 @@ pub trait PaintBackend {
     ///
     /// # Returns
     ///
-    /// A CPU buffer to present or confirmation that an external frame has
-    /// already been presented. A classified [`crate::error::Error::RenderFailure`]
+    /// A CPU buffer to present or confirmation that an external backend has
+    /// accepted responsibility for presenting the frame after GPU completion. A classified [`crate::error::Error::RenderFailure`]
     /// must not be reported as External: recoverable failures retain the previous
     /// display and certify retirement of the discarded frame's accepted work.
     /// RecoveryRequired forbids reuse of uncertain targets until backend recovery.

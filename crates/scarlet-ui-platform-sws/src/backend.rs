@@ -27,8 +27,9 @@ pub const DEFAULT_GPU_DEVICE: &str = "/dev/gpu0";
 // SWS retains the last presented client image until a replacement reaches the
 // compositor. Two targets therefore serialize rendering behind that release
 // and can turn a narrowly missed 60 Hz deadline into a stable 30 Hz cadence.
-// A third target keeps one image presented, one pending, and one renderable.
-const PRESENTATION_SLOT_COUNT: usize = 3;
+// Four targets allow CPU encoding, GPU execution and SWS presentation to overlap
+// without reusing an image until both GPU completion and compositor release.
+const PRESENTATION_SLOT_COUNT: usize = 4;
 
 /// SGFX/SWS integration operation that failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,7 +159,7 @@ struct RetiredGeneration {
 /// Native SGFX implementation of ScarletUI's backend-neutral paint contract.
 ///
 /// This platform object owns SWS presentation policy and alternates between
-/// three images. The physical image/resource/context/queue association
+/// four images. The physical image/resource/context/queue association
 /// is owned by [`MappedTargetSession`], and command execution is delegated to
 /// its backend-owned executor.
 pub struct SgfxPaintBackend<S> {
@@ -456,9 +457,9 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
     ///
     /// # Returns
     ///
-    /// Success after GPU completion and SWS commit. VirGL queues the frame's
-    /// streams asynchronously and waits at this cross-process handoff, not
-    /// after each submit. SWS release remains a separate condition for reuse.
+    /// Success after accepting the frame for ordered presentation. Tracked
+    /// receipts can retire on the sink's worker while the UI encodes another
+    /// frame. Only completed frames reach SWS; release remains required for reuse.
     /// Adreno retains its explicit legacy synchronous path until it supports
     /// tracked submission. An empty damage slice is an idle frame and issues
     /// no protocol request. Recoverable rejection discards this frame, retires
@@ -491,39 +492,13 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         }
         self.refresh_compositor_epoch()?;
         self.ensure_session()?;
-        self.import_external_textures(paint)?;
 
         #[cfg(feature = "std")]
         let profile_prepared = self.profiling.then(Instant::now);
 
-        let slot = self.next_slot;
+        let slot = self.acquire_slot()?;
         let identity = self.identity(slot)?;
-        if let Some(retained) = self.slots[slot].retained {
-            match self.sink.wait_until_released(retained) {
-                Ok(()) => self.slots[slot].retained = None,
-                // The sink has consumed an asynchronous rejection of this
-                // exact commit. Its GPU work already completed before commit;
-                // SWS never accepted this use, so the slot is safe to reuse.
-                // Report admission pressure without poisoning the renderer.
-                Err(SgfxSinkError::BufferBusy) => {
-                    self.slots[slot].retained = None;
-                    self.slots[slot].content_valid = false;
-                    self.slots[slot].needs_full_commit = true;
-                    self.full_redraw_required = true;
-                    return Err(Error::FrameNotPresented(RenderFailure {
-                        kind: RenderFailureKind::Busy,
-                        reason: "SWS rejected a queued frame while its presentation queue was full"
-                            .into(),
-                    }));
-                }
-                Err(source) => {
-                    return Err(Error::Sink {
-                        stage: Stage::WaitForRelease,
-                        source,
-                    });
-                }
-            }
-        }
+        self.import_external_textures(paint)?;
         #[cfg(feature = "std")]
         let profile_released = self.profiling.then(Instant::now);
         // A released image can already be current outside this frame's damage.
@@ -545,6 +520,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
 
         #[cfg(feature = "std")]
         let profile_encoded;
+        let mut submissions = Vec::new();
         {
             let encoder = self.encoder.as_mut().ok_or(Error::InvalidFrame)?;
             let session = self.session.as_mut().ok_or(Error::InvalidFrame)?;
@@ -593,16 +569,13 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                 {
                     profile_encoded = self.profiling.then(Instant::now);
                 }
-                match executor.wait() {
-                    Ok(CompletionStatus::Complete) => {}
-                    result => {
-                        self.render_failed = true;
-                        return Err(Error::FrameNotPresented(RenderFailure {
-                            kind: RenderFailureKind::RecoveryRequired,
-                            reason: format!("SGFX frame did not retire: {result:?}"),
-                        }));
-                    }
-                }
+                submissions = executor.into_submissions().map_err(|error| {
+                    self.render_failed = true;
+                    Error::FrameNotPresented(RenderFailure {
+                        kind: RenderFailureKind::RecoveryRequired,
+                        reason: format!("SGFX frame receipt transfer failed: {error:?}"),
+                    })
+                })?;
             } else {
                 // Older kernels can expose synchronous queues. Select that
                 // path from the negotiated capability, not the backend name.
@@ -634,6 +607,10 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         #[cfg(feature = "std")]
         let profile_completed = self.profiling.then(Instant::now);
 
+        // GPU work is already accepted. A registration/handoff failure must
+        // never leave this backend eligible to reuse an untracked target.
+        self.render_failed = true;
+
         if self.slots[slot].registered != Some(identity) {
             let target = self
                 .encoder
@@ -659,7 +636,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         let damage = self.commit_damage(slot, physical_damage)?;
         let retained = self
             .sink
-            .commit_shared_image(identity, &damage)
+            .commit_tracked_image(identity, &damage, submissions)
             .map_err(|source| Error::Sink {
                 stage: Stage::CommitImage,
                 source,
@@ -682,6 +659,7 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         self.next_slot = (slot + 1) % PRESENTATION_SLOT_COUNT;
         self.full_redraw_required = false;
         self.cleanup_retired()?;
+        self.render_failed = false;
         #[cfg(feature = "std")]
         if let (Some(start), Some(prepared), Some(released), Some(encoded), Some(completed)) = (
             profile_started,
@@ -691,10 +669,10 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             profile_completed,
         ) {
             // Opt-in wall times: encoding may include submission backpressure,
-            // and waiting includes dispatch/scheduling as well as GPU execution.
+            // GPU retirement and SWS handoff are reported separately by UI_PRESENT.
             // Redirect stdout to a file during measurement to avoid UART cost.
             std::println!(
-                "[UI_PROFILE] window={} prepare_us={} release_us={} encode_submit_us={} wait_us={} commit_us={} copy_previous={}",
+                "[UI_PROFILE] window={} prepare_us={} release_us={} encode_submit_us={} receipt_transfer_us={} enqueue_us={} copy_previous={}",
                 self.sink.window_id(),
                 prepared.duration_since(start).as_micros(),
                 released.duration_since(prepared).as_micros(),
@@ -759,6 +737,18 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             !self.retired.is_empty(),
         )?;
 
+        if self.session.is_some() {
+            // Registering a newer generation makes queued older commits stale
+            // in SWS. Flush socket publication first, but do not await release
+            // of the currently displayed image (the replacement releases it).
+            self.sink
+                .flush_pending_commits()
+                .map_err(|source| Error::Sink {
+                    stage: Stage::CommitImage,
+                    source,
+                })?;
+        }
+
         // Materialize the replacement before retiring the current session.
         // SWS continues presenting the old generation until the first frame
         // from this session reaches the display, then releases the old commit
@@ -815,18 +805,20 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
     }
 
     fn cleanup_retired(&mut self) -> Result<()> {
-        while let Some(mut retired) = self.retired.pop() {
+        let mut index = 0;
+        while index < self.retired.len() {
+            let retired = &mut self.retired[index];
             for slot in 0..PRESENTATION_SLOT_COUNT {
                 if let Some(identity) = retired.identities[slot] {
-                    if let Some(retained) = retired.retained[slot] {
-                        match self.sink.wait_until_released(retained) {
-                            Ok(())
+                    if let Some(token) = retired.retained[slot] {
+                        match self.sink.poll_released(token) {
+                            Ok(false) => continue,
+                            Ok(true)
                             | Err(SgfxSinkError::BufferBusy)
                             | Err(SgfxSinkError::BackendLost { .. }) => {
-                                retired.retained[slot] = None;
+                                retired.retained[slot] = None
                             }
                             Err(source) => {
-                                self.retired.push(retired);
                                 return Err(Error::Sink {
                                     stage: Stage::WaitForRelease,
                                     source,
@@ -836,10 +828,9 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                     }
                     match self.sink.destroy_shared_image(identity) {
                         Ok(()) | Err(SgfxSinkError::BackendLost { .. }) => {
-                            retired.identities[slot] = None;
+                            retired.identities[slot] = None
                         }
                         Err(source) => {
-                            self.retired.push(retired);
                             return Err(Error::Sink {
                                 stage: Stage::DestroyImage,
                                 source,
@@ -848,11 +839,55 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                     }
                 }
             }
-            // Dropping the complete SGFX session after deregistration releases
-            // its mapped images/cache before its context.
-            drop(retired.session);
+            if retired.identities.iter().all(Option::is_none) {
+                // Visit every generation: a recent pending image must not hide
+                // older releasable sessions during a sequence of resize events.
+                drop(self.retired.swap_remove(index).session);
+            } else {
+                index += 1;
+            }
         }
         Ok(())
+    }
+
+    fn acquire_slot(&mut self) -> Result<usize> {
+        let available =
+            super::sink::poll_available_slot(PRESENTATION_SLOT_COUNT, self.next_slot, |slot| {
+                if let Some(token) = self.slots[slot].retained {
+                    match self.sink.poll_released(token) {
+                        Ok(false) => return Ok(false),
+                        Ok(true) => self.slots[slot].retained = None,
+                        Err(SgfxSinkError::BufferBusy) => {
+                            self.slots[slot].retained = None;
+                            self.slots[slot].content_valid = false;
+                            self.slots[slot].needs_full_commit = true;
+                            self.full_redraw_required = true;
+                            return Err(SgfxSinkError::BufferBusy);
+                        }
+                        Err(source) => return Err(source),
+                    }
+                }
+                Ok(true)
+            })
+            .map_err(|source| match source {
+                SgfxSinkError::BufferBusy => Error::FrameNotPresented(RenderFailure {
+                    kind: RenderFailureKind::Busy,
+                    reason: "SWS rejected a queued frame; a full repaint is required".into(),
+                }),
+                source => Error::Sink {
+                    stage: Stage::WaitForRelease,
+                    source,
+                },
+            })?;
+        if let Some(slot) = available {
+            return Ok(slot);
+        }
+        // Application retains its dirty/retry state and yields to another
+        // credit/event. No accepted work is replayed and no busy image is reused.
+        Err(Error::FrameNotPresented(RenderFailure {
+            kind: RenderFailureKind::Busy,
+            reason: "all presentation images remain retained".into(),
+        }))
     }
 
     fn render_areas(&self, damage: Option<&[DamageRect]>) -> Result<Vec<DamageRect>> {

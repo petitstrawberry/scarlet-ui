@@ -12,7 +12,7 @@ preview = ["std", "dep:inventory", "dep:libloading"]
 [dependencies]
 hashbrown = { version = "=0.15.5", default-features = false, features = ["default-hasher", "inline-more"] }
 scarlet-scroll-motion = { path = "../scarlet-scroll-motion" }
-scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", rev = "97c99b0b3f2d651865a118500632f17725f7ecde", package = "scarlet-std", optional = true }
+scarlet-std = { git = "https://github.com/petitstrawberry/Scarlet", rev = "6e58b75deb6a50ae3b72ffc22da0ea40c3d52c94", package = "scarlet-std", optional = true }
 libm = { version = "0.2", default-features = false }
 scarlet-ui-macros = { path = "../scarlet-ui-macros" }
 scarlet-ui-icons-tabler = { path = "../scarlet-ui-icons-tabler" }

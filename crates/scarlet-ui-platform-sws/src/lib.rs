@@ -16,6 +16,8 @@ mod configure_batch;
 mod file_dialog;
 mod file_dialog_policy;
 mod keyboard;
+#[cfg(feature = "std")]
+mod presentation;
 mod shared_image;
 mod sink;
 mod text_input_sync;
@@ -206,6 +208,8 @@ struct SwsSgfxFrameSink {
     rejected: Vec<(SgfxCommitToken, SgfxSinkError)>,
     next_commit_serial: u64,
     lifecycle_error: Option<SgfxSinkError>,
+    #[cfg(feature = "std")]
+    presentation: Option<std::sync::Arc<presentation::FrameHandoff>>,
 }
 
 impl SwsSgfxFrameSink {
@@ -221,6 +225,8 @@ impl SwsSgfxFrameSink {
             rejected: Vec::new(),
             next_commit_serial: 1,
             lifecycle_error: None,
+            #[cfg(feature = "std")]
+            presentation: None,
         }
     }
 
@@ -351,6 +357,10 @@ impl SwsSgfxFrameSink {
             }
             SwsEvent::SgfxBackendLost { compositor_epoch } => {
                 if compositor_epoch > self.compositor_epoch {
+                    #[cfg(feature = "std")]
+                    if let Some(presentation) = &self.presentation {
+                        presentation.close();
+                    }
                     self.backend_lost = Some(compositor_epoch);
                     self.retained.clear();
                     self.rejected.clear();
@@ -362,6 +372,14 @@ impl SwsSgfxFrameSink {
     }
 
     fn pump_lifecycle(&mut self) -> SgfxSinkResult<()> {
+        #[cfg(feature = "std")]
+        if self
+            .presentation
+            .as_ref()
+            .is_some_and(|worker| worker.failed())
+        {
+            return Err(SgfxSinkError::Protocol);
+        }
         self.conn.dispatch().map_err(Self::map_error)?;
         while let Some(event) = self.events.poll_event() {
             self.handle_lifecycle_event(event);
@@ -449,20 +467,21 @@ impl SgfxFrameSink for SwsSgfxFrameSink {
     }
 
     fn wait_until_released(&mut self, token: SgfxCommitToken) -> SgfxSinkResult<()> {
-        self.validate_identity(token.identity)?;
         loop {
-            self.pump_lifecycle()?;
-            if let Some(compositor_epoch) = self.backend_lost {
-                return Err(SgfxSinkError::BackendLost { compositor_epoch });
-            }
-            if let Some(error) = self.take_rejection(token) {
-                return Err(error);
-            }
-            if !self.retained.contains(&token) {
+            if self.poll_released(token)? {
                 return Ok(());
             }
             let _ = std::thread::sleep(core::time::Duration::from_millis(1));
         }
+    }
+
+    fn poll_released(&mut self, token: SgfxCommitToken) -> SgfxSinkResult<bool> {
+        self.pump_lifecycle()?;
+        self.validate_identity(token.identity)?;
+        if let Some(error) = self.take_rejection(token) {
+            return Err(error);
+        }
+        Ok(!self.retained.contains(&token))
     }
 
     fn commit_shared_image(
@@ -488,6 +507,51 @@ impl SgfxFrameSink for SwsSgfxFrameSink {
         ) {
             self.retained.retain(|candidate| *candidate != token);
             return Err(Self::map_error(error));
+        }
+        Ok(token)
+    }
+
+    #[cfg(feature = "std")]
+    fn flush_pending_commits(&mut self) -> SgfxSinkResult<()> {
+        self.pump_lifecycle()?;
+        if let Some(worker) = &self.presentation {
+            worker.flush()?;
+        }
+        self.pump_lifecycle()
+    }
+
+    #[cfg(feature = "std")]
+    fn commit_tracked_image(
+        &mut self,
+        identity: SgfxBufferIdentity,
+        damage: &[DamageRect],
+        submissions: Vec<sgfx::Submission>,
+    ) -> SgfxSinkResult<SgfxCommitToken> {
+        self.pump_lifecycle()?;
+        self.validate_identity(identity)?;
+        let damage = Self::damage_rects(damage)?;
+        if damage.is_empty() {
+            return Err(SgfxSinkError::Protocol);
+        }
+        if self.retained.iter().any(|token| token.identity == identity) {
+            return Err(SgfxSinkError::BufferBusy);
+        }
+        if self.presentation.is_none() {
+            self.presentation = Some(std::sync::Arc::new(presentation::FrameHandoff::new(
+                self.conn.clone(),
+            )?));
+        }
+        let token = self.next_commit_token(identity)?;
+        // Reserve the image before the worker can publish it or receive release.
+        self.retained.push(token);
+        if let Err(error) = self
+            .presentation
+            .as_ref()
+            .unwrap()
+            .send(token, damage, submissions)
+        {
+            Self::release_retained(&mut self.retained, token);
+            return Err(error);
         }
         Ok(token)
     }
@@ -749,8 +813,11 @@ pub struct SWSPlatformWindow {
     surface_regions_cache: Option<(bool, Vec<sws_protocol::surface_regions::SurfaceRegion>)>,
     surface_regions_supported: bool,
     frame_callbacks_supported: bool,
+    frame_credits_supported: bool,
     next_frame_callback_id: u64,
     pending_frame_callback_id: Option<u64>,
+    #[cfg(feature = "std")]
+    presentation: Option<std::sync::Weak<presentation::FrameHandoff>>,
     fullscreen: bool,
     tablet_managed: bool,
     backing_refresh: Rc<BackingRefresh>,
@@ -1175,8 +1242,9 @@ impl SWSPlatformWindow {
         let capabilities = conn.get_capabilities().ok();
         let window_geometry_supported =
             capabilities.is_some_and(|capabilities| capabilities.supports_window_geometry());
-        let frame_callbacks_supported =
-            capabilities.is_some_and(|capabilities| capabilities.supports_frame_callbacks());
+        let frame_callbacks_supported = capabilities.is_some_and(|capabilities| {
+            capabilities.supports_frame_callbacks() || capabilities.supports_frame_credits()
+        });
         let configured_creation_supported = capabilities
             .is_some_and(|capabilities| capabilities.supports_configured_window_creation());
         let scale_milli = conn
@@ -1331,8 +1399,11 @@ impl SWSPlatformWindow {
             surface_regions_supported: capabilities
                 .is_some_and(|caps| caps.supports_surface_regions()),
             frame_callbacks_supported,
+            frame_credits_supported: capabilities.is_some_and(|caps| caps.supports_frame_credits()),
             next_frame_callback_id: 1,
             pending_frame_callback_id: None,
+            #[cfg(feature = "std")]
+            presentation: None,
             fullscreen: false,
             tablet_managed: false,
             backing_refresh: Rc::new(BackingRefresh::default()),
@@ -1893,6 +1964,20 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn poll_event(&mut self) -> Option<Event> {
+        #[cfg(feature = "std")]
+        if !self.quit_queued
+            && self
+                .presentation
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .is_some_and(|worker| worker.failed())
+        {
+            logln!(
+                "[ScarletUI SGFX] asynchronous presentation failed for surface {}",
+                self.surface_id
+            );
+            self.queue_quit();
+        }
         let debug = scarlet_ui_core::debug::is_enabled();
         if self.pending_head >= self.pending_events.len() {
             self.pending_events.clear();
@@ -1960,6 +2045,15 @@ impl PlatformWindow for SWSPlatformWindow {
         if self.transport_failed || self.pending_head < self.pending_events.len() {
             return;
         }
+        // Completion failure has no SWS event to wake a pending callback.
+        // Bound that wait so poll_event can report a failed worker. Idle windows
+        // without an outstanding callback retain the ordinary event-only wait.
+        #[cfg(feature = "std")]
+        let timeout = if self.presentation.is_some() && self.pending_frame_callback_id.is_some() {
+            timeout.min(core::time::Duration::from_millis(16))
+        } else {
+            timeout
+        };
         // The runner waits through its first window, but all SWS backend
         // windows share this connection. Include every window's mailbox so a
         // frame grant routed while another window was rendering is not lost.
@@ -1992,6 +2086,27 @@ impl PlatformWindow for SWSPlatformWindow {
         }
         let callback_id = self.next_frame_callback_id.max(1);
         self.next_frame_callback_id = callback_id.wrapping_add(1).max(1);
+        if self.frame_credits_supported {
+            // Negotiated nominal-60Hz draw permission, independent of this
+            // frame's GPU completion or scanout. Never queue it behind waits.
+            self.conn
+                .request_frame_credit(self.surface_id, callback_id)
+                .map_err(|_| Error::IoError)?;
+            self.pending_frame_callback_id = Some(callback_id);
+            return Ok(());
+        }
+        #[cfg(feature = "std")]
+        if let Some(worker) = self
+            .presentation
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            worker
+                .request_frame(self.surface_id, callback_id)
+                .map_err(|_| Error::IoError)?;
+            self.pending_frame_callback_id = Some(callback_id);
+            return Ok(());
+        }
         self.conn
             .request_frame(self.surface_id, callback_id)
             .map_err(|_| Error::IoError)?;
@@ -2038,13 +2153,26 @@ impl PlatformWindow for SWSPlatformWindow {
         let Some(capabilities) = capabilities else {
             return Err(scarlet_ui_core::error::Error::RenderError);
         };
-        let sink = SwsSgfxFrameSink::new(
+        let mut sink = SwsSgfxFrameSink::new(
             self.conn.clone(),
             self.surface_id,
             capabilities.compositor_epoch,
         );
+        #[cfg(feature = "std")]
+        let presentation = {
+            let worker = std::sync::Arc::new(
+                presentation::FrameHandoff::new(self.conn.clone())
+                    .map_err(|_| Error::RenderError)?,
+            );
+            sink.presentation = Some(worker.clone());
+            worker
+        };
         match SgfxPaintBackend::new(sink, self.current_size, self.scale_milli) {
             Ok(backend) => {
+                #[cfg(feature = "std")]
+                {
+                    self.presentation = Some(std::sync::Arc::downgrade(&presentation));
+                }
                 logln!(
                     "[ScarletUI] platform-sws renderer=sgfx backend={}",
                     backend.backend_kind()

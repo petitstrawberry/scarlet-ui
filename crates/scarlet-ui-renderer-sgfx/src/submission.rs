@@ -104,6 +104,18 @@ impl<E: CommandSubmitter> FrameExecutor<E> {
         Ok(status)
     }
 
+    /// Transfer successful frame receipts to an ordered presentation owner.
+    /// The owner must wait for every receipt before publishing the target.
+    /// This releases the borrowed submitter so another frame can be encoded.
+    pub fn into_submissions(
+        self,
+    ) -> Result<Vec<E::Submission>, FrameSubmissionError<E::Error, E::Submission>> {
+        if self.failed.get() || self.retirement_failed.get() {
+            return Err(FrameSubmissionError::Invalidated);
+        }
+        Ok(self.submissions)
+    }
+
     /// Retire the frame before handing its images to another queue or process.
     ///
     /// # Returns
@@ -321,6 +333,47 @@ mod tests {
         assert_eq!(frame.poll().unwrap(), CompletionStatus::Pending);
         assert_eq!(frame.wait().unwrap(), CompletionStatus::Complete);
         assert_eq!(waits.get(), 3);
+    }
+    #[test]
+    fn handoff_moves_all_receipts_without_waiting_or_replaying() {
+        let waits = Rc::new(Cell::new(0));
+        let table = ResourceTable::new();
+        let commands = CommandEncoder::new(&table).finish().unwrap();
+        let mut frame = FrameExecutor::new(Submitter {
+            calls: 0,
+            waits: waits.clone(),
+            busy: false,
+            fail: false,
+        });
+        for _ in 0..4 {
+            frame.execute(&commands).unwrap();
+        }
+        let receipts = frame.into_submissions().unwrap();
+        assert_eq!(receipts.len(), 4);
+        assert_eq!(waits.get(), 0);
+        for receipt in receipts {
+            assert_eq!(receipt.wait(None).unwrap(), CompletionStatus::Complete);
+        }
+        assert_eq!(waits.get(), 4);
+    }
+
+    #[test]
+    fn failed_frame_cannot_transfer_receipts_as_a_successful_handoff() {
+        let table = ResourceTable::new();
+        let commands = CommandEncoder::new(&table).finish().unwrap();
+        let mut frame = FrameExecutor::new(Submitter {
+            calls: 0,
+            waits: Rc::new(Cell::new(0)),
+            busy: false,
+            fail: false,
+        });
+        frame.execute(&commands).unwrap();
+        frame.submissions[0].fail.set(true);
+        assert!(frame.poll().is_err());
+        assert!(matches!(
+            frame.into_submissions(),
+            Err(FrameSubmissionError::Invalidated)
+        ));
     }
     #[test]
     fn retries_only_busy_and_never_replays_partial_acceptance() {
