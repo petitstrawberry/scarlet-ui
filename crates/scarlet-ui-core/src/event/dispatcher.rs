@@ -704,7 +704,23 @@ impl EventDispatcher {
                         .find(|route| route.id == gesture.primary_id())
                 {
                     if phase == GesturePhase::Started {
-                        route.scroll_target = Some(consumer);
+                        // Capture the original scroll chain, not only the first
+                        // consumer. A child may start at an edge (or receive a
+                        // perpendicular delta) and need the next move after a
+                        // reversal. Capturing its parent permanently starves it.
+                        route.scroll_target = route
+                            .path
+                            .iter()
+                            .rev()
+                            .copied()
+                            .find(|id| {
+                                element_tree.find_element_mut(*id).is_some_and(|element| {
+                                    element
+                                        .render_object()
+                                        .is_some_and(|object| object.accepts_touch_scroll())
+                                })
+                            })
+                            .or(Some(consumer));
                     }
                     route.scroll_last_consumer = Some(consumer);
                     if !route.scroll_consumers.contains(&consumer) {
