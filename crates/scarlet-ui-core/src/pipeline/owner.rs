@@ -488,54 +488,10 @@ impl PipelineOwner {
                 break;
             }
 
-            let path = match element_tree.find_path_ids(id) {
-                Some(path) => path,
-                None => {
-                    full_layout = true;
-                    break;
-                }
+            let Some(chosen_id) = element_tree.find_layout_root(id) else {
+                full_layout = true;
+                break;
             };
-
-            if path.len() < 2 {
-                full_layout = true;
-                break;
-            }
-
-            let mut chosen_id = path[path.len() - 2];
-            let mut has_constraints = false;
-
-            for ancestor_id in path[..path.len() - 1].iter().rev() {
-                let constraints_opt = element_tree
-                    .find_element_mut(*ancestor_id)
-                    .and_then(|element| element.last_layout_constraints());
-                let Some(ancestor_constraints) = constraints_opt else {
-                    has_constraints = false;
-                    break;
-                };
-
-                chosen_id = *ancestor_id;
-                has_constraints = true;
-
-                // Virtual content deliberately exceeds tight viewport
-                // constraints. Its size changes must reach ScrollView so the
-                // content extent and offsets are remeasured and clamped.
-                let size = element_tree
-                    .find_element(*ancestor_id)
-                    .map(|element| element.bounds().size);
-                if ancestor_constraints.is_tight()
-                    && size.is_some_and(|size| {
-                        size.width == ancestor_constraints.max_width
-                            && size.height == ancestor_constraints.max_height
-                    })
-                {
-                    break;
-                }
-            }
-
-            if !has_constraints {
-                full_layout = true;
-                break;
-            }
 
             layout_roots.insert(chosen_id);
         }
@@ -1089,6 +1045,7 @@ mod dense_update_tests {
         children: Vec<Box<dyn Element>>,
         calls: Rc<RefCell<Calls>>,
         remove_children_on_rebuild: bool,
+        constraints: Option<LayoutConstraints>,
     }
     impl Probe {
         fn new(calls: &Rc<RefCell<Calls>>) -> Self {
@@ -1097,6 +1054,7 @@ mod dense_update_tests {
                 children: Vec::new(),
                 calls: calls.clone(),
                 remove_children_on_rebuild: false,
+                constraints: None,
             }
         }
     }
@@ -1133,6 +1091,12 @@ mod dense_update_tests {
                 child.layout(c);
             }
             Size::new(10., 10.)
+        }
+        fn last_layout_constraints(&self) -> Option<LayoutConstraints> {
+            self.constraints
+        }
+        fn bounds(&self) -> crate::geometry::Rect {
+            crate::geometry::Rect::from_xywh(0., 0., 10., 10.)
         }
         fn render(&mut self) {
             self.calls.borrow_mut().rendered.push(self.id);
@@ -1233,6 +1197,64 @@ mod dense_update_tests {
             "dense paint must not search from the root per ID: {}",
             calls.visits
         );
+    }
+
+    #[test]
+    fn sparse_layout_search_is_bounded_and_preserves_extent_fallbacks() {
+        const SIBLINGS: usize = 128;
+        const DEPTH: usize = 24;
+        for boundary_constraints in [
+            Some(LayoutConstraints::tight(10., 10.)),
+            Some(LayoutConstraints::tight(5., 5.)), // Content exceeds viewport.
+            None,                                   // A custom ancestor does not track constraints.
+        ] {
+            let calls = Rc::new(RefCell::new(Calls::default()));
+            let leaf = Probe::new(&calls);
+            let leaf_id = leaf.id;
+            let mut branch = leaf;
+            for _ in 0..DEPTH {
+                let mut parent = Probe::new(&calls);
+                parent.constraints = Some(LayoutConstraints::loose(100., 100.));
+                parent.children.push(Box::new(branch));
+                branch = parent;
+            }
+            let mut boundary = Probe::new(&calls);
+            let boundary_id = boundary.id;
+            boundary.constraints = boundary_constraints;
+            boundary.children.push(Box::new(branch));
+            let targeted = boundary_constraints == Some(LayoutConstraints::tight(10., 10.));
+            let mut root = Probe::new(&calls);
+            let root_id = root.id;
+            // Untracked ancestors above a valid tight boundary must not force
+            // full layout. Oversized/missing boundaries must reach the root.
+            root.constraints = (!targeted).then(|| LayoutConstraints::tight(10., 10.));
+            for _ in 0..SIBLINGS {
+                root.children.push(Box::new(Probe::new(&calls)));
+            }
+            root.children.push(Box::new(boundary));
+            let mut tree = ElementTree::new();
+            tree.set_root(Box::new(root));
+            let mut owner = PipelineOwner::new();
+            owner.mark_needs_layout(leaf_id);
+            owner.flush_layout(&mut tree, Size::new(100., 100.));
+
+            let calls = calls.borrow();
+            let total_nodes = SIBLINGS + DEPTH + 3;
+            assert_eq!(
+                calls.layouts,
+                if targeted { DEPTH + 2 } else { total_nodes }
+            );
+            assert!(
+                owner
+                    .dirty_paint
+                    .contains(&if targeted { boundary_id } else { root_id })
+            );
+            assert!(
+                calls.visits <= 3 * total_nodes + DEPTH + 4,
+                "sparse layout must not repeat root searches per ancestor: {}",
+                calls.visits
+            );
+        }
     }
 
     #[test]

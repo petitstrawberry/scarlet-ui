@@ -174,6 +174,47 @@ impl ElementTree {
         Self::find_element_recursive(self.root.as_deref()?, id)
     }
 
+    /// Select a relayout ancestor in one search of the current tree. Inspect
+    /// ancestors while unwinding, without allocating a path or searching from
+    /// the root again for each ancestor's constraints and size.
+    pub(crate) fn find_layout_root(&self, target: ElementId) -> Option<ElementId> {
+        struct Candidate {
+            id: Option<ElementId>,
+            resolved: bool,
+        }
+
+        fn search(element: &dyn Element, target: ElementId) -> Option<Candidate> {
+            if element.id() == target {
+                // Start at the parent: the dirty element's size may change.
+                return Some(Candidate {
+                    id: None,
+                    resolved: false,
+                });
+            }
+            let mut candidate = element
+                .children()
+                .iter()
+                .find_map(|child| search(child.as_ref(), target))?;
+            if !candidate.resolved {
+                if let Some(constraints) = element.last_layout_constraints() {
+                    candidate.id = Some(element.id());
+                    // Virtual content can exceed tight viewport constraints;
+                    // propagate its extent to the scroll owner in that case.
+                    candidate.resolved = constraints.is_tight()
+                        && element.bounds().size
+                            == Size::new(constraints.max_width, constraints.max_height);
+                } else {
+                    // An untracked ancestor requires the full-layout fallback.
+                    candidate.id = None;
+                    candidate.resolved = true;
+                }
+            }
+            Some(candidate)
+        }
+
+        search(self.root.as_deref()?, target)?.id
+    }
+
     /// Resolve a root-to-element path and return the target plus absolute origin.
     ///
     /// This follows only the supplied path, so callers that already have a dirty
