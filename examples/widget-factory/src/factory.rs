@@ -3064,7 +3064,10 @@ mod tests {
         };
         use scarlet_ui::{ComponentElement, RenderingPipeline};
         use std::{cell::RefCell, rc::Rc, sync::Arc};
-        struct Capture(Rc<RefCell<Option<Arc<DisplayList>>>>);
+        struct Capture(
+            Rc<RefCell<Option<Arc<DisplayList>>>>,
+            Rc<RefCell<Option<Vec<scarlet_ui::compositor::DamageRect>>>>,
+        );
         impl PaintBackend for Capture {
             fn supports_retained_display_lists(&self) -> bool {
                 true
@@ -3075,8 +3078,9 @@ mod tests {
                 ctx: &PaintContext<'_>,
                 _: Color,
                 _: Option<&[Rect]>,
-                _: Option<&[scarlet_ui::compositor::DamageRect]>,
+                damage: Option<&[scarlet_ui::compositor::DamageRect]>,
             ) -> scarlet_ui::Result<BackendFrame<'a>> {
+                *self.1.borrow_mut() = damage.map(|d| d.to_vec());
                 for command in ctx.commands() {
                     if let PaintCommand::DrawDisplayList { list, .. } = command {
                         if list
@@ -3093,6 +3097,7 @@ mod tests {
         let app = WidgetFactory::new();
         app.viewport.set(Size::new(500., 800.));
         let capture = Rc::new(RefCell::new(None));
+        let damage = Rc::new(RefCell::new(None));
         let mut pipeline = RenderingPipeline::new();
         pipeline.set_root(Box::new(ComponentElement::new_with_builder(
             app.clone(),
@@ -3103,7 +3108,7 @@ mod tests {
                 Box::new(app.controls_page().frame(500., 800.))
             },
         )));
-        pipeline.set_paint_backend(Box::new(Capture(capture.clone())));
+        pipeline.set_paint_backend(Box::new(Capture(capture.clone(), damage.clone())));
         pipeline.resize(Size::new(500., 800.));
         pipeline.layout_initial();
         pipeline.render_for_present().unwrap();
@@ -3164,38 +3169,83 @@ mod tests {
         drop(pipeline);
         // Exercise the actual scene builder too, including navigation and the
         // dynamic Reset menu. The application's broad subscriptions stay live.
-        app.navigation().selected_index_state().set(1);
-        let mut full = RenderingPipeline::new();
-        full.set_root(Box::new(ComponentElement::new_with_builder(
-            app.clone(),
-            |app| {
-                let mut builder = scarlet_ui::SceneBuilder::new();
-                app.scenes().build(&mut builder);
-                builder.into_declarations().remove(0).view
-            },
-        )));
-        full.set_paint_backend(Box::new(Capture(capture)));
-        full.layout_initial();
-        for _ in 0..4 {
-            full.render_for_present().unwrap();
+        fn editor_bounds(element: &dyn Element, origin: Point) -> Option<Rect> {
+            let position = element.position();
+            let origin = Point::new(origin.x + position.x, origin.y + position.y);
+            if element
+                .render_object()
+                .is_some_and(|r| r.as_any().is::<scarlet_ui::views::TextViewRenderObject>())
+            {
+                return Some(Rect::new(origin, element.bounds().size));
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| editor_bounds(child.as_ref(), origin))
         }
-        for value in [0.1, 0.3, 0.6, 0.9, 0.42] {
-            app.slider_value.set(value);
-            full.render_for_present().unwrap();
-            assert!(
-                full.pipeline_owner().last_paint_ids().iter().all(|id| full
-                    .element_tree()
-                    .find_element(*id)
-                    .unwrap()
-                    .children()
-                    .is_empty()),
-                "real scenes must not dirty whole pages for slider updates"
-            );
-            let menu = app.menu_model();
-            let MenuEntry::Item(reset) = &menu.items()[0].children_value()[0] else {
-                panic!("reset menu");
-            };
-            assert_eq!(reset.enabled_value(), value != 0.42);
+        for page in [1, 2] {
+            app.navigation().selected_index_state().set(page);
+            let mut full = RenderingPipeline::new();
+            full.set_root(Box::new(ComponentElement::new_with_builder(
+                app.clone(),
+                |app| {
+                    let mut builder = scarlet_ui::SceneBuilder::new();
+                    app.scenes().build(&mut builder);
+                    builder.into_declarations().remove(0).view
+                },
+            )));
+            full.set_paint_backend(Box::new(Capture(capture.clone(), damage.clone())));
+            full.layout_initial();
+            for _ in 0..4 {
+                full.render_for_present().unwrap();
+            }
+            for value in [0.1, 0.3, 0.6, 0.9, 0.42] {
+                app.slider_value.set(value);
+                full.render_for_present().unwrap();
+                assert!(
+                    full.pipeline_owner().last_paint_ids().iter().all(|id| full
+                        .element_tree()
+                        .find_element(*id)
+                        .unwrap()
+                        .children()
+                        .is_empty()),
+                    "real scenes must not dirty whole pages for slider updates"
+                );
+                if page == 2 {
+                    let dirty = full.pipeline_owner().last_paint_ids();
+                    assert!(
+                        dirty.iter().all(|id| full
+                            .element_tree()
+                            .find_element(*id)
+                            .unwrap()
+                            .render_object()
+                            .is_some_and(|r| r
+                                .as_any()
+                                .is::<scarlet_ui::views::SliderRenderObject>())),
+                        "slider notifications must not repaint an unchanged editor or select"
+                    );
+                    let editor =
+                        editor_bounds(full.element_tree().root().unwrap(), Point::ZERO).unwrap();
+                    let factor = full.scale_milli().max(1) as f32 / 1000.;
+                    let damage = damage.borrow();
+                    let damage = damage.as_ref().expect("slider updates have partial damage");
+                    assert!(
+                        damage.iter().all(|&(x, y, w, h)| !Rect::from_xywh(
+                            x as f32 / factor,
+                            y as f32 / factor,
+                            w as f32 / factor,
+                            h as f32 / factor
+                        )
+                        .overlaps(&editor)),
+                        "cached page reconstruction must not pull in the unchanged editor: {damage:?}"
+                    );
+                }
+                let menu = app.menu_model();
+                let MenuEntry::Item(reset) = &menu.items()[0].children_value()[0] else {
+                    panic!("reset menu");
+                };
+                assert_eq!(reset.enabled_value(), value != 0.42);
+            }
         }
     }
 }

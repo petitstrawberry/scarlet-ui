@@ -218,23 +218,26 @@ impl DisplayList {
             return deps.clone();
         }
         let deps: Arc<[PaintDependencies]> = if let Some(bounds) = self.raster_bounds {
-            // Retain one conservative footprint instead of walking every control.
-            // An ancestor clip can cut the opaque backing away from a filter's
-            // halo, so even a locally isolated picture still exposes its reads.
-            let mut reads = PaintRegion::Empty;
-            for dep in self.context.paint_dependencies(scale) {
-                reads = match (reads, dep.reads) {
-                    (PaintRegion::Unknown, _) | (_, PaintRegion::Unknown) => PaintRegion::Unknown,
-                    (PaintRegion::Rect(a), PaintRegion::Rect(b)) => PaintRegion::Rect(union(a, b)),
-                    (PaintRegion::Empty, b) => b,
-                    (a, PaintRegion::Empty) => a,
-                };
-            }
-            alloc::vec![PaintDependencies::new(
+            // The cached image can write its complete bounds, but a local
+            // reader does not rewrite the entire image. Keep each reader's
+            // input/output edge rather than coupling the union of every glass
+            // halo to the whole group. Otherwise one thumb reconstructs all
+            // unrelated editors and controls in the same cached page.
+            let mut deps = alloc::vec![PaintDependencies::new(
                 PaintRegion::Rect(expand(bounds, 2.)),
-                reads
-            )]
-            .into()
+                PaintRegion::Empty,
+            )];
+            // An ancestor clip can remove a reader's opaque backing. Preserve
+            // those reads (including unknown coverage) even for isolated groups.
+            deps.extend(
+                self.context
+                    .paint_dependencies(scale)
+                    .into_iter()
+                    .filter(|dep| {
+                        dep.reads != PaintRegion::Empty || dep.writes == PaintRegion::Unknown
+                    }),
+            );
+            deps.into()
         } else {
             self.context.paint_dependencies(scale).into()
         };
@@ -607,12 +610,22 @@ mod tests {
         scene.refractive_glass_rounded_rect(r(180., 40., 25., 22.), 11., 1.12, Color::WHITE, 1.);
         for scale in [1000, 1250, 2000] {
             let label_damage = [r(12., 44., 40., 12.)];
-            assert_eq!(scene.dependent_damage(&label_damage, viewport, scale), label_damage);
-            assert_eq!(scene.reconstruction_regions(&label_damage, viewport, scale), label_damage);
-            let thumb_damage = scene.reconstruction_regions(&[r(185., 45., 2., 2.)], viewport, scale);
+            assert_eq!(
+                scene.dependent_damage(&label_damage, viewport, scale),
+                label_damage
+            );
+            assert_eq!(
+                scene.reconstruction_regions(&label_damage, viewport, scale),
+                label_damage
+            );
+            let thumb_damage =
+                scene.reconstruction_regions(&[r(185., 45., 2., 2.)], viewport, scale);
             assert_eq!(thumb_damage.len(), 1);
             assert!(thumb_damage[0].size.width > 25.);
-            assert!(thumb_damage[0].size.width < 60., "thumb must not pull in the body");
+            assert!(
+                thumb_damage[0].size.width < 60.,
+                "thumb must not pull in the body"
+            );
         }
     }
     #[test]
@@ -632,6 +645,55 @@ mod tests {
         for scale in [1000, 2000, 3000] {
             let damage = scene.dependent_damage(&[r(32., 50., 2., 2.)], viewport, scale);
             assert!(hits(PaintRegion::Rect(r(42., 50., 2., 2.)), &damage));
+        }
+    }
+
+    #[test]
+    fn cached_page_keeps_independent_glass_readers_local_and_repairs_exact_pixels() {
+        use crate::renderer::CpuPaintRenderer;
+        let viewport = r(0., 0., 320., 240.);
+        let editor = r(20., 20., 100., 80.);
+        let record = |x, previous: Option<&DisplayList>| {
+            let mut ctx = PaintContext::new();
+            ctx.fill_rect(viewport, Color::WHITE);
+            for x in [30., 70., 190., 230.] {
+                ctx.fill_rect(r(x, 0., 4., 240.), Color::BLUE.with_opacity(0.3));
+            }
+            ctx.backdrop_filter_rounded_rect(editor, 10., 10., Color::WHITE.with_opacity(0.3));
+            ctx.refractive_glass_rounded_rect(
+                r(x, 180., 20., 20.),
+                10.,
+                1.12,
+                Color::WHITE.with_opacity(0.3),
+                1.,
+            );
+            match previous {
+                Some(old) => ctx.into_cached_layer_revision(viewport, old),
+                None => ctx.into_cached_layer(viewport),
+            }
+        };
+        let old = record(180., None);
+        let new = record(220., Some(&old));
+        assert!(old.raster_cache_bounds().is_some() && new.raster_cache_bounds().is_some());
+        for scale in [1000, 2000] {
+            let changes = new.damage_since(&old, scale).unwrap();
+            let output = new.context().dependent_damage(&changes, viewport, scale);
+            let repair = new
+                .context()
+                .reconstruction_regions(&output, viewport, scale);
+            assert!(!repair.is_empty());
+            assert!(
+                repair
+                    .iter()
+                    .all(|dirty| intersect(*dirty, editor).is_none()),
+                "moving a thumb must not repair an unrelated cached editor: {repair:?}"
+            );
+            let mut partial = CpuPaintRenderer::new(viewport.size, scale, Color::WHITE);
+            partial.execute(old.context());
+            partial.execute_with_damage(new.context(), Some(&repair));
+            let mut full = CpuPaintRenderer::new(viewport.size, scale, Color::WHITE);
+            full.execute(new.context());
+            assert_eq!(partial.buffer().as_slice(), full.buffer().as_slice());
         }
     }
 

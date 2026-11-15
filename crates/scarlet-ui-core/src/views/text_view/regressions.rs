@@ -1,6 +1,71 @@
 use super::*;
 use unicode_segmentation::UnicodeSegmentation;
 
+#[test]
+fn unchanged_editor_keeps_recording_state_and_refreshes_nonvisual_bindings() {
+    use crate::element::UpdateResult;
+    let document = TextDocument::from_str(&"line\n".repeat(30));
+    let text = State::new(crate::state::generate_state_id(), document.clone());
+    let selection = State::new(
+        crate::state::generate_state_id(),
+        TextSelection::collapsed(0),
+    );
+    let view =
+        TextView::with_document(text.clone(), selection.clone()).text_spans(vec![TextStyleSpan {
+            range: 0..4,
+            color: Color::RED,
+        }]);
+    let mut object = render_object_with_size(&view, 240., 100.);
+    object.focused = true;
+    object.dragging = true;
+    object.preedit = String::from("active composition");
+    object.compute_layout();
+    object.desired_x = Some(42.);
+    let rows = object.layout.visual_lines.as_ptr();
+    let allocations = crate::testing::alloc_counter::measure_allocations(|| {
+        assert!(matches!(object.update(&view), UpdateResult::NoChange));
+    });
+    assert_eq!(allocations.allocations, 0);
+    assert_eq!(object.layout.visual_lines.as_ptr(), rows);
+    assert!(object.text_document.same_revision(&document));
+    assert!(object.focused && object.dragging);
+    assert_eq!(object.preedit, "active composition");
+    assert_eq!(object.desired_x, Some(42.));
+    // A broad declaration can recreate equal decoration indexes and rebind
+    // outputs without changing any pixels. The new caret output still updates.
+    let caret = State::new(
+        crate::state::generate_state_id(),
+        Rect::from_xywh(-1., -1., 0., 0.),
+    );
+    let rebound = view
+        .clone()
+        .text_spans(vec![TextStyleSpan {
+            range: 0..4,
+            color: Color::RED,
+        }])
+        .caret_rect_state(caret.clone());
+    assert!(matches!(object.update(&rebound), UpdateResult::NoChange));
+    assert_eq!(caret.get(), object.text_input_cursor_rect());
+    selection.set(TextSelection::collapsed(1));
+    assert!(matches!(object.update(&rebound), UpdateResult::Updated));
+    let scrolled = rebound.clone().scroll_state(State::new(
+        crate::state::generate_state_id(),
+        TextViewScroll { x: 0., y: 30. },
+    ));
+    assert!(matches!(object.update(&scrolled), UpdateResult::Updated));
+    text.set(document.replace(0..1, "changed").0);
+    assert!(matches!(object.update(&scrolled), UpdateResult::Updated));
+    let decorated = scrolled.clone().text_spans(vec![TextStyleSpan {
+        range: 0..4,
+        color: Color::BLUE,
+    }]);
+    assert!(matches!(object.update(&decorated), UpdateResult::Updated));
+    assert!(matches!(
+        object.update(&decorated.wrap_mode(WrapMode::Soft)),
+        UpdateResult::Updated
+    ));
+}
+
 /// Font discovery in another parallel test legitimately invalidates layout.
 /// Cache reuse assertions require an unchanged font epoch, so retry the whole
 /// scenario only when that external input changed. A stable epoch must still
@@ -162,21 +227,46 @@ fn soft_wrap_preserves_every_source_space_tab_and_grapheme() {
 
 #[test]
 fn cached_carets_use_shaped_clusters_and_preserve_document_offsets() {
-    let font = Arc::new(graphics::FontStack::new(include_bytes!(
-        "../../testing/fonts/shaping.ttf"
-    )).unwrap().with_fallback(include_bytes!("../../testing/fonts/metrics-primary.ttf")).unwrap()
-        .with_fallback(include_bytes!("../../testing/fonts/metrics-fallback.ttf")).unwrap());
+    let font = Arc::new(
+        graphics::FontStack::new(include_bytes!("../../testing/fonts/shaping.ttf"))
+            .unwrap()
+            .with_fallback(include_bytes!("../../testing/fonts/metrics-primary.ttf"))
+            .unwrap()
+            .with_fallback(include_bytes!("../../testing/fonts/metrics-fallback.ttf"))
+            .unwrap(),
+    );
     let document = TextDocument::from_str("AVfiA\u{301}日☃\t");
     let layout = TextViewLayout::compute_with_font_stack(
-        &document, 20., 8., WrapMode::None, Size::new(700., 80.),
-        TextViewScroll::default(), false, Some(&font),
+        &document,
+        20.,
+        8.,
+        WrapMode::None,
+        Size::new(700., 80.),
+        TextViewScroll::default(),
+        false,
+        Some(&font),
     );
     // Font table oracle: A/V kern -120, fi ligature 510 units, zero-width
     // combining acute, full-em fallback glyphs and four 300-unit spaces.
-    for (byte, expected) in [(0, 0.), (1, 12.), (2, 26.), (3, 31.), (4, 36.),
-        (7, 50.), (10, 70.), (13, 90.), (14, 114.)] {
-        assert_eq!(layout.cursor_rect(TextPosition::new(byte), &document).origin.x,
-            8. + expected, "byte={byte}");
+    for (byte, expected) in [
+        (0, 0.),
+        (1, 12.),
+        (2, 26.),
+        (3, 31.),
+        (4, 36.),
+        (7, 50.),
+        (10, 70.),
+        (13, 90.),
+        (14, 114.),
+    ] {
+        assert_eq!(
+            layout
+                .cursor_rect(TextPosition::new(byte), &document)
+                .origin
+                .x,
+            8. + expected,
+            "byte={byte}"
+        );
     }
 }
 
