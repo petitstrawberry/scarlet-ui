@@ -155,12 +155,16 @@ impl NavigationViewRenderObject {
         }
     }
 
-    pub(crate) fn set_header_layout(&mut self, automatic: bool) {
+    pub(crate) fn set_header_layout(&mut self, automatic: bool) -> bool {
+        let changed = self.automatic_header_height != automatic;
         self.automatic_header_height = automatic;
+        changed
     }
 
-    pub(crate) fn set_floating_bar_bottom_overlap(&mut self, overlap: f32) {
+    pub(crate) fn set_floating_bar_bottom_overlap(&mut self, overlap: f32) -> bool {
+        let changed = self.floating_bar_bottom_overlap != overlap;
         self.floating_bar_bottom_overlap = overlap;
+        changed
     }
 
     /// Update navigation layout configuration.
@@ -170,11 +174,16 @@ impl NavigationViewRenderObject {
         header_height: f32,
         presentation: NavigationPresentation,
         minimum_content_size: Size,
-    ) {
+    ) -> bool {
+        let changed = self.sidebar_width != sidebar_width
+            || self.header_height != header_height.max(0.0)
+            || self.presentation != presentation
+            || self.minimum_content_size != minimum_content_size;
         self.sidebar_width = sidebar_width;
         self.header_height = header_height.max(0.0);
         self.presentation = presentation;
         self.minimum_content_size = minimum_content_size;
+        changed
     }
 }
 
@@ -432,6 +441,7 @@ pub(crate) struct NavigationSidebarRenderObject {
     icons: Vec<Option<Icon>>,
     selection_callbacks: Vec<Option<Rc<dyn Fn()>>>,
     selected_index: State<usize>,
+    selection_value: usize,
     shows_icons: bool,
     icon_style: IconStyle,
     icon_color: Option<Color>,
@@ -443,6 +453,7 @@ pub(crate) struct NavigationSidebarRenderObject {
     font_size: f32,
     icon_size: u32,
     item_padding: f32,
+    presentation_policy: NavigationPresentation,
     presentation: NavigationPresentation,
     sidebar_style: NavigationSidebarStyle,
 }
@@ -454,6 +465,7 @@ impl NavigationSidebarRenderObject {
             icons: view.icons.clone(),
             selection_callbacks: view.selection_callbacks.clone(),
             selected_index: view.selected_index.clone(),
+            selection_value: view.selected_index.get(),
             shows_icons: view.shows_icons,
             icon_style: view.icon_style,
             icon_color: view.icon_color,
@@ -465,6 +477,7 @@ impl NavigationSidebarRenderObject {
             font_size: 14.0,
             icon_size: 16,
             item_padding: 8.0,
+            presentation_policy: view.presentation,
             presentation: view.presentation,
             sidebar_style: view.sidebar_style,
         }
@@ -988,20 +1001,43 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
         let Some(view) = new_view.as_any().downcast_ref::<NavigationSidebar>() else {
             return UpdateResult::Replaced;
         };
-        self.labels = view.labels.clone();
-        self.icons = view.icons.clone();
-        self.selection_callbacks = view.selection_callbacks.clone();
+        let selection = view.selected_index.get();
+        let policy_changed = self.presentation_policy != view.presentation;
+        let changed = self.labels != view.labels
+            || self.icons != view.icons
+            || self.selection_value != selection
+            || self.shows_icons != view.shows_icons
+            || self.icon_style != view.icon_style
+            || self.icon_color != view.icon_color
+            || policy_changed
+            || self.sidebar_style != view.sidebar_style
+            || self.item_height != style::metrics().navigation_item_height;
+        self.labels.clone_from(&view.labels);
+        self.icons.clone_from(&view.icons);
+        // Actions and bindings must refresh even when no pixels changed.
+        self.selection_callbacks
+            .clone_from(&view.selection_callbacks);
         self.selected_index = view.selected_index.clone();
+        self.selection_value = selection;
         self.shows_icons = view.shows_icons;
         self.icon_style = view.icon_style;
         self.icon_color = view.icon_color;
-        self.presentation = view.presentation;
+        // Layout resolves Automatic to Sidebar/BottomBar. Preserve that result
+        // across unchanged declarations while continuing to refresh actions.
+        if policy_changed {
+            self.presentation = view.presentation;
+        }
+        self.presentation_policy = view.presentation;
         self.sidebar_style = view.sidebar_style;
         self.item_height = style::metrics().navigation_item_height;
         self.hovered_index = self
             .hovered_index
             .filter(|index| *index < self.labels.len());
-        UpdateResult::Updated
+        if changed {
+            UpdateResult::Updated
+        } else {
+            UpdateResult::NoChange
+        }
     }
 
     fn render(&mut self) {
@@ -1211,6 +1247,64 @@ impl ElementRenderObject for NavigationSidebarRenderObject {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unchanged_automatic_policy_retains_resolution_but_real_policy_changes_update() {
+        use crate::element::UpdateResult;
+        let mut view = NavigationSidebar::new(
+            vec![String::from("One")],
+            vec![None],
+            vec![None],
+            State::new(crate::state::generate_state_id(), 0),
+            false,
+            IconStyle::default(),
+            None,
+            NavigationPresentation::Automatic,
+        );
+        let mut render = NavigationSidebarRenderObject::from_view(&view);
+        render.set_presentation(NavigationPresentation::BottomBar);
+        assert!(matches!(render.update(&view), UpdateResult::NoChange));
+        assert_eq!(render.presentation, NavigationPresentation::BottomBar);
+        // Resize-driven resolution remains authoritative with the same policy.
+        render.set_presentation(NavigationPresentation::Sidebar);
+        assert!(matches!(render.update(&view), UpdateResult::NoChange));
+        assert_eq!(render.presentation, NavigationPresentation::Sidebar);
+        view.presentation = NavigationPresentation::BottomBar;
+        assert!(matches!(render.update(&view), UpdateResult::Updated));
+        assert_eq!(render.presentation, NavigationPresentation::BottomBar);
+        view.presentation = NavigationPresentation::Automatic;
+        assert!(matches!(render.update(&view), UpdateResult::Updated));
+        render.set_presentation(NavigationPresentation::BottomBar);
+        assert!(matches!(render.update(&view), UpdateResult::NoChange));
+        assert_eq!(render.presentation, NavigationPresentation::BottomBar);
+    }
+    #[test]
+    fn unchanged_sidebar_refreshes_actions_without_paint_but_selection_still_invalidates() {
+        use crate::element::UpdateResult;
+        use alloc::rc::Rc;
+        use core::cell::Cell;
+        let selected = State::new(crate::state::generate_state_id(), 0);
+        let mut view = NavigationSidebar::new(
+            vec![String::from("One"), String::from("Two")],
+            vec![None, None],
+            vec![None, None],
+            selected.clone(),
+            false,
+            IconStyle::default(),
+            None,
+            NavigationPresentation::Sidebar,
+        );
+        let mut render = NavigationSidebarRenderObject::from_view(&view);
+        let calls = Rc::new(Cell::new(0));
+        let updated = calls.clone();
+        view.selection_callbacks[0] = Some(Rc::new(move || updated.set(updated.get() + 1)));
+        assert!(matches!(render.update(&view), UpdateResult::NoChange));
+        render.selection_callback(0).unwrap()();
+        assert_eq!(calls.get(), 1);
+        selected.set(1);
+        assert!(matches!(render.update(&view), UpdateResult::Updated));
+        view.labels[0] = String::from("Changed label");
+        assert!(matches!(render.update(&view), UpdateResult::Updated));
+    }
     use super::{
         NavigationPresentation, NavigationSidebar, NavigationSidebarRenderObject,
         NavigationViewRenderObject, bottom_bar_content_geometry, bottom_bar_height,

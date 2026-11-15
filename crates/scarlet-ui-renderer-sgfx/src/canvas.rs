@@ -9,9 +9,17 @@ use scarlet_ui_core::__private::IdAllocator;
 use scarlet_ui_core::color::Color;
 use scarlet_ui_core::element::{Element, ElementRenderObject, LayoutConstraints, UpdateResult};
 use scarlet_ui_core::geometry::{Point, Rect, Size};
-use scarlet_ui_core::renderer::{PaintContext, PaintExtension};
+use scarlet_ui_core::renderer::{PaintContext, PaintDependencies, PaintExtension, PaintRegion};
 use scarlet_ui_core::state::{InvalidationKind, Listenable, State, SubscriptionId};
 use scarlet_ui_core::view::View;
+
+// Both canvas targets and imported images are composited as textured_rect
+// quads. The lowerer truncates their physical destination; outward rounding of
+// this logical rectangle covers those pixels, and textured_rect adds no AA
+// fringe. Texture filtering reads the source image, never preceding UI pixels.
+pub(crate) fn image_dependencies(rect: Rect) -> PaintDependencies {
+    PaintDependencies::new(PaintRegion::Rect(rect), PaintRegion::Empty)
+}
 
 static NEXT_CANVAS_ID: IdAllocator = IdAllocator::new();
 static NEXT_MESH_ID: IdAllocator = IdAllocator::new();
@@ -227,11 +235,12 @@ impl SgfxTexture {
         ctx: &mut scarlet_ui_core::renderer::PaintContext<'_>,
         rect: scarlet_ui_core::geometry::Rect,
     ) {
-        ctx.draw_extension(
+        ctx.draw_extension_with_dependencies(
             rect,
             Arc::new(crate::external_surface::ExternalGpuSurfacePaint {
                 texture: Arc::clone(self),
             }),
+            image_dependencies(rect),
         );
     }
     pub(crate) fn is_nv12(&self) -> bool {
@@ -726,12 +735,13 @@ impl ElementRenderObject for SgfxCanvasRenderObject {
     fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
         let rect = Rect::new(origin, self.size);
         ctx.fill_rect(rect, self.placeholder);
-        ctx.draw_extension(
+        ctx.draw_extension_with_dependencies(
             rect,
             Arc::new(SgfxCanvasPaint {
                 handle: self.handle,
                 frame: self.source.frame(),
             }),
+            image_dependencies(rect),
         );
         true
     }
@@ -803,6 +813,59 @@ mod tests {
             })
             .unwrap();
         assert_eq!(frame.frame.revision, 2);
+    }
+
+    #[test]
+    fn canvas_and_direct_image_revisions_have_local_damage() {
+        use scarlet_ui_core::state::generate_state_id;
+        let rect = Rect::from_xywh(7.25, 11.75, 80.5, 40.25);
+        let frames = State::new(
+            generate_state_id(),
+            Arc::new(SgfxCanvasFrame::new(1, Color::BLACK)),
+        );
+        let mut element = SgfxCanvas::from_state(
+            SgfxCanvasHandle::new(),
+            rect.size.width,
+            rect.size.height,
+            frames.clone(),
+        )
+        .create_element();
+        element.layout(LayoutConstraints::tight(rect.size.width, rect.size.height));
+        let record = || {
+            let mut paint = PaintContext::new();
+            element
+                .render_object()
+                .unwrap()
+                .paint(&mut paint, rect.origin);
+            paint.into_display_list()
+        };
+        let old = record();
+        frames.set(Arc::new(SgfxCanvasFrame::new(2, Color::WHITE)));
+        let new = record();
+        for scale in [500, 1000, 1500, 2000] {
+            let damage = new
+                .damage_since(&old, scale)
+                .expect("canvas writes are bounded");
+            assert!(!damage.is_empty());
+            assert!(damage.iter().all(|r| *r == rect));
+        }
+
+        #[derive(Debug)]
+        struct Image;
+        let first = SgfxTexture::external_bgra8(16, 16, Arc::new(Image));
+        let next = SgfxTexture::external_bgra8(16, 16, Arc::new(Image));
+        let record = |texture: &Arc<SgfxTexture>| {
+            let mut paint = PaintContext::new();
+            texture.paint(&mut paint, rect);
+            paint.into_display_list()
+        };
+        let (old, new) = (record(&first), record(&next));
+        assert_eq!(new.damage_since(&old, 1500).unwrap(), vec![rect, rect]);
+        assert!(
+            new.paint_dependencies(1500)
+                .iter()
+                .all(|dep| dep.reads == PaintRegion::Empty)
+        );
     }
 
     fn triangle() -> Vec<SgfxCanvasVertex> {

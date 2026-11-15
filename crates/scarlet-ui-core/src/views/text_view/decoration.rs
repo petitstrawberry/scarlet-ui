@@ -32,7 +32,7 @@ pub struct TextDiagnosticSpan {
     pub color: Color,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct Decoration {
     /// Half-open byte range in the current document.
     pub range: Range<usize>,
@@ -44,6 +44,12 @@ pub(super) struct Decoration {
 /// Prefix maximum endpoints allow binary-search queries even for nested spans.
 #[derive(Clone, Default)]
 pub(super) struct DecorationIndex(Arc<[Decoration]>);
+
+impl PartialEq for DecorationIndex {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+    }
+}
 
 impl DecorationIndex {
     pub fn new(spans: impl Iterator<Item = (Range<usize>, Color)>) -> Self {
@@ -75,7 +81,7 @@ impl DecorationIndex {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub(super) struct TextDecorations {
     pub foreground: DecorationIndex,
     pub diagnostics: DecorationIndex,

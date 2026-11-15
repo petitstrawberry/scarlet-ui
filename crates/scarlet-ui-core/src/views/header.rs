@@ -142,7 +142,7 @@ impl<C: View + Clone> HeaderBar<C> {
 
 impl<C: View + Clone + 'static> View for HeaderBar<C> {
     fn create_element(&self) -> Box<dyn Element> {
-        Box::new(RenderElement::with_view_children(
+        Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
             |view| {
                 let mut render =
@@ -150,6 +150,22 @@ impl<C: View + Clone + 'static> View for HeaderBar<C> {
                 render.material = view.material;
                 render.corner_radius = view.corner_radius;
                 render
+            },
+            |render, view| {
+                if render.height == view.height
+                    && render.background == view.background
+                    && render.border == view.border
+                    && render.material == view.material
+                    && render.corner_radius == view.corner_radius
+                {
+                    return UpdateResult::NoChange;
+                }
+                render.height = view.height;
+                render.background = view.background;
+                render.border = view.border;
+                render.material = view.material;
+                render.corner_radius = view.corner_radius;
+                UpdateResult::Updated
             },
             |view| vec![view.content.clone_view()],
         ))
@@ -189,6 +205,9 @@ impl HeaderBarRenderObject {
 }
 
 impl ElementRenderObject for HeaderBarRenderObject {
+    fn update_needs_layout(&self) -> bool {
+        true
+    }
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         let width = if constraints.max_width.is_finite() {
             constraints.max_width.max(constraints.min_width)

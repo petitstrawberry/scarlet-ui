@@ -16,7 +16,7 @@ std = [
 [dependencies]
 libm = { version = "0.2", default-features = false }
 scarlet-ui-core = { path = "../scarlet-ui-core", default-features = false }
-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "77e64a81115d78fab7c63671c2a6c16aac060c05", package = "sgfx-core", default-features = false }
+sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "e6886eb6683de0a75108bd7cd19eae729efe36b3", package = "sgfx-core", default-features = false }
 
 [lib]
 name = "scarlet_ui_renderer_sgfx"
@@ -26,6 +26,6 @@ path = "src/lib.rs"
 web-time = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-sgfx-backend-wgpu = { git = "https://github.com/petitstrawberry/sgfx", rev = "0ee6b41669904ced227f01cc435933c646a60c75" }
+sgfx-backend-wgpu = { git = "https://github.com/petitstrawberry/sgfx", rev = "0ca31d0c69d4836f34de40bf68ecf590cb19bde9" }
 wgpu = "24"
 pollster = "0.4"

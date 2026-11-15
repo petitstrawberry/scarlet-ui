@@ -61,15 +61,20 @@ fn update_navigation_render_object<T>(
 where
     T: NavigationLinkTuple + Clone + 'static,
 {
-    render_object.update_configuration(
+    let mut changed = render_object.update_configuration(
         content.nav.get_sidebar_width(),
         content.nav.get_header_height(),
         content.nav.get_presentation(),
         content.nav.get_minimum_content_size(),
     );
-    render_object.set_header_layout(content.nav.get_automatic_header_height());
-    render_object.set_floating_bar_bottom_overlap(content.nav.get_floating_bar_bottom_overlap());
-    crate::element::UpdateResult::Updated
+    changed |= render_object.set_header_layout(content.nav.get_automatic_header_height());
+    changed |= render_object
+        .set_floating_bar_bottom_overlap(content.nav.get_floating_bar_bottom_overlap());
+    if changed {
+        crate::element::UpdateResult::Updated
+    } else {
+        crate::element::UpdateResult::NoChange
+    }
 }
 
 fn navigation_render_object<T>(content: &NavigationContent<T>) -> NavigationViewRenderObject

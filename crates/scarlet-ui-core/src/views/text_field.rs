@@ -411,6 +411,26 @@ impl ElementRenderObject for TextFieldRenderObject {
         let Some(view) = new_view.as_any().downcast_ref::<TextField>() else {
             return crate::element::UpdateResult::Replaced;
         };
+        let new_text = view.text.get();
+        // Parent declarations can rebuild while this field is being edited.
+        // Keep live selection/IME state and cached layout when its descriptor
+        // is unchanged. Callbacks are retained by the updated View, not here.
+        if self.text_document.as_str().as_ref() == new_text.as_str()
+            && self.placeholder == view.placeholder
+            && self.autofocus == view.autofocus
+            && self.automatic_software_keyboard == view.automatic_software_keyboard
+            && self.background_color == view.background_color
+            && self.material == view.material
+            && self.border_color == view.border_color
+            && self.focused_border_color == view.focused_border_color
+            && self.text_color == view.text_color
+            && self.placeholder_color == view.placeholder_color
+            && self.font_size == view.font_size
+            && self.padding == view.padding
+            && self.enabled == view.enabled
+        {
+            return crate::element::UpdateResult::NoChange;
+        }
         let focused = if self.autofocus != view.autofocus {
             view.autofocus
         } else {
@@ -419,7 +439,6 @@ impl ElementRenderObject for TextFieldRenderObject {
         let selection = self.selection;
         let old_document = self.text_document.clone();
         let old_len = self.text_document.len();
-        let new_text = view.text.get();
         let text_changed = self.text_document.as_str().as_ref() != new_text.as_str();
         let selection_followed_old_end =
             selection.anchor.byte == old_len && selection.caret.byte == old_len;
@@ -1194,6 +1213,46 @@ fn is_word_grapheme(grapheme: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_descriptor_preserves_live_editing_without_rebuilding_layout() {
+        use crate::testing::alloc_counter::measure_allocations;
+        let text = State::new(crate::state::generate_state_id(), String::new());
+        let view = TextField::new(text.clone());
+        let mut field = TextFieldRenderObject::from_view(&view);
+        field.layout(LayoutConstraints::tight(200., 40.));
+        field.focused = true;
+        field.dragging = true;
+        field.hovered = true;
+        field.preedit = String::from("active composition");
+        field.preedit_spans = alloc::vec![1, 2, 3];
+        let allocations = measure_allocations(|| {
+            assert!(matches!(
+                field.update(&view),
+                crate::element::UpdateResult::NoChange
+            ));
+        });
+        assert_eq!(allocations.allocations, 0);
+        assert!(field.focused && field.dragging && field.hovered);
+        assert_eq!(field.preedit, "active composition");
+        assert_eq!(field.preedit_spans, [1, 2, 3]);
+        text.set(String::from("new text"));
+        assert!(matches!(
+            field.update(&view),
+            crate::element::UpdateResult::Updated
+        ));
+        assert_eq!(field.text_document.as_str().as_ref(), "new text");
+        assert!(matches!(
+            field.update(&view.clone().placeholder("new placeholder")),
+            crate::element::UpdateResult::Updated
+        ));
+        assert!(matches!(
+            field.update(&view.enabled(false)),
+            crate::element::UpdateResult::Updated
+        ));
+        assert!(!field.focused);
+        assert!(field.preedit.is_empty());
+    }
     use crate::event::{Event, KeyEvent, MouseButton, MouseEvent};
     use crate::renderer::PaintCommand;
     use crate::state::StateId;
