@@ -8,6 +8,7 @@ mod owner;
 mod registry;
 mod rendering;
 mod retained_paint;
+mod tree_metadata;
 
 pub(crate) use owner::clear_global_dirty;
 pub use owner::{

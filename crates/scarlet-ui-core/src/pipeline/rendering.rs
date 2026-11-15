@@ -90,6 +90,7 @@ pub(crate) struct PaintTestCounters {
     pub(crate) window_backdrop_rebuilds: usize,
     pub(crate) dense_damage_updates: usize,
     pub(crate) popup_viewport_syncs: usize,
+    pub(crate) focus_reconciliations: usize,
 }
 
 /// RenderingPipeline integrates all components of the rendering system
@@ -116,6 +117,8 @@ pub struct RenderingPipeline {
     // Backdrop filters depend on preceding scene pixels, not just their own
     // retained picture. Use ordered dependency-aware replay for those scenes,
     // rather than the isolated CPU picture compositor.
+    scene_metadata: super::tree_metadata::TreeMetadata,
+    metadata_changes: super::owner::PrepaintChanges,
     scene_reads_backdrop: bool,
     scene_has_extensions: bool,
     scene_has_opacity: bool,
@@ -166,6 +169,8 @@ impl RenderingPipeline {
             paint_needs_full: true,
             paint_background_color: None,
             paint_enabled: true,
+            scene_metadata: Default::default(),
+            metadata_changes: Default::default(),
             scene_reads_backdrop: false,
             scene_has_extensions: false,
             scene_has_opacity: false,
@@ -226,6 +231,7 @@ impl RenderingPipeline {
     #[cfg(test)]
     pub(crate) fn reset_paint_test_counters(&mut self) {
         self.paint_test_counters = PaintTestCounters::default();
+        self.scene_metadata.visits = 0;
     }
 
     #[cfg(test)]
@@ -251,6 +257,7 @@ impl RenderingPipeline {
         self.cancel_animations();
         self.visual_animations.clear(self.pipeline_id());
         self.element_tree.clear_root();
+        self.scene_metadata.clear();
         crate::pipeline::clear_global_dirty(self.pipeline_id());
         self.renderer = None;
         self.paint_renderer = None;
@@ -332,6 +339,7 @@ impl RenderingPipeline {
         self.select_popup_input_synced = false;
         self.context_menu = None;
         self.context_menu_swallow_release = false;
+        self.scene_metadata.clear();
         self.element_tree.set_root(root_element);
         self.retained_paint.clear();
         self.retained_backdrop = None;
@@ -353,6 +361,7 @@ impl RenderingPipeline {
     /// Get mutable reference to the ElementTree
     pub fn element_tree_mut(&mut self) -> &mut ElementTree {
         self.select_popup_input_synced = false;
+        self.scene_metadata.clear();
         &mut self.element_tree
     }
 
@@ -731,8 +740,19 @@ impl RenderingPipeline {
             &mut self.element_tree,
             self.window_size,
             !self.paint_enabled,
-            |tree, reconcile| {
-                if reconcile {
+            |tree, scope| {
+                let changes = self.scene_metadata.sync(tree, scope);
+                if changes.topology || changes.scroll {
+                    crate::element::invalidate_scroll_structure();
+                }
+                if scope.geometry || changes.topology || changes.popup {
+                    self.select_popup_input_synced = false;
+                }
+                if changes.input || scope.geometry {
+                    #[cfg(test)]
+                    {
+                        self.paint_test_counters.focus_reconciliations += 1;
+                    }
                     self.event_dispatcher.reconcile_keyboard_focus(tree);
                 }
                 self.overlays.apply(tree);
@@ -742,7 +762,13 @@ impl RenderingPipeline {
             crate::logln!("[RenderingPipeline] flush() completed");
         }
 
-        let popup_geometry_changed = self.sync_select_popup_viewports();
+        self.refresh_painted_metadata();
+        let popup_geometry_changed =
+            if !self.select_popup_input_synced || self.select_overlay_active {
+                self.sync_select_popup_viewports()
+            } else {
+                false
+            };
         let background_color = self.extract_background_color();
 
         if self.paint_enabled {
@@ -790,10 +816,7 @@ impl RenderingPipeline {
         let size = self.window_size;
         let scale = self.scale_milli;
         let creating_renderer = self.paint_renderer.is_none();
-        let has_paint_extensions = self
-            .element_tree
-            .root()
-            .is_some_and(Self::subtree_emits_paint_extension);
+        let has_paint_extensions = self.scene_has_extensions;
         let deferred_window_backdrop = self
             .element_tree
             .root()
@@ -1045,36 +1068,43 @@ impl RenderingPipeline {
                 .any(|child| Self::subtree_reads_backdrop(child.as_ref()))
     }
 
+    fn refresh_painted_metadata(&mut self) {
+        // Focus/keyboard avoidance and legacy buffer rendering can produce more
+        // work during prepaint. Read the final facts on those painted branches;
+        // do not assume that paint-command metadata stayed unchanged.
+        let self_ids = self.pipeline_owner.last_self_paint_ids();
+        let mut scope = core::mem::take(&mut self.metadata_changes);
+        scope.branches.clear();
+        scope.branches.extend(
+            self.pipeline_owner
+                .last_paint_ids()
+                .iter()
+                .copied()
+                .filter(|id| !self_ids.contains(id)),
+        );
+        scope
+            .branches
+            .extend_from_slice(self.pipeline_owner.last_children_ids());
+        scope.branches.sort_unstable();
+        scope.branches.dedup();
+        scope.self_paint.clear();
+        scope.self_paint.extend_from_slice(self_ids);
+        scope
+            .self_paint
+            .extend_from_slice(self.pipeline_owner.last_composite_ids());
+        scope.geometry = false;
+        let changes = self.scene_metadata.sync(&self.element_tree, &scope);
+        self.metadata_changes = scope;
+        if changes.topology || changes.scroll {
+            crate::element::invalidate_scroll_structure();
+        }
+        if changes.topology || changes.popup {
+            self.select_popup_input_synced = false;
+        }
+    }
+
     fn refresh_backdrop_dependency(&mut self) {
-        if !self.paint_needs_full && self.pipeline_owner.last_paint_ids().is_empty() {
-            return;
-        }
-        // Query without painting: painting may update damage-history cells.
-        // Composite-only transforms cannot add or remove material commands.
-        fn dependencies(element: &dyn Element) -> (bool, bool, bool) {
-            let (mut reads, mut extensions, mut opacity) =
-                element.render_object().map_or((false, false, false), |r| {
-                    (
-                        r.reads_backdrop(),
-                        r.emits_paint_extension(),
-                        r.has_opacity_scope(),
-                    )
-                });
-            for child in element.children() {
-                let (child_reads, child_extensions, child_opacity) = dependencies(child.as_ref());
-                reads |= child_reads;
-                extensions |= child_extensions;
-                opacity |= child_opacity;
-                if reads && extensions && opacity {
-                    break;
-                }
-            }
-            (reads, extensions, opacity)
-        }
-        let (reads_backdrop, has_extensions, has_opacity) = self
-            .element_tree
-            .root()
-            .map_or((false, false, false), dependencies);
+        let (reads_backdrop, has_extensions, has_opacity) = self.scene_metadata.dependencies();
         self.scene_has_extensions = has_extensions;
         if reads_backdrop != self.scene_reads_backdrop || has_opacity != self.scene_has_opacity {
             self.paint_caches.clear();
@@ -3723,21 +3753,31 @@ impl RenderingPipeline {
             &mut self.element_tree,
             self.window_size,
             false,
-            |tree, reconcile| {
+            |tree, scope| {
                 let input_started = started.map(|_| crate::clock::Instant::now());
-                if reconcile {
+                let changes = self.scene_metadata.sync(tree, scope);
+                if changes.topology || changes.scroll {
+                    crate::element::invalidate_scroll_structure();
+                }
+                if scope.geometry || changes.topology || changes.popup {
+                    self.select_popup_input_synced = false;
+                }
+                if changes.input || scope.geometry {
+                    #[cfg(test)]
+                    {
+                        self.paint_test_counters.focus_reconciliations += 1;
+                    }
                     self.event_dispatcher.reconcile_keyboard_focus(tree);
                 }
                 focus_us = input_started.map_or(0, |start| start.elapsed().as_micros());
                 self.overlays.apply(tree);
-                overlays_us = input_started.map_or(0, |start| start.elapsed().as_micros()) - focus_us;
+                overlays_us =
+                    input_started.map_or(0, |start| start.elapsed().as_micros()) - focus_us;
             },
         );
+        self.refresh_painted_metadata();
         let popup_started = started.map(|_| crate::clock::Instant::now());
-        if self.paint_needs_full
-            || !self.pipeline_owner.last_paint_ids().is_empty()
-            || self.select_overlay_active
-        {
+        if !self.select_popup_input_synced || self.select_overlay_active {
             self.sync_select_popup_viewports();
         }
         let popup_us = popup_started.map_or(0, |start| start.elapsed().as_micros());
@@ -3972,6 +4012,10 @@ impl Default for RenderingPipeline {
 #[cfg(test)]
 #[path = "rebuild_tests.rs"]
 mod rebuild_tests;
+
+#[cfg(test)]
+#[path = "metadata_tests.rs"]
+mod metadata_tests;
 
 #[cfg(test)]
 #[path = "damage_tests.rs"]

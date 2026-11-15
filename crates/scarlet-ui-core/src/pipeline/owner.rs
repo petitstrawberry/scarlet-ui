@@ -22,6 +22,15 @@ use std::println;
 // root searches cost more than a single traversal of the live tree.
 const MAX_TARGETED_UPDATES: usize = 64;
 
+/// Work actually queued after rebuilding. A build request alone says nothing
+/// about changes to topology, geometry, focus or scene paint dependencies.
+#[derive(Default)]
+pub(crate) struct PrepaintChanges {
+    pub branches: alloc::vec::Vec<ElementId>,
+    pub self_paint: alloc::vec::Vec<ElementId>,
+    pub geometry: bool,
+}
+
 /// Optional frame-log measurements; no clocks are read when logging is off.
 pub(crate) struct PrepaintTimings {
     pub collect_us: u128,
@@ -214,6 +223,7 @@ pub struct PipelineOwner {
     last_composite_ids: alloc::vec::Vec<ElementId>,
     /// State registry for managing State instances
     state_registry: StateRegistry,
+    prepaint_changes: PrepaintChanges,
 }
 
 impl PipelineOwner {
@@ -238,6 +248,7 @@ impl PipelineOwner {
             last_self_paint_ids: alloc::vec::Vec::new(),
             last_composite_ids: alloc::vec::Vec::new(),
             state_registry: StateRegistry::new(),
+            prepaint_changes: PrepaintChanges::default(),
         }
     }
 
@@ -326,7 +337,7 @@ impl PipelineOwner {
         element_tree: &mut ElementTree,
         window_size: Size,
         render_legacy_paint: bool,
-        before_paint: impl FnOnce(&mut ElementTree, bool),
+        before_paint: impl FnOnce(&mut ElementTree, &PrepaintChanges),
     ) -> Option<PrepaintTimings> {
         let started = crate::debug::frame_log_enabled().then(crate::clock::Instant::now);
         let elapsed = || started.map_or(0, |start| start.elapsed().as_micros());
@@ -334,17 +345,9 @@ impl PipelineOwner {
         let collected = elapsed();
         let build_ids = self.dirty_build.len();
 
-        // A composite-only update changes placement, not focus claims or
-        // mounted input controls. Reconciliation walks the tree; reserve it for
-        // content/geometry changes instead of every scroll animation frame.
-        let structure_changed = !self.dirty_build.is_empty()
-            || !self.dirty_layout.is_empty()
-            || !self.dirty_children.is_empty();
-        let content_changed = !self.dirty_build.is_empty()
-            || !self.dirty_layout.is_empty()
-            || !self.dirty_paint.is_empty()
-            || !self.dirty_self_paint.is_empty()
-            || !self.dirty_children.is_empty();
+        let mut changes = core::mem::take(&mut self.prepaint_changes);
+        changes.branches.clear();
+        changes.branches.extend(self.dirty_build.iter().copied());
 
         // 1. Build Phase: Rebuild Elements whose State changed
         self.flush_build(element_tree);
@@ -352,17 +355,30 @@ impl PipelineOwner {
         let built = elapsed();
         let layout_ids = self.dirty_layout.len();
 
+        let geometry = !self.dirty_layout.is_empty() || !self.dirty_children.is_empty();
+        if geometry && element_tree.safe_area_insets() != crate::geometry::EdgeInsets::ZERO {
+            element_tree.apply_safe_area_insets();
+        }
         // 2. Layout Phase: Recalculate layout
         self.flush_layout(element_tree, window_size);
-
-        if structure_changed {
+        if geometry {
             crate::element::invalidate_scroll_structure();
         }
+        changes.branches.extend(self.dirty_paint.iter().copied());
+        changes.branches.extend(self.dirty_children.iter().copied());
+        changes.branches.sort_unstable();
+        changes.branches.dedup();
+        changes.self_paint.clear();
+        changes
+            .self_paint
+            .extend(self.dirty_self_paint.iter().copied());
+        changes
+            .self_paint
+            .extend(self.dirty_composite.iter().copied());
+        changes.geometry = geometry;
         let laid_out = elapsed();
-        before_paint(
-            element_tree,
-            content_changed || self.dirty_composite.is_empty(),
-        );
+        before_paint(element_tree, &changes);
+        self.prepaint_changes = changes;
         self.collect_global_dirty();
         let reconciled = elapsed();
         let paint_ids = self.dirty_paint.len() + self.dirty_self_paint.len();
@@ -416,7 +432,6 @@ impl PipelineOwner {
     fn flush_build(&mut self, element_tree: &mut ElementTree) {
         let dirty_build = core::mem::take(&mut self.dirty_build);
         let transactions = core::mem::take(&mut self.build_transactions);
-        let rebuilt = !dirty_build.is_empty();
 
         crate::animation::pending::with_pending_builds(
             self.pipeline_id,
@@ -479,9 +494,6 @@ impl PipelineOwner {
                 }
             },
         );
-        if rebuilt && element_tree.safe_area_insets() != crate::geometry::EdgeInsets::ZERO {
-            element_tree.apply_safe_area_insets();
-        }
     }
 
     /// Flush the layout phase
