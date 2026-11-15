@@ -80,6 +80,22 @@ pub trait Application: Clone + 'static {
     /// declaration is opened automatically; further instances use window commands.
     fn scenes(&self) -> impl Scene;
 
+    /// Construct the current view for one open scene.
+    ///
+    /// The runner calls this on reactive root rebuilds. Override it to build
+    /// only the requested window when constructing all of `scenes()` is costly.
+    /// Read current shared state on each call; caching a declaration here would
+    /// prevent reactive updates. The returned view must describe the same window
+    /// as the corresponding declaration in `scenes()`, including its metadata.
+    ///
+    /// `scenes()` remains the source of declaration keys, launch policy, and
+    /// validation when opening windows. Return `None` if this key no longer has
+    /// a view; this removes its content without closing the platform window.
+    /// The default resolves the key from fresh declarations for compatibility.
+    fn scene_view(&self, key: &SceneWindowKey) -> Option<Box<dyn View>> {
+        resolve_scene_view(self, key)
+    }
+
     /// Select the application states that rebuild one scene's root.
     ///
     /// Return `None` to observe every application state, as usual. An explicit
@@ -464,6 +480,7 @@ impl ApplicationRunner {
             app.clone(),
             declaration.key.clone(),
             pipeline_id,
+            declaration.view,
         ));
         pipeline.set_root(root);
 
@@ -1485,9 +1502,17 @@ struct SceneWindowRootElement<A: Application + View> {
 }
 
 impl<A: Application + View> SceneWindowRootElement<A> {
-    fn new(app: A, scene_key: SceneWindowKey, pipeline_id: PipelineId) -> Self {
+    fn new(
+        app: A,
+        scene_key: SceneWindowKey,
+        pipeline_id: PipelineId,
+        view: Box<dyn View>,
+    ) -> Self {
         let id = ElementId::generate();
-        let child = resolve_scene_view(&app, &scene_key).map(|view| view.create_element());
+        // Opening already collected and validated this declaration. Do not
+        // construct every scene again before mounting this one. Mount still
+        // queues a fresh rebuild to catch state changes before subscription.
+        let child = Some(view.create_element());
         Self {
             id,
             app,
@@ -1541,7 +1566,7 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
     }
 
     fn rebuild(&mut self) -> UpdateResult {
-        let new_view = resolve_scene_view(&self.app, &self.scene_key);
+        let new_view = self.app.scene_view(&self.scene_key);
         crate::element::update_child(
             &mut self.child,
             new_view.as_deref(),
@@ -1645,6 +1670,7 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
 #[cfg(test)]
 mod tests {
     include!("application_animation_tests.rs");
+    include!("application_scene_tests.rs");
     use super::*;
     use alloc::rc::Rc;
     use core::cell::{Cell, RefCell};
@@ -1771,6 +1797,7 @@ mod tests {
             app.clone(),
             SceneWindowKey::main(),
             pipeline.pipeline_id(),
+            app.scene_view(&SceneWindowKey::main()).unwrap(),
         );
         pipeline.set_root(Box::new(root));
         pipeline.layout_initial();
@@ -1847,7 +1874,8 @@ mod tests {
         };
         let create = |key: SceneWindowKey| {
             let mut pipeline = RenderingPipeline::new();
-            let root = SceneWindowRootElement::new(app.clone(), key, pipeline.pipeline_id());
+            let view = app.scene_view(&key).unwrap();
+            let root = SceneWindowRootElement::new(app.clone(), key, pipeline.pipeline_id(), view);
             pipeline.set_root(Box::new(root));
             pipeline.layout_initial();
             pipeline.render().unwrap();
@@ -1886,7 +1914,12 @@ mod tests {
             built: Rc::new(RefCell::new(Vec::new())),
         };
         let mut pipeline = RenderingPipeline::new();
-        let root = SceneWindowRootElement::new(app.clone(), "home".into(), pipeline.pipeline_id());
+        let root = SceneWindowRootElement::new(
+            app.clone(),
+            "home".into(),
+            pipeline.pipeline_id(),
+            app.scene_view(&"home".into()).unwrap(),
+        );
         assert_eq!(app.built.borrow().last(), Some(&0));
         // Simulate a shell workspace event arriving before the root subscribes.
         app.content.set(7);
