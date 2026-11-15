@@ -788,6 +788,21 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         self.slots = [SlotState::new(); PRESENTATION_SLOT_COUNT];
         self.next_slot = 0;
         self.front_slot = None;
+        #[cfg(feature = "std")]
+        if self.profiling {
+            // Session configuration, not evidence that this frame contains an
+            // analytic filter. Zero-radius materials bypass local filtering.
+            std::println!(
+                "[UI_SESSION] window={} generation={} supports_programmable={} analytic_enabled={} width={} height={} slots={}",
+                self.sink.window_id(),
+                self.generation,
+                self.supports_programmable,
+                self.supports_programmable,
+                self.physical_width,
+                self.physical_height,
+                PRESENTATION_SLOT_COUNT,
+            );
+        }
         Ok(())
     }
 
