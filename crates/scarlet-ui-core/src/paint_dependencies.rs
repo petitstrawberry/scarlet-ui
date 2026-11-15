@@ -114,6 +114,16 @@ pub(super) fn command_dependencies(
             if !valid(*rect) || !blur_radius.is_finite() {
                 return PaintDependencies::UNKNOWN;
             }
+            // Zero-radius glass is a local tint and rim. Neither renderer
+            // snapshots or refracts the preceding scene in this case. In
+            // particular, an externally blurred panel must not turn every
+            // child update into reconstruction of the entire panel.
+            if *blur_radius <= 0. {
+                return PaintDependencies::new(
+                    PaintRegion::Rect(expand(*rect, 1. / factor)),
+                    PaintRegion::Empty,
+                );
+            }
             // Conservative union of CPU/GPU kernel support, reconstruction taps
             // and physical-pixel rounding. Refraction samples inward.
             let radius = (blur_radius.max(0.) * factor).min(64.);
@@ -583,6 +593,27 @@ mod tests {
             Arc::new(1u32),
             PaintDependencies::new(PaintRegion::Rect(writes), PaintRegion::Rect(reads)),
         );
+    }
+    #[test]
+    fn external_glass_body_does_not_expand_local_control_damage() {
+        let viewport = r(0., 0., 304., 300.);
+        let mut body = PaintContext::new();
+        body.refractive_glass_rounded_rect(viewport, 16., 0., Color::WHITE, 1.);
+        let body = body.into_display_list();
+        assert!(!body.reads_backdrop());
+        let mut scene = PaintContext::new();
+        scene.draw_display_list(Point::ZERO, body);
+        // The ordinary thumb retains its real local diffusion/refraction.
+        scene.refractive_glass_rounded_rect(r(180., 40., 25., 22.), 11., 1.12, Color::WHITE, 1.);
+        for scale in [1000, 1250, 2000] {
+            let label_damage = [r(12., 44., 40., 12.)];
+            assert_eq!(scene.dependent_damage(&label_damage, viewport, scale), label_damage);
+            assert_eq!(scene.reconstruction_regions(&label_damage, viewport, scale), label_damage);
+            let thumb_damage = scene.reconstruction_regions(&[r(185., 45., 2., 2.)], viewport, scale);
+            assert_eq!(thumb_damage.len(), 1);
+            assert!(thumb_damage[0].size.width > 25.);
+            assert!(thumb_damage[0].size.width < 60., "thumb must not pull in the body");
+        }
     }
     #[test]
     fn clipped_cached_glass_keeps_damage_from_outside_its_viewport() {

@@ -284,7 +284,7 @@ impl<V: View + Clone> ElementRenderObject for SurfaceRenderObject<V> {
     fn render(&mut self) {}
 
     fn reads_backdrop(&self) -> bool {
-        self.material.is_some()
+        self.material.is_some_and(|material| material.blur_radius > 0.)
     }
 
     fn paint(&self, ctx: &mut PaintContext<'_>, origin: Point) -> bool {

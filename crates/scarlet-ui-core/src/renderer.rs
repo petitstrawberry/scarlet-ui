@@ -399,7 +399,9 @@ impl<'a> PaintContext<'a> {
         }
         Arc::new(DisplayList {
             reads_backdrop: self.commands.iter().any(|c| match c {
-                PaintCommand::BackdropFilterRoundedRect { .. } => true,
+                PaintCommand::BackdropFilterRoundedRect { blur_radius, .. } => {
+                    !blur_radius.is_finite() || *blur_radius > 0.
+                }
                 PaintCommand::DrawDisplayList { list, .. } => list.reads_backdrop(),
                 _ => false,
             }),
@@ -814,7 +816,7 @@ impl<'a> PaintContext<'a> {
     /// This fallback is a renderer quality decision, not a different material.
     ///
     /// Custom `ElementRenderObject` implementations emitting this command must
-    /// return `true` from `reads_backdrop()` while the material is present,
+    /// return `true` from `reads_backdrop()` while a nonzero blur is present,
     /// including commands inside nested display lists or popups. This lets the
     /// rendering pipeline bypass isolated picture caches and replay the scene
     /// whenever its backdrop changes.
@@ -835,7 +837,9 @@ impl<'a> PaintContext<'a> {
     }
 
     /// Bounded convex refraction of the preceding scene. Like backdrop blur,
-    /// requires `reads_backdrop()`. Strength is clamped to 0..1.
+    /// requires `reads_backdrop()` with a nonzero blur radius. At radius zero,
+    /// renderers keep the local tint/rim without sampling the scene.
+    /// Strength is clamped to 0..1.
     pub fn refractive_glass_rounded_rect(
         &mut self,
         rect: Rect,
