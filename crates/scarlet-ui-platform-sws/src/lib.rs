@@ -393,6 +393,13 @@ impl SwsSgfxFrameSink {
         {
             return Err(SgfxSinkError::Protocol);
         }
+        #[cfg(feature = "std")]
+        if let Some(worker) = &self.presentation {
+            let retained = &mut self.retained;
+            worker.release_superseded(|token| {
+                Self::release_retained(retained, token);
+            });
+        }
         self.conn.dispatch().map_err(Self::map_error)?;
         while let Some(event) = self.events.poll_event() {
             self.handle_lifecycle_event(event);

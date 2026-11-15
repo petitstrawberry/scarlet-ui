@@ -1,4 +1,4 @@
-//! Ordered, bounded GPU completion and SWS handoff off the UI event thread.
+//! Bounded GPU completion and latest-ready SWS handoff off the UI event thread.
 //!
 //! GPU resources remain owned by accepted submissions. SWS retention separately
 //! prevents reuse of presented targets. Legacy frame callbacks remain ordered
@@ -166,6 +166,9 @@ struct State {
     failed: AtomicBool,
     publication: Mutex<()>,
     profile: Option<Mutex<LeaseProfile>>,
+    // These exact uses completed on the GPU but were never sent to SWS.
+    // Only they can be released locally; published uses still require SWS ack.
+    superseded: Mutex<Vec<SgfxCommitToken>>,
 }
 
 impl State {
@@ -265,6 +268,60 @@ impl Drop for WorkerExit {
     }
 }
 
+fn same_generation(older: SgfxCommitToken, newer: SgfxCommitToken) -> bool {
+    older.identity.window_id == newer.identity.window_id
+        && older.identity.generation == newer.identity.generation
+        && older.identity.compositor_epoch == newer.identity.compositor_epoch
+        && older.commit_serial < newer.commit_serial
+}
+
+// A skipped frame may contain changes not covered by the following frame's
+// incremental damage. Preserve all of them without exceeding the wire budget.
+fn merge_superseded_damage(
+    older: &[sws::SgfxDamageRect],
+    newer: &mut Vec<sws::SgfxDamageRect>,
+) -> bool {
+    if older.is_empty() {
+        return true;
+    }
+    if older.len().saturating_add(newer.len()) <= sws_protocol::SGFX_MAX_DAMAGE_RECTS {
+        if newer.try_reserve(older.len()).is_err() {
+            return false;
+        }
+        newer.extend_from_slice(older);
+        return true;
+    }
+    let mut left = i64::MAX;
+    let mut top = i64::MAX;
+    let mut right = i64::MIN;
+    let mut bottom = i64::MIN;
+    for rect in older.iter().chain(newer.iter()) {
+        left = left.min(i64::from(rect.x));
+        top = top.min(i64::from(rect.y));
+        right = right.max(i64::from(rect.x) + i64::from(rect.width));
+        bottom = bottom.max(i64::from(rect.y) + i64::from(rect.height));
+    }
+    let (Ok(x), Ok(y), Ok(width), Ok(height)) = (
+        i32::try_from(left),
+        i32::try_from(top),
+        u32::try_from(right - left),
+        u32::try_from(bottom - top),
+    ) else {
+        return false;
+    };
+    if newer.is_empty() && newer.try_reserve(1).is_err() {
+        return false;
+    }
+    newer.clear();
+    newer.push(sws::SgfxDamageRect {
+        x,
+        y,
+        width,
+        height,
+    });
+    true
+}
+
 fn run_worker<R: Completion>(
     receiver: Receiver<Work<R>>,
     state: Arc<State>,
@@ -273,10 +330,15 @@ fn run_worker<R: Completion>(
     profile: bool,
 ) {
     let _exit = WorkerExit(state.clone());
-    while let Ok(work) = receiver.recv() {
+    let mut deferred = None;
+    loop {
+        let work = match deferred.take().map(Ok).unwrap_or_else(|| receiver.recv()) {
+            Ok(work) => work,
+            Err(_) => break,
+        };
         match work {
-            Work::Frame(frame) => {
-                let started = Instant::now();
+            Work::Frame(mut frame) => {
+                let mut started = Instant::now();
                 let mut completed = true;
                 // Drain every accepted receipt after failure/close as well.
                 // No connection/publication lock is held during GPU waits.
@@ -286,12 +348,63 @@ fn run_worker<R: Completion>(
                         state.failed.store(true, Ordering::Release);
                     }
                 }
-                let retired = Instant::now();
                 if completed {
                     state.profile_event(frame.token, "complete", |p| {
                         p.transition(frame.token, LeasePhase::Ready)
                     });
                 }
+                // Never wait for a newer image merely to skip an old one.
+                // Collapse only a contiguous, already-complete prefix. Barriers
+                // and generations keep their original publication ordering.
+                if completed && state.check().is_ok() {
+                    for _ in 0..QUEUE_CAPACITY {
+                        let Ok(work) = receiver.try_recv() else { break };
+                        match work {
+                            Work::Frame(mut next) if same_generation(frame.token, next.token) => {
+                                let observed = profile.then(Instant::now);
+                                let mut ready = true;
+                                for submission in &next.submissions {
+                                    match submission.poll() {
+                                        Ok(CompletionStatus::Complete) => {}
+                                        Ok(_) => ready = false,
+                                        Err(_) => {
+                                            ready = false;
+                                            state.failed.store(true, Ordering::Release);
+                                        }
+                                    }
+                                }
+                                if !ready
+                                    || !merge_superseded_damage(&frame.damage, &mut next.damage)
+                                {
+                                    deferred = Some(Work::Frame(next));
+                                    break;
+                                }
+                                state.profile_event(next.token, "complete", |p| {
+                                    p.transition(next.token, LeasePhase::Ready)
+                                });
+                                state.profile_event(frame.token, "supersede", |p| {
+                                    p.remove(frame.token, "abandon")
+                                });
+                                state
+                                    .superseded
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .push(frame.token);
+                                // Every receipt in both frames has established
+                                // completion. Drop only the unpublished old use.
+                                frame = next;
+                                if let Some(observed) = observed {
+                                    started = observed;
+                                }
+                            }
+                            other => {
+                                deferred = Some(other);
+                                break;
+                            }
+                        }
+                    }
+                }
+                let retired = Instant::now();
                 let published = state.publish(|| {
                     // Serialize profile handoff with release observation. A fast
                     // server can release a token before this socket write returns.
@@ -398,6 +511,17 @@ impl FrameHandoff {
         })
     }
 
+    pub(super) fn release_superseded(&self, mut release: impl FnMut(SgfxCommitToken)) {
+        let mut superseded = self
+            .state
+            .superseded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for token in superseded.drain(..) {
+            release(token);
+        }
+    }
+
     pub(super) fn observe_release(&self, token: SgfxCommitToken, rejected: bool) {
         let event = if rejected { "reject" } else { "release" };
         self.state
@@ -470,12 +594,20 @@ mod tests {
         gate: Option<Mutex<Receiver<()>>>,
         entered: Option<SyncSender<()>>,
         failed: bool,
+        ready: bool,
+        poll_failed: bool,
         drops: Arc<AtomicUsize>,
     }
     impl Completion for Receipt {
         type Error = ();
         fn poll(&self) -> Result<CompletionStatus, ()> {
-            Ok(CompletionStatus::Pending)
+            if self.poll_failed {
+                Err(())
+            } else if self.ready {
+                Ok(CompletionStatus::Complete)
+            } else {
+                Ok(CompletionStatus::Pending)
+            }
         }
         fn wait(&self, _: Option<Duration>) -> Result<CompletionStatus, ()> {
             self.trace.lock().unwrap().push("wait");
@@ -506,6 +638,8 @@ mod tests {
             gate: None,
             entered: None,
             failed: false,
+            ready: false,
+            poll_failed: false,
             drops: drops.clone(),
         }
     }
@@ -536,6 +670,186 @@ mod tests {
             },
             commit_serial: u64::from(generation) * 10 + u64::from(slot),
         }
+    }
+
+    fn ready_frame(
+        slot: u32,
+        generation: u32,
+        trace: &Trace,
+        drops: &Arc<AtomicUsize>,
+    ) -> Work<Receipt> {
+        let mut receipt = receipt(trace, drops);
+        receipt.ready = true;
+        Work::Frame(Frame {
+            token: token(slot, generation),
+            damage: vec![sws::SgfxDamageRect {
+                x: slot as i32 * 10,
+                y: 0,
+                width: 5,
+                height: 10,
+            }],
+            submissions: vec![receipt],
+            queued: Instant::now(),
+        })
+    }
+
+    #[test]
+    fn completed_burst_publishes_latest_with_all_damage_and_releases_only_unpublished_use() {
+        let trace = Trace::default();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(State::default());
+        let (sender, receiver) = sync_channel(QUEUE_CAPACITY);
+        sender.send(ready_frame(1, 1, &trace, &drops)).unwrap();
+        sender.send(ready_frame(2, 1, &trace, &drops)).unwrap();
+        drop(sender);
+        let mut commits = Vec::new();
+        run_worker(
+            receiver,
+            state.clone(),
+            |token, damage| {
+                commits.push(token);
+                assert_eq!(damage.len(), 2);
+                assert!(damage.iter().any(|rect| rect.x == 10));
+                assert!(damage.iter().any(|rect| rect.x == 20));
+                Ok(())
+            },
+            |_, _| panic!("no callback"),
+            true,
+        );
+        assert_eq!(commits, [token(2, 1)]);
+        assert_eq!(*state.superseded.lock().unwrap(), [token(1, 1)]);
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn pending_newer_frame_does_not_delay_ready_publication_or_release_its_lease() {
+        let trace = Trace::default();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(State::default());
+        let (sender, receiver) = sync_channel(QUEUE_CAPACITY);
+        sender.send(ready_frame(1, 1, &trace, &drops)).unwrap();
+        let (gate, retired) = sync_channel(1);
+        let (entered, waiting) = sync_channel(1);
+        let mut next = receipt(&trace, &drops);
+        next.gate = Some(Mutex::new(retired));
+        next.entered = Some(entered);
+        sender
+            .send(Work::Frame(Frame {
+                token: token(2, 1),
+                damage: Vec::new(),
+                submissions: vec![next],
+                queued: Instant::now(),
+            }))
+            .unwrap();
+        drop(sender);
+        let committed = Arc::new(Mutex::new(Vec::new()));
+        let published = committed.clone();
+        let worker_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            run_worker(
+                receiver,
+                worker_state,
+                |token, _| {
+                    published.lock().unwrap().push(token);
+                    Ok(())
+                },
+                |_, _| Ok(()),
+                false,
+            )
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(*committed.lock().unwrap(), [token(1, 1)]);
+        assert!(state.superseded.lock().unwrap().is_empty());
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        gate.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(*committed.lock().unwrap(), [token(1, 1), token(2, 1)]);
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn latest_ready_selection_preserves_callback_flush_and_generation_boundaries() {
+        let trace = Trace::default();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(State::default());
+        let (sender, receiver) = sync_channel(QUEUE_CAPACITY);
+        let (done, flushed) = sync_channel(1);
+        sender.send(ready_frame(1, 1, &trace, &drops)).unwrap();
+        sender.send(Work::Callback { window: 1, id: 2 }).unwrap();
+        sender.send(ready_frame(2, 1, &trace, &drops)).unwrap();
+        sender.send(Work::Flush(done)).unwrap();
+        sender.send(ready_frame(3, 1, &trace, &drops)).unwrap();
+        sender.send(ready_frame(4, 2, &trace, &drops)).unwrap();
+        drop(sender);
+        let publications = Mutex::new(Vec::new());
+        run_worker(
+            receiver,
+            state.clone(),
+            |token, _| {
+                if token == self::token(3, 1) {
+                    flushed.try_recv().unwrap();
+                }
+                publications.lock().unwrap().push(token.commit_serial);
+                Ok(())
+            },
+            |_, _| {
+                publications.lock().unwrap().push(0);
+                Ok(())
+            },
+            false,
+        );
+        assert_eq!(*publications.lock().unwrap(), [11, 0, 12, 13, 24]);
+        assert!(state.superseded.lock().unwrap().is_empty());
+        assert_eq!(drops.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn failed_newer_observation_poisons_publication_and_keeps_its_receipt_for_drain() {
+        let trace = Trace::default();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let state = Arc::new(State::default());
+        let (sender, receiver) = sync_channel(QUEUE_CAPACITY);
+        sender.send(ready_frame(1, 1, &trace, &drops)).unwrap();
+        let mut work = ready_frame(2, 1, &trace, &drops);
+        if let Work::Frame(frame) = &mut work {
+            frame.submissions[0].poll_failed = true;
+        }
+        sender.send(work).unwrap();
+        drop(sender);
+        run_worker(
+            receiver,
+            state.clone(),
+            |_, _| panic!("failed observation must not publish"),
+            |_, _| Ok(()),
+            false,
+        );
+        assert_eq!(*trace.lock().unwrap(), ["wait", "wait"]);
+        assert!(state.superseded.lock().unwrap().is_empty());
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn superseded_damage_overflow_is_bounded_and_conservative() {
+        let old: Vec<_> = (0..sws_protocol::SGFX_MAX_DAMAGE_RECTS)
+            .map(|x| sws::SgfxDamageRect {
+                x: x as i32 * 10,
+                y: 5,
+                width: 2,
+                height: 3,
+            })
+            .collect();
+        let mut new = vec![sws::SgfxDamageRect {
+            x: 200,
+            y: 10,
+            width: 5,
+            height: 4,
+        }];
+        assert!(merge_superseded_damage(&old, &mut new));
+        assert_eq!(new.len(), 1);
+        assert_eq!(
+            (new[0].x, new[0].y, new[0].width, new[0].height),
+            (0, 5, 205, 9)
+        );
     }
 
     #[test]
