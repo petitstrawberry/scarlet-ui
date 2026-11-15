@@ -666,6 +666,8 @@ impl ApplicationRunner {
             if let Some(error) = slot.pipeline.take_text_clipboard_error() {
                 app.on_clipboard_error(&slot.context, error);
             }
+            // Publish input changes before rendering; present_window refreshes
+            // any caret/clip changes caused by the subsequent layout.
             sync_text_input(slot.window.as_mut(), &slot.pipeline);
             let elapsed = slot.animation_tick.elapsed();
             slot.animation_tick = Instant::now();
@@ -692,8 +694,7 @@ impl ApplicationRunner {
                 && frame_granted
             {
                 let presentation = present_window(app, slot)?;
-                // Layout/scroll during presentation may move the focused caret.
-                sync_text_input(slot.window.as_mut(), &slot.pipeline);
+                // present_window already synchronized the final layout state.
                 match presentation {
                     Presentation::Cpu => {
                         slot.presented_this_cycle = true;
@@ -3353,6 +3354,67 @@ mod tests {
         fn as_any(&self) -> &dyn Any {
             self
         }
+    }
+
+    #[test]
+    fn runner_coalesces_text_input_scans_after_layout_or_a_withheld_frame() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let mut app = FramePacingApp {
+            suspended_changes: Rc::new(RefCell::new(Vec::new())),
+        };
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: probe.clone(),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slots = vec![runner.create_slot(&mut app, declaration, true).unwrap()];
+        let mut state = RunnerLoopState::new();
+        let before = probe.borrow().text_input_syncs[0];
+        ApplicationRunner::run_cycle(runner.backend.as_mut(), &mut app, &mut slots, &mut state)
+            .unwrap();
+        assert_eq!(
+            probe.borrow().text_input_syncs[0],
+            before + 2,
+            "input and final layout snapshots must not repeat the same post-layout query"
+        );
+        let root = slots[0].pipeline.element_tree().root().unwrap().id();
+        slots[0]
+            .pipeline
+            .pipeline_owner_mut()
+            .mark_needs_paint(root);
+        slots[0].frame_pacing_enabled = true;
+        slots[0].frame_ready = false;
+        let before = probe.borrow().text_input_syncs[0];
+        ApplicationRunner::run_cycle(runner.backend.as_mut(), &mut app, &mut slots, &mut state)
+            .unwrap();
+        assert!(
+            slots[0].pipeline.has_dirty(),
+            "withheld frame must not paint"
+        );
+        assert_eq!(
+            probe.borrow().text_input_syncs[0],
+            before + 1,
+            "input metadata must still publish when paint is withheld"
+        );
+        let mut close = Vec::new();
+        let before = probe.borrow().text_input_syncs[0];
+        handle_window_event(
+            &mut app,
+            &mut slots[0],
+            Event::Keyboard(crate::event::KeyEvent::Pressed {
+                keycode: crate::event::KeyCode::Tab,
+                modifiers: crate::event::KeyModifiers::default(),
+            }),
+            &mut close,
+        )
+        .unwrap();
+        assert_eq!(
+            probe.borrow().text_input_syncs[0],
+            before + 1,
+            "discrete focus/selection boundaries still synchronize immediately"
+        );
     }
 
     #[test]
