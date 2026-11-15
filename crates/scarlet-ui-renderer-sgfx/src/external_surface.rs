@@ -192,11 +192,12 @@ impl ElementRenderObject for ExternalGpuSurfaceRenderObject {
     fn paint<'a>(&'a self, ctx: &mut PaintContext<'a>, origin: Point) -> bool {
         let rect = Rect::new(origin, self.size);
         ctx.fill_rect(rect, self.placeholder);
-        ctx.draw_extension(
+        ctx.draw_extension_with_dependencies(
             rect,
             Arc::new(ExternalGpuSurfacePaint {
                 texture: self.source.texture(),
             }),
+            crate::canvas::image_dependencies(rect),
         );
         true
     }
@@ -286,6 +287,12 @@ mod tests {
         }));
         let mut element = view.create_element();
         element.layout(LayoutConstraints::tight(320.0, 240.0));
+        let mut before = PaintContext::new();
+        element
+            .render_object()
+            .unwrap()
+            .paint(&mut before, Point::ZERO);
+        let before = before.into_display_list();
         state.set(Arc::clone(&next));
         assert_eq!(notifications.load(Ordering::SeqCst), 1);
         let render = element.render_object().unwrap();
@@ -316,6 +323,22 @@ mod tests {
             .downcast_ref::<ExternalGpuSurfacePaint>()
             .unwrap();
         assert!(Arc::ptr_eq(&surface.texture, &next));
+        let after = paint.into_display_list();
+        let damage = after
+            .damage_since(&before, 1000)
+            .expect("imported image revisions have bounded writes");
+        assert!(!damage.is_empty());
+        assert!(
+            damage
+                .iter()
+                .all(|r| *r == Rect::from_xywh(0., 0., 320., 240.))
+        );
+        assert!(
+            after
+                .paint_dependencies(1000)
+                .iter()
+                .all(|dep| dep.reads == scarlet_ui_core::renderer::PaintRegion::Empty)
+        );
         assert!(listenables[0].unsubscribe(subscription));
         state.set(next);
         assert_eq!(notifications.load(Ordering::SeqCst), 1);
