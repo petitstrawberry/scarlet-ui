@@ -71,6 +71,11 @@ pub enum Error {
     /// Rendering error
     RenderError,
 
+    /// Temporary presentation pressure before any work for this frame was accepted.
+    /// The previous target and encoder caches are unchanged; retry a newly encoded
+    /// scene later while retaining all damage since the last accepted frame.
+    RenderDeferred,
+
     /// A classified frame failure. Busy/rejected frames permit continued input
     /// and scene updates; recovery-required frames must not reuse the backend.
     RenderFailure(RenderFailure),
@@ -107,6 +112,7 @@ impl fmt::Display for Error {
             Error::InvalidStateId => write!(f, "Invalid state ID"),
             Error::LayoutConstraintViolation => write!(f, "Layout constraint violation"),
             Error::RenderError => write!(f, "Rendering error"),
+            Error::RenderDeferred => write!(f, "Presentation temporarily deferred"),
             Error::RenderFailure(failure) => failure.fmt(f),
             Error::InvalidRendererBackend { value } => {
                 write!(f, "Invalid renderer backend: {}", value)

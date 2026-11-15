@@ -330,6 +330,7 @@ fn run_worker<R: Completion>(
     profile: bool,
 ) {
     let _exit = WorkerExit(state.clone());
+    let damage_trace = super::damage_trace::enabled();
     let mut deferred = None;
     loop {
         let work = match deferred.take().map(Ok).unwrap_or_else(|| receiver.recv()) {
@@ -361,7 +362,7 @@ fn run_worker<R: Completion>(
                         let Ok(work) = receiver.try_recv() else { break };
                         match work {
                             Work::Frame(mut next) if same_generation(frame.token, next.token) => {
-                                let observed = profile.then(Instant::now);
+                                let observed = (profile || damage_trace).then(Instant::now);
                                 let mut ready = true;
                                 for submission in &next.submissions {
                                     match submission.poll() {
@@ -378,6 +379,51 @@ fn run_worker<R: Completion>(
                                 {
                                     deferred = Some(Work::Frame(next));
                                     break;
+                                }
+                                if damage_trace {
+                                    use std::fmt::Write as _;
+                                    super::damage_trace::record(
+                                        next.token.identity.window_id,
+                                        "merge",
+                                        Some(next.token.commit_serial),
+                                        false,
+                                        |out| {
+                                            let _ = write!(
+                                                out,
+                                                "\tevent=supersede\tbuffer={}\tgen={}\tepoch={}\tserial={}\told_buffer={}\told_serial={}",
+                                                next.token.identity.buffer_id,
+                                                next.token.identity.generation,
+                                                next.token.identity.compositor_epoch,
+                                                next.token.commit_serial,
+                                                frame.token.identity.buffer_id,
+                                                frame.token.commit_serial
+                                            );
+                                            super::damage_trace::rects(
+                                                out,
+                                                "old_damage",
+                                                frame.damage.iter().map(|r| {
+                                                    (
+                                                        i64::from(r.x),
+                                                        i64::from(r.y),
+                                                        r.width,
+                                                        r.height,
+                                                    )
+                                                }),
+                                            );
+                                            super::damage_trace::rects(
+                                                out,
+                                                "merged_damage",
+                                                next.damage.iter().map(|r| {
+                                                    (
+                                                        i64::from(r.x),
+                                                        i64::from(r.y),
+                                                        r.width,
+                                                        r.height,
+                                                    )
+                                                }),
+                                            );
+                                        },
+                                    );
                                 }
                                 state.profile_event(next.token, "complete", |p| {
                                     p.transition(next.token, LeasePhase::Ready)
@@ -405,6 +451,30 @@ fn run_worker<R: Completion>(
                     }
                 }
                 let retired = Instant::now();
+                if damage_trace {
+                    use std::fmt::Write as _;
+                    super::damage_trace::record(
+                        frame.token.identity.window_id,
+                        "ready",
+                        Some(frame.token.commit_serial),
+                        !completed,
+                        |out| {
+                            let _ = write!(
+                                out,
+                                "\tevent=ready\tbuffer={}\tgen={}\tepoch={}\tserial={}\tcomplete={}\treceipts={}\tqueue_us={}\twait_us={}\tready_latency_us={}",
+                                frame.token.identity.buffer_id,
+                                frame.token.identity.generation,
+                                frame.token.identity.compositor_epoch,
+                                frame.token.commit_serial,
+                                u8::from(completed),
+                                frame.submissions.len(),
+                                started.duration_since(frame.queued).as_micros(),
+                                retired.duration_since(started).as_micros(),
+                                retired.duration_since(frame.queued).as_micros()
+                            );
+                        },
+                    );
+                }
                 let published = state.publish(|| {
                     // Serialize profile handoff with release observation. A fast
                     // server can release a token before this socket write returns.
@@ -455,8 +525,9 @@ pub(super) struct FrameHandoff {
 }
 
 impl FrameHandoff {
-    pub(super) fn new(conn: sws::Connection) -> SgfxSinkResult<Self> {
+    pub(super) fn new(conn: sws::Connection, window_id: u32) -> SgfxSinkResult<Self> {
         let (sender, receiver) = sync_channel(QUEUE_CAPACITY);
+        let damage_trace = super::damage_trace::enabled();
         let profile = std::env::var("SCARLET_UI_PROFILE").is_ok_and(|value| value == "1");
         let state = Arc::new(State {
             profile: profile.then(|| Mutex::new(LeaseProfile::default())),
@@ -470,12 +541,21 @@ impl FrameHandoff {
                     receiver,
                     worker_state,
                     |token, damage| {
-                        conn.commit_sgfx_frame(
+                        let publish_started = damage_trace.then(Instant::now);
+                        let result = conn.commit_sgfx_frame(
                             SwsSgfxFrameSink::client_identity(token.identity),
                             token.commit_serial,
                             damage,
                         )
-                        .map_err(|_| ())
+                        .map_err(|_| ());
+                        if damage_trace {
+                            use std::fmt::Write as _;
+                            super::damage_trace::record(window_id, "wire", Some(token.commit_serial), result.is_err(), |out| {
+                                let _ = write!(out, "\tevent=commit\tbuffer={}\tgen={}\tepoch={}\tserial={}\tok={}\tcount={}\tpublish_us={}", token.identity.buffer_id, token.identity.generation, token.identity.compositor_epoch, token.commit_serial, u8::from(result.is_ok()), damage.len(), publish_started.map_or(0, |start| start.elapsed().as_micros()));
+                                super::damage_trace::rects(out, "damage", damage.iter().map(|r| (i64::from(r.x), i64::from(r.y), r.width, r.height)));
+                            });
+                        }
+                        result
                     },
                     |window, id| conn.request_frame(window, id).map_err(|_| ()),
                     profile,

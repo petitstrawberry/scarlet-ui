@@ -112,6 +112,8 @@ pub struct RenderingPipeline {
     last_paint_bounds: BTreeMap<ElementId, Rect>,
     paint_damage: Option<Vec<DamageRect>>,
     paint_needs_full: bool,
+    // An unaccepted direct frame must be retried even without another dirty event.
+    direct_paint_deferred: bool,
     paint_background_color: Option<crate::color::Color>,
     paint_enabled: bool,
     // Backdrop filters depend on preceding scene pixels, not just their own
@@ -167,6 +169,7 @@ impl RenderingPipeline {
             last_paint_bounds: BTreeMap::new(),
             paint_damage: None,
             paint_needs_full: true,
+            direct_paint_deferred: false,
             paint_background_color: None,
             paint_enabled: true,
             scene_metadata: Default::default(),
@@ -1151,7 +1154,7 @@ impl RenderingPipeline {
             }
         }
         let force_full = force_recording_rebuild;
-        if !force_full && self.dirty_scratch.ids.is_empty() {
+        if !force_full && !self.direct_paint_deferred && self.dirty_scratch.ids.is_empty() {
             return Ok(PresentedFrame::Idle);
         }
         if force_full {
@@ -1224,7 +1227,7 @@ impl RenderingPipeline {
                 }
             }
         }
-        if self.paint_damage.as_ref().is_some_and(Vec::is_empty) {
+        if !self.direct_paint_deferred && self.paint_damage.as_ref().is_some_and(Vec::is_empty) {
             return Ok(PresentedFrame::Idle);
         }
         if force_recording_rebuild || !self.pipeline_owner.last_paint_ids().is_empty() {
@@ -1320,7 +1323,6 @@ impl RenderingPipeline {
                 self.paint_damage = None;
             }
         }
-        self.last_direct_scene = Some(alloc::sync::Arc::clone(&scene));
         self.last_paint_bounds.clear();
         if self.paint_backend.supports_retained_display_lists() {
             if self.select_overlay_active
@@ -1331,9 +1333,11 @@ impl RenderingPipeline {
         } else if let Some(root) = self.element_tree.root() {
             Self::collect_paint_bounds(root, Point::ZERO, None, &mut self.last_paint_bounds);
         }
-        self.paint_needs_full = false;
-        self.paint_background_color = Some(background_color);
         if self.paint_damage.as_ref().is_some_and(Vec::is_empty) {
+            self.last_direct_scene = Some(alloc::sync::Arc::clone(&scene));
+            self.direct_paint_deferred = false;
+            self.paint_needs_full = false;
+            self.paint_background_color = Some(background_color);
             return Ok(PresentedFrame::Idle);
         }
         let damage = self
@@ -1343,6 +1347,7 @@ impl RenderingPipeline {
         let physical_damage = self.paint_damage.as_deref();
         let prepare_us = started.map(|start| start.elapsed().as_micros());
         let backend_started = started.map(|_| crate::clock::Instant::now());
+        let supports_retained = self.paint_backend.supports_retained_display_lists();
         let result = self
             .paint_backend
             .render(&ctx, background_color, damage, physical_damage);
@@ -1354,13 +1359,28 @@ impl RenderingPipeline {
             );
         }
         match result {
-            Ok(BackendFrame::External) => Ok(PresentedFrame::External),
-            Ok(BackendFrame::Cpu { buffer }) => Ok(PresentedFrame::Cpu {
-                buffer,
-                damage: physical_damage,
-            }),
+            Ok(frame) => {
+                // Damage is relative to the last accepted picture, never a
+                // merely encoded revision whose target was still occupied.
+                self.last_direct_scene = Some(alloc::sync::Arc::clone(&scene));
+                self.direct_paint_deferred = false;
+                self.paint_needs_full = false;
+                self.paint_background_color = Some(background_color);
+                match frame {
+                    BackendFrame::External => Ok(PresentedFrame::External),
+                    BackendFrame::Cpu { buffer } => Ok(PresentedFrame::Cpu {
+                        buffer,
+                        damage: physical_damage,
+                    }),
+                }
+            }
             Err(error) => {
-                self.paint_needs_full = true;
+                let deferred =
+                    matches!(error, crate::error::Error::RenderDeferred) && supports_retained;
+                self.direct_paint_deferred = deferred;
+                // Rejected accepted-prefix work still requires full recovery.
+                // Clean deferral preserves a genuine pre-existing full repair.
+                self.paint_needs_full = !deferred || force_recording_rebuild;
                 Err(error)
             }
         }

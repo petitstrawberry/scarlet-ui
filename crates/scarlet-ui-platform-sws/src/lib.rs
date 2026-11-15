@@ -13,6 +13,8 @@ mod backend;
 mod backing_refresh;
 mod clipboard;
 mod configure_batch;
+#[cfg(feature = "std")]
+mod damage_trace;
 mod file_dialog;
 mod file_dialog_policy;
 mod keyboard;
@@ -559,6 +561,7 @@ impl SgfxFrameSink for SwsSgfxFrameSink {
         if self.presentation.is_none() {
             self.presentation = Some(std::sync::Arc::new(presentation::FrameHandoff::new(
                 self.conn.clone(),
+                self.window_id,
             )?));
         }
         let token = self.next_commit_token(identity)?;
@@ -2123,7 +2126,11 @@ impl PlatformWindow for SWSPlatformWindow {
                 .map_err(|_| Error::IoError)?;
             self.pending_frame_callback_id = Some(callback_id);
             #[cfg(feature = "std")]
-            if let Some(worker) = self.presentation.as_ref().and_then(std::sync::Weak::upgrade) {
+            if let Some(worker) = self
+                .presentation
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+            {
                 worker.profile_pacing(self.surface_id, callback_id, true, false);
             }
             return Ok(());
@@ -2195,7 +2202,7 @@ impl PlatformWindow for SWSPlatformWindow {
         #[cfg(feature = "std")]
         let presentation = {
             let worker = std::sync::Arc::new(
-                presentation::FrameHandoff::new(self.conn.clone())
+                presentation::FrameHandoff::new(self.conn.clone(), self.surface_id)
                     .map_err(|_| Error::RenderError)?,
             );
             sink.presentation = Some(worker.clone());
@@ -2993,8 +3000,17 @@ impl SWSPlatformWindow {
                 }
                 self.pending_frame_callback_id = None;
                 #[cfg(feature = "std")]
-                if let Some(worker) = self.presentation.as_ref().and_then(std::sync::Weak::upgrade) {
-                    worker.profile_pacing(self.surface_id, callback_id, self.frame_credits_supported, true);
+                if let Some(worker) = self
+                    .presentation
+                    .as_ref()
+                    .and_then(std::sync::Weak::upgrade)
+                {
+                    worker.profile_pacing(
+                        self.surface_id,
+                        callback_id,
+                        self.frame_credits_supported,
+                        true,
+                    );
                 }
                 self.push_event(Event::FrameReady {
                     presentation_time_ns,

@@ -709,7 +709,7 @@ impl ApplicationRunner {
                         app.on_frame_presented(&slot.context);
                     }
                     Presentation::Idle => {
-                        if slot.pipeline.has_visual_animation() {
+                        if slot.pipeline.has_visual_animation() && slot.frame_ready {
                             request_next_frame(slot);
                         }
                     }
@@ -1004,6 +1004,13 @@ fn present_window<A: Application>(app: &mut A, slot: &mut WindowSlot<A>) -> Resu
     );
     match result {
         Ok(presentation) => Ok(presentation),
+        Err(Error::RenderDeferred) => {
+            slot.retry_render = true;
+            // Consume this opportunity; the occupied pool needs a later credit,
+            // not repeated attempts against the same ready grant.
+            request_next_frame(slot);
+            Ok(Presentation::Idle)
+        }
         Err(Error::RenderFailure(failure)) => {
             app.on_render_error(&slot.context, &failure);
             match failure.kind {
@@ -1964,6 +1971,7 @@ mod tests {
     #[derive(Default)]
     struct RenderProbe {
         fail_next: Option<RenderFailureKind>,
+        defer_next: bool,
         attempts: usize,
         presented: usize,
         full_damage: Vec<bool>,
@@ -1983,6 +1991,9 @@ mod tests {
             let mut probe = self.0.borrow_mut();
             probe.attempts += 1;
             probe.full_damage.push(damage.is_none());
+            if core::mem::take(&mut probe.defer_next) {
+                return Err(Error::RenderDeferred);
+            }
             if let Some(kind) = probe.fail_next.take() {
                 return Err(Error::RenderFailure(RenderFailure {
                     kind,
@@ -1992,6 +2003,43 @@ mod tests {
             probe.presented += 1;
             Ok(crate::renderer::BackendFrame::External)
         }
+    }
+
+    #[test]
+    fn clean_render_deferral_rearms_pacing_without_render_failure_notification() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let mut app = RenderFailureApp(Rc::new(RefCell::new(Vec::new())));
+        let platform = Rc::new(RefCell::new(EnvironmentRunnerProbe {
+            frame_pacing: true,
+            ..Default::default()
+        }));
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: platform.clone(),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slot = runner.create_slot(&mut app, declaration, true).unwrap();
+        let probe = Rc::new(RefCell::new(RenderProbe {
+            defer_next: true,
+            ..Default::default()
+        }));
+        slot.pipeline
+            .set_paint_backend(Box::new(FailingPaintBackend(probe.clone())));
+        slot.frame_ready = true;
+        slot.frame_request_outstanding = false;
+        let requests = platform.borrow().frame_requests[0];
+        assert_eq!(
+            present_window(&mut app, &mut slot).unwrap(),
+            Presentation::Idle
+        );
+        assert!(slot.retry_render);
+        assert!(!slot.frame_ready);
+        assert!(slot.frame_request_outstanding);
+        assert_eq!(platform.borrow().frame_requests[0], requests + 1);
+        assert!(app.0.borrow().is_empty());
+        assert_eq!(probe.borrow().attempts, 1);
+        assert_eq!(probe.borrow().presented, 0);
     }
 
     fn assert_render_failure_policy(kind: RenderFailureKind) {
