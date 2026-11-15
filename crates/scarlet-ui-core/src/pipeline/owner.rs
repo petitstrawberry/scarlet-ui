@@ -347,7 +347,10 @@ impl PipelineOwner {
 
         let mut changes = core::mem::take(&mut self.prepaint_changes);
         changes.branches.clear();
-        changes.branches.extend(self.dirty_build.iter().copied());
+        // Rebuild requests can reconcile to NoChange. Refresh metadata from
+        // actual paint/children work below; real geometry changes take the
+        // conservative full-tree path. A broad State subscription alone must
+        // not turn a leaf repaint into a whole-scene fact scan.
 
         // 1. Build Phase: Rebuild Elements whose State changed
         self.flush_build(element_tree);
@@ -648,6 +651,9 @@ impl PipelineOwner {
                         render_dirty(child.as_mut(), subtree_ids, self_ids, subtree);
                     }
                     if own {
+                        if let Some(object) = element.render_object_mut() {
+                            object.prepare_paint();
+                        }
                         let requires_buffer = element
                             .render_object()
                             .is_some_and(|object| object.requires_buffer_render_for_paint());
@@ -677,6 +683,9 @@ impl PipelineOwner {
                     continue;
                 }
                 if let Some(element) = element_tree.find_element_mut(id) {
+                    if let Some(object) = element.render_object_mut() {
+                        object.prepare_paint();
+                    }
                     let requires_buffer = element.render_object().is_some_and(|render_object| {
                         render_object.requires_buffer_render_for_paint()
                     });
@@ -718,6 +727,9 @@ impl PipelineOwner {
                 );
             }
             if let Some(element) = element_tree.find_element_mut(id) {
+                if let Some(object) = element.render_object_mut() {
+                    object.prepare_paint();
+                }
                 element.render();
             }
         }
@@ -758,6 +770,9 @@ impl PipelineOwner {
         }
 
         // Render this element
+        if let Some(object) = element.render_object_mut() {
+            object.prepare_paint();
+        }
         element.render();
     }
 
@@ -767,6 +782,9 @@ impl PipelineOwner {
             Self::render_paint_buffers_recursive(child);
         }
 
+        if let Some(object) = element.render_object_mut() {
+            object.prepare_paint();
+        }
         let requires_buffer = element
             .render_object()
             .is_some_and(|render_object| render_object.requires_buffer_render_for_paint());
@@ -807,6 +825,11 @@ impl PipelineOwner {
     /// Check if there are any composite-only dirty elements.
     pub fn has_dirty_composite(&self) -> bool {
         !self.dirty_composite.is_empty()
+    }
+
+    /// Whether the last prepaint pass performed layout or changed children.
+    pub(crate) fn last_geometry_changed(&self) -> bool {
+        self.prepaint_changes.geometry
     }
 
     /// Structural updates that can reuse existing children's display lists.

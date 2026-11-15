@@ -50,21 +50,46 @@ fn find_id(element: &dyn Element, matches: &dyn Fn(&dyn Element) -> bool) -> Opt
 #[test]
 fn slider_motion_and_noop_rebuild_do_not_rescan_focus_popups_or_sibling_metadata() {
     let value = State::new(generate_state_id(), 0.5);
-    let tile = Rectangle::new().frame(200., 2.);
-    let row = VStack::new((
-        tile.clone(),
-        tile.clone(),
-        tile.clone(),
-        tile.clone(),
-        tile.clone(),
-        tile.clone(),
-        tile.clone(),
-        tile,
-    ));
-    let mut p = pipeline(VStack::new((
-        Slider::new(value.clone()).frame(200., 20.),
-        VStack::new((row.clone(), row.clone(), row.clone(), row.clone(), row)),
+    // The broad component subscription deliberately rebuilds the declaration
+    // too, like WidgetFactory. Only the slider's actual paint work is dirty.
+    let mut p = RenderingPipeline::new();
+    p.set_root(Box::new(ComponentElement::new_with_builder(
+        Slider::new(value.clone()),
+        |slider| {
+            let tile = Divider::new().frame(200., 2.);
+            let row = VStack::new((
+                tile.clone(),
+                tile.clone(),
+                tile.clone(),
+                tile.clone(),
+                tile.clone(),
+                tile.clone(),
+                tile.clone(),
+                tile,
+            ));
+            Box::new(
+                Window::new(
+                    "Broad subscription",
+                    VStack::new((
+                        slider.clone().frame(200., 20.),
+                        VStack::new((
+                            row.clone(),
+                            row.clone(),
+                            row.clone(),
+                            row.clone(),
+                            row.clone(),
+                        )),
+                    )),
+                )
+                .decorated(false)
+                .shadow(false)
+                .size(Size::new(240., 160.)),
+            )
+        },
     )));
+    p.set_paint_backend(Box::new(Commands));
+    p.layout_initial();
+    p.render_for_present().unwrap();
     let slider = find_id(p.element_tree.root().unwrap(), &|e| {
         e.render_object()
             .is_some_and(|r| r.as_any().is::<crate::views::SliderRenderObject>())
@@ -91,10 +116,14 @@ fn slider_motion_and_noop_rebuild_do_not_rescan_focus_popups_or_sibling_metadata
     // Reconcile the newly acquired focus once, then every motion is pure paint.
     for x in [70, 90, 110, 130] {
         p.reset_paint_test_counters();
+        p.retained_paint.sync_visits = 0;
+        p.retained_paint.indexed_syncs = 0;
         p.handle_event(&mouse(x));
         p.render_for_present().unwrap();
         assert_eq!(p.paint_test_counters.focus_reconciliations, 0);
         assert_eq!(p.paint_test_counters.popup_viewport_syncs, 0);
+        assert_eq!(p.retained_paint.indexed_syncs, 0);
+        assert!(p.retained_paint.sync_visits <= path.len());
         assert!(
             p.scene_metadata.visits <= 2,
             "paint must query only the slider, not its 40 siblings: {}",
@@ -109,7 +138,7 @@ fn slider_motion_and_noop_rebuild_do_not_rescan_focus_popups_or_sibling_metadata
     ));
     assert_eq!(p.paint_test_counters.focus_reconciliations, 0);
     assert_eq!(p.paint_test_counters.popup_viewport_syncs, 0);
-    assert_eq!(p.scene_metadata.visits, 1);
+    assert_eq!(p.scene_metadata.visits, 0);
     // The dense-paint fallback may refresh every cached fact, but that does
     // not make unchanged topology/focus/popup state dirty.
     fn collect(element: &dyn Element, ids: &mut Vec<ElementId>) {

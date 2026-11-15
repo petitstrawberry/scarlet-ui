@@ -1194,19 +1194,28 @@ impl RenderingPipeline {
                             .last_direct_scene
                             .as_ref()
                             .is_some_and(|s| s.is_self_contained() && !s.has_extensions());
-                    self.retained_paint.sync_tree(
-                        root,
-                        self.pipeline_owner.last_paint_ids(),
-                        self.pipeline_owner.last_self_paint_ids(),
-                        self.pipeline_owner.last_children_ids(),
-                        force_recording_rebuild,
-                        defer.then_some(Rect::from_xywh(
-                            0.,
-                            0.,
-                            self.window_size.width,
-                            self.window_size.height,
-                        )),
-                    );
+                    let leaf_synced = !force_recording_rebuild
+                        && !self.pipeline_owner.last_geometry_changed()
+                        && self.pipeline_owner.last_children_ids().is_empty()
+                        && self.pipeline_owner.last_composite_ids().is_empty()
+                        && self
+                            .retained_paint
+                            .try_sync_leaf_paint(&self.element_tree, &self.dirty_scratch.ids);
+                    if !leaf_synced {
+                        self.retained_paint.sync_tree(
+                            root,
+                            self.pipeline_owner.last_paint_ids(),
+                            self.pipeline_owner.last_self_paint_ids(),
+                            self.pipeline_owner.last_children_ids(),
+                            force_recording_rebuild,
+                            defer.then_some(Rect::from_xywh(
+                                0.,
+                                0.,
+                                self.window_size.width,
+                                self.window_size.height,
+                            )),
+                        );
+                    }
                 }
                 for id in self.pipeline_owner.last_composite_ids() {
                     if let Some(element) = self.element_tree.find_element(*id) {

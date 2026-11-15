@@ -232,6 +232,12 @@ impl ElementRenderObject for DividerRenderObject {
         let Some(divider) = new_view.as_any().downcast_ref::<Divider>() else {
             return crate::element::UpdateResult::Replaced;
         };
+        if self.orientation == divider.orientation
+            && self.color == divider.color
+            && self.thickness == divider.thickness
+        {
+            return crate::element::UpdateResult::NoChange;
+        }
         self.orientation = divider.orientation;
         self.color = divider.color;
         self.thickness = divider.thickness;

@@ -3,7 +3,7 @@
 //! never borrow mutable elements; removed virtual rows release their resources.
 use super::rendering::RenderingPipeline;
 use crate::{
-    element::{Element, ElementId},
+    element::{Element, ElementId, ElementTree},
     geometry::{Point, Rect},
     renderer::{DisplayList, PaintContext},
 };
@@ -36,12 +36,24 @@ pub(super) struct RetainedPaint {
     // Lookup order is irrelevant: replay always follows the explicit child order.
     nodes: HashMap<ElementId, Node>,
     deferred_paint: bool,
+    paint_scratch: HashSet<ElementId>,
+    self_scratch: HashSet<ElementId>,
+    structural_scratch: HashSet<ElementId>,
+    path_scratch: Vec<ElementId>,
+    #[cfg(test)]
+    pub(super) sync_visits: usize,
+    #[cfg(test)]
+    pub(super) indexed_syncs: usize,
 }
 impl RetainedPaint {
     pub fn clear(&mut self) {
         self.nodes = HashMap::new();
         self.root = None;
         self.deferred_paint = false;
+        self.paint_scratch = HashSet::new();
+        self.self_scratch = HashSet::new();
+        self.structural_scratch = HashSet::new();
+        self.path_scratch = Vec::new();
     }
     pub fn has_deferred_paint(&self) -> bool {
         self.deferred_paint
@@ -60,14 +72,24 @@ impl RetainedPaint {
         self.generation = self.generation.wrapping_add(1);
         // A membership query happens for every element. Index the dirty IDs
         // once instead of linearly scanning a dense dirty list at each node.
-        let paint_ids = paint_ids.iter().copied().collect();
-        let self_ids = self_ids.iter().copied().collect();
-        let structural_ids = structural_ids.iter().copied().collect();
+        let mut paint_index = core::mem::take(&mut self.paint_scratch);
+        let mut self_index = core::mem::take(&mut self.self_scratch);
+        let mut structural_index = core::mem::take(&mut self.structural_scratch);
+        paint_index.clear();
+        self_index.clear();
+        structural_index.clear();
+        paint_index.extend(paint_ids.iter().copied());
+        self_index.extend(self_ids.iter().copied());
+        structural_index.extend(structural_ids.iter().copied());
+        #[cfg(test)]
+        {
+            self.indexed_syncs += 1;
+        }
         self.sync(
             root,
-            &paint_ids,
-            &self_ids,
-            &structural_ids,
+            &paint_index,
+            &self_index,
+            &structural_index,
             full,
             false,
             None,
@@ -81,6 +103,105 @@ impl RetainedPaint {
         if self.nodes.capacity() > self.nodes.len().saturating_mul(4).max(256) {
             self.nodes.shrink_to(self.nodes.len().saturating_mul(2));
         }
+        self.paint_scratch = paint_index;
+        self.self_scratch = self_index;
+        self.structural_scratch = structural_index;
+    }
+
+    fn path_into(&self, id: ElementId, path: &mut Vec<ElementId>) -> bool {
+        path.clear();
+        let mut current = Some(id);
+        while let Some(id) = current {
+            let Some(node) = self.nodes.get(&id) else {
+                return false;
+            };
+            path.push(id);
+            if path.len() > self.nodes.len() {
+                return false;
+            }
+            current = node.parent;
+        }
+        path.reverse();
+        path.first().copied() == self.root
+    }
+
+    /// Paint-only leaf changes cannot move descendants or remove nodes. The
+    /// caller must exclude layout, topology, composite and full invalidations.
+    /// Validate every cached route before changing any recording; otherwise the
+    /// ordinary tree reconciliation remains the authority.
+    pub fn try_sync_leaf_paint(&mut self, tree: &ElementTree, ids: &[ElementId]) -> bool {
+        if self.deferred_paint || tree.root().map(|r| r.id()) != self.root {
+            return false;
+        }
+        let mut path = core::mem::take(&mut self.path_scratch);
+        let valid = ids.iter().all(|id| {
+            if !self.path_into(*id, &mut path) {
+                return false;
+            }
+            let Some((element, _)) = tree.element_and_absolute_origin_for_path(&path) else {
+                return false;
+            };
+            #[cfg(test)]
+            {
+                self.sync_visits += path.len();
+            }
+            let node = &self.nodes[id];
+            node.children.is_empty()
+                && element.children().is_empty()
+                && node.position == element.position()
+                && node.reads_backdrop
+                    == element.render_object().is_some_and(|r| r.reads_backdrop())
+        });
+        if valid {
+            self.generation = self.generation.wrapping_add(1);
+            for id in ids {
+                self.path_into(*id, &mut path);
+                let (element, _) = tree.element_and_absolute_origin_for_path(&path).unwrap();
+                let node = self.nodes.get_mut(id).unwrap();
+                let bounds = RenderingPipeline::element_paint_bounds(element, Point::ZERO);
+                let clip = RenderingPipeline::clip_for_element(element, Point::ZERO);
+                let opacity = element.render_object().map_or(1., |r| r.subtree_opacity());
+                let mut changed =
+                    node.bounds != bounds || node.clip != clip || node.opacity != opacity;
+                node.bounds = bounds;
+                node.clip = clip;
+                node.opacity = opacity;
+                let mut paint = PaintContext::new();
+                RenderingPipeline::paint_element_self(&mut paint, element, Point::ZERO);
+                let same = node
+                    .paint
+                    .as_ref()
+                    .map_or_else(|| paint.is_empty(), |old| paint.same_recording(old));
+                if !same {
+                    node.paint = (!paint.is_empty()).then(|| paint.into_display_list());
+                    changed = true;
+                }
+                let mut overlay = PaintContext::new();
+                RenderingPipeline::paint_element_overlay(&mut overlay, element, Point::ZERO);
+                let same = node
+                    .overlay
+                    .as_ref()
+                    .map_or_else(|| overlay.is_empty(), |old| overlay.same_recording(old));
+                if !same {
+                    node.overlay = (!overlay.is_empty()).then(|| overlay.into_display_list());
+                    changed = true;
+                }
+                if changed {
+                    // Refresh enclosing retained pictures bottom-up. Unchanged
+                    // sibling records remain shared, including nested groups.
+                    for ancestor in path.iter().rev() {
+                        let node = self.nodes.get_mut(ancestor).unwrap();
+                        node.content_stamp = self.generation;
+                        node.subtree_stamp = self.generation;
+                        if node.group.is_some() {
+                            self.cache_static_subtrees(*ancestor);
+                        }
+                    }
+                }
+            }
+        }
+        self.path_scratch = path;
+        valid
     }
     fn sync(
         &mut self,
@@ -94,6 +215,10 @@ impl RetainedPaint {
         origin: Point,
         defer_outside: Option<Rect>,
     ) -> (u64, bool) {
+        #[cfg(test)]
+        {
+            self.sync_visits += 1;
+        }
         let id = element.id();
         let subtree_dirty = inherited
             || (paint_ids.contains(&id)
@@ -521,6 +646,89 @@ mod tests {
     };
     use alloc::{boxed::Box, rc::Rc};
     use core::cell::RefCell;
+
+    #[test]
+    fn warm_leaf_sync_visits_only_its_path_without_allocating_dirty_indexes() {
+        use crate::testing::alloc_counter::measure_allocations;
+        let row = VStack::new((Spacer::new(), Spacer::new(), Spacer::new(), Spacer::new()));
+        let mut tree = ElementTree::new();
+        tree.set_root(
+            VStack::new((Spacer::new(), row.clone(), row.clone(), row.clone(), row))
+                .create_element(),
+        );
+        let root = tree.root().unwrap();
+        let id = root.children()[0].id();
+        let mut scene = RetainedPaint::default();
+        scene.sync_tree(root, &[], &[], &[], true, None);
+        assert!(scene.nodes.len() > 20);
+        assert!(scene.try_sync_leaf_paint(&tree, &[id]));
+        scene.sync_visits = 0;
+        scene.indexed_syncs = 0;
+        let allocations = measure_allocations(|| {
+            for _ in 0..64 {
+                assert!(scene.try_sync_leaf_paint(&tree, &[id]));
+            }
+        });
+        assert_eq!(scene.sync_visits, 64 * 2);
+        assert_eq!(scene.indexed_syncs, 0);
+        assert_eq!(allocations.allocations, 0);
+        assert_eq!(allocations.allocated_bytes, 0);
+        // A subtree paint is deliberately handled by the full reconciler.
+        assert!(!scene.try_sync_leaf_paint(&tree, &[root.id()]));
+    }
+
+    #[test]
+    fn leaf_sync_refreshes_enclosing_groups_and_rejects_geometry_or_missing_routes() {
+        fn rectangle(element: &dyn Element) -> Option<ElementId> {
+            if element
+                .render_object()
+                .is_some_and(|r| r.as_any().is::<crate::views::RectangleRenderObject>())
+            {
+                return Some(element.id());
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|e| rectangle(e.as_ref()))
+        }
+        fn pixels(scene: &RetainedPaint) -> Vec<u8> {
+            let mut ctx = PaintContext::new();
+            scene.replay(&mut ctx, None);
+            let mut renderer = CpuPaintRenderer::new(Size::new(40., 30.), 1000, Color::WHITE);
+            renderer.execute_with_damage(&ctx, None);
+            renderer.buffer().data().to_vec()
+        }
+        let mut tree = ElementTree::new();
+        tree.set_root(
+            ScrollView::new(VStack::new((
+                Rectangle::new().fill(Color::RED).frame(30., 20.),
+                Rectangle::new().fill(Color::GREEN).frame(30., 20.),
+            )))
+            .content_size(30., 40.)
+            .frame(40., 30.)
+            .create_element(),
+        );
+        tree.layout(crate::element::LayoutConstraints::tight(40., 30.));
+        let id = rectangle(tree.root().unwrap()).unwrap();
+        let mut scene = RetainedPaint::default();
+        scene.sync_tree(tree.root().unwrap(), &[], &[], &[], true, None);
+        assert!(scene.nodes.values().any(|n| n.group.is_some()));
+        for color in [Color::BLUE, Color::CLEAR, Color::RED] {
+            tree.find_element_mut(id)
+                .unwrap()
+                .update(&Rectangle::new().fill(color));
+            assert!(scene.try_sync_leaf_paint(&tree, &[id]));
+            let mut fresh = RetainedPaint::default();
+            fresh.sync_tree(tree.root().unwrap(), &[], &[], &[], true, None);
+            assert_eq!(pixels(&scene), pixels(&fresh));
+        }
+        tree.find_element_mut(id)
+            .unwrap()
+            .set_position(Point::new(3., 4.));
+        assert!(!scene.try_sync_leaf_paint(&tree, &[id]));
+        tree.clear_root();
+        assert!(!scene.try_sync_leaf_paint(&tree, &[id]));
+    }
 
     #[test]
     fn deferred_offscreen_surface_repaints_before_exposure_and_releases_on_clear() {

@@ -555,7 +555,9 @@ impl<V: View + Clone> View for FactoryPageContent<V> {
             scarlet_ui::element::RenderElement::with_view_children_and_updater(
                 self.clone(),
                 |_| FactoryPageLayout(Size::ZERO),
-                |_, _| scarlet_ui::element::UpdateResult::Updated,
+                // The wrapper has no view properties of its own. Its child
+                // still reconciles normally and requests layout when needed.
+                |_, _| scarlet_ui::element::UpdateResult::NoChange,
                 |view| vec![view.0.clone_view()],
             ),
         )
@@ -783,10 +785,15 @@ impl WidgetFactory {
             )
         } else {
             Either::B(
-                hstack![label.frame_width(150.0).content_alignment(Alignment::Leading), control]
-                    .spacing(18.0)
-                    .alignment(alignment)
-                    .frame_width(self.row_width()),
+                hstack![
+                    label
+                        .frame_width(150.0)
+                        .content_alignment(Alignment::Leading),
+                    control
+                ]
+                .spacing(18.0)
+                .alignment(alignment)
+                .frame_width(self.row_width()),
             )
         }
     }
@@ -3119,6 +3126,18 @@ mod tests {
         for value in [0.1, 0.3, 0.6, 0.9, 0.42] {
             app.slider_value.set(value);
             pipeline.render_for_present().unwrap();
+            let owner = pipeline.pipeline_owner();
+            assert!(owner.last_children_ids().is_empty());
+            assert!(owner.last_composite_ids().is_empty());
+            assert!(
+                owner.last_paint_ids().iter().all(|id| pipeline
+                    .element_tree()
+                    .find_element(*id)
+                    .unwrap()
+                    .children()
+                    .is_empty()),
+                "slider changes must not mark a whole page for paint"
+            );
             let next = capture.borrow().as_ref().unwrap().clone();
             assert_eq!(next.cache_identity(), original.cache_identity());
             let ids = next
@@ -3141,6 +3160,42 @@ mod tests {
                 damage.iter().all(|r| r.top() > 500.),
                 "slider updates must not invalidate the static material study: {damage:?}"
             );
+        }
+        drop(pipeline);
+        // Exercise the actual scene builder too, including navigation and the
+        // dynamic Reset menu. The application's broad subscriptions stay live.
+        app.navigation().selected_index_state().set(1);
+        let mut full = RenderingPipeline::new();
+        full.set_root(Box::new(ComponentElement::new_with_builder(
+            app.clone(),
+            |app| {
+                let mut builder = scarlet_ui::SceneBuilder::new();
+                app.scenes().build(&mut builder);
+                builder.into_declarations().remove(0).view
+            },
+        )));
+        full.set_paint_backend(Box::new(Capture(capture)));
+        full.layout_initial();
+        for _ in 0..4 {
+            full.render_for_present().unwrap();
+        }
+        for value in [0.1, 0.3, 0.6, 0.9, 0.42] {
+            app.slider_value.set(value);
+            full.render_for_present().unwrap();
+            assert!(
+                full.pipeline_owner().last_paint_ids().iter().all(|id| full
+                    .element_tree()
+                    .find_element(*id)
+                    .unwrap()
+                    .children()
+                    .is_empty()),
+                "real scenes must not dirty whole pages for slider updates"
+            );
+            let menu = app.menu_model();
+            let MenuEntry::Item(reset) = &menu.items()[0].children_value()[0] else {
+                panic!("reset menu");
+            };
+            assert_eq!(reset.enabled_value(), value != 0.42);
         }
     }
 }
