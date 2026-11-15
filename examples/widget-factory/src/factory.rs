@@ -3196,6 +3196,11 @@ mod tests {
             )));
             full.set_paint_backend(Box::new(Capture(capture.clone(), damage.clone())));
             full.layout_initial();
+            if page == 2 {
+                full.set_scale_milli(2000);
+                full.resize(Size::new(540., 680.));
+                full.handle_event(&scarlet_ui::Event::TabletPresentationChanged { active: true });
+            }
             for _ in 0..4 {
                 full.render_for_present().unwrap();
             }
