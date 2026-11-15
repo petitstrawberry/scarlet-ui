@@ -884,6 +884,15 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         }
         // Application retains its dirty/retry state and yields to another
         // credit/event. No accepted work is replayed and no busy image is reused.
+        #[cfg(feature = "std")]
+        if self.profiling {
+            // Every slot was polled above: unlike cached retained flags, this
+            // records an actual exhausted admission attempt for this generation.
+            std::println!(
+                "[UI_POOL] window={} generation={} capacity={} event=exhausted",
+                self.sink.window_id(), self.generation, PRESENTATION_SLOT_COUNT,
+            );
+        }
         Err(Error::FrameNotPresented(RenderFailure {
             kind: RenderFailureKind::Busy,
             reason: "all presentation images remain retained".into(),

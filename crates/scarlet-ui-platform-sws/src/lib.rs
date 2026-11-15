@@ -327,6 +327,10 @@ impl SwsSgfxFrameSink {
                     commit_serial,
                 };
                 if Self::release_retained(&mut self.retained, token) {
+                    #[cfg(feature = "std")]
+                    if let Some(worker) = &self.presentation {
+                        worker.observe_release(token, true);
+                    }
                     self.rejected.push((token, Self::map_error_code(code)));
                 } else {
                     self.lifecycle_error = Some(SgfxSinkError::Protocol);
@@ -353,6 +357,11 @@ impl SwsSgfxFrameSink {
                 };
                 if !Self::release_retained(&mut self.retained, token) {
                     self.lifecycle_error = Some(SgfxSinkError::Protocol);
+                } else {
+                    #[cfg(feature = "std")]
+                    if let Some(worker) = &self.presentation {
+                        worker.observe_release(token, false);
+                    }
                 }
             }
             SwsEvent::SgfxBackendLost { compositor_epoch } => {
@@ -2093,6 +2102,10 @@ impl PlatformWindow for SWSPlatformWindow {
                 .request_frame_credit(self.surface_id, callback_id)
                 .map_err(|_| Error::IoError)?;
             self.pending_frame_callback_id = Some(callback_id);
+            #[cfg(feature = "std")]
+            if let Some(worker) = self.presentation.as_ref().and_then(std::sync::Weak::upgrade) {
+                worker.profile_pacing(self.surface_id, callback_id, true, false);
+            }
             return Ok(());
         }
         #[cfg(feature = "std")]
@@ -2105,6 +2118,7 @@ impl PlatformWindow for SWSPlatformWindow {
                 .request_frame(self.surface_id, callback_id)
                 .map_err(|_| Error::IoError)?;
             self.pending_frame_callback_id = Some(callback_id);
+            worker.profile_pacing(self.surface_id, callback_id, false, false);
             return Ok(());
         }
         self.conn
@@ -2958,6 +2972,10 @@ impl SWSPlatformWindow {
                     return;
                 }
                 self.pending_frame_callback_id = None;
+                #[cfg(feature = "std")]
+                if let Some(worker) = self.presentation.as_ref().and_then(std::sync::Weak::upgrade) {
+                    worker.profile_pacing(self.surface_id, callback_id, self.frame_credits_supported, true);
+                }
                 self.push_event(Event::FrameReady {
                     presentation_time_ns,
                 });

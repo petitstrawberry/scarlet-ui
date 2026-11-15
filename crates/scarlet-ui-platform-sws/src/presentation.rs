@@ -15,6 +15,138 @@ use std::time::Instant;
 // flushes the old generation before registering/admitting any new-generation work.
 const QUEUE_CAPACITY: usize = 6;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeasePhase {
+    GpuPending,
+    Ready,
+    HandedOff,
+}
+
+// One profile per window/worker, shared with the sink's exact lifecycle events.
+// Pending means completion has not been observed, not physically executing GPU
+// work. HandedOff means socket publication succeeded, not compositor admission.
+#[derive(Default)]
+struct LeaseProfile {
+    live: Vec<(SgfxCommitToken, LeasePhase)>,
+    sequence: u64,
+    queued: u64,
+    completed: u64,
+    handed_off: u64,
+    released: u64,
+    rejected: u64,
+    abandoned: u64,
+    unmatched: u64,
+    peak_live: usize,
+    peak_generation_live: usize,
+    peak_gpu_pending: usize,
+    peak_handed_off: usize,
+    overlap_samples: u64,
+    pending_grant: Option<(u64, Instant)>,
+    credit_requests: u64,
+    legacy_requests: u64,
+    grants: u64,
+}
+
+impl LeaseProfile {
+    fn queued(&mut self, token: SgfxCommitToken) {
+        if self.live.iter().any(|(existing, _)| *existing == token) {
+            self.unmatched += 1;
+            return;
+        }
+        self.live.push((token, LeasePhase::GpuPending));
+        self.queued += 1;
+    }
+
+    fn transition(&mut self, token: SgfxCommitToken, phase: LeasePhase) {
+        let Some((_, current)) = self.live.iter_mut().find(|(t, _)| *t == token) else {
+            self.unmatched += 1;
+            return;
+        };
+        let expected = match phase {
+            LeasePhase::Ready => LeasePhase::GpuPending,
+            LeasePhase::HandedOff => LeasePhase::Ready,
+            LeasePhase::GpuPending => unreachable!(),
+        };
+        if *current != expected {
+            self.unmatched += 1;
+            return;
+        }
+        *current = phase;
+        match phase {
+            LeasePhase::Ready => self.completed += 1,
+            LeasePhase::HandedOff => self.handed_off += 1,
+            LeasePhase::GpuPending => unreachable!(),
+        }
+    }
+
+    fn remove(&mut self, token: SgfxCommitToken, event: &str) {
+        let Some(index) = self.live.iter().position(|(t, _)| *t == token) else {
+            self.unmatched += 1;
+            return;
+        };
+        self.live.swap_remove(index);
+        match event {
+            "release" => self.released += 1,
+            "reject" => self.rejected += 1,
+            _ => self.abandoned += 1,
+        }
+    }
+
+    fn snapshot(&mut self, window: u32, event: &str) -> String {
+        self.sequence += 1;
+        let gpu = self
+            .live
+            .iter()
+            .filter(|(_, p)| *p == LeasePhase::GpuPending)
+            .count();
+        let handed = self
+            .live
+            .iter()
+            .filter(|(_, p)| *p == LeasePhase::HandedOff)
+            .count();
+        let generation_live = self
+            .live
+            .iter()
+            .map(|(token, _)| {
+                self.live
+                    .iter()
+                    .filter(|(other, _)| {
+                        other.identity.generation == token.identity.generation
+                            && other.identity.compositor_epoch == token.identity.compositor_epoch
+                    })
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+        self.peak_live = self.peak_live.max(self.live.len());
+        self.peak_generation_live = self.peak_generation_live.max(generation_live);
+        self.peak_gpu_pending = self.peak_gpu_pending.max(gpu);
+        self.peak_handed_off = self.peak_handed_off.max(handed);
+        self.overlap_samples += u64::from(gpu > 0 && handed > 0);
+        format!(
+            "[UI_LEASE] window={window} seq={} event={event} live={} gpu_pending={gpu} ready={} sws_handed_off={handed} peak_live={} peak_generation_live={} peak_gpu_pending={} peak_sws_handed_off={} overlap_samples={} queued_total={} completed_total={} handed_off_total={} released_total={} rejected_total={} abandoned_total={} unmatched={} credit_requests={} legacy_requests={} grants={}",
+            self.sequence,
+            self.live.len(),
+            self.live.len() - gpu - handed,
+            self.peak_live,
+            self.peak_generation_live,
+            self.peak_gpu_pending,
+            self.peak_handed_off,
+            self.overlap_samples,
+            self.queued,
+            self.completed,
+            self.handed_off,
+            self.released,
+            self.rejected,
+            self.abandoned,
+            self.unmatched,
+            self.credit_requests,
+            self.legacy_requests,
+            self.grants,
+        )
+    }
+}
+
 struct Frame<R> {
     token: SgfxCommitToken,
     damage: Vec<sws::SgfxDamageRect>,
@@ -33,15 +165,57 @@ struct State {
     closed: AtomicBool,
     failed: AtomicBool,
     publication: Mutex<()>,
+    profile: Option<Mutex<LeaseProfile>>,
 }
 
 impl State {
-    fn publish(&self, action: impl FnOnce() -> Result<(), ()>) {
+    fn enqueue_frame(
+        &self,
+        token: SgfxCommitToken,
+        send: impl FnOnce() -> SgfxSinkResult<()>,
+    ) -> SgfxSinkResult<()> {
+        // Count only successful acceptance, before the worker can record
+        // completion. No profile lock/allocation is used when profiling is off.
+        let mut profile = self
+            .profile
+            .as_ref()
+            .map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
+        send()?;
+        let line = profile.as_mut().map(|p| {
+            p.queued(token);
+            p.snapshot(token.identity.window_id, "queue")
+        });
+        drop(profile);
+        if let Some(line) = line {
+            std::println!("{line}");
+        }
+        Ok(())
+    }
+
+    fn publish(&self, action: impl FnOnce() -> Result<(), ()>) -> bool {
         let _guard = self.publication.lock().unwrap_or_else(|e| e.into_inner());
         if !self.closed.load(Ordering::Acquire) && !self.failed.load(Ordering::Acquire) {
             if action().is_err() {
                 self.failed.store(true, Ordering::Release);
+            } else {
+                return true;
             }
+        }
+        false
+    }
+
+    fn profile_event(
+        &self,
+        token: SgfxCommitToken,
+        event: &str,
+        update: impl FnOnce(&mut LeaseProfile),
+    ) {
+        if let Some(profile) = &self.profile {
+            let mut profile = profile.lock().unwrap_or_else(|e| e.into_inner());
+            update(&mut profile);
+            let line = profile.snapshot(token.identity.window_id, event);
+            drop(profile);
+            std::println!("{line}");
         }
     }
 
@@ -49,7 +223,28 @@ impl State {
         // Serialize cancellation with socket writes, not with GPU retirement.
         // After close returns no old-epoch publication can start.
         let _guard = self.publication.lock().unwrap_or_else(|e| e.into_inner());
-        self.closed.store(true, Ordering::Release);
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            if let Some(profile) = &self.profile {
+                let mut p = profile.lock().unwrap_or_else(|e| e.into_inner());
+                // Closing invalidates SWS leases; it does not claim GPU work
+                // retired. The worker still drains and abandons queued receipts.
+                let handed: Vec<_> = p
+                    .live
+                    .iter()
+                    .filter_map(|(t, phase)| (*phase == LeasePhase::HandedOff).then_some(*t))
+                    .collect();
+                for token in &handed {
+                    p.remove(*token, "abandon");
+                }
+                let line = handed
+                    .first()
+                    .map(|t| p.snapshot(t.identity.window_id, "close"));
+                drop(p);
+                if let Some(line) = line {
+                    std::println!("{line}");
+                }
+            }
+        }
     }
 
     fn check(&self) -> SgfxSinkResult<()> {
@@ -82,15 +277,44 @@ fn run_worker<R: Completion>(
         match work {
             Work::Frame(frame) => {
                 let started = Instant::now();
+                let mut completed = true;
                 // Drain every accepted receipt after failure/close as well.
                 // No connection/publication lock is held during GPU waits.
                 for submission in &frame.submissions {
                     if !matches!(submission.wait(None), Ok(CompletionStatus::Complete)) {
+                        completed = false;
                         state.failed.store(true, Ordering::Release);
                     }
                 }
                 let retired = Instant::now();
-                state.publish(|| commit(frame.token, &frame.damage));
+                if completed {
+                    state.profile_event(frame.token, "complete", |p| {
+                        p.transition(frame.token, LeasePhase::Ready)
+                    });
+                }
+                let published = state.publish(|| {
+                    // Serialize profile handoff with release observation. A fast
+                    // server can release a token before this socket write returns.
+                    let mut profile = state
+                        .profile
+                        .as_ref()
+                        .map(|p| p.lock().unwrap_or_else(|e| e.into_inner()));
+                    commit(frame.token, &frame.damage)?;
+                    let line = profile.as_mut().map(|p| {
+                        p.transition(frame.token, LeasePhase::HandedOff);
+                        p.snapshot(frame.token.identity.window_id, "handoff")
+                    });
+                    drop(profile);
+                    if let Some(line) = line {
+                        std::println!("{line}");
+                    }
+                    Ok(())
+                });
+                if !published {
+                    state.profile_event(frame.token, "abandon", |p| {
+                        p.remove(frame.token, "abandon")
+                    });
+                }
                 if profile && state.check().is_ok() {
                     std::println!(
                         "[UI_PRESENT] window={} serial={} queue_us={} completion_wait_us={} handoff_us={}",
@@ -102,7 +326,9 @@ fn run_worker<R: Completion>(
                     );
                 }
             }
-            Work::Callback { window, id } => state.publish(|| callback(window, id)),
+            Work::Callback { window, id } => {
+                state.publish(|| callback(window, id));
+            }
             Work::Flush(done) => {
                 let _ = done.send(());
             }
@@ -118,9 +344,12 @@ pub(super) struct FrameHandoff {
 impl FrameHandoff {
     pub(super) fn new(conn: sws::Connection) -> SgfxSinkResult<Self> {
         let (sender, receiver) = sync_channel(QUEUE_CAPACITY);
-        let state = Arc::new(State::default());
-        let worker_state = state.clone();
         let profile = std::env::var("SCARLET_UI_PROFILE").is_ok_and(|value| value == "1");
+        let state = Arc::new(State {
+            profile: profile.then(|| Mutex::new(LeaseProfile::default())),
+            ..State::default()
+        });
+        let worker_state = state.clone();
         std::thread::Builder::new()
             .name("sgfx-present".into())
             .spawn(move || {
@@ -159,12 +388,45 @@ impl FrameHandoff {
         damage: Vec<sws::SgfxDamageRect>,
         submissions: Vec<sgfx::Submission>,
     ) -> SgfxSinkResult<()> {
-        self.enqueue(Work::Frame(Frame {
-            token,
-            damage,
-            submissions,
-            queued: Instant::now(),
-        }))
+        self.state.enqueue_frame(token, || {
+            self.enqueue(Work::Frame(Frame {
+                token,
+                damage,
+                submissions,
+                queued: Instant::now(),
+            }))
+        })
+    }
+
+    pub(super) fn observe_release(&self, token: SgfxCommitToken, rejected: bool) {
+        let event = if rejected { "reject" } else { "release" };
+        self.state
+            .profile_event(token, event, |p| p.remove(token, event));
+    }
+
+    pub(super) fn profile_pacing(&self, window: u32, id: u64, credit: bool, grant: bool) {
+        if let Some(profile) = &self.state.profile {
+            let mut p = profile.lock().unwrap_or_else(|e| e.into_inner());
+            let wait_us = if grant {
+                p.grants += 1;
+                p.pending_grant
+                    .take()
+                    .filter(|(pending, _)| *pending == id)
+                    .map(|(_, start)| start.elapsed().as_micros())
+                    .unwrap_or(0)
+            } else {
+                if credit {
+                    p.credit_requests += 1;
+                } else {
+                    p.legacy_requests += 1;
+                }
+                p.pending_grant = Some((id, Instant::now()));
+                0
+            };
+            let line = p.snapshot(window, if grant { "grant" } else { "request" });
+            drop(p);
+            std::println!("{line} callback={id} credit={credit} grant_wait_us={wait_us}");
+        }
     }
 
     pub(super) fn request_frame(&self, window: u32, id: u64) -> SgfxSinkResult<()> {
@@ -262,6 +524,158 @@ mod tests {
             submissions,
             queued: Instant::now(),
         })
+    }
+
+    fn token(slot: u32, generation: u32) -> SgfxCommitToken {
+        SgfxCommitToken {
+            identity: super::super::SgfxBufferIdentity {
+                window_id: 1,
+                buffer_id: slot,
+                generation,
+                compositor_epoch: 1,
+            },
+            commit_serial: u64::from(generation) * 10 + u64::from(slot),
+        }
+    }
+
+    #[test]
+    fn profile_counts_four_accepted_leases_and_completion_handoff_release_overlap() {
+        let state = Arc::new(State {
+            profile: Some(Mutex::new(LeaseProfile::default())),
+            ..State::default()
+        });
+        let trace = Trace::default();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (sender, receiver) = sync_channel(QUEUE_CAPACITY);
+        let (entered, waiting) = sync_channel(4);
+        let mut gates = Vec::new();
+        for slot in 1..=4 {
+            let token = token(slot, 1);
+            let (gate, retired) = sync_channel(1);
+            gates.push(gate);
+            let mut receipt = receipt(&trace, &drops);
+            receipt.gate = Some(Mutex::new(retired));
+            receipt.entered = Some(entered.clone());
+            state
+                .enqueue_frame(token, || {
+                    sender
+                        .try_send(Work::Frame(Frame {
+                            token,
+                            damage: Vec::new(),
+                            submissions: vec![receipt],
+                            queued: Instant::now(),
+                        }))
+                        .map_err(|_| SgfxSinkError::Protocol)
+                })
+                .unwrap();
+        }
+        {
+            let p = state.profile.as_ref().unwrap().lock().unwrap();
+            assert_eq!(
+                (
+                    p.queued,
+                    p.peak_live,
+                    p.peak_generation_live,
+                    p.peak_gpu_pending
+                ),
+                (4, 4, 4, 4)
+            );
+            assert_eq!(p.handed_off, 0);
+        }
+        let (done, flushed) = sync_channel(1);
+        sender.send(Work::Flush(done)).unwrap();
+        drop(sender);
+        let worker_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            run_worker(receiver, worker_state, |_, _| Ok(()), |_, _| Ok(()), false)
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        gates[0].send(()).unwrap();
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        {
+            let p = state.profile.as_ref().unwrap().lock().unwrap();
+            assert_eq!((p.completed, p.handed_off, p.live.len()), (1, 1, 4));
+            assert!(
+                p.overlap_samples > 0,
+                "SWS lease coexists with queued GPU work"
+            );
+        }
+        state.profile_event(token(1, 1), "release", |p| p.remove(token(1, 1), "release"));
+        for gate in gates.into_iter().skip(1) {
+            gate.send(()).unwrap();
+        }
+        flushed.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        for slot in 2..=4 {
+            state.profile_event(token(slot, 1), "release", |p| {
+                p.remove(token(slot, 1), "release")
+            });
+        }
+        let p = state.profile.as_ref().unwrap().lock().unwrap();
+        assert_eq!(
+            (p.queued, p.completed, p.handed_off, p.released),
+            (4, 4, 4, 4)
+        );
+        assert!(p.live.is_empty());
+        assert_eq!(p.unmatched, 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn profile_separates_generations_rejections_and_failed_enqueue() {
+        let state = State {
+            profile: Some(Mutex::new(LeaseProfile::default())),
+            ..State::default()
+        };
+        assert!(
+            state
+                .enqueue_frame(token(1, 1), || Err(SgfxSinkError::Protocol))
+                .is_err()
+        );
+        let mut p = state.profile.as_ref().unwrap().lock().unwrap();
+        assert_eq!((p.queued, p.peak_live), (0, 0));
+        for generation in 1..=2 {
+            for slot in 1..=4 {
+                p.queued(token(slot, generation));
+            }
+            p.snapshot(1, "queue");
+        }
+        assert_eq!((p.peak_live, p.peak_generation_live), (8, 4));
+        p.remove(token(1, 1), "reject");
+        p.remove(token(1, 1), "release"); // Late/duplicate must not free generation 2.
+        assert_eq!(
+            (p.live.len(), p.rejected, p.released, p.unmatched),
+            (7, 1, 0, 1)
+        );
+        assert!(p.live.iter().any(|(t, _)| *t == token(1, 2)));
+        assert_eq!(
+            LeaseProfile::default().peak_live,
+            0,
+            "separate window has no shared peak"
+        );
+    }
+
+    #[test]
+    fn profile_close_invalidates_handoff_but_does_not_claim_gpu_retirement_or_release() {
+        let state = State {
+            profile: Some(Mutex::new(LeaseProfile::default())),
+            ..State::default()
+        };
+        {
+            let mut p = state.profile.as_ref().unwrap().lock().unwrap();
+            p.queued(token(1, 1));
+            p.queued(token(2, 1));
+            p.transition(token(1, 1), LeasePhase::Ready);
+            p.transition(token(1, 1), LeasePhase::HandedOff);
+        }
+        state.close();
+        let p = state.profile.as_ref().unwrap().lock().unwrap();
+        assert_eq!(
+            (p.live.len(), p.completed, p.released, p.abandoned),
+            (1, 1, 0, 1)
+        );
+        assert!(p.live[0].1 == LeasePhase::GpuPending);
+        assert!(State::default().profile.is_none());
     }
 
     #[test]
