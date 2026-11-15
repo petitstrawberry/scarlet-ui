@@ -22,6 +22,18 @@ use std::println;
 // root searches cost more than a single traversal of the live tree.
 const MAX_TARGETED_UPDATES: usize = 64;
 
+/// Optional frame-log measurements; no clocks are read when logging is off.
+pub(crate) struct PrepaintTimings {
+    pub collect_us: u128,
+    pub build_us: u128,
+    pub layout_us: u128,
+    pub input_us: u128,
+    pub buffers_us: u128,
+    pub build_ids: usize,
+    pub layout_ids: usize,
+    pub paint_ids: usize,
+}
+
 /// Stable owner ID for dirty queues belonging to one rendering pipeline.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct PipelineId(u64);
@@ -315,8 +327,12 @@ impl PipelineOwner {
         window_size: Size,
         render_legacy_paint: bool,
         before_paint: impl FnOnce(&mut ElementTree, bool),
-    ) {
+    ) -> Option<PrepaintTimings> {
+        let started = crate::debug::frame_log_enabled().then(crate::clock::Instant::now);
+        let elapsed = || started.map_or(0, |start| start.elapsed().as_micros());
         self.collect_global_dirty();
+        let collected = elapsed();
+        let build_ids = self.dirty_build.len();
 
         // A composite-only update changes placement, not focus claims or
         // mounted input controls. Reconciliation walks the tree; reserve it for
@@ -333,6 +349,8 @@ impl PipelineOwner {
         // 1. Build Phase: Rebuild Elements whose State changed
         self.flush_build(element_tree);
         self.collect_global_dirty();
+        let built = elapsed();
+        let layout_ids = self.dirty_layout.len();
 
         // 2. Layout Phase: Recalculate layout
         self.flush_layout(element_tree, window_size);
@@ -340,14 +358,27 @@ impl PipelineOwner {
         if structure_changed {
             crate::element::invalidate_scroll_structure();
         }
+        let laid_out = elapsed();
         before_paint(
             element_tree,
             content_changed || self.dirty_composite.is_empty(),
         );
         self.collect_global_dirty();
+        let reconciled = elapsed();
+        let paint_ids = self.dirty_paint.len() + self.dirty_self_paint.len();
 
         // 3. Paint Phase: Repaint dirty elements
         self.flush_paint(element_tree, render_legacy_paint);
+        started.map(|_| PrepaintTimings {
+            collect_us: collected,
+            build_us: built - collected,
+            layout_us: laid_out - built,
+            input_us: reconciled - laid_out,
+            buffers_us: elapsed() - reconciled,
+            build_ids,
+            layout_ids,
+            paint_ids,
+        })
     }
 
     fn collect_global_dirty(&mut self) {
@@ -582,6 +613,16 @@ impl PipelineOwner {
         self.dirty_composite.clear();
 
         if !render_legacy_paint {
+            // Full layout can leave both root and descendant paint IDs queued.
+            // The root covers every buffer, including self-only descendants;
+            // do not search and walk those subtrees again for a sparse queue.
+            // Keep the original IDs above for retained damage bookkeeping.
+            if let Some(root) = element_tree.root_mut()
+                && dirty_paint.contains(&root.id())
+            {
+                Self::render_paint_buffers_recursive(root);
+                return;
+            }
             if dirty_paint.len() + dirty_self_paint.len() > MAX_TARGETED_UPDATES {
                 fn render_dirty(
                     element: &mut dyn crate::element::Element,
@@ -1159,6 +1200,31 @@ mod dense_update_tests {
             "dense rebuild must not search from the root per ID: {}",
             calls.visits
         );
+    }
+
+    #[test]
+    fn root_paint_prepares_descendant_buffers_once_and_keeps_damage_ids() {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut root = Probe::new(&calls);
+        let root_id = root.id;
+        let mut child = Probe::new(&calls);
+        let child_id = child.id;
+        let leaf = Probe::new(&calls);
+        let leaf_id = leaf.id;
+        child.children.push(Box::new(leaf));
+        root.children.push(Box::new(child));
+        let mut tree = ElementTree::new();
+        tree.set_root(Box::new(root));
+        let mut owner = PipelineOwner::new();
+        owner.mark_needs_paint(root_id);
+        owner.mark_needs_paint(child_id);
+        owner.mark_needs_self_paint(leaf_id);
+
+        owner.flush_paint(&mut tree, false);
+
+        assert_eq!(calls.borrow().rendered, [leaf_id, child_id, root_id]);
+        assert_eq!(owner.last_paint_ids, [root_id, child_id, leaf_id]);
+        assert_eq!(owner.last_self_paint_ids, [leaf_id]);
     }
 
     #[test]

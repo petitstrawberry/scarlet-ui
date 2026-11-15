@@ -3705,33 +3705,54 @@ impl RenderingPipeline {
 
         let started = crate::debug::frame_log_enabled().then(crate::clock::Instant::now);
         crate::graphics::set_current_scale_milli(self.scale_milli);
-        self.pipeline_owner.flush_before_paint(
+        let mut focus_us = 0;
+        let mut overlays_us = 0;
+        let timings = self.pipeline_owner.flush_before_paint(
             &mut self.element_tree,
             self.window_size,
             false,
             |tree, reconcile| {
+                let input_started = started.map(|_| crate::clock::Instant::now());
                 if reconcile {
                     self.event_dispatcher.reconcile_keyboard_focus(tree);
                 }
+                focus_us = input_started.map_or(0, |start| start.elapsed().as_micros());
                 self.overlays.apply(tree);
+                overlays_us = input_started.map_or(0, |start| start.elapsed().as_micros()) - focus_us;
             },
         );
+        let popup_started = started.map(|_| crate::clock::Instant::now());
         if self.paint_needs_full
             || !self.pipeline_owner.last_paint_ids().is_empty()
             || self.select_overlay_active
         {
             self.sync_select_popup_viewports();
         }
+        let popup_us = popup_started.map_or(0, |start| start.elapsed().as_micros());
         let layout_us = started.map(|start| start.elapsed().as_micros());
         let background_color = self.extract_background_color();
+        let pipeline_id = self.pipeline_id().get();
         let result = self.render_paint_path(background_color);
         if !matches!(&result, Ok(PresentedFrame::Idle))
             && let Some(start) = started
+            && let Some(timings) = timings
         {
             crate::logln!(
-                "[ScrollTiming] layout_us={} frame_us={}",
+                "[ScrollTiming] layout_us={} frame_us={} pipeline={} collect_us={} build_us={} relayout_us={} input_us={} focus_us={} overlays_us={} buffers_us={} popup_us={} build_ids={} layout_ids={} paint_ids={}",
                 layout_us.unwrap_or_default(),
-                start.elapsed().as_micros()
+                start.elapsed().as_micros(),
+                pipeline_id,
+                timings.collect_us,
+                timings.build_us,
+                timings.layout_us,
+                timings.input_us,
+                focus_us,
+                overlays_us,
+                timings.buffers_us,
+                popup_us,
+                timings.build_ids,
+                timings.layout_ids,
+                timings.paint_ids,
             );
         }
         result
