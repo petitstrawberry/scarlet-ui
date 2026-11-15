@@ -72,6 +72,10 @@ use sws_client as sws;
 // with SGFX instead of requiring every graphics backend to upgrade for this bit.
 const SWS_TABLET_MANAGED: u32 = 1 << 4;
 
+// Match the client's bounded transport pump. Do not turn a subscribed mailbox
+// into an unbounded UI queue when native touch frames arrive during dispatch.
+const MAX_NATIVE_EVENTS_PER_BATCH: usize = 64;
+
 fn window_close_request_event(window_id: u32, surface_id: u32) -> Option<Event> {
     (window_id == surface_id).then_some(Event::Window(WindowEvent::CloseRequested))
 }
@@ -1993,30 +1997,39 @@ impl PlatformWindow for SWSPlatformWindow {
             self.pending_head = 0;
         }
 
-        if !self.transport_failed && self.conn.dispatch().is_err() {
-            self.mark_transport_failed();
-        }
-
-        if !self.transport_failed {
-            while let Some(ev) = self.event_receiver.poll_event() {
-                self.handle_sws_event(ev);
+        // Finish the admitted batch before pumping another one. In particular,
+        // TouchFrame retains every change, timestamp and contact edge; unlike
+        // absolute mouse motion, dropping intermediate touch samples changes
+        // slop/reversal recognition and release velocity.
+        if self.pending_events.is_empty() {
+            if !self.transport_failed && self.conn.dispatch().is_err() {
+                self.mark_transport_failed();
             }
-            self.flush_pending_relative_motion();
-            if let Some(configure) = self.configure_batch.take() {
-                // State and extent belong to the same frame. State-only
-                // notifications remain staged until their configure arrives.
-                let (width, height) = configure.size;
-                self.needs_full_present = true;
-                if let Some(fullscreen) = configure.fullscreen {
-                    // Fullscreen can change CSD without changing the extent.
-                    self.backing_refresh.decoration_changed();
-                    self.push_event(Event::FullscreenConfigure {
-                        width,
-                        height,
-                        fullscreen,
-                    });
-                } else {
-                    self.push_event(Event::Resize { width, height });
+
+            if !self.transport_failed {
+                for _ in 0..MAX_NATIVE_EVENTS_PER_BATCH {
+                    let Some(ev) = self.event_receiver.poll_event() else {
+                        break;
+                    };
+                    self.handle_sws_event(ev);
+                }
+                self.flush_pending_relative_motion();
+                if let Some(configure) = self.configure_batch.take() {
+                    // State and extent belong to the same frame. State-only
+                    // notifications remain staged until their configure arrives.
+                    let (width, height) = configure.size;
+                    self.needs_full_present = true;
+                    if let Some(fullscreen) = configure.fullscreen {
+                        // Fullscreen can change CSD without changing the extent.
+                        self.backing_refresh.decoration_changed();
+                        self.push_event(Event::FullscreenConfigure {
+                            width,
+                            height,
+                            fullscreen,
+                        });
+                    } else {
+                        self.push_event(Event::Resize { width, height });
+                    }
                 }
             }
         }

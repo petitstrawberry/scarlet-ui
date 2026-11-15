@@ -246,6 +246,62 @@ impl ElementTree {
         None
     }
 
+    /// Follow a retained input route without searching unrelated subtrees.
+    /// If a rebuild changed its ancestry, preserve ID-based delivery until the
+    /// dispatcher reconciles the route, just as for an uncached ID lookup.
+    pub(crate) fn element_mut_for_path(
+        &mut self,
+        path: &[ElementId],
+    ) -> Option<&mut Box<dyn Element>> {
+        if self.element_and_absolute_origin_for_path(path).is_none() {
+            return self.find_element_mut(*path.last()?);
+        }
+        let mut element = self.root.as_mut()?;
+        for (index, id) in path.iter().enumerate() {
+            if element.id() != *id {
+                return None;
+            }
+            if index + 1 == path.len() {
+                return Some(element);
+            }
+            let next = path[index + 1];
+            element = element
+                .children_mut()
+                .iter_mut()
+                .find(|child| child.id() == next)?;
+        }
+        None
+    }
+
+    /// Collect the current origins along a retained route in one descent.
+    pub(crate) fn origins_for_path(&self, path: &[ElementId], out: &mut Vec<Point>) -> bool {
+        out.clear();
+        let Some(mut element) = self.root.as_deref() else {
+            return false;
+        };
+        let mut origin = Point::ZERO;
+        for (index, id) in path.iter().enumerate() {
+            if element.id() != *id {
+                return false;
+            }
+            origin.x += element.position().x;
+            origin.y += element.position().y;
+            out.push(origin);
+            if index + 1 == path.len() {
+                return true;
+            }
+            let Some(child) = element
+                .children()
+                .iter()
+                .find(|child| child.id() == path[index + 1])
+            else {
+                return false;
+            };
+            element = child.as_ref();
+        }
+        false
+    }
+
     /// Return the deepest repaint boundary in a root-to-target path.
     pub fn find_nearest_repaint_boundary_in_path(&self, path: &[ElementId]) -> Option<ElementId> {
         path.iter().rev().copied().find(|id| {

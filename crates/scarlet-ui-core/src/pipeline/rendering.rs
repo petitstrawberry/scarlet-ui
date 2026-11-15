@@ -89,6 +89,7 @@ pub(crate) struct PaintTestCounters {
     pub(crate) retained_primitive_scan_syncs: usize,
     pub(crate) window_backdrop_rebuilds: usize,
     pub(crate) dense_damage_updates: usize,
+    pub(crate) popup_viewport_syncs: usize,
 }
 
 /// RenderingPipeline integrates all components of the rendering system
@@ -119,6 +120,7 @@ pub struct RenderingPipeline {
     scene_has_extensions: bool,
     scene_has_opacity: bool,
     select_overlay_active: bool,
+    select_popup_input_synced: bool,
     paint_caches: BTreeMap<ElementId, PaintCache>,
     window_backdrop_cache: Option<WindowBackdropCache>,
     layer_store: LayerStore,
@@ -168,6 +170,7 @@ impl RenderingPipeline {
             scene_has_extensions: false,
             scene_has_opacity: false,
             select_overlay_active: false,
+            select_popup_input_synced: false,
             paint_caches: BTreeMap::new(),
             window_backdrop_cache: None,
             layer_store: LayerStore::new(),
@@ -315,6 +318,7 @@ impl RenderingPipeline {
         if insets == self.safe_area_insets() {
             return false;
         }
+        self.select_popup_input_synced = false;
         self.element_tree.set_safe_area_insets(insets);
         self.paint_needs_full = true;
         if let Some(root) = self.element_tree.root() {
@@ -325,6 +329,7 @@ impl RenderingPipeline {
 
     /// Set the root Element
     pub fn set_root(&mut self, root_element: Box<dyn Element>) {
+        self.select_popup_input_synced = false;
         self.context_menu = None;
         self.context_menu_swallow_release = false;
         self.element_tree.set_root(root_element);
@@ -347,6 +352,7 @@ impl RenderingPipeline {
 
     /// Get mutable reference to the ElementTree
     pub fn element_tree_mut(&mut self) -> &mut ElementTree {
+        self.select_popup_input_synced = false;
         &mut self.element_tree
     }
 
@@ -620,6 +626,7 @@ impl RenderingPipeline {
 
     /// Set window size and resize compositor
     pub fn resize(&mut self, new_size: Size) {
+        self.select_popup_input_synced = false;
         if new_size != self.window_size {
             self.context_menu = None;
         }
@@ -659,6 +666,10 @@ impl RenderingPipeline {
     }
 
     fn sync_select_popup_viewports(&mut self) -> bool {
+        #[cfg(test)]
+        {
+            self.paint_test_counters.popup_viewport_syncs += 1;
+        }
         fn visit(
             element: &mut dyn Element,
             parent: Point,
@@ -702,6 +713,7 @@ impl RenderingPipeline {
                 &mut self.select_overlay_active,
             )
         });
+        self.select_popup_input_synced = true;
         self.paint_needs_full |= changed;
         changed
     }
@@ -3845,13 +3857,14 @@ impl RenderingPipeline {
             return true;
         }
 
-        if self.select_overlay_active
-            || !matches!(
-                _event,
-                crate::event::Event::Mouse(crate::event::MouseEvent::Wheel { .. })
-            )
-        {
+        // Collapsed selects do not need new viewport geometry for every sample
+        // in a motion burst. A discrete event may open a popup; refresh on the
+        // next event, and always keep open popups current while scrolling.
+        if self.select_overlay_active || !self.select_popup_input_synced {
             self.sync_select_popup_viewports();
+        }
+        if !_event.is_continuous_motion() {
+            self.select_popup_input_synced = false;
         }
         if self.overlays.handle_event(_event) {
             self.overlays.apply_presentation(&mut self.element_tree);
@@ -4219,6 +4232,36 @@ mod tests {
         assert_eq!(value.get(), committed);
         assert!(!dragging.get());
         assert!(offset(&pipeline) > 0.0);
+    }
+
+    #[test]
+    fn motion_bursts_reuse_collapsed_popup_geometry_and_refresh_after_opening() {
+        let selected = State::new(crate::state::generate_state_id(), 0);
+        let select = Select::new(
+            vec![String::from("First"), String::from("Second")],
+            selected,
+        );
+        let expanded = select.expanded().clone();
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(select.create_element());
+        pipeline.layout_initial();
+        pipeline.sync_select_popup_viewports();
+        pipeline.reset_paint_test_counters();
+        for serial in 1..=20 {
+            pipeline.handle_event(&touch_frame(serial, 1, TouchPhase::Move, 10, 10));
+        }
+        assert_eq!(pipeline.paint_test_counters.popup_viewport_syncs, 0);
+        pipeline.handle_event(&touch_frame(21, 1, TouchPhase::Down, 10, 10));
+        pipeline.handle_event(&touch_frame(22, 1, TouchPhase::Up, 10, 10));
+        assert!(expanded.get());
+        // Opening was processed synchronously. The next event must discover
+        // the popup even without a render between events in the same batch.
+        pipeline.handle_event(&touch_frame(23, 2, TouchPhase::Move, 10, 10));
+        assert!(pipeline.select_overlay_active);
+        let syncs = pipeline.paint_test_counters.popup_viewport_syncs;
+        pipeline.handle_event(&touch_frame(24, 2, TouchPhase::Move, 10, 20));
+        assert_eq!(pipeline.paint_test_counters.popup_viewport_syncs, syncs + 1);
+        pipeline.teardown();
     }
 
     #[test]
@@ -5074,7 +5117,10 @@ mod tests {
         // The intrinsic 40x40 patch is centered inside its 800x600 frame.
         // Damage must follow that child-local placement, not cover the frame.
         assert!(damage.iter().all(|&(x, y, width, height)| {
-            x >= 380 && y >= 280 && x.saturating_add(width) <= 420 && y.saturating_add(height) <= 320
+            x >= 380
+                && y >= 280
+                && x.saturating_add(width) <= 420
+                && y.saturating_add(height) <= 320
         }));
     }
 

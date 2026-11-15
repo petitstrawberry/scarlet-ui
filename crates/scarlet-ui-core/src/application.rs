@@ -1386,7 +1386,12 @@ fn handle_window_event<A: Application>(
             if closing {
                 return Ok(true);
             }
-            sync_after_event(slot)?;
+            // All motion samples have reached the controls and velocity tracker.
+            // Publish caret/context-menu metadata once at the end of this event
+            // batch; contact/button/key boundaries still synchronize immediately.
+            if !event.is_continuous_motion() {
+                sync_after_event(slot)?;
+            }
         }
     }
     Ok(false)
@@ -2104,6 +2109,7 @@ mod tests {
         environment_emitted: bool,
         quit_emitted: [bool; 2],
         poll_calls: [usize; 2],
+        text_input_syncs: [usize; 2],
         frame_pacing: bool,
         frame_requests: [usize; 2],
         frame_ready_emitted: [bool; 2],
@@ -2276,6 +2282,10 @@ mod tests {
                 return Some(Event::Quit);
             }
             None
+        }
+
+        fn sync_text_input(&mut self, _state: Option<&crate::element::TextInputElementState>) {
+            self.probe.borrow_mut().text_input_syncs[self.index] += 1;
         }
 
         fn wait_for_event(&mut self, _timeout: Duration) {
@@ -2550,6 +2560,62 @@ mod tests {
             next_window: 0,
             negotiated_size: None,
         }))
+    }
+
+    #[test]
+    fn motion_metadata_sync_is_batched_but_contact_boundaries_are_immediate() {
+        use crate::event::{TouchChange, TouchFrame, TouchPhase};
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let (mut app, _) = menu_runtime_app();
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        let mut runner = menu_runtime_runner(probe.clone());
+        let declarations = collect_scene_declarations(&app).unwrap();
+        let mut slots = runner.create_slots(&mut app, declarations).unwrap();
+        let slot = &mut slots[0];
+        let touch = |serial, phase| {
+            Event::TouchFrame(TouchFrame {
+                seat_id: 0,
+                serial,
+                time_ns: serial * 1_000_000,
+                changes: vec![TouchChange {
+                    seat_id: 0,
+                    serial,
+                    time_ns: serial * 1_000_000,
+                    id: 7,
+                    phase,
+                    x: 10,
+                    y: 10,
+                    pressure: None,
+                    touch_major: None,
+                }],
+            })
+        };
+        let mut expected = probe.borrow().text_input_syncs[0];
+        for (event, boundary) in [
+            (touch(1, TouchPhase::Down), true),
+            (touch(2, TouchPhase::Move), false),
+            (touch(3, TouchPhase::Move), false),
+            (touch(4, TouchPhase::Up), true),
+            (touch(5, TouchPhase::Down), true),
+            (touch(6, TouchPhase::Cancel), true),
+            (Event::Mouse(MouseEvent::Moved { x: 20, y: 10 }), false),
+            (
+                Event::Mouse(MouseEvent::ButtonReleased {
+                    button: crate::event::MouseButton::Left,
+                    click_count: 1,
+                    x: 20,
+                    y: 10,
+                }),
+                true,
+            ),
+        ] {
+            handle_window_event(&mut app, slot, event, &mut Vec::new()).unwrap();
+            expected += usize::from(boundary);
+            assert_eq!(probe.borrow().text_input_syncs[0], expected);
+        }
+        // This is the same refresh the runner performs after draining input.
+        sync_text_input(slot.window.as_mut(), &slot.pipeline);
+        assert_eq!(probe.borrow().text_input_syncs[0], expected + 1);
     }
 
     #[test]

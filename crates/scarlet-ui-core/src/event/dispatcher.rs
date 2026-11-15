@@ -538,9 +538,12 @@ impl EventDispatcher {
                 continue;
             };
             let path = self.touch_routes[route_index].path.clone();
-            if path
-                .last()
-                .is_none_or(|id| element_tree.find_path_ids(*id).is_none())
+            if element_tree
+                .element_and_absolute_origin_for_path(&path)
+                .is_none()
+                && path
+                    .last()
+                    .is_none_or(|id| element_tree.find_path_ids(*id).is_none())
             {
                 let mut cancel = change;
                 cancel.phase = TouchPhase::Cancel;
@@ -779,8 +782,8 @@ impl EventDispatcher {
         event: &Event,
     ) -> (bool, Option<ElementId>) {
         let origins = Self::path_origins(element_tree, path);
-        for (index, id) in path.iter().take(path.len().saturating_sub(1)).enumerate() {
-            if let Some(element) = element_tree.find_element_mut(*id)
+        for index in 0..path.len().saturating_sub(1) {
+            if let Some(element) = element_tree.element_mut_for_path(&path[..=index])
                 && element.handle_event(
                     &Self::localize_touch_event(event, origins[index]),
                     Phase::Capture,
@@ -794,7 +797,7 @@ impl EventDispatcher {
             }
         }
         if let Some(id) = path.last()
-            && let Some(element) = element_tree.find_element_mut(*id)
+            && let Some(element) = element_tree.element_mut_for_path(path)
             && element.handle_event(
                 &Self::localize_touch_event(event, *origins.last().unwrap_or(&Point::ZERO)),
                 Phase::Target,
@@ -807,7 +810,7 @@ impl EventDispatcher {
         }
         for (index, id) in path.iter().rev().skip(1).enumerate() {
             let origin_index = path.len().saturating_sub(2).saturating_sub(index);
-            if let Some(element) = element_tree.find_element_mut(*id)
+            if let Some(element) = element_tree.element_mut_for_path(&path[..=origin_index])
                 && element.handle_event(
                     &Self::localize_touch_event(event, origins[origin_index]),
                     Phase::Bubble,
@@ -1049,7 +1052,12 @@ impl EventDispatcher {
 
         if self.left_button_down {
             if let Some(captured_id) = self.captured_id {
-                if let Some(captured_path) = element_tree.find_path_ids(captured_id) {
+                let retained_path = element_tree
+                    .element_and_absolute_origin_for_path(&self.captured_path)
+                    .filter(|(element, _)| element.id() == captured_id)
+                    .map(|_| self.captured_path.clone())
+                    .or_else(|| element_tree.find_path_ids(captured_id));
+                if let Some(captured_path) = retained_path {
                     self.captured_path = captured_path.clone();
                     path = Some(captured_path);
                     self.update_captured_point_from_path(element_tree);
@@ -1147,7 +1155,7 @@ impl EventDispatcher {
 
             // 2.1 Capture Phase: root → target (excluding target)
             for (index, id) in path.iter().take(path.len().saturating_sub(1)).enumerate() {
-                if let Some(element) = element_tree.find_element_mut(*id) {
+                if let Some(element) = element_tree.element_mut_for_path(&path[..=index]) {
                     let localized =
                         Event::Mouse(Self::localize_mouse_event(event, path_origins[index]));
                     if element.handle_event(&localized, Phase::Capture) {
@@ -1164,7 +1172,7 @@ impl EventDispatcher {
 
             // 2.2 Target Phase: at the target
             if !handled {
-                if let Some(target) = element_tree.find_element_mut(target_id) {
+                if let Some(target) = element_tree.element_mut_for_path(&path) {
                     let localized = Event::Mouse(Self::localize_mouse_event(
                         event,
                         *path_origins.last().unwrap_or(&Point::ZERO),
@@ -1183,8 +1191,9 @@ impl EventDispatcher {
             // 2.3 Bubble Phase: target's parent → root
             if !handled && !wheel_target_locked {
                 for (index, id) in path.iter().rev().skip(1).enumerate() {
-                    if let Some(element) = element_tree.find_element_mut(*id) {
-                        let origin_index = path.len().saturating_sub(2).saturating_sub(index);
+                    let origin_index = path.len().saturating_sub(2).saturating_sub(index);
+                    if let Some(element) = element_tree.element_mut_for_path(&path[..=origin_index])
+                    {
                         let localized = Event::Mouse(Self::localize_mouse_event(
                             event,
                             path_origins[origin_index],
@@ -1918,35 +1927,16 @@ impl EventDispatcher {
     }
 
     fn update_captured_point_from_path(&mut self, element_tree: &mut ElementTree) {
-        let Some(target_id) = self.captured_path.last().copied() else {
+        let Some((target, origin)) =
+            element_tree.element_and_absolute_origin_for_path(&self.captured_path)
+        else {
             return;
         };
-
-        let mut parent_origin = Point::ZERO;
-        if self.captured_path.len() > 1 {
-            for id in self.captured_path.iter().take(self.captured_path.len() - 1) {
-                let Some(element) = element_tree.find_element_mut(*id) else {
-                    return;
-                };
-                let pos = element.position();
-                parent_origin.x += pos.x;
-                parent_origin.y += pos.y;
-            }
-        }
-
-        let Some(target) = element_tree.find_element_mut(target_id) else {
-            return;
-        };
-        let target_pos = target.position();
         let bounds = target.bounds().size;
-        let absolute_origin = Point {
-            x: parent_origin.x + target_pos.x,
-            y: parent_origin.y + target_pos.y,
-        };
-        self.captured_point = Some(Point {
-            x: absolute_origin.x + bounds.width / 2.0,
-            y: absolute_origin.y + bounds.height / 2.0,
-        });
+        self.captured_point = Some(Point::new(
+            origin.x + bounds.width / 2.0,
+            origin.y + bounds.height / 2.0,
+        ));
     }
 
     fn clear_wheel_target(&mut self) {
@@ -2068,6 +2058,9 @@ impl EventDispatcher {
         path: &[ElementId],
         origins: &mut Vec<Point>,
     ) {
+        if element_tree.origins_for_path(path, origins) {
+            return;
+        }
         origins.clear();
         let mut acc = Point::ZERO;
         for id in path {
