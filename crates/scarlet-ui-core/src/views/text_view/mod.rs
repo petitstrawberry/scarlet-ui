@@ -3,8 +3,8 @@
 mod decoration;
 mod document;
 mod editing;
-mod layout;
 mod inlay;
+mod layout;
 pub use inlay::TextInlayHint;
 pub(crate) mod paint;
 mod selection;
@@ -741,16 +741,18 @@ impl TextViewRenderObject {
     }
 
     pub(crate) fn compute_layout(&mut self) {
-        if self.layout.inlay_hints != self.inlay_hints || !self.layout.matches_with_font_stack(
-            &self.text_document,
-            self.font_size,
-            self.padding,
-            self.wrap_mode,
-            self.size,
-            self.line_numbers,
-            self.font_stack.as_ref(),
-        ) {
-            self.layout = TextViewLayout::compute_with_inlay_hints(
+        if self.layout.inlay_hints != self.inlay_hints
+            || !self.layout.matches_with_font_stack(
+                &self.text_document,
+                self.font_size,
+                self.padding,
+                self.wrap_mode,
+                self.size,
+                self.line_numbers,
+                self.font_stack.as_ref(),
+            )
+        {
+            self.layout = TextViewLayout::compute_with_inlay_hints_reusing(
                 &self.text_document,
                 self.font_size,
                 self.padding,
@@ -760,6 +762,7 @@ impl TextViewRenderObject {
                 self.line_numbers,
                 self.font_stack.as_ref(),
                 &self.inlay_hints,
+                Some(&self.layout),
             );
         }
         self.layout.set_viewport(self.size);

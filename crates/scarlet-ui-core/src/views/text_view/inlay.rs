@@ -28,8 +28,34 @@ impl TextViewLayout {
         font_stack: Option<&Arc<graphics::FontStack>>,
         hints: &[TextInlayHint],
     ) -> Self {
+        Self::compute_with_inlay_hints_reusing(
+            document,
+            font_size,
+            padding,
+            wrap_mode,
+            size,
+            scroll,
+            show_line_numbers,
+            font_stack,
+            hints,
+            None,
+        )
+    }
+
+    pub(super) fn compute_with_inlay_hints_reusing(
+        document: &TextDocument,
+        font_size: f32,
+        padding: f32,
+        wrap_mode: WrapMode,
+        size: Size,
+        scroll: TextViewScroll,
+        show_line_numbers: bool,
+        font_stack: Option<&Arc<graphics::FontStack>>,
+        hints: &[TextInlayHint],
+        previous: Option<&Self>,
+    ) -> Self {
         if hints.is_empty() {
-            return Self::compute_with_font_stack(
+            return Self::compute_reusing(
                 document,
                 font_size,
                 padding,
@@ -38,6 +64,7 @@ impl TextViewLayout {
                 scroll,
                 show_line_numbers,
                 font_stack,
+                previous,
             );
         }
         let source = document.as_str();
@@ -77,7 +104,7 @@ impl TextViewLayout {
             }
         }
         let projected = TextDocument::from_str(&text);
-        let mut layout = Self::compute_with_font_stack(
+        let mut layout = Self::compute_reusing(
             &projected,
             font_size,
             padding,
@@ -86,6 +113,7 @@ impl TextViewLayout {
             scroll,
             show_line_numbers,
             font_stack,
+            previous,
         );
         for hint in hints {
             if hint.byte <= source.len() && source.is_char_boundary(hint.byte) {
