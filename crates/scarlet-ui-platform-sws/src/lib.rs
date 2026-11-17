@@ -710,6 +710,8 @@ struct TextInputContext {
     context_id: u32,
     serial: u32,
     enabled: bool,
+    editor_id: Option<scarlet_ui_core::element::ElementId>,
+    activation_serial: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1557,6 +1559,7 @@ impl SWSPlatformWindow {
             {
                 if self.conn.disable_text_input(context.context_id).is_ok() {
                     context.enabled = false;
+                    context.editor_id = None;
                 }
             }
             return;
@@ -1570,12 +1573,21 @@ impl SWSPlatformWindow {
                         context_id,
                         serial,
                         enabled: false,
+                        editor_id: None,
+                        activation_serial: serial,
                     });
                 }
                 Err(_) => return,
             }
         }
 
+        if let Some(context) = self.text_input.as_mut()
+            && (!context.enabled || context.editor_id != state.editor_id)
+        {
+            context.editor_id = state.editor_id;
+            context.activation_serial = context.serial;
+            self.text_input_sync.invalidate();
+        }
         let Some(context) = self.text_input else {
             return;
         };
@@ -3141,15 +3153,19 @@ impl SWSPlatformWindow {
             SwsEvent::TextInputDismissed { context_id, serial } => {
                 if let Some(context) = self.text_input.as_mut() {
                     // A queued close must not blur a newly synchronized editor.
-                    if !text_input_sync::dismissal_is_current(
-                        context.context_id,
-                        context.serial,
-                        context_id,
-                        serial,
-                    ) {
+                    if !context.enabled
+                        || !text_input_sync::dismissal_is_current(
+                            context.context_id,
+                            context.activation_serial,
+                            context.serial,
+                            context_id,
+                            serial,
+                        )
+                    {
                         return;
                     }
                     context.enabled = false;
+                    context.editor_id = None;
                 }
                 self.text_input_sync.invalidate();
                 self.input_panel_show_pending = false;
