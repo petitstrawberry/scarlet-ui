@@ -151,6 +151,8 @@ pub enum Event {
 
     /// End of a text-input update batch.
     TextInputDone { context_id: u32, serial: u32 },
+    /// The user explicitly closed the software keyboard for this editor.
+    TextInputDismissed { context_id: u32, serial: u32 },
 }
 
 impl Event {

@@ -2,6 +2,16 @@
 
 use alloc::string::String;
 
+/// The local serial is the next commit; dismissals address the last commit.
+pub(super) fn dismissal_is_current(
+    context: u32,
+    next_serial: u32,
+    dismissed_context: u32,
+    serial: u32,
+) -> bool {
+    context == dismissed_context && serial.saturating_add(1) == next_serial
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct State<'a> {
     pub rect: (i32, i32, u32, u32),
@@ -97,6 +107,14 @@ impl TextInputSync {
 mod tests {
     use super::*;
     use alloc::vec::Vec;
+
+    #[test]
+    fn dismissal_does_not_blur_a_newer_editor_or_another_context() {
+        assert!(dismissal_is_current(4, 8, 4, 7));
+        assert!(!dismissal_is_current(4, 9, 4, 7));
+        assert!(!dismissal_is_current(5, 8, 4, 7));
+        assert!(!dismissal_is_current(4, 8, 4, 8));
+    }
 
     fn state() -> State<'static> {
         State {

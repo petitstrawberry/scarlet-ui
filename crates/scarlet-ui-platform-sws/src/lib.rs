@@ -1565,6 +1565,7 @@ impl SWSPlatformWindow {
         if self.text_input.is_none() {
             match self.conn.create_text_input_context(self.surface_id, 0) {
                 Ok((context_id, serial)) => {
+                    let _ = self.conn.accept_text_input_dismissal(context_id);
                     self.text_input = Some(TextInputContext {
                         context_id,
                         serial,
@@ -3136,6 +3137,23 @@ impl SWSPlatformWindow {
             }
             SwsEvent::TextInputDone { context_id, serial } => {
                 self.push_event(Event::TextInputDone { context_id, serial });
+            }
+            SwsEvent::TextInputDismissed { context_id, serial } => {
+                if let Some(context) = self.text_input.as_mut() {
+                    // A queued close must not blur a newly synchronized editor.
+                    if !text_input_sync::dismissal_is_current(
+                        context.context_id,
+                        context.serial,
+                        context_id,
+                        serial,
+                    ) {
+                        return;
+                    }
+                    context.enabled = false;
+                }
+                self.text_input_sync.invalidate();
+                self.input_panel_show_pending = false;
+                self.push_event(Event::TextInputDismissed { context_id, serial });
             }
             SwsEvent::FocusChanged {
                 window_id,

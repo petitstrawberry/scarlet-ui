@@ -17,7 +17,7 @@ arboard = { version = "3.6", default-features = false, features = ["wayland-data
 softbuffer = "0.4.8"
 winit = "0.30.13"
 raw-window-handle = { version = "0.6", optional = true }
-sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "9dfbec263fae939e06985277d13f899a60fe3d63", package = "sgfx", default-features = false, features = ["std", "backend-wgpu"], optional = true }
+sgfx = { git = "https://github.com/petitstrawberry/sgfx", rev = "fbfbefd6fd8593f9557d058574918b0016919f81", package = "sgfx", default-features = false, features = ["std", "backend-wgpu"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSView", "NSWindow", "NSPanel", "NSResponder", "NSApplication", "NSOpenPanel", "NSSavePanel", "NSMenu", "NSMenuItem", "NSEvent", "NSCell", "block2", "objc2-quartz-core"] }
