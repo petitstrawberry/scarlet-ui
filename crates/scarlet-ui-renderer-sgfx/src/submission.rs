@@ -53,6 +53,7 @@ impl<E: fmt::Display, S> fmt::Display for FrameSubmissionError<E, S> {
 pub struct FrameExecutor<E: CommandSubmitter> {
     executor: E,
     submissions: Vec<E::Submission>,
+    accepted_count: u64,
     failed: Cell<bool>,
     retirement_failed: Cell<bool>,
 }
@@ -75,10 +76,15 @@ impl<E: CommandSubmitter> FrameExecutor<E> {
         Self {
             executor,
             submissions: Vec::new(),
+            accepted_count: 0,
             failed: Cell::new(false),
             retirement_failed: Cell::new(false),
         }
     }
+
+    /// Monotonic stream boundary, including receipts already retired by
+    /// bounded capacity pressure. Used to hand off independent output fences.
+    pub fn accepted_count(&self) -> u64 { self.accepted_count }
 
     /// Observe every accepted stream without waiting for GPU work.
     ///
@@ -237,6 +243,7 @@ impl<E: CommandSubmitter> FrameExecutor<E> {
             match self.executor.submit(commands) {
                 Ok(submission) => {
                     self.submissions.push(submission);
+                    self.accepted_count += 1;
                     return Ok(());
                 }
                 Err(SubmitError::Busy) if !self.submissions.is_empty() => self.retire_oldest()?,

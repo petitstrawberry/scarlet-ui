@@ -497,6 +497,7 @@ impl ApplicationRunner {
             .unwrap_or_default();
 
         let request = WindowCreateRequest {
+            output_id: window_info.output_id,
             app_id: window_info.app_id.clone(),
             title: window_info.title.clone(),
             size: window_info.size,

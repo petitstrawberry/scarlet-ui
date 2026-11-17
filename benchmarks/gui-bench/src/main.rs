@@ -134,6 +134,7 @@ fn run() -> Result<()> {
     let mut backend = WinitBackend::new();
     let mut window = backend
         .create_window(WindowCreateRequest {
+                output_id: None,
             app_id: "org.scarlet-ui.gui-bench".into(),
             title: info.title,
             size: info.size,

@@ -249,6 +249,8 @@ impl Default for WindowDecoration {
 
 /// Parameters used by a backend to create a window.
 pub struct WindowCreateRequest {
+    /// Preferred display; positions are local to this display. None follows activation.
+    pub output_id: Option<u32>,
     /// Stable application identifier.
     pub app_id: String,
     /// Initial window title.

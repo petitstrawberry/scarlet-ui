@@ -40,6 +40,7 @@ pub mod window_type {
 /// Window information
 #[derive(Clone)]
 pub struct WindowInfo {
+    pub output_id: Option<u32>,
     pub app_id: String,
     pub title: String,
     pub size: Size,
@@ -88,6 +89,7 @@ impl WindowInfo {
         placement: WindowPlacement,
     ) -> Self {
         Self {
+            output_id: None,
             app_id,
             title,
             size,
@@ -104,6 +106,8 @@ impl WindowInfo {
             shadow_elevation: ElevationRole::Flat,
         }
     }
+
+    pub const fn with_output(mut self, output: Option<u32>) -> Self { self.output_id = output; self }
 
     /// Override who owns the visible frame around this window.
     pub const fn with_decoration(mut self, decoration: WindowDecoration) -> Self {
@@ -283,6 +287,7 @@ impl WindowContentLayout {
 /// Window provides window-level properties like title, size, and decorations.
 /// The content is a single View (use VStack/HStack for multiple children).
 pub struct Window<V: View> {
+    output_id: Option<u32>,
     content_safe_area_edges: SafeAreaEdges,
     app_id: String,
     title: String,
@@ -400,6 +405,7 @@ impl<V: View> Window<V> {
             focus_on_create: true,
             active_on_focus: true,
             placement: WindowPlacement::Default,
+            output_id: None,
             window_geometry_insets: EdgeInsets::ZERO,
             shadow: WindowShadow::PlatformDefault,
             scene_key: None,
@@ -528,6 +534,8 @@ impl<V: View> Window<V> {
     }
 
     /// Set the initial placement hint passed to the window manager.
+    pub fn output(mut self, output: u32) -> Self { self.output_id = Some(output); self }
+
     pub fn placement(mut self, placement: WindowPlacement) -> Self {
         self.placement = placement;
         self
@@ -747,6 +755,7 @@ impl<V: View + Clone> Clone for Window<V> {
             focus_on_create: self.focus_on_create,
             active_on_focus: self.active_on_focus,
             placement: self.placement,
+            output_id: self.output_id,
             window_geometry_insets: self.window_geometry_insets,
             shadow: self.shadow,
             scene_key: self.scene_key.clone(),
@@ -775,6 +784,7 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
             self.opaque,
             self.placement,
         )
+        .with_output(self.output_id)
         .with_decoration(self.decoration.resolved())
         .with_corner_radius(self.corner_radius)
         .with_window_geometry_insets(insets)

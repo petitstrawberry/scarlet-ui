@@ -48,6 +48,8 @@ pub enum GesturePhase {
 pub enum TouchDragAxis {
     Horizontal,
     Vertical,
+    /// A two-dimensional editor owns drags in either direction.
+    Both,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -290,6 +292,7 @@ impl TouchArena {
                     || match previous.drag_axis {
                         Some(TouchDragAxis::Horizontal) => total_x.abs() > total_y.abs(),
                         Some(TouchDragAxis::Vertical) => total_y.abs() > total_x.abs(),
+                        Some(TouchDragAxis::Both) => true,
                         None => false,
                     };
                 self.contacts[index].mode = if drag_claimed {

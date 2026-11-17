@@ -437,6 +437,7 @@ impl PreviewHost {
         let size = session.size();
         let mut window = backend
             .create_window(WindowCreateRequest {
+                output_id: None,
                 app_id: String::from("org.scarlet-os.scarletui.preview"),
                 title: session.title().to_string(),
                 size,

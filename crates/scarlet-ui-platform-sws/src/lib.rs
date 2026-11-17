@@ -826,6 +826,8 @@ pub struct SWSPlatformWindow {
     conn: sws::Connection,
     event_receiver: sws::EventReceiver,
     surface_id: u32,
+    output_id: Option<u32>,
+    output_origin: (i32, i32),
     requested_renderer_backend: RequestedRendererBackend,
     renderer_backend: RendererBackendKind,
     compositor_backend: CompositorBackendKind,
@@ -983,8 +985,11 @@ impl PlatformBackend for SwsBackend {
         request.decoration = request.decoration.resolve_with(WindowDecoration::CUSTOM);
         validate_window_decoration(request.decoration)?;
         let conn = self.connection()?;
-        Ok(Box::new(
-            SWSPlatformWindow::create_with_connection_and_policies(
+        let context = conn.output_context(request.output_id.unwrap_or(u32::MAX)).ok();
+        if let (Some(context), WindowPlacement::At { x, y }) = (context, request.placement) {
+            request.placement = WindowPlacement::At { x: x.saturating_add(context.rect.x), y: y.saturating_add(context.rect.y) };
+        }
+        let mut window = SWSPlatformWindow::create_with_connection_and_policies(
                 conn,
                 &request.app_id,
                 &request.title,
@@ -997,8 +1002,10 @@ impl PlatformBackend for SwsBackend {
                 request.opaque,
                 request.placement,
                 request.window_geometry_insets,
-            )?,
-        ))
+            )?;
+        window.output_id = context.map(|context| context.id);
+        window.output_origin = context.map_or((0, 0), |context| (context.rect.x, context.rect.y));
+        Ok(Box::new(window))
     }
 }
 
@@ -1403,14 +1410,16 @@ impl SWSPlatformWindow {
                 .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
         }
         let current_size = Size::new(
-            Self::physical_to_logical_len_with_scale(actual_width, scale_milli) as f32,
-            Self::physical_to_logical_len_with_scale(actual_height, scale_milli) as f32,
+            if actual_width == physical_width { size.width } else { Self::physical_to_logical_len_with_scale(actual_width, scale_milli) as f32 },
+            if actual_height == physical_height { size.height } else { Self::physical_to_logical_len_with_scale(actual_height, scale_milli) as f32 },
         );
 
         Ok(Self {
             conn,
             event_receiver,
             surface_id,
+            output_id: None,
+            output_origin: (0, 0),
             requested_renderer_backend,
             renderer_backend: RendererBackendKind::Cpu,
             compositor_backend: CompositorBackendKind::Unknown,
@@ -2443,8 +2452,11 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn create_popup(&mut self, position: Point, size: Size) -> Result<u32> {
-        let x = self.logical_to_physical_pos(position.x as i32);
-        let y = self.logical_to_physical_pos(position.y as i32);
+        if let Some(output) = self.output_id {
+            self.conn.output_context(output).map_err(|_| Error::IoError)?;
+        }
+        let x = self.logical_to_physical_pos((position.x as i32).saturating_add(self.output_origin.0));
+        let y = self.logical_to_physical_pos((position.y as i32).saturating_add(self.output_origin.1));
 
         // Create and place the popup in one request.  This avoids exposing the
         // compositor's fallback position for one frame before move_window is
@@ -2485,10 +2497,14 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn set_workarea(&mut self, x: i32, y: i32, width: u32, height: u32) -> Result<()> {
+        if let Some(output) = self.output_id {
+            return self.conn.set_output_workarea(output, self.logical_to_physical_pos(x), self.logical_to_physical_pos(y), self.logical_to_physical_len(width), self.logical_to_physical_len(height))
+                .map_err(|_| scarlet_ui_core::error::Error::IoError);
+        }
         self.conn
             .set_workarea(
-                self.logical_to_physical_pos(x),
-                self.logical_to_physical_pos(y),
+                self.logical_to_physical_pos(x.saturating_add(self.output_origin.0)),
+                self.logical_to_physical_pos(y.saturating_add(self.output_origin.1)),
                 self.logical_to_physical_len(width),
                 self.logical_to_physical_len(height),
             )
@@ -2505,7 +2521,10 @@ impl PlatformWindow for SWSPlatformWindow {
     where
         Self: Sized,
     {
-        Self::create_with_connection_and_policies(
+        if let Some(output) = self.output_id {
+            self.conn.output_context(output).map_err(|_| Error::IoError)?;
+        }
+        let mut window = Self::create_with_connection_and_policies(
             self.conn.clone(),
             app_id,
             title,
@@ -2521,15 +2540,18 @@ impl PlatformWindow for SWSPlatformWindow {
             true,
             WindowPlacement::Default,
             EdgeInsets::ZERO,
-        )
+        )?;
+        window.output_id = self.output_id;
+        window.output_origin = self.output_origin;
+        Ok(window)
     }
 
     fn move_window(&mut self, x: i32, y: i32) -> Result<()> {
         self.conn
             .move_window(
                 self.surface_id,
-                self.logical_to_physical_pos(x),
-                self.logical_to_physical_pos(y),
+                self.logical_to_physical_pos(x.saturating_add(self.output_origin.0)),
+                self.logical_to_physical_pos(y.saturating_add(self.output_origin.1)),
             )
             .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
@@ -2541,6 +2563,10 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn get_screen_size(&mut self) -> Result<(u32, u32)> {
+        if let Some(output) = self.output_id {
+            let context = self.conn.output_context(output).map_err(|_| Error::IoError)?;
+            return Ok((context.rect.width, context.rect.height));
+        }
         let (width, height) = self
             .conn
             .get_screen_size()
@@ -2936,6 +2962,9 @@ impl SWSPlatformWindow {
                     changes,
                 }));
             }
+            // Output-aware servers follow with the authoritative logical
+            // configure; decoding this legacy extent would round it twice.
+            SwsEvent::SurfaceConfigure { .. } if self.output_id.is_some() => {}
             SwsEvent::SurfaceConfigure {
                 surface_id,
                 width,
@@ -3030,12 +3059,30 @@ impl SWSPlatformWindow {
                 }
                 self.push_event(Event::PointerLockChanged { locked });
             }
+            SwsEvent::ScreenSizeChanged { .. } if self.output_id.is_some() => {}
             SwsEvent::ScreenSizeChanged { width, height } => {
                 self.push_event(Event::ScreenSizeChanged {
                     width: self.physical_to_logical_len(width),
                     height: self.physical_to_logical_len(height),
                 });
             }
+            SwsEvent::Output(sws_protocol::outputs::OutputEvent::Window { window, output, scale_milli, logical_width, logical_height, output_x, output_y, .. }) if window == self.surface_id => {
+                self.output_id = Some(output);
+                self.output_origin = (output_x, output_y);
+                self.text_input_sync.invalidate();
+                self.scale_milli = Self::sanitize_scale(scale_milli);
+                self.surface_regions_cache = None;
+                self.configure_batch.resize(logical_width, logical_height);
+            }
+            SwsEvent::Output(sws_protocol::outputs::OutputEvent::Snapshot(snapshot)) => {
+                if let Some(output) = self.output_id.and_then(|id| snapshot.outputs.iter().find(|output| output.id == id)) {
+                    if let Some(configuration) = snapshot.configuration.iter().find(|configuration| configuration.id == output.id) {
+                        self.output_origin = (configuration.x, configuration.y);
+                    }
+                    self.push_event(Event::ScreenSizeChanged { width: self.physical_to_logical_len(output.mode.pixel_width), height: self.physical_to_logical_len(output.mode.pixel_height) });
+                }
+            }
+            SwsEvent::OutputScaleChanged { .. } if self.output_id.is_some() => {}
             SwsEvent::OutputScaleChanged { scale_milli } => {
                 self.text_input_sync.invalidate();
                 self.scale_milli = Self::sanitize_scale(scale_milli);
