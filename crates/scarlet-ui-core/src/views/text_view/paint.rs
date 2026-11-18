@@ -455,7 +455,7 @@ fn paint_visible_text(
         return;
     }
     for line in visible_lines(layout) {
-        let gap = if focused && !preedit.is_empty() && line.contains_byte(selection.caret.byte) {
+        let gap = if focused && !preedit.is_empty() && line.y == layout.cursor_rect(selection.caret, document).origin.y {
             Some((
                 line.display_byte_for_document_byte(selection.caret.byte),
                 layout.measure_text(preedit).0 as f32,
@@ -540,6 +540,17 @@ fn paint_foreground(
             colors.push(span.color);
             events.push((start, true, span.priority, index));
             events.push((end, false, span.priority, index));
+        }
+    }
+    // Virtual labels override source syntax colors, including labels inside a token.
+    for (range, color) in &line.inlay_spans {
+        let start = range.start.max(part.start);
+        let end = range.end.min(part.end);
+        if start < end {
+            let index = colors.len();
+            colors.push(*color);
+            events.push((start, true, usize::MAX, index));
+            events.push((end, false, usize::MAX, index));
         }
     }
     events.sort_unstable();

@@ -834,6 +834,7 @@ fn apply_replace(
     let (new_document, delta) = render_object.text_document.replace(range.clone(), text);
     let caret = delta.replaced_range.start + text.len();
     render_object.text_document = new_document.clone();
+    render_object.inlay_hints.clear();
     render_object.selection = TextSelection::collapsed(caret);
     render_object.desired_x = None;
     render_object.compute_layout();
