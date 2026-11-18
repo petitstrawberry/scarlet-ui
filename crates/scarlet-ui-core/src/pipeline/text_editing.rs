@@ -69,6 +69,7 @@ impl RenderingPipeline {
                 | Event::Touch(_)
                 | Event::TouchGesture(_)
                 | Event::TextInputCommit { .. }
+                | Event::TextInputDismissed { .. }
                 | Event::TextInputPreedit { .. }
                 | Event::TextInputSelection { .. }
                 | Event::TextInputDeleteSurroundingText { .. }

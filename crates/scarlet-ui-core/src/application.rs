@@ -236,6 +236,9 @@ pub trait Application: Clone + 'static {
     ) {
     }
 
+    /// Blur an application-managed editor after an explicit keyboard close.
+    fn on_text_input_dismissed(&mut self, _ctx: &WindowContext, _context_id: u32, _serial: u32) {}
+
     /// Handle preedit text from an input method.
     fn on_text_input_preedit(
         &mut self,
@@ -1372,6 +1375,13 @@ fn handle_window_event<A: Application>(
         Event::TextInputDone { context_id, serial } => {
             let event = Event::TextInputDone { context_id, serial };
             let _ = slot.pipeline.handle_event(&event);
+        }
+        Event::TextInputDismissed { context_id, serial } => {
+            let event = Event::TextInputDismissed { context_id, serial };
+            if !slot.pipeline.handle_event(&event) {
+                app.on_text_input_dismissed(&slot.context, context_id, serial);
+            }
+            sync_after_event(slot)?;
         }
         Event::Custom { event_type, data } if event_type == 0xF0C0F => {
             if let Some((window_id, app_name, title, menu_titles)) =

@@ -13,6 +13,37 @@ use alloc::string::String;
 const SURFACE: Size = Size::new(480.0, 600.0);
 const KEYBOARD: Rect = Rect::from_xywh(0.0, 360.0, 480.0, 240.0);
 
+#[test]
+fn explicit_keyboard_close_blurs_only_the_editor_and_touch_can_refocus_it() {
+    let text = state(String::from("retained text"));
+    let mut pipeline = mounted(TextField::new(text.clone()).autofocus(true));
+    assert!(pipeline.focused_text_input_state().is_some());
+    assert!(pipeline.handle_event(&Event::TextInputDismissed {
+        context_id: 1,
+        serial: 1
+    }));
+    frame(&mut pipeline);
+    assert!(pipeline.focused_text_input_state().is_none());
+    pipeline.handle_event(&Event::Keyboard(KeyEvent::Char { c: 'x' }));
+    assert_eq!(text.get(), "retained text");
+    // No window FocusLost is emitted: the same mounted editor can be focused
+    // again by a user click, without recreating the window or its text state.
+    pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonPressed {
+        button: crate::event::MouseButton::Left,
+        x: 20,
+        y: 20,
+        click_count: 1,
+    }));
+    pipeline.handle_event(&Event::Mouse(MouseEvent::ButtonReleased {
+        button: crate::event::MouseButton::Left,
+        x: 20,
+        y: 20,
+        click_count: 1,
+    }));
+    frame(&mut pipeline);
+    assert!(pipeline.focused_text_input_state().is_some());
+}
+
 fn state<T>(value: T) -> State<T> {
     State::new(generate_state_id(), value)
 }

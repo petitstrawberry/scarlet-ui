@@ -431,6 +431,12 @@ impl EventDispatcher {
             | Event::TextInputCommit { .. }
             | Event::TextInputDeleteSurroundingText { .. }
             | Event::TextInputDone { .. } => self.dispatch_text_input(element_tree, event),
+            Event::TextInputDismissed { .. } => {
+                let had_editor = element_tree.focused_text_input_state().is_some();
+                self.reset_text_input_reveal(element_tree);
+                self.clear_focused_element(element_tree);
+                had_editor
+            }
             Event::Custom { .. } => {
                 // Custom events can be dispatched similarly
                 false
