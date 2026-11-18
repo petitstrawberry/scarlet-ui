@@ -2316,14 +2316,14 @@ dependencies = [
 [[package]]
 name = "sgfx"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63#9dfbec263fae939e06985277d13f899a60fe3d63"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=61e5ddd0f0e31309d2468ace3c4afe67d949fa72#61e5ddd0f0e31309d2468ace3c4afe67d949fa72"
 dependencies = [
  "gpu-raw",
  "pollster",
  "raw-window-handle",
  "scarlet-os",
  "scarlet-std",
- "sgfx-backend-abi 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63)",
+ "sgfx-backend-abi 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=61e5ddd0f0e31309d2468ace3c4afe67d949fa72)",
  "sgfx-backend-loader",
  "sgfx-backend-wgpu",
  "sgfx-core",
@@ -2338,21 +2338,21 @@ source = "git+https://github.com/petitstrawberry/sgfx?rev=040dbb5cf42b75489504e1
 [[package]]
 name = "sgfx-backend-abi"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63#9dfbec263fae939e06985277d13f899a60fe3d63"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=61e5ddd0f0e31309d2468ace3c4afe67d949fa72#61e5ddd0f0e31309d2468ace3c4afe67d949fa72"
 
 [[package]]
 name = "sgfx-backend-loader"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63#9dfbec263fae939e06985277d13f899a60fe3d63"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=61e5ddd0f0e31309d2468ace3c4afe67d949fa72#61e5ddd0f0e31309d2468ace3c4afe67d949fa72"
 dependencies = [
  "scarlet-std",
- "sgfx-backend-abi 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63)",
+ "sgfx-backend-abi 1.0.0 (git+https://github.com/petitstrawberry/sgfx?rev=61e5ddd0f0e31309d2468ace3c4afe67d949fa72)",
 ]
 
 [[package]]
 name = "sgfx-backend-wgpu"
 version = "1.0.0"
-source = "git+https://github.com/petitstrawberry/sgfx?rev=9dfbec263fae939e06985277d13f899a60fe3d63#9dfbec263fae939e06985277d13f899a60fe3d63"
+source = "git+https://github.com/petitstrawberry/sgfx?rev=61e5ddd0f0e31309d2468ace3c4afe67d949fa72#61e5ddd0f0e31309d2468ace3c4afe67d949fa72"
 dependencies = [
  "bytemuck",
  "naga",
