@@ -80,6 +80,22 @@ pub trait Application: Clone + 'static {
     /// declaration is opened automatically; further instances use window commands.
     fn scenes(&self) -> impl Scene;
 
+    /// Construct the current view for one open scene.
+    ///
+    /// The runner calls this on reactive root rebuilds. Override it to build
+    /// only the requested window when constructing all of `scenes()` is costly.
+    /// Read current shared state on each call; caching a declaration here would
+    /// prevent reactive updates. The returned view must describe the same window
+    /// as the corresponding declaration in `scenes()`, including its metadata.
+    ///
+    /// `scenes()` remains the source of declaration keys, launch policy, and
+    /// validation when opening windows. Return `None` if this key no longer has
+    /// a view; this removes its content without closing the platform window.
+    /// The default resolves the key from fresh declarations for compatibility.
+    fn scene_view(&self, key: &SceneWindowKey) -> Option<Box<dyn View>> {
+        resolve_scene_view(self, key)
+    }
+
     /// Select the application states that rebuild one scene's root.
     ///
     /// Return `None` to observe every application state, as usual. An explicit
@@ -219,6 +235,9 @@ pub trait Application: Clone + 'static {
         _text: &str,
     ) {
     }
+
+    /// Blur an application-managed editor after an explicit keyboard close.
+    fn on_text_input_dismissed(&mut self, _ctx: &WindowContext, _context_id: u32, _serial: u32) {}
 
     /// Handle preedit text from an input method.
     fn on_text_input_preedit(
@@ -464,6 +483,7 @@ impl ApplicationRunner {
             app.clone(),
             declaration.key.clone(),
             pipeline_id,
+            declaration.view,
         ));
         pipeline.set_root(root);
 
@@ -480,6 +500,7 @@ impl ApplicationRunner {
             .unwrap_or_default();
 
         let request = WindowCreateRequest {
+            output_id: window_info.output_id,
             app_id: window_info.app_id.clone(),
             title: window_info.title.clone(),
             size: window_info.size,
@@ -649,6 +670,8 @@ impl ApplicationRunner {
             if let Some(error) = slot.pipeline.take_text_clipboard_error() {
                 app.on_clipboard_error(&slot.context, error);
             }
+            // Publish input changes before rendering; present_window refreshes
+            // any caret/clip changes caused by the subsequent layout.
             sync_text_input(slot.window.as_mut(), &slot.pipeline);
             let elapsed = slot.animation_tick.elapsed();
             slot.animation_tick = Instant::now();
@@ -675,8 +698,7 @@ impl ApplicationRunner {
                 && frame_granted
             {
                 let presentation = present_window(app, slot)?;
-                // Layout/scroll during presentation may move the focused caret.
-                sync_text_input(slot.window.as_mut(), &slot.pipeline);
+                // present_window already synchronized the final layout state.
                 match presentation {
                     Presentation::Cpu => {
                         slot.presented_this_cycle = true;
@@ -692,7 +714,7 @@ impl ApplicationRunner {
                         app.on_frame_presented(&slot.context);
                     }
                     Presentation::Idle => {
-                        if slot.pipeline.has_visual_animation() {
+                        if slot.pipeline.has_visual_animation() && slot.frame_ready {
                             request_next_frame(slot);
                         }
                     }
@@ -987,6 +1009,13 @@ fn present_window<A: Application>(app: &mut A, slot: &mut WindowSlot<A>) -> Resu
     );
     match result {
         Ok(presentation) => Ok(presentation),
+        Err(Error::RenderDeferred) => {
+            slot.retry_render = true;
+            // Consume this opportunity; the occupied pool needs a later credit,
+            // not repeated attempts against the same ready grant.
+            request_next_frame(slot);
+            Ok(Presentation::Idle)
+        }
         Err(Error::RenderFailure(failure)) => {
             app.on_render_error(&slot.context, &failure);
             match failure.kind {
@@ -1347,6 +1376,13 @@ fn handle_window_event<A: Application>(
             let event = Event::TextInputDone { context_id, serial };
             let _ = slot.pipeline.handle_event(&event);
         }
+        Event::TextInputDismissed { context_id, serial } => {
+            let event = Event::TextInputDismissed { context_id, serial };
+            if !slot.pipeline.handle_event(&event) {
+                app.on_text_input_dismissed(&slot.context, context_id, serial);
+            }
+            sync_after_event(slot)?;
+        }
         Event::Custom { event_type, data } if event_type == 0xF0C0F => {
             if let Some((window_id, app_name, title, menu_titles)) =
                 decode_app_change_payload(&data)
@@ -1369,7 +1405,12 @@ fn handle_window_event<A: Application>(
             if closing {
                 return Ok(true);
             }
-            sync_after_event(slot)?;
+            // All motion samples have reached the controls and velocity tracker.
+            // Publish caret/context-menu metadata once at the end of this event
+            // batch; contact/button/key boundaries still synchronize immediately.
+            if !event.is_continuous_motion() {
+                sync_after_event(slot)?;
+            }
         }
     }
     Ok(false)
@@ -1485,9 +1526,17 @@ struct SceneWindowRootElement<A: Application + View> {
 }
 
 impl<A: Application + View> SceneWindowRootElement<A> {
-    fn new(app: A, scene_key: SceneWindowKey, pipeline_id: PipelineId) -> Self {
+    fn new(
+        app: A,
+        scene_key: SceneWindowKey,
+        pipeline_id: PipelineId,
+        view: Box<dyn View>,
+    ) -> Self {
         let id = ElementId::generate();
-        let child = resolve_scene_view(&app, &scene_key).map(|view| view.create_element());
+        // Opening already collected and validated this declaration. Do not
+        // construct every scene again before mounting this one. Mount still
+        // queues a fresh rebuild to catch state changes before subscription.
+        let child = Some(view.create_element());
         Self {
             id,
             app,
@@ -1541,7 +1590,7 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
     }
 
     fn rebuild(&mut self) -> UpdateResult {
-        let new_view = resolve_scene_view(&self.app, &self.scene_key);
+        let new_view = self.app.scene_view(&self.scene_key);
         crate::element::update_child(
             &mut self.child,
             new_view.as_deref(),
@@ -1645,6 +1694,7 @@ impl<A: Application + View> Element for SceneWindowRootElement<A> {
 #[cfg(test)]
 mod tests {
     include!("application_animation_tests.rs");
+    include!("application_scene_tests.rs");
     use super::*;
     use alloc::rc::Rc;
     use core::cell::{Cell, RefCell};
@@ -1771,6 +1821,7 @@ mod tests {
             app.clone(),
             SceneWindowKey::main(),
             pipeline.pipeline_id(),
+            app.scene_view(&SceneWindowKey::main()).unwrap(),
         );
         pipeline.set_root(Box::new(root));
         pipeline.layout_initial();
@@ -1847,7 +1898,8 @@ mod tests {
         };
         let create = |key: SceneWindowKey| {
             let mut pipeline = RenderingPipeline::new();
-            let root = SceneWindowRootElement::new(app.clone(), key, pipeline.pipeline_id());
+            let view = app.scene_view(&key).unwrap();
+            let root = SceneWindowRootElement::new(app.clone(), key, pipeline.pipeline_id(), view);
             pipeline.set_root(Box::new(root));
             pipeline.layout_initial();
             pipeline.render().unwrap();
@@ -1886,7 +1938,12 @@ mod tests {
             built: Rc::new(RefCell::new(Vec::new())),
         };
         let mut pipeline = RenderingPipeline::new();
-        let root = SceneWindowRootElement::new(app.clone(), "home".into(), pipeline.pipeline_id());
+        let root = SceneWindowRootElement::new(
+            app.clone(),
+            "home".into(),
+            pipeline.pipeline_id(),
+            app.scene_view(&"home".into()).unwrap(),
+        );
         assert_eq!(app.built.borrow().last(), Some(&0));
         // Simulate a shell workspace event arriving before the root subscribes.
         app.content.set(7);
@@ -1926,6 +1983,7 @@ mod tests {
     #[derive(Default)]
     struct RenderProbe {
         fail_next: Option<RenderFailureKind>,
+        defer_next: bool,
         attempts: usize,
         presented: usize,
         full_damage: Vec<bool>,
@@ -1945,6 +2003,9 @@ mod tests {
             let mut probe = self.0.borrow_mut();
             probe.attempts += 1;
             probe.full_damage.push(damage.is_none());
+            if core::mem::take(&mut probe.defer_next) {
+                return Err(Error::RenderDeferred);
+            }
             if let Some(kind) = probe.fail_next.take() {
                 return Err(Error::RenderFailure(RenderFailure {
                     kind,
@@ -1954,6 +2015,43 @@ mod tests {
             probe.presented += 1;
             Ok(crate::renderer::BackendFrame::External)
         }
+    }
+
+    #[test]
+    fn clean_render_deferral_rearms_pacing_without_render_failure_notification() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let mut app = RenderFailureApp(Rc::new(RefCell::new(Vec::new())));
+        let platform = Rc::new(RefCell::new(EnvironmentRunnerProbe {
+            frame_pacing: true,
+            ..Default::default()
+        }));
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: platform.clone(),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slot = runner.create_slot(&mut app, declaration, true).unwrap();
+        let probe = Rc::new(RefCell::new(RenderProbe {
+            defer_next: true,
+            ..Default::default()
+        }));
+        slot.pipeline
+            .set_paint_backend(Box::new(FailingPaintBackend(probe.clone())));
+        slot.frame_ready = true;
+        slot.frame_request_outstanding = false;
+        let requests = platform.borrow().frame_requests[0];
+        assert_eq!(
+            present_window(&mut app, &mut slot).unwrap(),
+            Presentation::Idle
+        );
+        assert!(slot.retry_render);
+        assert!(!slot.frame_ready);
+        assert!(slot.frame_request_outstanding);
+        assert_eq!(platform.borrow().frame_requests[0], requests + 1);
+        assert!(app.0.borrow().is_empty());
+        assert_eq!(probe.borrow().attempts, 1);
+        assert_eq!(probe.borrow().presented, 0);
     }
 
     fn assert_render_failure_policy(kind: RenderFailureKind) {
@@ -2071,6 +2169,7 @@ mod tests {
         environment_emitted: bool,
         quit_emitted: [bool; 2],
         poll_calls: [usize; 2],
+        text_input_syncs: [usize; 2],
         frame_pacing: bool,
         frame_requests: [usize; 2],
         frame_ready_emitted: [bool; 2],
@@ -2243,6 +2342,10 @@ mod tests {
                 return Some(Event::Quit);
             }
             None
+        }
+
+        fn sync_text_input(&mut self, _state: Option<&crate::element::TextInputElementState>) {
+            self.probe.borrow_mut().text_input_syncs[self.index] += 1;
         }
 
         fn wait_for_event(&mut self, _timeout: Duration) {
@@ -2517,6 +2620,62 @@ mod tests {
             next_window: 0,
             negotiated_size: None,
         }))
+    }
+
+    #[test]
+    fn motion_metadata_sync_is_batched_but_contact_boundaries_are_immediate() {
+        use crate::event::{TouchChange, TouchFrame, TouchPhase};
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let (mut app, _) = menu_runtime_app();
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        let mut runner = menu_runtime_runner(probe.clone());
+        let declarations = collect_scene_declarations(&app).unwrap();
+        let mut slots = runner.create_slots(&mut app, declarations).unwrap();
+        let slot = &mut slots[0];
+        let touch = |serial, phase| {
+            Event::TouchFrame(TouchFrame {
+                seat_id: 0,
+                serial,
+                time_ns: serial * 1_000_000,
+                changes: vec![TouchChange {
+                    seat_id: 0,
+                    serial,
+                    time_ns: serial * 1_000_000,
+                    id: 7,
+                    phase,
+                    x: 10,
+                    y: 10,
+                    pressure: None,
+                    touch_major: None,
+                }],
+            })
+        };
+        let mut expected = probe.borrow().text_input_syncs[0];
+        for (event, boundary) in [
+            (touch(1, TouchPhase::Down), true),
+            (touch(2, TouchPhase::Move), false),
+            (touch(3, TouchPhase::Move), false),
+            (touch(4, TouchPhase::Up), true),
+            (touch(5, TouchPhase::Down), true),
+            (touch(6, TouchPhase::Cancel), true),
+            (Event::Mouse(MouseEvent::Moved { x: 20, y: 10 }), false),
+            (
+                Event::Mouse(MouseEvent::ButtonReleased {
+                    button: crate::event::MouseButton::Left,
+                    click_count: 1,
+                    x: 20,
+                    y: 10,
+                }),
+                true,
+            ),
+        ] {
+            handle_window_event(&mut app, slot, event, &mut Vec::new()).unwrap();
+            expected += usize::from(boundary);
+            assert_eq!(probe.borrow().text_input_syncs[0], expected);
+        }
+        // This is the same refresh the runner performs after draining input.
+        sync_text_input(slot.window.as_mut(), &slot.pipeline);
+        assert_eq!(probe.borrow().text_input_syncs[0], expected + 1);
     }
 
     #[test]
@@ -3206,6 +3365,67 @@ mod tests {
         fn as_any(&self) -> &dyn Any {
             self
         }
+    }
+
+    #[test]
+    fn runner_coalesces_text_input_scans_after_layout_or_a_withheld_frame() {
+        let _environment_guard = install_test_input_environment(InputEnvironment::desktop());
+        let mut app = FramePacingApp {
+            suspended_changes: Rc::new(RefCell::new(Vec::new())),
+        };
+        let probe = Rc::new(RefCell::new(EnvironmentRunnerProbe::default()));
+        let mut runner = ApplicationRunner::new(Box::new(EnvironmentTestBackend {
+            probe: probe.clone(),
+            next_window: 0,
+            negotiated_size: None,
+        }));
+        let declaration = collect_scene_declarations(&app).unwrap().remove(0);
+        let mut slots = vec![runner.create_slot(&mut app, declaration, true).unwrap()];
+        let mut state = RunnerLoopState::new();
+        let before = probe.borrow().text_input_syncs[0];
+        ApplicationRunner::run_cycle(runner.backend.as_mut(), &mut app, &mut slots, &mut state)
+            .unwrap();
+        assert_eq!(
+            probe.borrow().text_input_syncs[0],
+            before + 2,
+            "input and final layout snapshots must not repeat the same post-layout query"
+        );
+        let root = slots[0].pipeline.element_tree().root().unwrap().id();
+        slots[0]
+            .pipeline
+            .pipeline_owner_mut()
+            .mark_needs_paint(root);
+        slots[0].frame_pacing_enabled = true;
+        slots[0].frame_ready = false;
+        let before = probe.borrow().text_input_syncs[0];
+        ApplicationRunner::run_cycle(runner.backend.as_mut(), &mut app, &mut slots, &mut state)
+            .unwrap();
+        assert!(
+            slots[0].pipeline.has_dirty(),
+            "withheld frame must not paint"
+        );
+        assert_eq!(
+            probe.borrow().text_input_syncs[0],
+            before + 1,
+            "input metadata must still publish when paint is withheld"
+        );
+        let mut close = Vec::new();
+        let before = probe.borrow().text_input_syncs[0];
+        handle_window_event(
+            &mut app,
+            &mut slots[0],
+            Event::Keyboard(crate::event::KeyEvent::Pressed {
+                keycode: crate::event::KeyCode::Tab,
+                modifiers: crate::event::KeyModifiers::default(),
+            }),
+            &mut close,
+        )
+        .unwrap();
+        assert_eq!(
+            probe.borrow().text_input_syncs[0],
+            before + 1,
+            "discrete focus/selection boundaries still synchronize immediately"
+        );
     }
 
     #[test]

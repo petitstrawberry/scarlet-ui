@@ -13,9 +13,13 @@ mod backend;
 mod backing_refresh;
 mod clipboard;
 mod configure_batch;
+#[cfg(feature = "std")]
+mod damage_trace;
 mod file_dialog;
 mod file_dialog_policy;
 mod keyboard;
+#[cfg(feature = "std")]
+mod presentation;
 mod shared_image;
 mod sink;
 mod text_input_sync;
@@ -69,6 +73,10 @@ use sws_client as sws;
 // payload and decoder are unchanged; keep the shared-image SDK ABI aligned
 // with SGFX instead of requiring every graphics backend to upgrade for this bit.
 const SWS_TABLET_MANAGED: u32 = 1 << 4;
+
+// Match the client's bounded transport pump. Do not turn a subscribed mailbox
+// into an unbounded UI queue when native touch frames arrive during dispatch.
+const MAX_NATIVE_EVENTS_PER_BATCH: usize = 64;
 
 fn window_close_request_event(window_id: u32, surface_id: u32) -> Option<Event> {
     (window_id == surface_id).then_some(Event::Window(WindowEvent::CloseRequested))
@@ -206,6 +214,8 @@ struct SwsSgfxFrameSink {
     rejected: Vec<(SgfxCommitToken, SgfxSinkError)>,
     next_commit_serial: u64,
     lifecycle_error: Option<SgfxSinkError>,
+    #[cfg(feature = "std")]
+    presentation: Option<std::sync::Arc<presentation::FrameHandoff>>,
 }
 
 impl SwsSgfxFrameSink {
@@ -221,6 +231,8 @@ impl SwsSgfxFrameSink {
             rejected: Vec::new(),
             next_commit_serial: 1,
             lifecycle_error: None,
+            #[cfg(feature = "std")]
+            presentation: None,
         }
     }
 
@@ -321,6 +333,10 @@ impl SwsSgfxFrameSink {
                     commit_serial,
                 };
                 if Self::release_retained(&mut self.retained, token) {
+                    #[cfg(feature = "std")]
+                    if let Some(worker) = &self.presentation {
+                        worker.observe_release(token, true);
+                    }
                     self.rejected.push((token, Self::map_error_code(code)));
                 } else {
                     self.lifecycle_error = Some(SgfxSinkError::Protocol);
@@ -347,10 +363,19 @@ impl SwsSgfxFrameSink {
                 };
                 if !Self::release_retained(&mut self.retained, token) {
                     self.lifecycle_error = Some(SgfxSinkError::Protocol);
+                } else {
+                    #[cfg(feature = "std")]
+                    if let Some(worker) = &self.presentation {
+                        worker.observe_release(token, false);
+                    }
                 }
             }
             SwsEvent::SgfxBackendLost { compositor_epoch } => {
                 if compositor_epoch > self.compositor_epoch {
+                    #[cfg(feature = "std")]
+                    if let Some(presentation) = &self.presentation {
+                        presentation.close();
+                    }
                     self.backend_lost = Some(compositor_epoch);
                     self.retained.clear();
                     self.rejected.clear();
@@ -362,6 +387,21 @@ impl SwsSgfxFrameSink {
     }
 
     fn pump_lifecycle(&mut self) -> SgfxSinkResult<()> {
+        #[cfg(feature = "std")]
+        if self
+            .presentation
+            .as_ref()
+            .is_some_and(|worker| worker.failed())
+        {
+            return Err(SgfxSinkError::Protocol);
+        }
+        #[cfg(feature = "std")]
+        if let Some(worker) = &self.presentation {
+            let retained = &mut self.retained;
+            worker.release_superseded(|token| {
+                Self::release_retained(retained, token);
+            });
+        }
         self.conn.dispatch().map_err(Self::map_error)?;
         while let Some(event) = self.events.poll_event() {
             self.handle_lifecycle_event(event);
@@ -449,20 +489,21 @@ impl SgfxFrameSink for SwsSgfxFrameSink {
     }
 
     fn wait_until_released(&mut self, token: SgfxCommitToken) -> SgfxSinkResult<()> {
-        self.validate_identity(token.identity)?;
         loop {
-            self.pump_lifecycle()?;
-            if let Some(compositor_epoch) = self.backend_lost {
-                return Err(SgfxSinkError::BackendLost { compositor_epoch });
-            }
-            if let Some(error) = self.take_rejection(token) {
-                return Err(error);
-            }
-            if !self.retained.contains(&token) {
+            if self.poll_released(token)? {
                 return Ok(());
             }
             let _ = std::thread::sleep(core::time::Duration::from_millis(1));
         }
+    }
+
+    fn poll_released(&mut self, token: SgfxCommitToken) -> SgfxSinkResult<bool> {
+        self.pump_lifecycle()?;
+        self.validate_identity(token.identity)?;
+        if let Some(error) = self.take_rejection(token) {
+            return Err(error);
+        }
+        Ok(!self.retained.contains(&token))
     }
 
     fn commit_shared_image(
@@ -488,6 +529,52 @@ impl SgfxFrameSink for SwsSgfxFrameSink {
         ) {
             self.retained.retain(|candidate| *candidate != token);
             return Err(Self::map_error(error));
+        }
+        Ok(token)
+    }
+
+    #[cfg(feature = "std")]
+    fn flush_pending_commits(&mut self) -> SgfxSinkResult<()> {
+        self.pump_lifecycle()?;
+        if let Some(worker) = &self.presentation {
+            worker.flush()?;
+        }
+        self.pump_lifecycle()
+    }
+
+    #[cfg(feature = "std")]
+    fn commit_tracked_image(
+        &mut self,
+        identity: SgfxBufferIdentity,
+        damage: &[DamageRect],
+        submissions: Vec<sgfx::Submission>,
+    ) -> SgfxSinkResult<SgfxCommitToken> {
+        self.pump_lifecycle()?;
+        self.validate_identity(identity)?;
+        let damage = Self::damage_rects(damage)?;
+        if damage.is_empty() {
+            return Err(SgfxSinkError::Protocol);
+        }
+        if self.retained.iter().any(|token| token.identity == identity) {
+            return Err(SgfxSinkError::BufferBusy);
+        }
+        if self.presentation.is_none() {
+            self.presentation = Some(std::sync::Arc::new(presentation::FrameHandoff::new(
+                self.conn.clone(),
+                self.window_id,
+            )?));
+        }
+        let token = self.next_commit_token(identity)?;
+        // Reserve the image before the worker can publish it or receive release.
+        self.retained.push(token);
+        if let Err(error) = self
+            .presentation
+            .as_ref()
+            .unwrap()
+            .send(token, damage, submissions)
+        {
+            Self::release_retained(&mut self.retained, token);
+            return Err(error);
         }
         Ok(token)
     }
@@ -623,6 +710,8 @@ struct TextInputContext {
     context_id: u32,
     serial: u32,
     enabled: bool,
+    editor_id: Option<scarlet_ui_core::element::ElementId>,
+    activation_serial: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -739,6 +828,8 @@ pub struct SWSPlatformWindow {
     conn: sws::Connection,
     event_receiver: sws::EventReceiver,
     surface_id: u32,
+    output_id: Option<u32>,
+    output_origin: (i32, i32),
     requested_renderer_backend: RequestedRendererBackend,
     renderer_backend: RendererBackendKind,
     compositor_backend: CompositorBackendKind,
@@ -749,8 +840,11 @@ pub struct SWSPlatformWindow {
     surface_regions_cache: Option<(bool, Vec<sws_protocol::surface_regions::SurfaceRegion>)>,
     surface_regions_supported: bool,
     frame_callbacks_supported: bool,
+    frame_credits_supported: bool,
     next_frame_callback_id: u64,
     pending_frame_callback_id: Option<u64>,
+    #[cfg(feature = "std")]
+    presentation: Option<std::sync::Weak<presentation::FrameHandoff>>,
     fullscreen: bool,
     tablet_managed: bool,
     backing_refresh: Rc<BackingRefresh>,
@@ -893,8 +987,11 @@ impl PlatformBackend for SwsBackend {
         request.decoration = request.decoration.resolve_with(WindowDecoration::CUSTOM);
         validate_window_decoration(request.decoration)?;
         let conn = self.connection()?;
-        Ok(Box::new(
-            SWSPlatformWindow::create_with_connection_and_policies(
+        let context = conn.output_context(request.output_id.unwrap_or(u32::MAX)).ok();
+        if let (Some(context), WindowPlacement::At { x, y }) = (context, request.placement) {
+            request.placement = WindowPlacement::At { x: x.saturating_add(context.rect.x), y: y.saturating_add(context.rect.y) };
+        }
+        let mut window = SWSPlatformWindow::create_with_connection_and_policies(
                 conn,
                 &request.app_id,
                 &request.title,
@@ -907,8 +1004,10 @@ impl PlatformBackend for SwsBackend {
                 request.opaque,
                 request.placement,
                 request.window_geometry_insets,
-            )?,
-        ))
+            )?;
+        window.output_id = context.map(|context| context.id);
+        window.output_origin = context.map_or((0, 0), |context| (context.rect.x, context.rect.y));
+        Ok(Box::new(window))
     }
 }
 
@@ -1175,8 +1274,9 @@ impl SWSPlatformWindow {
         let capabilities = conn.get_capabilities().ok();
         let window_geometry_supported =
             capabilities.is_some_and(|capabilities| capabilities.supports_window_geometry());
-        let frame_callbacks_supported =
-            capabilities.is_some_and(|capabilities| capabilities.supports_frame_callbacks());
+        let frame_callbacks_supported = capabilities.is_some_and(|capabilities| {
+            capabilities.supports_frame_callbacks() || capabilities.supports_frame_credits()
+        });
         let configured_creation_supported = capabilities
             .is_some_and(|capabilities| capabilities.supports_configured_window_creation());
         let scale_milli = conn
@@ -1312,14 +1412,16 @@ impl SWSPlatformWindow {
                 .map_err(|_| scarlet_ui_core::error::Error::IoError)?;
         }
         let current_size = Size::new(
-            Self::physical_to_logical_len_with_scale(actual_width, scale_milli) as f32,
-            Self::physical_to_logical_len_with_scale(actual_height, scale_milli) as f32,
+            if actual_width == physical_width { size.width } else { Self::physical_to_logical_len_with_scale(actual_width, scale_milli) as f32 },
+            if actual_height == physical_height { size.height } else { Self::physical_to_logical_len_with_scale(actual_height, scale_milli) as f32 },
         );
 
         Ok(Self {
             conn,
             event_receiver,
             surface_id,
+            output_id: None,
+            output_origin: (0, 0),
             requested_renderer_backend,
             renderer_backend: RendererBackendKind::Cpu,
             compositor_backend: CompositorBackendKind::Unknown,
@@ -1331,8 +1433,11 @@ impl SWSPlatformWindow {
             surface_regions_supported: capabilities
                 .is_some_and(|caps| caps.supports_surface_regions()),
             frame_callbacks_supported,
+            frame_credits_supported: capabilities.is_some_and(|caps| caps.supports_frame_credits()),
             next_frame_callback_id: 1,
             pending_frame_callback_id: None,
+            #[cfg(feature = "std")]
+            presentation: None,
             fullscreen: false,
             tablet_managed: false,
             backing_refresh: Rc::new(BackingRefresh::default()),
@@ -1463,6 +1568,7 @@ impl SWSPlatformWindow {
             {
                 if self.conn.disable_text_input(context.context_id).is_ok() {
                     context.enabled = false;
+                    context.editor_id = None;
                 }
             }
             return;
@@ -1471,16 +1577,26 @@ impl SWSPlatformWindow {
         if self.text_input.is_none() {
             match self.conn.create_text_input_context(self.surface_id, 0) {
                 Ok((context_id, serial)) => {
+                    let _ = self.conn.accept_text_input_dismissal(context_id);
                     self.text_input = Some(TextInputContext {
                         context_id,
                         serial,
                         enabled: false,
+                        editor_id: None,
+                        activation_serial: serial,
                     });
                 }
                 Err(_) => return,
             }
         }
 
+        if let Some(context) = self.text_input.as_mut()
+            && (!context.enabled || context.editor_id != state.editor_id)
+        {
+            context.editor_id = state.editor_id;
+            context.activation_serial = context.serial;
+            self.text_input_sync.invalidate();
+        }
         let Some(context) = self.text_input else {
             return;
         };
@@ -1893,36 +2009,59 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn poll_event(&mut self) -> Option<Event> {
+        #[cfg(feature = "std")]
+        if !self.quit_queued
+            && self
+                .presentation
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .is_some_and(|worker| worker.failed())
+        {
+            logln!(
+                "[ScarletUI SGFX] asynchronous presentation failed for surface {}",
+                self.surface_id
+            );
+            self.queue_quit();
+        }
         let debug = scarlet_ui_core::debug::is_enabled();
         if self.pending_head >= self.pending_events.len() {
             self.pending_events.clear();
             self.pending_head = 0;
         }
 
-        if !self.transport_failed && self.conn.dispatch().is_err() {
-            self.mark_transport_failed();
-        }
-
-        if !self.transport_failed {
-            while let Some(ev) = self.event_receiver.poll_event() {
-                self.handle_sws_event(ev);
+        // Finish the admitted batch before pumping another one. In particular,
+        // TouchFrame retains every change, timestamp and contact edge; unlike
+        // absolute mouse motion, dropping intermediate touch samples changes
+        // slop/reversal recognition and release velocity.
+        if self.pending_events.is_empty() {
+            if !self.transport_failed && self.conn.dispatch().is_err() {
+                self.mark_transport_failed();
             }
-            self.flush_pending_relative_motion();
-            if let Some(configure) = self.configure_batch.take() {
-                // State and extent belong to the same frame. State-only
-                // notifications remain staged until their configure arrives.
-                let (width, height) = configure.size;
-                self.needs_full_present = true;
-                if let Some(fullscreen) = configure.fullscreen {
-                    // Fullscreen can change CSD without changing the extent.
-                    self.backing_refresh.decoration_changed();
-                    self.push_event(Event::FullscreenConfigure {
-                        width,
-                        height,
-                        fullscreen,
-                    });
-                } else {
-                    self.push_event(Event::Resize { width, height });
+
+            if !self.transport_failed {
+                for _ in 0..MAX_NATIVE_EVENTS_PER_BATCH {
+                    let Some(ev) = self.event_receiver.poll_event() else {
+                        break;
+                    };
+                    self.handle_sws_event(ev);
+                }
+                self.flush_pending_relative_motion();
+                if let Some(configure) = self.configure_batch.take() {
+                    // State and extent belong to the same frame. State-only
+                    // notifications remain staged until their configure arrives.
+                    let (width, height) = configure.size;
+                    self.needs_full_present = true;
+                    if let Some(fullscreen) = configure.fullscreen {
+                        // Fullscreen can change CSD without changing the extent.
+                        self.backing_refresh.decoration_changed();
+                        self.push_event(Event::FullscreenConfigure {
+                            width,
+                            height,
+                            fullscreen,
+                        });
+                    } else {
+                        self.push_event(Event::Resize { width, height });
+                    }
                 }
             }
         }
@@ -1960,6 +2099,15 @@ impl PlatformWindow for SWSPlatformWindow {
         if self.transport_failed || self.pending_head < self.pending_events.len() {
             return;
         }
+        // Completion failure has no SWS event to wake a pending callback.
+        // Bound that wait so poll_event can report a failed worker. Idle windows
+        // without an outstanding callback retain the ordinary event-only wait.
+        #[cfg(feature = "std")]
+        let timeout = if self.presentation.is_some() && self.pending_frame_callback_id.is_some() {
+            timeout.min(core::time::Duration::from_millis(16))
+        } else {
+            timeout
+        };
         // The runner waits through its first window, but all SWS backend
         // windows share this connection. Include every window's mailbox so a
         // frame grant routed while another window was rendering is not lost.
@@ -1992,6 +2140,36 @@ impl PlatformWindow for SWSPlatformWindow {
         }
         let callback_id = self.next_frame_callback_id.max(1);
         self.next_frame_callback_id = callback_id.wrapping_add(1).max(1);
+        if self.frame_credits_supported {
+            // Negotiated nominal-60Hz draw permission, independent of this
+            // frame's GPU completion or scanout. Never queue it behind waits.
+            self.conn
+                .request_frame_credit(self.surface_id, callback_id)
+                .map_err(|_| Error::IoError)?;
+            self.pending_frame_callback_id = Some(callback_id);
+            #[cfg(feature = "std")]
+            if let Some(worker) = self
+                .presentation
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+            {
+                worker.profile_pacing(self.surface_id, callback_id, true, false);
+            }
+            return Ok(());
+        }
+        #[cfg(feature = "std")]
+        if let Some(worker) = self
+            .presentation
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            worker
+                .request_frame(self.surface_id, callback_id)
+                .map_err(|_| Error::IoError)?;
+            self.pending_frame_callback_id = Some(callback_id);
+            worker.profile_pacing(self.surface_id, callback_id, false, false);
+            return Ok(());
+        }
         self.conn
             .request_frame(self.surface_id, callback_id)
             .map_err(|_| Error::IoError)?;
@@ -2038,13 +2216,26 @@ impl PlatformWindow for SWSPlatformWindow {
         let Some(capabilities) = capabilities else {
             return Err(scarlet_ui_core::error::Error::RenderError);
         };
-        let sink = SwsSgfxFrameSink::new(
+        let mut sink = SwsSgfxFrameSink::new(
             self.conn.clone(),
             self.surface_id,
             capabilities.compositor_epoch,
         );
+        #[cfg(feature = "std")]
+        let presentation = {
+            let worker = std::sync::Arc::new(
+                presentation::FrameHandoff::new(self.conn.clone(), self.surface_id)
+                    .map_err(|_| Error::RenderError)?,
+            );
+            sink.presentation = Some(worker.clone());
+            worker
+        };
         match SgfxPaintBackend::new(sink, self.current_size, self.scale_milli) {
             Ok(backend) => {
+                #[cfg(feature = "std")]
+                {
+                    self.presentation = Some(std::sync::Arc::downgrade(&presentation));
+                }
                 logln!(
                     "[ScarletUI] platform-sws renderer=sgfx backend={}",
                     backend.backend_kind()
@@ -2274,8 +2465,11 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn create_popup(&mut self, position: Point, size: Size) -> Result<u32> {
-        let x = self.logical_to_physical_pos(position.x as i32);
-        let y = self.logical_to_physical_pos(position.y as i32);
+        if let Some(output) = self.output_id {
+            self.conn.output_context(output).map_err(|_| Error::IoError)?;
+        }
+        let x = self.logical_to_physical_pos((position.x as i32).saturating_add(self.output_origin.0));
+        let y = self.logical_to_physical_pos((position.y as i32).saturating_add(self.output_origin.1));
 
         // Create and place the popup in one request.  This avoids exposing the
         // compositor's fallback position for one frame before move_window is
@@ -2316,10 +2510,14 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn set_workarea(&mut self, x: i32, y: i32, width: u32, height: u32) -> Result<()> {
+        if let Some(output) = self.output_id {
+            return self.conn.set_output_workarea(output, self.logical_to_physical_pos(x), self.logical_to_physical_pos(y), self.logical_to_physical_len(width), self.logical_to_physical_len(height))
+                .map_err(|_| scarlet_ui_core::error::Error::IoError);
+        }
         self.conn
             .set_workarea(
-                self.logical_to_physical_pos(x),
-                self.logical_to_physical_pos(y),
+                self.logical_to_physical_pos(x.saturating_add(self.output_origin.0)),
+                self.logical_to_physical_pos(y.saturating_add(self.output_origin.1)),
                 self.logical_to_physical_len(width),
                 self.logical_to_physical_len(height),
             )
@@ -2336,7 +2534,10 @@ impl PlatformWindow for SWSPlatformWindow {
     where
         Self: Sized,
     {
-        Self::create_with_connection_and_policies(
+        if let Some(output) = self.output_id {
+            self.conn.output_context(output).map_err(|_| Error::IoError)?;
+        }
+        let mut window = Self::create_with_connection_and_policies(
             self.conn.clone(),
             app_id,
             title,
@@ -2352,15 +2553,18 @@ impl PlatformWindow for SWSPlatformWindow {
             true,
             WindowPlacement::Default,
             EdgeInsets::ZERO,
-        )
+        )?;
+        window.output_id = self.output_id;
+        window.output_origin = self.output_origin;
+        Ok(window)
     }
 
     fn move_window(&mut self, x: i32, y: i32) -> Result<()> {
         self.conn
             .move_window(
                 self.surface_id,
-                self.logical_to_physical_pos(x),
-                self.logical_to_physical_pos(y),
+                self.logical_to_physical_pos(x.saturating_add(self.output_origin.0)),
+                self.logical_to_physical_pos(y.saturating_add(self.output_origin.1)),
             )
             .map_err(|_| scarlet_ui_core::error::Error::IoError)
     }
@@ -2372,6 +2576,10 @@ impl PlatformWindow for SWSPlatformWindow {
     }
 
     fn get_screen_size(&mut self) -> Result<(u32, u32)> {
+        if let Some(output) = self.output_id {
+            let context = self.conn.output_context(output).map_err(|_| Error::IoError)?;
+            return Ok((context.rect.width, context.rect.height));
+        }
         let (width, height) = self
             .conn
             .get_screen_size()
@@ -2767,6 +2975,9 @@ impl SWSPlatformWindow {
                     changes,
                 }));
             }
+            // Output-aware servers follow with the authoritative logical
+            // configure; decoding this legacy extent would round it twice.
+            SwsEvent::SurfaceConfigure { .. } if self.output_id.is_some() => {}
             SwsEvent::SurfaceConfigure {
                 surface_id,
                 width,
@@ -2830,6 +3041,19 @@ impl SWSPlatformWindow {
                     return;
                 }
                 self.pending_frame_callback_id = None;
+                #[cfg(feature = "std")]
+                if let Some(worker) = self
+                    .presentation
+                    .as_ref()
+                    .and_then(std::sync::Weak::upgrade)
+                {
+                    worker.profile_pacing(
+                        self.surface_id,
+                        callback_id,
+                        self.frame_credits_supported,
+                        true,
+                    );
+                }
                 self.push_event(Event::FrameReady {
                     presentation_time_ns,
                 });
@@ -2848,12 +3072,30 @@ impl SWSPlatformWindow {
                 }
                 self.push_event(Event::PointerLockChanged { locked });
             }
+            SwsEvent::ScreenSizeChanged { .. } if self.output_id.is_some() => {}
             SwsEvent::ScreenSizeChanged { width, height } => {
                 self.push_event(Event::ScreenSizeChanged {
                     width: self.physical_to_logical_len(width),
                     height: self.physical_to_logical_len(height),
                 });
             }
+            SwsEvent::Output(sws_protocol::outputs::OutputEvent::Window { window, output, scale_milli, logical_width, logical_height, output_x, output_y, .. }) if window == self.surface_id => {
+                self.output_id = Some(output);
+                self.output_origin = (output_x, output_y);
+                self.text_input_sync.invalidate();
+                self.scale_milli = Self::sanitize_scale(scale_milli);
+                self.surface_regions_cache = None;
+                self.configure_batch.resize(logical_width, logical_height);
+            }
+            SwsEvent::Output(sws_protocol::outputs::OutputEvent::Snapshot(snapshot)) => {
+                if let Some(output) = self.output_id.and_then(|id| snapshot.outputs.iter().find(|output| output.id == id)) {
+                    if let Some(configuration) = snapshot.configuration.iter().find(|configuration| configuration.id == output.id) {
+                        self.output_origin = (configuration.x, configuration.y);
+                    }
+                    self.push_event(Event::ScreenSizeChanged { width: self.physical_to_logical_len(output.mode.pixel_width), height: self.physical_to_logical_len(output.mode.pixel_height) });
+                }
+            }
+            SwsEvent::OutputScaleChanged { .. } if self.output_id.is_some() => {}
             SwsEvent::OutputScaleChanged { scale_milli } => {
                 self.text_input_sync.invalidate();
                 self.scale_milli = Self::sanitize_scale(scale_milli);
@@ -2954,6 +3196,27 @@ impl SWSPlatformWindow {
             }
             SwsEvent::TextInputDone { context_id, serial } => {
                 self.push_event(Event::TextInputDone { context_id, serial });
+            }
+            SwsEvent::TextInputDismissed { context_id, serial } => {
+                if let Some(context) = self.text_input.as_mut() {
+                    // A queued close must not blur a newly synchronized editor.
+                    if !context.enabled
+                        || !text_input_sync::dismissal_is_current(
+                            context.context_id,
+                            context.activation_serial,
+                            context.serial,
+                            context_id,
+                            serial,
+                        )
+                    {
+                        return;
+                    }
+                    context.enabled = false;
+                    context.editor_id = None;
+                }
+                self.text_input_sync.invalidate();
+                self.input_panel_show_pending = false;
+                self.push_event(Event::TextInputDismissed { context_id, serial });
             }
             SwsEvent::FocusChanged {
                 window_id,

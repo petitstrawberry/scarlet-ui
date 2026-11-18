@@ -174,6 +174,47 @@ impl ElementTree {
         Self::find_element_recursive(self.root.as_deref()?, id)
     }
 
+    /// Select a relayout ancestor in one search of the current tree. Inspect
+    /// ancestors while unwinding, without allocating a path or searching from
+    /// the root again for each ancestor's constraints and size.
+    pub(crate) fn find_layout_root(&self, target: ElementId) -> Option<ElementId> {
+        struct Candidate {
+            id: Option<ElementId>,
+            resolved: bool,
+        }
+
+        fn search(element: &dyn Element, target: ElementId) -> Option<Candidate> {
+            if element.id() == target {
+                // Start at the parent: the dirty element's size may change.
+                return Some(Candidate {
+                    id: None,
+                    resolved: false,
+                });
+            }
+            let mut candidate = element
+                .children()
+                .iter()
+                .find_map(|child| search(child.as_ref(), target))?;
+            if !candidate.resolved {
+                if let Some(constraints) = element.last_layout_constraints() {
+                    candidate.id = Some(element.id());
+                    // Virtual content can exceed tight viewport constraints;
+                    // propagate its extent to the scroll owner in that case.
+                    candidate.resolved = constraints.is_tight()
+                        && element.bounds().size
+                            == Size::new(constraints.max_width, constraints.max_height);
+                } else {
+                    // An untracked ancestor requires the full-layout fallback.
+                    candidate.id = None;
+                    candidate.resolved = true;
+                }
+            }
+            Some(candidate)
+        }
+
+        search(self.root.as_deref()?, target)?.id
+    }
+
     /// Resolve a root-to-element path and return the target plus absolute origin.
     ///
     /// This follows only the supplied path, so callers that already have a dirty
@@ -203,6 +244,62 @@ impl ElementTree {
                 .as_ref();
         }
         None
+    }
+
+    /// Follow a retained input route without searching unrelated subtrees.
+    /// If a rebuild changed its ancestry, preserve ID-based delivery until the
+    /// dispatcher reconciles the route, just as for an uncached ID lookup.
+    pub(crate) fn element_mut_for_path(
+        &mut self,
+        path: &[ElementId],
+    ) -> Option<&mut Box<dyn Element>> {
+        if self.element_and_absolute_origin_for_path(path).is_none() {
+            return self.find_element_mut(*path.last()?);
+        }
+        let mut element = self.root.as_mut()?;
+        for (index, id) in path.iter().enumerate() {
+            if element.id() != *id {
+                return None;
+            }
+            if index + 1 == path.len() {
+                return Some(element);
+            }
+            let next = path[index + 1];
+            element = element
+                .children_mut()
+                .iter_mut()
+                .find(|child| child.id() == next)?;
+        }
+        None
+    }
+
+    /// Collect the current origins along a retained route in one descent.
+    pub(crate) fn origins_for_path(&self, path: &[ElementId], out: &mut Vec<Point>) -> bool {
+        out.clear();
+        let Some(mut element) = self.root.as_deref() else {
+            return false;
+        };
+        let mut origin = Point::ZERO;
+        for (index, id) in path.iter().enumerate() {
+            if element.id() != *id {
+                return false;
+            }
+            origin.x += element.position().x;
+            origin.y += element.position().y;
+            out.push(origin);
+            if index + 1 == path.len() {
+                return true;
+            }
+            let Some(child) = element
+                .children()
+                .iter()
+                .find(|child| child.id() == path[index + 1])
+            else {
+                return false;
+            };
+            element = child.as_ref();
+        }
+        false
     }
 
     /// Return the deepest repaint boundary in a root-to-target path.

@@ -2,6 +2,20 @@
 
 use alloc::string::String;
 
+/// Cursor/geometry updates may advance the serial while a close is in flight.
+/// Only a newer editor activation makes the old close stale.
+pub(super) fn dismissal_is_current(
+    context: u32,
+    activation_serial: u32,
+    next_serial: u32,
+    dismissed_context: u32,
+    serial: u32,
+) -> bool {
+    // SWS advances the serial after committing, so its context serial matches
+    // the client's next serial, rather than the value sent in the commit.
+    context == dismissed_context && serial > activation_serial && serial <= next_serial
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct State<'a> {
     pub rect: (i32, i32, u32, u32),
@@ -97,6 +111,18 @@ impl TextInputSync {
 mod tests {
     use super::*;
     use alloc::vec::Vec;
+
+    #[test]
+    fn dismissal_does_not_blur_a_newer_editor_or_another_context() {
+        assert!(dismissal_is_current(4, 6, 8, 4, 8));
+        assert!(
+            dismissal_is_current(4, 6, 10, 4, 8),
+            "cursor-only commits must not lose the close"
+        );
+        assert!(!dismissal_is_current(4, 8, 10, 4, 8));
+        assert!(!dismissal_is_current(5, 6, 8, 4, 8));
+        assert!(!dismissal_is_current(4, 6, 8, 4, 9));
+    }
 
     fn state() -> State<'static> {
         State {

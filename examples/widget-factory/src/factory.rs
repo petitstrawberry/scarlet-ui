@@ -555,7 +555,9 @@ impl<V: View + Clone> View for FactoryPageContent<V> {
             scarlet_ui::element::RenderElement::with_view_children_and_updater(
                 self.clone(),
                 |_| FactoryPageLayout(Size::ZERO),
-                |_, _| scarlet_ui::element::UpdateResult::Updated,
+                // The wrapper has no view properties of its own. Its child
+                // still reconciles normally and requests layout when needed.
+                |_, _| scarlet_ui::element::UpdateResult::NoChange,
                 |view| vec![view.0.clone_view()],
             ),
         )
@@ -783,10 +785,15 @@ impl WidgetFactory {
             )
         } else {
             Either::B(
-                hstack![label.frame_width(150.0), control]
-                    .spacing(18.0)
-                    .alignment(alignment)
-                    .frame_width(self.row_width()),
+                hstack![
+                    label
+                        .frame_width(150.0)
+                        .content_alignment(Alignment::Leading),
+                    control
+                ]
+                .spacing(18.0)
+                .alignment(alignment)
+                .frame_width(self.row_width()),
             )
         }
     }
@@ -884,14 +891,14 @@ impl WidgetFactory {
         ScrollView::new(
             vstack! {
                 Text::new("ScrollView content").font_size(16.0),
-                hstack![Text::new("Track 01").frame_width(150.0), ProgressView::new(0.20).frame(260.0, 18.0)].spacing(18.0),
-                hstack![Text::new("Track 02").frame_width(150.0), ProgressView::new(0.42).frame(260.0, 18.0)].spacing(18.0),
-                hstack![Text::new("Track 03").frame_width(150.0), ProgressView::new(0.64).frame(260.0, 18.0)].spacing(18.0),
-                hstack![Text::new("Track 04").frame_width(150.0), ProgressView::new(0.82).frame(260.0, 18.0)].spacing(18.0),
-                hstack![Text::new("Track 05").frame_width(150.0), ProgressView::new(0.34).frame(260.0, 18.0)].spacing(18.0),
-                hstack![Text::new("Track 06").frame_width(150.0), ProgressView::new(0.56).frame(260.0, 18.0)].spacing(18.0),
-                hstack![Text::new("Track 07").frame_width(150.0), ProgressView::new(0.74).frame(260.0, 18.0)].spacing(18.0),
-                hstack![Text::new("Track 08").frame_width(150.0), ProgressView::new(0.12).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 01").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.20).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 02").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.42).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 03").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.64).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 04").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.82).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 05").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.34).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 06").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.56).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 07").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.74).frame(260.0, 18.0)].spacing(18.0),
+                hstack![Text::new("Track 08").frame_width(150.0).content_alignment(Alignment::Leading), ProgressView::new(0.12).frame(260.0, 18.0)].spacing(18.0),
             }
             .spacing(8.0)
             .alignment(Alignment::Leading)
@@ -1606,6 +1613,56 @@ mod tests {
         assert_eq!(&edited[headings[0].range.clone()], "# Another");
         assert!(diagnostics.is_empty());
         assert_eq!(text_decorations(""), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn slider_rows_center_tracks_and_keep_the_label_column_leading() {
+        fn find<T: 'static>(element: &dyn Element, origin: Point) -> Option<Rect> {
+            let origin = Point::new(
+                origin.x + element.position().x,
+                origin.y + element.position().y,
+            );
+            if element
+                .render_object()
+                .is_some_and(|r| r.as_any().is::<T>())
+            {
+                return Some(Rect::new(origin, element.bounds().size));
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| find::<T>(child.as_ref(), origin))
+        }
+        let app = WidgetFactory::new();
+        for width in [600.0, 800.0] {
+            app.page_width.set(width);
+            let rows: Vec<Box<dyn View>> = vec![
+                Box::new(app.row("Slider", app.slider())),
+                Box::new(
+                    app.row(
+                        "Disabled",
+                        Slider::new(app.slider_value.clone())
+                            .enabled(false)
+                            .frame(app.demo_width(280.0), 26.0),
+                    ),
+                ),
+            ];
+            for row in rows {
+                let mut root = row.create_element();
+                root.layout(LayoutConstraints::loose(width, 100.0));
+                let label = find::<scarlet_ui::views::TextRenderObject>(root.as_ref(), Point::ZERO)
+                    .unwrap();
+                let slider =
+                    find::<scarlet_ui::views::SliderRenderObject>(root.as_ref(), Point::ZERO)
+                        .unwrap();
+                assert_eq!(label.origin.x, 0.0);
+                assert_eq!(
+                    label.origin.y + label.size.height / 2.0,
+                    slider.origin.y + slider.size.height / 2.0
+                );
+                assert!(slider.right() <= app.row_width());
+            }
+        }
     }
 
     #[test]
@@ -3007,7 +3064,10 @@ mod tests {
         };
         use scarlet_ui::{ComponentElement, RenderingPipeline};
         use std::{cell::RefCell, rc::Rc, sync::Arc};
-        struct Capture(Rc<RefCell<Option<Arc<DisplayList>>>>);
+        struct Capture(
+            Rc<RefCell<Option<Arc<DisplayList>>>>,
+            Rc<RefCell<Option<Vec<scarlet_ui::compositor::DamageRect>>>>,
+        );
         impl PaintBackend for Capture {
             fn supports_retained_display_lists(&self) -> bool {
                 true
@@ -3018,8 +3078,9 @@ mod tests {
                 ctx: &PaintContext<'_>,
                 _: Color,
                 _: Option<&[Rect]>,
-                _: Option<&[scarlet_ui::compositor::DamageRect]>,
+                damage: Option<&[scarlet_ui::compositor::DamageRect]>,
             ) -> scarlet_ui::Result<BackendFrame<'a>> {
+                *self.1.borrow_mut() = damage.map(|d| d.to_vec());
                 for command in ctx.commands() {
                     if let PaintCommand::DrawDisplayList { list, .. } = command {
                         if list
@@ -3036,6 +3097,7 @@ mod tests {
         let app = WidgetFactory::new();
         app.viewport.set(Size::new(500., 800.));
         let capture = Rc::new(RefCell::new(None));
+        let damage = Rc::new(RefCell::new(None));
         let mut pipeline = RenderingPipeline::new();
         pipeline.set_root(Box::new(ComponentElement::new_with_builder(
             app.clone(),
@@ -3046,7 +3108,7 @@ mod tests {
                 Box::new(app.controls_page().frame(500., 800.))
             },
         )));
-        pipeline.set_paint_backend(Box::new(Capture(capture.clone())));
+        pipeline.set_paint_backend(Box::new(Capture(capture.clone(), damage.clone())));
         pipeline.resize(Size::new(500., 800.));
         pipeline.layout_initial();
         pipeline.render_for_present().unwrap();
@@ -3069,6 +3131,18 @@ mod tests {
         for value in [0.1, 0.3, 0.6, 0.9, 0.42] {
             app.slider_value.set(value);
             pipeline.render_for_present().unwrap();
+            let owner = pipeline.pipeline_owner();
+            assert!(owner.last_children_ids().is_empty());
+            assert!(owner.last_composite_ids().is_empty());
+            assert!(
+                owner.last_paint_ids().iter().all(|id| pipeline
+                    .element_tree()
+                    .find_element(*id)
+                    .unwrap()
+                    .children()
+                    .is_empty()),
+                "slider changes must not mark a whole page for paint"
+            );
             let next = capture.borrow().as_ref().unwrap().clone();
             assert_eq!(next.cache_identity(), original.cache_identity());
             let ids = next
@@ -3091,6 +3165,92 @@ mod tests {
                 damage.iter().all(|r| r.top() > 500.),
                 "slider updates must not invalidate the static material study: {damage:?}"
             );
+        }
+        drop(pipeline);
+        // Exercise the actual scene builder too, including navigation and the
+        // dynamic Reset menu. The application's broad subscriptions stay live.
+        fn editor_bounds(element: &dyn Element, origin: Point) -> Option<Rect> {
+            let position = element.position();
+            let origin = Point::new(origin.x + position.x, origin.y + position.y);
+            if element
+                .render_object()
+                .is_some_and(|r| r.as_any().is::<scarlet_ui::views::TextViewRenderObject>())
+            {
+                return Some(Rect::new(origin, element.bounds().size));
+            }
+            element
+                .children()
+                .iter()
+                .find_map(|child| editor_bounds(child.as_ref(), origin))
+        }
+        for page in [1, 2] {
+            app.navigation().selected_index_state().set(page);
+            let mut full = RenderingPipeline::new();
+            full.set_root(Box::new(ComponentElement::new_with_builder(
+                app.clone(),
+                |app| {
+                    let mut builder = scarlet_ui::SceneBuilder::new();
+                    app.scenes().build(&mut builder);
+                    builder.into_declarations().remove(0).view
+                },
+            )));
+            full.set_paint_backend(Box::new(Capture(capture.clone(), damage.clone())));
+            full.layout_initial();
+            if page == 2 {
+                full.set_scale_milli(2000);
+                full.resize(Size::new(540., 680.));
+                full.handle_event(&scarlet_ui::Event::TabletPresentationChanged { active: true });
+            }
+            for _ in 0..4 {
+                full.render_for_present().unwrap();
+            }
+            for value in [0.1, 0.3, 0.6, 0.9, 0.42] {
+                app.slider_value.set(value);
+                full.render_for_present().unwrap();
+                assert!(
+                    full.pipeline_owner().last_paint_ids().iter().all(|id| full
+                        .element_tree()
+                        .find_element(*id)
+                        .unwrap()
+                        .children()
+                        .is_empty()),
+                    "real scenes must not dirty whole pages for slider updates"
+                );
+                if page == 2 {
+                    let dirty = full.pipeline_owner().last_paint_ids();
+                    assert!(
+                        dirty.iter().all(|id| full
+                            .element_tree()
+                            .find_element(*id)
+                            .unwrap()
+                            .render_object()
+                            .is_some_and(|r| r
+                                .as_any()
+                                .is::<scarlet_ui::views::SliderRenderObject>())),
+                        "slider notifications must not repaint an unchanged editor or select"
+                    );
+                    let editor =
+                        editor_bounds(full.element_tree().root().unwrap(), Point::ZERO).unwrap();
+                    let factor = full.scale_milli().max(1) as f32 / 1000.;
+                    let damage = damage.borrow();
+                    let damage = damage.as_ref().expect("slider updates have partial damage");
+                    assert!(
+                        damage.iter().all(|&(x, y, w, h)| !Rect::from_xywh(
+                            x as f32 / factor,
+                            y as f32 / factor,
+                            w as f32 / factor,
+                            h as f32 / factor
+                        )
+                        .overlaps(&editor)),
+                        "cached page reconstruction must not pull in the unchanged editor: {damage:?}"
+                    );
+                }
+                let menu = app.menu_model();
+                let MenuEntry::Item(reset) = &menu.items()[0].children_value()[0] else {
+                    panic!("reset menu");
+                };
+                assert_eq!(reset.enabled_value(), value != 0.42);
+            }
         }
     }
 }

@@ -27,8 +27,9 @@ pub const DEFAULT_GPU_DEVICE: &str = "/dev/gpu0";
 // SWS retains the last presented client image until a replacement reaches the
 // compositor. Two targets therefore serialize rendering behind that release
 // and can turn a narrowly missed 60 Hz deadline into a stable 30 Hz cadence.
-// A third target keeps one image presented, one pending, and one renderable.
-const PRESENTATION_SLOT_COUNT: usize = 3;
+// Four targets allow CPU encoding, GPU execution and SWS presentation to overlap
+// without reusing an image until both GPU completion and compositor release.
+const PRESENTATION_SLOT_COUNT: usize = 4;
 
 /// SGFX/SWS integration operation that failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +73,8 @@ pub enum Error {
     FrameNotPresented(RenderFailure),
     /// An SWS sink operation failed.
     Sink { stage: Stage, source: SgfxSinkError },
+    /// All target leases are occupied; no work for this frame was accepted.
+    Deferred,
     /// A frame dimension or lifecycle transition was invalid.
     InvalidFrame,
     /// The allocation-generation counter was exhausted.
@@ -94,6 +97,7 @@ impl fmt::Display for Error {
             Self::Sink { stage, source } => {
                 write!(formatter, "SGFX sink failed at {stage:?}: {source}")
             }
+            Self::Deferred => formatter.write_str("presentation target temporarily unavailable"),
             Self::InvalidFrame => formatter.write_str("invalid ScarletUI frame"),
             Self::GenerationExhausted => formatter.write_str("SGFX buffer generation exhausted"),
         }
@@ -158,7 +162,7 @@ struct RetiredGeneration {
 /// Native SGFX implementation of ScarletUI's backend-neutral paint contract.
 ///
 /// This platform object owns SWS presentation policy and alternates between
-/// three images. The physical image/resource/context/queue association
+/// four images. The physical image/resource/context/queue association
 /// is owned by [`MappedTargetSession`], and command execution is delegated to
 /// its backend-owned executor.
 pub struct SgfxPaintBackend<S> {
@@ -185,6 +189,8 @@ pub struct SgfxPaintBackend<S> {
     backing_invalidated: bool,
     #[cfg(feature = "std")]
     profiling: bool,
+    #[cfg(feature = "std")]
+    damage_trace: bool,
 }
 
 impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
@@ -253,6 +259,8 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             backing_invalidated: false,
             #[cfg(feature = "std")]
             profiling: std::env::var("SCARLET_UI_PROFILE").as_deref() == Ok("1"),
+            #[cfg(feature = "std")]
+            damage_trace: super::damage_trace::enabled(),
         };
         backend.initialize_shared_images()?;
         Ok(backend)
@@ -456,9 +464,9 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
     ///
     /// # Returns
     ///
-    /// Success after GPU completion and SWS commit. VirGL queues the frame's
-    /// streams asynchronously and waits at this cross-process handoff, not
-    /// after each submit. SWS release remains a separate condition for reuse.
+    /// Success after accepting the frame for ordered presentation. Tracked
+    /// receipts can retire on the sink's worker while the UI encodes another
+    /// frame. Only completed frames reach SWS; release remains required for reuse.
     /// Adreno retains its explicit legacy synchronous path until it supports
     /// tracked submission. An empty damage slice is an idle frame and issues
     /// no protocol request. Recoverable rejection discards this frame, retires
@@ -473,7 +481,11 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         physical_damage: Option<&[DamageRect]>,
     ) -> Result<()> {
         #[cfg(feature = "std")]
-        let profile_started = self.profiling.then(Instant::now);
+        let timing_enabled = self.profiling || self.damage_trace;
+        #[cfg(feature = "std")]
+        let trace_input = (physical_damage, self.full_redraw_required);
+        #[cfg(feature = "std")]
+        let profile_started = timing_enabled.then(Instant::now);
         if self.render_failed {
             return Err(Error::FrameNotPresented(RenderFailure {
                 kind: RenderFailureKind::RecoveryRequired,
@@ -491,41 +503,15 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         }
         self.refresh_compositor_epoch()?;
         self.ensure_session()?;
-        self.import_external_textures(paint)?;
 
         #[cfg(feature = "std")]
-        let profile_prepared = self.profiling.then(Instant::now);
+        let profile_prepared = timing_enabled.then(Instant::now);
 
-        let slot = self.next_slot;
+        let slot = self.acquire_slot()?;
         let identity = self.identity(slot)?;
-        if let Some(retained) = self.slots[slot].retained {
-            match self.sink.wait_until_released(retained) {
-                Ok(()) => self.slots[slot].retained = None,
-                // The sink has consumed an asynchronous rejection of this
-                // exact commit. Its GPU work already completed before commit;
-                // SWS never accepted this use, so the slot is safe to reuse.
-                // Report admission pressure without poisoning the renderer.
-                Err(SgfxSinkError::BufferBusy) => {
-                    self.slots[slot].retained = None;
-                    self.slots[slot].content_valid = false;
-                    self.slots[slot].needs_full_commit = true;
-                    self.full_redraw_required = true;
-                    return Err(Error::FrameNotPresented(RenderFailure {
-                        kind: RenderFailureKind::Busy,
-                        reason: "SWS rejected a queued frame while its presentation queue was full"
-                            .into(),
-                    }));
-                }
-                Err(source) => {
-                    return Err(Error::Sink {
-                        stage: Stage::WaitForRelease,
-                        source,
-                    });
-                }
-            }
-        }
+        self.import_external_textures(paint)?;
         #[cfg(feature = "std")]
-        let profile_released = self.profiling.then(Instant::now);
+        let profile_released = timing_enabled.then(Instant::now);
         // A released image can already be current outside this frame's damage.
         // Track changes since each slot's last commit and skip the whole-image
         // copy when this repaint covers every stale pixel. Do not expand the
@@ -539,12 +525,15 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                     _ => return Err(Error::InvalidFrame),
                 }
             };
+        #[cfg(feature = "std")]
+        let trace_slot = self.slots[slot];
         // An accepted prefix may modify this image even if encoding, waiting,
         // or publication later fails. Only a successful commit validates it.
         self.slots[slot].content_valid = false;
 
         #[cfg(feature = "std")]
         let profile_encoded;
+        let mut submissions = Vec::new();
         {
             let encoder = self.encoder.as_mut().ok_or(Error::InvalidFrame)?;
             let session = self.session.as_mut().ok_or(Error::InvalidFrame)?;
@@ -591,18 +580,15 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                 }
                 #[cfg(feature = "std")]
                 {
-                    profile_encoded = self.profiling.then(Instant::now);
+                    profile_encoded = timing_enabled.then(Instant::now);
                 }
-                match executor.wait() {
-                    Ok(CompletionStatus::Complete) => {}
-                    result => {
-                        self.render_failed = true;
-                        return Err(Error::FrameNotPresented(RenderFailure {
-                            kind: RenderFailureKind::RecoveryRequired,
-                            reason: format!("SGFX frame did not retire: {result:?}"),
-                        }));
-                    }
-                }
+                submissions = executor.into_submissions().map_err(|error| {
+                    self.render_failed = true;
+                    Error::FrameNotPresented(RenderFailure {
+                        kind: RenderFailureKind::RecoveryRequired,
+                        reason: format!("SGFX frame receipt transfer failed: {error:?}"),
+                    })
+                })?;
             } else {
                 // Older kernels can expose synchronous queues. Select that
                 // path from the negotiated capability, not the backend name.
@@ -627,12 +613,16 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                 #[cfg(feature = "std")]
                 {
                     // Synchronous backends include GPU completion in encoding.
-                    profile_encoded = self.profiling.then(Instant::now);
+                    profile_encoded = timing_enabled.then(Instant::now);
                 }
             }
         }
         #[cfg(feature = "std")]
-        let profile_completed = self.profiling.then(Instant::now);
+        let profile_completed = timing_enabled.then(Instant::now);
+
+        // GPU work is already accepted. A registration/handoff failure must
+        // never leave this backend eligible to reuse an untracked target.
+        self.render_failed = true;
 
         if self.slots[slot].registered != Some(identity) {
             let target = self
@@ -659,11 +649,79 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         let damage = self.commit_damage(slot, physical_damage)?;
         let retained = self
             .sink
-            .commit_shared_image(identity, &damage)
+            .commit_tracked_image(identity, &damage, submissions)
             .map_err(|source| Error::Sink {
                 stage: Stage::CommitImage,
                 source,
             })?;
+        #[cfg(feature = "std")]
+        if self.damage_trace {
+            use std::fmt::Write as _;
+            let handed_off = Instant::now();
+            super::damage_trace::record(
+                self.sink.window_id(),
+                "backend",
+                Some(retained.commit_serial),
+                false,
+                |out| {
+                    let _ = write!(
+                        out,
+                        "\tevent=enqueue\tbuffer={}\tgen={}\tepoch={}\tserial={}\tslot={}\tw={}\th={}\tinput_none={}\tforced_full={}\tfull_before={}\tfull_after=0\tcontent_before={}\tcopy_from={}\tinput_count={}\trender_count={}\tcommit_count={}",
+                        identity.buffer_id,
+                        identity.generation,
+                        identity.compositor_epoch,
+                        retained.commit_serial,
+                        slot,
+                        self.physical_width,
+                        self.physical_height,
+                        u8::from(trace_input.0.is_none()),
+                        u8::from(trace_input.1),
+                        u8::from(trace_slot.needs_full_commit),
+                        u8::from(trace_slot.content_valid),
+                        copy_from.map_or(-1, |i| i as i32),
+                        trace_input.0.map_or(0, |r| r.len()),
+                        render_areas.len(),
+                        damage.len()
+                    );
+                    if let (
+                        Some(start),
+                        Some(prepared),
+                        Some(released),
+                        Some(encoded),
+                        Some(completed),
+                    ) = (
+                        profile_started,
+                        profile_prepared,
+                        profile_released,
+                        profile_encoded,
+                        profile_completed,
+                    ) {
+                        let _ = write!(
+                            out,
+                            "\tprepare_us={}\tacquire_import_us={}\tencode_submit_us={}\treceipt_transfer_us={}\tqueue_handoff_us={}",
+                            prepared.duration_since(start).as_micros(),
+                            released.duration_since(prepared).as_micros(),
+                            encoded.duration_since(released).as_micros(),
+                            completed.duration_since(encoded).as_micros(),
+                            handed_off.duration_since(completed).as_micros()
+                        );
+                    }
+                    for (name, rects) in [
+                        ("input", trace_input.0.unwrap_or(&[])),
+                        ("render", render_areas.as_slice()),
+                        ("commit", damage.as_slice()),
+                    ] {
+                        super::damage_trace::rects(
+                            out,
+                            name,
+                            rects
+                                .iter()
+                                .map(|&(x, y, w, h)| (i64::from(x), i64::from(y), w, h)),
+                        );
+                    }
+                },
+            );
+        }
         self.slots[slot].retained = Some(retained);
         self.slots[slot].needs_full_commit = false;
         let logical_damage = render_areas.iter().copied().reduce(union_damage).unwrap();
@@ -682,19 +740,22 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         self.next_slot = (slot + 1) % PRESENTATION_SLOT_COUNT;
         self.full_redraw_required = false;
         self.cleanup_retired()?;
+        self.render_failed = false;
         #[cfg(feature = "std")]
-        if let (Some(start), Some(prepared), Some(released), Some(encoded), Some(completed)) = (
-            profile_started,
-            profile_prepared,
-            profile_released,
-            profile_encoded,
-            profile_completed,
-        ) {
+        if self.profiling
+            && let (Some(start), Some(prepared), Some(released), Some(encoded), Some(completed)) = (
+                profile_started,
+                profile_prepared,
+                profile_released,
+                profile_encoded,
+                profile_completed,
+            )
+        {
             // Opt-in wall times: encoding may include submission backpressure,
-            // and waiting includes dispatch/scheduling as well as GPU execution.
+            // GPU retirement and SWS handoff are reported separately by UI_PRESENT.
             // Redirect stdout to a file during measurement to avoid UART cost.
             std::println!(
-                "[UI_PROFILE] window={} prepare_us={} release_us={} encode_submit_us={} wait_us={} commit_us={} copy_previous={}",
+                "[UI_PROFILE] window={} prepare_us={} release_us={} encode_submit_us={} receipt_transfer_us={} enqueue_us={} copy_previous={}",
                 self.sink.window_id(),
                 prepared.duration_since(start).as_micros(),
                 released.duration_since(prepared).as_micros(),
@@ -730,6 +791,20 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
         if self.compositor_epoch == Some(epoch) {
             return Ok(());
         }
+        #[cfg(feature = "std")]
+        if self.damage_trace {
+            use std::fmt::Write as _;
+            super::damage_trace::record(self.sink.window_id(), "reset", None, true, |out| {
+                let _ = write!(
+                    out,
+                    "\tevent=epoch\told_epoch={}\tepoch={}\tgen={}\tslots_reset={}",
+                    self.compositor_epoch.unwrap_or(0),
+                    epoch,
+                    self.generation,
+                    PRESENTATION_SLOT_COUNT
+                );
+            });
+        }
         self.compositor_epoch = Some(epoch);
         self.slots = [SlotState::new(); PRESENTATION_SLOT_COUNT];
         self.front_slot = None;
@@ -741,6 +816,17 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
     /// Replace the shared images after a native backing handshake, including
     /// same-extent decoration changes. Retain old images until SWS releases them.
     pub(super) fn invalidate_backing(&mut self) {
+        #[cfg(feature = "std")]
+        if self.damage_trace {
+            use std::fmt::Write as _;
+            super::damage_trace::record(self.sink.window_id(), "reset", None, true, |out| {
+                let _ = write!(
+                    out,
+                    "\tevent=invalidate_backing\tgen={}\tw={}\th={}",
+                    self.generation, self.physical_width, self.physical_height
+                );
+            });
+        }
         self.backing_invalidated = true;
         self.full_redraw_required = true;
     }
@@ -753,11 +839,29 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
             return Ok(());
         }
 
+        #[cfg(feature = "std")]
+        let trace_session = (
+            self.generation,
+            self.session.is_some(),
+            self.backing_invalidated,
+        );
         let next_generation = next_session_generation(
             self.generation,
             self.session.is_some(),
             !self.retired.is_empty(),
         )?;
+
+        if self.session.is_some() {
+            // Registering a newer generation makes queued older commits stale
+            // in SWS. Flush socket publication first, but do not await release
+            // of the currently displayed image (the replacement releases it).
+            self.sink
+                .flush_pending_commits()
+                .map_err(|source| Error::Sink {
+                    stage: Stage::CommitImage,
+                    source,
+                })?;
+        }
 
         // Materialize the replacement before retiring the current session.
         // SWS continues presenting the old generation until the first frame
@@ -792,12 +896,45 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                 retained: self.slots.map(|slot| slot.retained),
             });
         }
+        #[cfg(feature = "std")]
+        if self.damage_trace {
+            use std::fmt::Write as _;
+            super::damage_trace::record(self.sink.window_id(), "reset", None, true, |out| {
+                let _ = write!(
+                    out,
+                    "\tevent=session\told_gen={}\tgen={}\thad_session={}\tinvalidated={}\textent_match={}\tw={}\th={}\tslots_reset={}",
+                    trace_session.0,
+                    next_generation,
+                    u8::from(trace_session.1),
+                    u8::from(trace_session.2),
+                    u8::from(matches),
+                    self.physical_width,
+                    self.physical_height,
+                    PRESENTATION_SLOT_COUNT
+                );
+            });
+        }
         self.encoder = Some(encoder);
         self.generation = next_generation;
         self.backing_invalidated = false;
         self.slots = [SlotState::new(); PRESENTATION_SLOT_COUNT];
         self.next_slot = 0;
         self.front_slot = None;
+        #[cfg(feature = "std")]
+        if self.profiling {
+            // Session configuration, not evidence that this frame contains an
+            // analytic filter. Zero-radius materials bypass local filtering.
+            std::println!(
+                "[UI_SESSION] window={} generation={} supports_programmable={} analytic_enabled={} width={} height={} slots={}",
+                self.sink.window_id(),
+                self.generation,
+                self.supports_programmable,
+                self.supports_programmable,
+                self.physical_width,
+                self.physical_height,
+                PRESENTATION_SLOT_COUNT,
+            );
+        }
         Ok(())
     }
 
@@ -815,18 +952,20 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
     }
 
     fn cleanup_retired(&mut self) -> Result<()> {
-        while let Some(mut retired) = self.retired.pop() {
+        let mut index = 0;
+        while index < self.retired.len() {
+            let retired = &mut self.retired[index];
             for slot in 0..PRESENTATION_SLOT_COUNT {
                 if let Some(identity) = retired.identities[slot] {
-                    if let Some(retained) = retired.retained[slot] {
-                        match self.sink.wait_until_released(retained) {
-                            Ok(())
+                    if let Some(token) = retired.retained[slot] {
+                        match self.sink.poll_released(token) {
+                            Ok(false) => continue,
+                            Ok(true)
                             | Err(SgfxSinkError::BufferBusy)
                             | Err(SgfxSinkError::BackendLost { .. }) => {
-                                retired.retained[slot] = None;
+                                retired.retained[slot] = None
                             }
                             Err(source) => {
-                                self.retired.push(retired);
                                 return Err(Error::Sink {
                                     stage: Stage::WaitForRelease,
                                     source,
@@ -836,10 +975,9 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                     }
                     match self.sink.destroy_shared_image(identity) {
                         Ok(()) | Err(SgfxSinkError::BackendLost { .. }) => {
-                            retired.identities[slot] = None;
+                            retired.identities[slot] = None
                         }
                         Err(source) => {
-                            self.retired.push(retired);
                             return Err(Error::Sink {
                                 stage: Stage::DestroyImage,
                                 source,
@@ -848,11 +986,83 @@ impl<S: SgfxFrameSink> SgfxPaintBackend<S> {
                     }
                 }
             }
-            // Dropping the complete SGFX session after deregistration releases
-            // its mapped images/cache before its context.
-            drop(retired.session);
+            if retired.identities.iter().all(Option::is_none) {
+                // Visit every generation: a recent pending image must not hide
+                // older releasable sessions during a sequence of resize events.
+                drop(self.retired.swap_remove(index).session);
+            } else {
+                index += 1;
+            }
         }
         Ok(())
+    }
+
+    fn acquire_slot(&mut self) -> Result<usize> {
+        let available =
+            super::sink::poll_available_slot(PRESENTATION_SLOT_COUNT, self.next_slot, |slot| {
+                if let Some(token) = self.slots[slot].retained {
+                    match self.sink.poll_released(token) {
+                        Ok(false) => return Ok(false),
+                        Ok(true) => self.slots[slot].retained = None,
+                        Err(SgfxSinkError::BufferBusy) => {
+                            #[cfg(feature = "std")]
+                            if self.damage_trace {
+                                use std::fmt::Write as _;
+                                super::damage_trace::record(token.identity.window_id, "reset", Some(token.commit_serial), true, |out| {
+                                    let _ = write!(out, "\tevent=rejected\tbuffer={}\tgen={}\tepoch={}\tserial={}\tslot={}\tfull_reset=1", token.identity.buffer_id, token.identity.generation, token.identity.compositor_epoch, token.commit_serial, slot);
+                                });
+                            }
+                            self.slots[slot].retained = None;
+                            self.slots[slot].content_valid = false;
+                            self.slots[slot].needs_full_commit = true;
+                            self.full_redraw_required = true;
+                            return Err(SgfxSinkError::BufferBusy);
+                        }
+                        Err(source) => return Err(source),
+                    }
+                }
+                Ok(true)
+            })
+            .map_err(|source| match source {
+                SgfxSinkError::BufferBusy => Error::FrameNotPresented(RenderFailure {
+                    kind: RenderFailureKind::Busy,
+                    reason: "SWS rejected a queued frame; a full repaint is required".into(),
+                }),
+                source => Error::Sink {
+                    stage: Stage::WaitForRelease,
+                    source,
+                },
+            })?;
+        if let Some(slot) = available {
+            return Ok(slot);
+        }
+        // Application retains its dirty/retry state and yields to another
+        // credit/event. No accepted work is replayed and no busy image is reused.
+        #[cfg(feature = "std")]
+        if self.profiling {
+            // Every slot was polled above: unlike cached retained flags, this
+            // records an actual exhausted admission attempt for this generation.
+            std::println!(
+                "[UI_POOL] window={} generation={} capacity={} event=exhausted",
+                self.sink.window_id(),
+                self.generation,
+                PRESENTATION_SLOT_COUNT,
+            );
+        }
+        #[cfg(feature = "std")]
+        if self.damage_trace {
+            use std::fmt::Write as _;
+            super::damage_trace::record(self.sink.window_id(), "defer", None, false, |out| {
+                let _ = write!(
+                    out,
+                    "\tevent=pool_exhausted\tgen={}\tepoch={}\tcapacity={}",
+                    self.generation,
+                    self.compositor_epoch.unwrap_or(0),
+                    PRESENTATION_SLOT_COUNT
+                );
+            });
+        }
+        Err(Error::Deferred)
     }
 
     fn render_areas(&self, damage: Option<&[DamageRect]>) -> Result<Vec<DamageRect>> {
@@ -924,6 +1134,7 @@ impl<S: SgfxFrameSink> PaintBackend for SgfxPaintBackend<S> {
     ) -> scarlet_ui_core::Result<BackendFrame<'a>> {
         self.render_and_commit(context, background_color, physical_damage)
             .map_err(|error| match error {
+                Error::Deferred => scarlet_ui_core::error::Error::RenderDeferred,
                 Error::FrameNotPresented(failure) => {
                     scarlet_ui_core::error::Error::RenderFailure(failure)
                 }

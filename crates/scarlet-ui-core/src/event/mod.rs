@@ -151,6 +151,31 @@ pub enum Event {
 
     /// End of a text-input update batch.
     TextInputDone { context_id: u32, serial: u32 },
+    /// The user explicitly closed the software keyboard for this editor.
+    TextInputDismissed { context_id: u32, serial: u32 },
+}
+
+impl Event {
+    /// Motion may batch platform metadata refreshes, but must still be dispatched
+    /// sample by sample: touch recognition and fling velocity need its history.
+    pub(crate) fn is_continuous_motion(&self) -> bool {
+        match self {
+            Self::Mouse(MouseEvent::Moved { .. } | MouseEvent::RelativeMotion { .. }) => true,
+            Self::Mouse(MouseEvent::Wheel {
+                phase: WheelPhase::Moved,
+                source: ScrollSource::Trackpad,
+                ..
+            }) => true,
+            Self::TouchFrame(frame) => {
+                !frame.changes.is_empty()
+                    && frame
+                        .changes
+                        .iter()
+                        .all(|change| change.phase == TouchPhase::Move)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Mouse events.

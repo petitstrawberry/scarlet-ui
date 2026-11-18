@@ -177,13 +177,27 @@ impl SgfxPaintEncoder {
         };
         if radius <= 0. {
             if let Some(geometry) = tessellator.fill_rounded_rect(rect, corner_radius)? {
-                return push_draw(
+                push_draw(
                     draws,
                     tessellator,
                     geometry,
                     ui_color(tint, opacity)?,
                     DrawSource::Solid,
-                );
+                )?;
+            }
+            // An external compositor may own diffusion. A zero local blur
+            // still carries the standard glass rim, without a backdrop copy,
+            // scratch texture or filter pass over this window's empty canvas.
+            if refraction > 0.0 {
+                self.lower_glass_rim(
+                    tessellator,
+                    draws,
+                    rect,
+                    corner_radius,
+                    opacity,
+                    refraction,
+                    scale,
+                )?;
             }
             return Ok(());
         }
@@ -282,31 +296,53 @@ impl SgfxPaintEncoder {
             }),
         )?;
         if refraction > 0.0 && !analytic {
-            // The rim carries its own half-pixel coverage fringe. Preserve
-            // ancestor clips, but do not cut that fringe at the glass boundary.
-            if let Some(draw) = self.cached_glass_rim(
+            self.lower_glass_rim(
                 tessellator,
+                draws,
                 rect,
                 corner_radius,
-                opacity * refraction,
+                opacity,
+                refraction,
                 scale,
-            )? {
-                draws.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
-                draws.push(draw);
-                return Ok(());
-            }
-            let rim =
-                tessellator.glass_rim(rect, corner_radius, opacity * refraction.clamp(0.0, 1.0));
-            if let Some(geometry) = rim? {
-                draws.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
-                draws.push(Draw {
-                    geometry,
-                    source: DrawSource::Solid,
-                    vertex_buffer: None,
-                    offset: [0.0, 0.0],
-                    snap_phase: [0.0, 0.0],
-                });
-            }
+            )?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_glass_rim(
+        &mut self,
+        tessellator: &mut Tessellator,
+        draws: &mut Vec<Draw>,
+        rect: Rect,
+        corner_radius: f32,
+        opacity: f32,
+        refraction: f32,
+        scale: f32,
+    ) -> Result<()> {
+        // The rim carries its own half-pixel coverage fringe. Preserve
+        // ancestor clips, but do not cut that fringe at the glass boundary.
+        if let Some(draw) = self.cached_glass_rim(
+            tessellator,
+            rect,
+            corner_radius,
+            opacity * refraction,
+            scale,
+        )? {
+            draws.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
+            draws.push(draw);
+            return Ok(());
+        }
+        let rim = tessellator.glass_rim(rect, corner_radius, opacity * refraction.clamp(0.0, 1.0));
+        if let Some(geometry) = rim? {
+            draws.try_reserve(1).map_err(|_| Error::FrameTooComplex)?;
+            draws.push(Draw {
+                geometry,
+                source: DrawSource::Solid,
+                vertex_buffer: None,
+                offset: [0.0, 0.0],
+                snap_phase: [0.0, 0.0],
+            });
         }
         Ok(())
     }
@@ -717,6 +753,60 @@ mod tests {
     }
     use crate::lowering::tests::RecordingExecutor;
     use scarlet_ui_core::geometry::Point;
+
+    #[test]
+    fn zero_local_blur_keeps_the_glass_rim_without_backdrop_work() {
+        for analytic in [false, true] {
+            for refraction in [0., 1.] {
+                let mut renderer = SgfxPaintEncoder::new(200, 120, false).unwrap();
+                renderer.set_analytic_glass(analytic);
+                let mut paint = PaintContext::new();
+                paint.refractive_glass_rounded_rect(
+                    Rect::from_xywh(20., 20., 80., 40.),
+                    12.,
+                    0.,
+                    UiColor::rgba(1., 1., 1., 0.88),
+                    refraction,
+                );
+                // Repeated frames also exercise the retained optical cache.
+                for _ in 0..2 {
+                    let frame = renderer
+                        .lower(
+                            &paint,
+                            1000,
+                            PixelBounds {
+                                x: 0,
+                                y: 0,
+                                width: 200,
+                                height: 120,
+                            },
+                        )
+                        .unwrap();
+                    let material_draws: Vec<_> = frame
+                        .draws
+                        .iter()
+                        .filter(|draw| !matches!(draw.source, DrawSource::ClearOnly))
+                        .collect();
+                    assert_eq!(material_draws.len(), if refraction > 0. { 2 } else { 1 });
+                    assert!(
+                        frame
+                            .draws
+                            .iter()
+                            .all(|d| !matches!(d.source, DrawSource::Backdrop(_)))
+                    );
+                    if refraction > 0. {
+                        assert!(
+                            material_draws[1].geometry.vertex_count > 6,
+                            "rim geometry must survive"
+                        );
+                    }
+                    assert_eq!(renderer.backdrop_filters, 0);
+                    assert_eq!(renderer.backdrop_pixels, 0);
+                    assert!(renderer.backdrop.is_none());
+                }
+            }
+        }
+    }
 
     #[test]
     fn optical_mesh_is_bounded_and_degrades_to_blur_after_sixteen_filters() {

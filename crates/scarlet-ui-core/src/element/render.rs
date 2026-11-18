@@ -207,6 +207,12 @@ pub trait RenderObject: Any {
     /// update state without interrupting the layout traversal.
     fn flush_layout_notifications(&mut self) {}
 
+    /// Prepare mutable paint resources after layout and before recording this
+    /// dirty object's paint. Paint-only data changes need not request layout.
+    /// Called for CPU and command backends; implementations should reuse
+    /// resources when their data and final layout size are unchanged.
+    fn prepare_paint(&mut self) {}
+
     /// Render to buffer.
     ///
     /// For leaf nodes, this renders content to the buffer.

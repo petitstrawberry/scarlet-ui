@@ -28,10 +28,12 @@ fn clip_position(position: vec2<f32>) -> vec4<f32> {
     return clip_position(position.xy);
 }
 fn blur(position: vec2<f32>, axis: vec2<f32>) -> vec4<f32> {
+    // Keep reciprocal work outside the tap loop on native shader backends.
+    let inverse_extent = 1.0 / p.extent.xy;
     var result = vec4<f32>(0.0);
     for (var i = 0u; i < u32(p.optics.w); i += 1u) {
         let sample_position = position + axis * p.kernel[i].x;
-        result += textureSampleLevel(source, linear_sampler, sample_position / p.extent.xy, 0.0) * p.kernel[i].y;
+        result += textureSampleLevel(source, linear_sampler, sample_position * inverse_extent, 0.0) * p.kernel[i].y;
     }
     return result;
 }

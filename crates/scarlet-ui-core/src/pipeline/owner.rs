@@ -22,6 +22,27 @@ use std::println;
 // root searches cost more than a single traversal of the live tree.
 const MAX_TARGETED_UPDATES: usize = 64;
 
+/// Work actually queued after rebuilding. A build request alone says nothing
+/// about changes to topology, geometry, focus or scene paint dependencies.
+#[derive(Default)]
+pub(crate) struct PrepaintChanges {
+    pub branches: alloc::vec::Vec<ElementId>,
+    pub self_paint: alloc::vec::Vec<ElementId>,
+    pub geometry: bool,
+}
+
+/// Optional frame-log measurements; no clocks are read when logging is off.
+pub(crate) struct PrepaintTimings {
+    pub collect_us: u128,
+    pub build_us: u128,
+    pub layout_us: u128,
+    pub input_us: u128,
+    pub buffers_us: u128,
+    pub build_ids: usize,
+    pub layout_ids: usize,
+    pub paint_ids: usize,
+}
+
 /// Stable owner ID for dirty queues belonging to one rendering pipeline.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct PipelineId(u64);
@@ -202,6 +223,7 @@ pub struct PipelineOwner {
     last_composite_ids: alloc::vec::Vec<ElementId>,
     /// State registry for managing State instances
     state_registry: StateRegistry,
+    prepaint_changes: PrepaintChanges,
 }
 
 impl PipelineOwner {
@@ -226,6 +248,7 @@ impl PipelineOwner {
             last_self_paint_ids: alloc::vec::Vec::new(),
             last_composite_ids: alloc::vec::Vec::new(),
             state_registry: StateRegistry::new(),
+            prepaint_changes: PrepaintChanges::default(),
         }
     }
 
@@ -314,40 +337,67 @@ impl PipelineOwner {
         element_tree: &mut ElementTree,
         window_size: Size,
         render_legacy_paint: bool,
-        before_paint: impl FnOnce(&mut ElementTree, bool),
-    ) {
+        before_paint: impl FnOnce(&mut ElementTree, &PrepaintChanges),
+    ) -> Option<PrepaintTimings> {
+        let started = crate::debug::frame_log_enabled().then(crate::clock::Instant::now);
+        let elapsed = || started.map_or(0, |start| start.elapsed().as_micros());
         self.collect_global_dirty();
+        let collected = elapsed();
+        let build_ids = self.dirty_build.len();
 
-        // A composite-only update changes placement, not focus claims or
-        // mounted input controls. Reconciliation walks the tree; reserve it for
-        // content/geometry changes instead of every scroll animation frame.
-        let structure_changed = !self.dirty_build.is_empty()
-            || !self.dirty_layout.is_empty()
-            || !self.dirty_children.is_empty();
-        let content_changed = !self.dirty_build.is_empty()
-            || !self.dirty_layout.is_empty()
-            || !self.dirty_paint.is_empty()
-            || !self.dirty_self_paint.is_empty()
-            || !self.dirty_children.is_empty();
+        let mut changes = core::mem::take(&mut self.prepaint_changes);
+        changes.branches.clear();
+        // Rebuild requests can reconcile to NoChange. Refresh metadata from
+        // actual paint/children work below; real geometry changes take the
+        // conservative full-tree path. A broad State subscription alone must
+        // not turn a leaf repaint into a whole-scene fact scan.
 
         // 1. Build Phase: Rebuild Elements whose State changed
         self.flush_build(element_tree);
         self.collect_global_dirty();
+        let built = elapsed();
+        let layout_ids = self.dirty_layout.len();
 
+        let geometry = !self.dirty_layout.is_empty() || !self.dirty_children.is_empty();
+        if geometry && element_tree.safe_area_insets() != crate::geometry::EdgeInsets::ZERO {
+            element_tree.apply_safe_area_insets();
+        }
         // 2. Layout Phase: Recalculate layout
         self.flush_layout(element_tree, window_size);
-
-        if structure_changed {
+        if geometry {
             crate::element::invalidate_scroll_structure();
         }
-        before_paint(
-            element_tree,
-            content_changed || self.dirty_composite.is_empty(),
-        );
+        changes.branches.extend(self.dirty_paint.iter().copied());
+        changes.branches.extend(self.dirty_children.iter().copied());
+        changes.branches.sort_unstable();
+        changes.branches.dedup();
+        changes.self_paint.clear();
+        changes
+            .self_paint
+            .extend(self.dirty_self_paint.iter().copied());
+        changes
+            .self_paint
+            .extend(self.dirty_composite.iter().copied());
+        changes.geometry = geometry;
+        let laid_out = elapsed();
+        before_paint(element_tree, &changes);
+        self.prepaint_changes = changes;
         self.collect_global_dirty();
+        let reconciled = elapsed();
+        let paint_ids = self.dirty_paint.len() + self.dirty_self_paint.len();
 
         // 3. Paint Phase: Repaint dirty elements
         self.flush_paint(element_tree, render_legacy_paint);
+        started.map(|_| PrepaintTimings {
+            collect_us: collected,
+            build_us: built - collected,
+            layout_us: laid_out - built,
+            input_us: reconciled - laid_out,
+            buffers_us: elapsed() - reconciled,
+            build_ids,
+            layout_ids,
+            paint_ids,
+        })
     }
 
     fn collect_global_dirty(&mut self) {
@@ -385,7 +435,6 @@ impl PipelineOwner {
     fn flush_build(&mut self, element_tree: &mut ElementTree) {
         let dirty_build = core::mem::take(&mut self.dirty_build);
         let transactions = core::mem::take(&mut self.build_transactions);
-        let rebuilt = !dirty_build.is_empty();
 
         crate::animation::pending::with_pending_builds(
             self.pipeline_id,
@@ -448,9 +497,6 @@ impl PipelineOwner {
                 }
             },
         );
-        if rebuilt && element_tree.safe_area_insets() != crate::geometry::EdgeInsets::ZERO {
-            element_tree.apply_safe_area_insets();
-        }
     }
 
     /// Flush the layout phase
@@ -488,54 +534,10 @@ impl PipelineOwner {
                 break;
             }
 
-            let path = match element_tree.find_path_ids(id) {
-                Some(path) => path,
-                None => {
-                    full_layout = true;
-                    break;
-                }
+            let Some(chosen_id) = element_tree.find_layout_root(id) else {
+                full_layout = true;
+                break;
             };
-
-            if path.len() < 2 {
-                full_layout = true;
-                break;
-            }
-
-            let mut chosen_id = path[path.len() - 2];
-            let mut has_constraints = false;
-
-            for ancestor_id in path[..path.len() - 1].iter().rev() {
-                let constraints_opt = element_tree
-                    .find_element_mut(*ancestor_id)
-                    .and_then(|element| element.last_layout_constraints());
-                let Some(ancestor_constraints) = constraints_opt else {
-                    has_constraints = false;
-                    break;
-                };
-
-                chosen_id = *ancestor_id;
-                has_constraints = true;
-
-                // Virtual content deliberately exceeds tight viewport
-                // constraints. Its size changes must reach ScrollView so the
-                // content extent and offsets are remeasured and clamped.
-                let size = element_tree
-                    .find_element(*ancestor_id)
-                    .map(|element| element.bounds().size);
-                if ancestor_constraints.is_tight()
-                    && size.is_some_and(|size| {
-                        size.width == ancestor_constraints.max_width
-                            && size.height == ancestor_constraints.max_height
-                    })
-                {
-                    break;
-                }
-            }
-
-            if !has_constraints {
-                full_layout = true;
-                break;
-            }
 
             layout_roots.insert(chosen_id);
         }
@@ -626,6 +628,16 @@ impl PipelineOwner {
         self.dirty_composite.clear();
 
         if !render_legacy_paint {
+            // Full layout can leave both root and descendant paint IDs queued.
+            // The root covers every buffer, including self-only descendants;
+            // do not search and walk those subtrees again for a sparse queue.
+            // Keep the original IDs above for retained damage bookkeeping.
+            if let Some(root) = element_tree.root_mut()
+                && dirty_paint.contains(&root.id())
+            {
+                Self::render_paint_buffers_recursive(root);
+                return;
+            }
             if dirty_paint.len() + dirty_self_paint.len() > MAX_TARGETED_UPDATES {
                 fn render_dirty(
                     element: &mut dyn crate::element::Element,
@@ -639,6 +651,9 @@ impl PipelineOwner {
                         render_dirty(child.as_mut(), subtree_ids, self_ids, subtree);
                     }
                     if own {
+                        if let Some(object) = element.render_object_mut() {
+                            object.prepare_paint();
+                        }
                         let requires_buffer = element
                             .render_object()
                             .is_some_and(|object| object.requires_buffer_render_for_paint());
@@ -668,6 +683,9 @@ impl PipelineOwner {
                     continue;
                 }
                 if let Some(element) = element_tree.find_element_mut(id) {
+                    if let Some(object) = element.render_object_mut() {
+                        object.prepare_paint();
+                    }
                     let requires_buffer = element.render_object().is_some_and(|render_object| {
                         render_object.requires_buffer_render_for_paint()
                     });
@@ -709,6 +727,9 @@ impl PipelineOwner {
                 );
             }
             if let Some(element) = element_tree.find_element_mut(id) {
+                if let Some(object) = element.render_object_mut() {
+                    object.prepare_paint();
+                }
                 element.render();
             }
         }
@@ -749,6 +770,9 @@ impl PipelineOwner {
         }
 
         // Render this element
+        if let Some(object) = element.render_object_mut() {
+            object.prepare_paint();
+        }
         element.render();
     }
 
@@ -758,6 +782,9 @@ impl PipelineOwner {
             Self::render_paint_buffers_recursive(child);
         }
 
+        if let Some(object) = element.render_object_mut() {
+            object.prepare_paint();
+        }
         let requires_buffer = element
             .render_object()
             .is_some_and(|render_object| render_object.requires_buffer_render_for_paint());
@@ -798,6 +825,11 @@ impl PipelineOwner {
     /// Check if there are any composite-only dirty elements.
     pub fn has_dirty_composite(&self) -> bool {
         !self.dirty_composite.is_empty()
+    }
+
+    /// Whether the last prepaint pass performed layout or changed children.
+    pub(crate) fn last_geometry_changed(&self) -> bool {
+        self.prepaint_changes.geometry
     }
 
     /// Structural updates that can reuse existing children's display lists.
@@ -1089,6 +1121,7 @@ mod dense_update_tests {
         children: Vec<Box<dyn Element>>,
         calls: Rc<RefCell<Calls>>,
         remove_children_on_rebuild: bool,
+        constraints: Option<LayoutConstraints>,
     }
     impl Probe {
         fn new(calls: &Rc<RefCell<Calls>>) -> Self {
@@ -1097,6 +1130,7 @@ mod dense_update_tests {
                 children: Vec::new(),
                 calls: calls.clone(),
                 remove_children_on_rebuild: false,
+                constraints: None,
             }
         }
     }
@@ -1133,6 +1167,12 @@ mod dense_update_tests {
                 child.layout(c);
             }
             Size::new(10., 10.)
+        }
+        fn last_layout_constraints(&self) -> Option<LayoutConstraints> {
+            self.constraints
+        }
+        fn bounds(&self) -> crate::geometry::Rect {
+            crate::geometry::Rect::from_xywh(0., 0., 10., 10.)
         }
         fn render(&mut self) {
             self.calls.borrow_mut().rendered.push(self.id);
@@ -1198,6 +1238,31 @@ mod dense_update_tests {
     }
 
     #[test]
+    fn root_paint_prepares_descendant_buffers_once_and_keeps_damage_ids() {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let mut root = Probe::new(&calls);
+        let root_id = root.id;
+        let mut child = Probe::new(&calls);
+        let child_id = child.id;
+        let leaf = Probe::new(&calls);
+        let leaf_id = leaf.id;
+        child.children.push(Box::new(leaf));
+        root.children.push(Box::new(child));
+        let mut tree = ElementTree::new();
+        tree.set_root(Box::new(root));
+        let mut owner = PipelineOwner::new();
+        owner.mark_needs_paint(root_id);
+        owner.mark_needs_paint(child_id);
+        owner.mark_needs_self_paint(leaf_id);
+
+        owner.flush_paint(&mut tree, false);
+
+        assert_eq!(calls.borrow().rendered, [leaf_id, child_id, root_id]);
+        assert_eq!(owner.last_paint_ids, [root_id, child_id, leaf_id]);
+        assert_eq!(owner.last_self_paint_ids, [leaf_id]);
+    }
+
+    #[test]
     fn dense_paint_renders_overlapping_subtrees_once_and_preserves_self_only_scope() {
         let calls = Rc::new(RefCell::new(Calls::default()));
         let mut root = Probe::new(&calls);
@@ -1233,6 +1298,64 @@ mod dense_update_tests {
             "dense paint must not search from the root per ID: {}",
             calls.visits
         );
+    }
+
+    #[test]
+    fn sparse_layout_search_is_bounded_and_preserves_extent_fallbacks() {
+        const SIBLINGS: usize = 128;
+        const DEPTH: usize = 24;
+        for boundary_constraints in [
+            Some(LayoutConstraints::tight(10., 10.)),
+            Some(LayoutConstraints::tight(5., 5.)), // Content exceeds viewport.
+            None,                                   // A custom ancestor does not track constraints.
+        ] {
+            let calls = Rc::new(RefCell::new(Calls::default()));
+            let leaf = Probe::new(&calls);
+            let leaf_id = leaf.id;
+            let mut branch = leaf;
+            for _ in 0..DEPTH {
+                let mut parent = Probe::new(&calls);
+                parent.constraints = Some(LayoutConstraints::loose(100., 100.));
+                parent.children.push(Box::new(branch));
+                branch = parent;
+            }
+            let mut boundary = Probe::new(&calls);
+            let boundary_id = boundary.id;
+            boundary.constraints = boundary_constraints;
+            boundary.children.push(Box::new(branch));
+            let targeted = boundary_constraints == Some(LayoutConstraints::tight(10., 10.));
+            let mut root = Probe::new(&calls);
+            let root_id = root.id;
+            // Untracked ancestors above a valid tight boundary must not force
+            // full layout. Oversized/missing boundaries must reach the root.
+            root.constraints = (!targeted).then(|| LayoutConstraints::tight(10., 10.));
+            for _ in 0..SIBLINGS {
+                root.children.push(Box::new(Probe::new(&calls)));
+            }
+            root.children.push(Box::new(boundary));
+            let mut tree = ElementTree::new();
+            tree.set_root(Box::new(root));
+            let mut owner = PipelineOwner::new();
+            owner.mark_needs_layout(leaf_id);
+            owner.flush_layout(&mut tree, Size::new(100., 100.));
+
+            let calls = calls.borrow();
+            let total_nodes = SIBLINGS + DEPTH + 3;
+            assert_eq!(
+                calls.layouts,
+                if targeted { DEPTH + 2 } else { total_nodes }
+            );
+            assert!(
+                owner
+                    .dirty_paint
+                    .contains(&if targeted { boundary_id } else { root_id })
+            );
+            assert!(
+                calls.visits <= 3 * total_nodes + DEPTH + 4,
+                "sparse layout must not repeat root searches per ancestor: {}",
+                calls.visits
+            );
+        }
     }
 
     #[test]

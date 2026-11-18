@@ -40,6 +40,7 @@ pub mod window_type {
 /// Window information
 #[derive(Clone)]
 pub struct WindowInfo {
+    pub output_id: Option<u32>,
     pub app_id: String,
     pub title: String,
     pub size: Size,
@@ -88,6 +89,7 @@ impl WindowInfo {
         placement: WindowPlacement,
     ) -> Self {
         Self {
+            output_id: None,
             app_id,
             title,
             size,
@@ -104,6 +106,8 @@ impl WindowInfo {
             shadow_elevation: ElevationRole::Flat,
         }
     }
+
+    pub const fn with_output(mut self, output: Option<u32>) -> Self { self.output_id = output; self }
 
     /// Override who owns the visible frame around this window.
     pub const fn with_decoration(mut self, decoration: WindowDecoration) -> Self {
@@ -283,6 +287,7 @@ impl WindowContentLayout {
 /// Window provides window-level properties like title, size, and decorations.
 /// The content is a single View (use VStack/HStack for multiple children).
 pub struct Window<V: View> {
+    output_id: Option<u32>,
     content_safe_area_edges: SafeAreaEdges,
     app_id: String,
     title: String,
@@ -400,6 +405,7 @@ impl<V: View> Window<V> {
             focus_on_create: true,
             active_on_focus: true,
             placement: WindowPlacement::Default,
+            output_id: None,
             window_geometry_insets: EdgeInsets::ZERO,
             shadow: WindowShadow::PlatformDefault,
             scene_key: None,
@@ -528,6 +534,8 @@ impl<V: View> Window<V> {
     }
 
     /// Set the initial placement hint passed to the window manager.
+    pub fn output(mut self, output: u32) -> Self { self.output_id = Some(output); self }
+
     pub fn placement(mut self, placement: WindowPlacement) -> Self {
         self.placement = placement;
         self
@@ -747,6 +755,7 @@ impl<V: View + Clone> Clone for Window<V> {
             focus_on_create: self.focus_on_create,
             active_on_focus: self.active_on_focus,
             placement: self.placement,
+            output_id: self.output_id,
             window_geometry_insets: self.window_geometry_insets,
             shadow: self.shadow,
             scene_key: self.scene_key.clone(),
@@ -775,6 +784,7 @@ impl<V: View + Clone> WindowViewInfo for Window<V> {
             self.opaque,
             self.placement,
         )
+        .with_output(self.output_id)
         .with_decoration(self.decoration.resolved())
         .with_corner_radius(self.corner_radius)
         .with_window_geometry_insets(insets)
@@ -1165,6 +1175,9 @@ impl ElementRenderObject for WindowTitleBarRenderObject {
 pub struct WindowRenderElement<C: View + Clone + WindowViewInfo> {
     id: ElementId,
     view: C,
+    // Preferred declaration size is independent of the platform allocation.
+    // Layout can change the latter without changing application configuration.
+    declared_size: Size,
     // Authoritative platform state, independent of the application's declaration.
     tablet_presented: bool,
     // Presentation-only translation for fixed-layout content above an input panel.
@@ -1193,9 +1206,11 @@ impl<C: View + Clone + WindowViewInfo> WindowRenderElement<C> {
         render_object: WindowRenderObject,
         children: Vec<Box<dyn Element>>,
     ) -> Self {
+        let declared_size = view.window_info().size;
         Self {
             id: ElementId::generate(),
             view,
+            declared_size,
             tablet_presented: false,
             content_pan_y: 0.0,
             render_object,
@@ -1565,7 +1580,14 @@ impl<C: View + Clone + WindowViewInfo> Element for WindowRenderElement<C> {
             return UpdateResult::Replaced;
         };
         self.view = typed_view.clone();
-        let window_info = self.effective_window_info();
+        let mut window_info = self.effective_window_info();
+        if self.declared_size == window_info.size {
+            // A tiled/resized allocation must survive unrelated declarations.
+            window_info.size = self.render_object.size;
+        } else {
+            // A genuine preferred-size change still follows normal layout.
+            self.declared_size = window_info.size;
+        }
         let chrome_changed = self.reconcile_titlebar_presence(&window_info);
         let mut child_views: Vec<Box<dyn View>> = Vec::new();
         if window_info.decoration.title_bar.is_custom() {
@@ -2766,6 +2788,45 @@ mod tablet_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_preference_keeps_allocated_size_and_real_preference_changes_still_update() {
+        let view = Window::new("Allocated", crate::views::Spacer::new())
+            .decorated(false)
+            .shadow(false)
+            .size(Size::new(860., 560.));
+        let mut element = view.create_element();
+        element.layout(LayoutConstraints::tight(540., 680.));
+        assert!(matches!(element.update(&view), UpdateResult::NoChange));
+        assert_eq!(
+            element.render_object().unwrap().size(),
+            Size::new(540., 680.)
+        );
+        let changed = Window::new("Allocated", crate::views::Spacer::new())
+            .decorated(false)
+            .shadow(false)
+            .size(Size::new(900., 600.));
+        assert!(matches!(element.update(&changed), UpdateResult::Updated));
+        assert_eq!(
+            element.render_object().unwrap().size(),
+            Size::new(900., 600.)
+        );
+        // The platform can retain a tiled allocation after a new preference.
+        element.layout(LayoutConstraints::tight(540., 680.));
+        assert!(matches!(element.update(&changed), UpdateResult::NoChange));
+        element.layout(LayoutConstraints::tight(600., 700.));
+        assert!(matches!(element.update(&changed), UpdateResult::NoChange));
+        assert_eq!(
+            element.render_object().unwrap().size(),
+            Size::new(600., 700.)
+        );
+        let restyled = changed.background_color(Color::RED);
+        assert!(matches!(element.update(&restyled), UpdateResult::Updated));
+        assert_eq!(
+            element.render_object().unwrap().size(),
+            Size::new(600., 700.)
+        );
+    }
     use crate::event::{
         Event, GesturePhase, Phase, TouchChange, TouchGesture, TouchPhase, WindowEvent,
     };
@@ -2780,8 +2841,8 @@ mod tests {
         assert!(!decoration.has_custom_chrome());
         let layout = WindowContentLayout::for_decoration(decoration);
         assert_eq!(layout.decoration_size(), Size::ZERO);
-        let window = Window::new("Overlay", crate::views::Text::new("Content"))
-            .decoration(decoration);
+        let window =
+            Window::new("Overlay", crate::views::Text::new("Content")).decoration(decoration);
         assert_eq!(window.window_decoration(), decoration);
     }
 

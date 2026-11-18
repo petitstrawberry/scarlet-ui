@@ -1633,6 +1633,7 @@ impl PlatformWindow for WinitPlatformWindow {
         Self::create(
             backend.shared.clone(),
             WindowCreateRequest {
+                output_id: None,
                 app_id: alloc::string::String::from(app_id),
                 title: alloc::string::String::from(title),
                 size,
@@ -1883,6 +1884,7 @@ impl PlatformWindow for WinitPlatformWindow {
         Self::create(
             self.shared.clone(),
             WindowCreateRequest {
+                output_id: None,
                 app_id: alloc::string::String::from(app_id),
                 title: alloc::string::String::from(title),
                 size,
@@ -2290,6 +2292,7 @@ mod tests {
     fn platform_defaults_and_window_limits_reach_native_attributes() {
         assert_eq!(WINIT_WINDOW_DEFAULTS.decoration, WindowDecoration::SYSTEM);
         let mut request = WindowCreateRequest {
+                output_id: None,
             app_id: "test.window".into(),
             title: "Native".into(),
             size: Size::new(800., 600.),

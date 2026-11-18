@@ -52,6 +52,7 @@ pub struct CanvasView {
     size: Size,
     render_callback: CanvasRenderCallback,
     event_handler: Option<CanvasEventHandler>,
+    touch_drag_axis: Option<crate::event::TouchDragAxis>,
 }
 
 impl CanvasView {
@@ -61,6 +62,7 @@ impl CanvasView {
             size: Size { width, height },
             render_callback,
             event_handler: None,
+            touch_drag_axis: None,
         }
     }
 
@@ -72,6 +74,13 @@ impl CanvasView {
         F: FnMut(&Event) -> bool + 'static,
     {
         self.event_handler = Some(Rc::new(RefCell::new(handler)));
+        self
+    }
+
+    /// Opt an interactive canvas into the native touch gesture arena.
+    /// Unconfigured canvases continue to yield drags to their scroll parent.
+    pub fn touch_drag_axis(mut self, axis: crate::event::TouchDragAxis) -> Self {
+        self.touch_drag_axis = Some(axis);
         self
     }
 
@@ -104,6 +113,7 @@ impl View for CanvasView {
                 self.size,
                 self.render_callback.clone(),
                 self.event_handler.clone(),
+                self.touch_drag_axis,
             ),
         ))
     }
@@ -122,6 +132,7 @@ pub struct CanvasRenderObject {
     size: Size,
     render_callback: CanvasRenderCallback,
     event_handler: Option<CanvasEventHandler>,
+    touch_drag_axis: Option<crate::event::TouchDragAxis>,
     buffer: Option<Buffer>,
 }
 
@@ -130,11 +141,13 @@ impl CanvasRenderObject {
         size: Size,
         render_callback: CanvasRenderCallback,
         event_handler: Option<CanvasEventHandler>,
+        touch_drag_axis: Option<crate::event::TouchDragAxis>,
     ) -> Self {
         Self {
             size,
             render_callback,
             event_handler,
+            touch_drag_axis,
             buffer: None,
         }
     }
@@ -146,6 +159,12 @@ impl CanvasRenderObject {
 }
 
 impl ElementRenderObject for CanvasRenderObject {
+    fn touch_drag_axis(&self, _point: Point) -> Option<crate::event::TouchDragAxis> { self.touch_drag_axis }
+
+    fn handle_event(&mut self, event: &Event, phase: crate::event::Phase) -> bool {
+        if phase != crate::event::Phase::Target || !matches!(event, Event::Touch(_) | Event::TouchGesture(_)) { return false; }
+        self.event_handler.as_ref().and_then(|handler| handler.try_borrow_mut().ok()).is_some_and(|mut handler| handler(event))
+    }
     fn layout(&mut self, constraints: LayoutConstraints) -> Size {
         // Apply constraints
         let width = if constraints.max_width.is_finite() && constraints.max_width > 0.0 {
@@ -229,6 +248,7 @@ impl ElementRenderObject for CanvasRenderObject {
         self.size = canvas.size;
         self.render_callback = canvas.render_callback.clone();
         self.event_handler = canvas.event_handler.clone();
+        self.touch_drag_axis = canvas.touch_drag_axis;
         crate::element::UpdateResult::Updated
     }
 

@@ -89,6 +89,8 @@ pub(crate) struct PaintTestCounters {
     pub(crate) retained_primitive_scan_syncs: usize,
     pub(crate) window_backdrop_rebuilds: usize,
     pub(crate) dense_damage_updates: usize,
+    pub(crate) popup_viewport_syncs: usize,
+    pub(crate) focus_reconciliations: usize,
 }
 
 /// RenderingPipeline integrates all components of the rendering system
@@ -110,15 +112,20 @@ pub struct RenderingPipeline {
     last_paint_bounds: BTreeMap<ElementId, Rect>,
     paint_damage: Option<Vec<DamageRect>>,
     paint_needs_full: bool,
+    // An unaccepted direct frame must be retried even without another dirty event.
+    direct_paint_deferred: bool,
     paint_background_color: Option<crate::color::Color>,
     paint_enabled: bool,
     // Backdrop filters depend on preceding scene pixels, not just their own
     // retained picture. Use ordered dependency-aware replay for those scenes,
     // rather than the isolated CPU picture compositor.
+    scene_metadata: super::tree_metadata::TreeMetadata,
+    metadata_changes: super::owner::PrepaintChanges,
     scene_reads_backdrop: bool,
     scene_has_extensions: bool,
     scene_has_opacity: bool,
     select_overlay_active: bool,
+    select_popup_input_synced: bool,
     paint_caches: BTreeMap<ElementId, PaintCache>,
     window_backdrop_cache: Option<WindowBackdropCache>,
     layer_store: LayerStore,
@@ -162,12 +169,16 @@ impl RenderingPipeline {
             last_paint_bounds: BTreeMap::new(),
             paint_damage: None,
             paint_needs_full: true,
+            direct_paint_deferred: false,
             paint_background_color: None,
             paint_enabled: true,
+            scene_metadata: Default::default(),
+            metadata_changes: Default::default(),
             scene_reads_backdrop: false,
             scene_has_extensions: false,
             scene_has_opacity: false,
             select_overlay_active: false,
+            select_popup_input_synced: false,
             paint_caches: BTreeMap::new(),
             window_backdrop_cache: None,
             layer_store: LayerStore::new(),
@@ -223,6 +234,7 @@ impl RenderingPipeline {
     #[cfg(test)]
     pub(crate) fn reset_paint_test_counters(&mut self) {
         self.paint_test_counters = PaintTestCounters::default();
+        self.scene_metadata.visits = 0;
     }
 
     #[cfg(test)]
@@ -248,6 +260,7 @@ impl RenderingPipeline {
         self.cancel_animations();
         self.visual_animations.clear(self.pipeline_id());
         self.element_tree.clear_root();
+        self.scene_metadata.clear();
         crate::pipeline::clear_global_dirty(self.pipeline_id());
         self.renderer = None;
         self.paint_renderer = None;
@@ -315,6 +328,7 @@ impl RenderingPipeline {
         if insets == self.safe_area_insets() {
             return false;
         }
+        self.select_popup_input_synced = false;
         self.element_tree.set_safe_area_insets(insets);
         self.paint_needs_full = true;
         if let Some(root) = self.element_tree.root() {
@@ -325,8 +339,10 @@ impl RenderingPipeline {
 
     /// Set the root Element
     pub fn set_root(&mut self, root_element: Box<dyn Element>) {
+        self.select_popup_input_synced = false;
         self.context_menu = None;
         self.context_menu_swallow_release = false;
+        self.scene_metadata.clear();
         self.element_tree.set_root(root_element);
         self.retained_paint.clear();
         self.retained_backdrop = None;
@@ -347,6 +363,8 @@ impl RenderingPipeline {
 
     /// Get mutable reference to the ElementTree
     pub fn element_tree_mut(&mut self) -> &mut ElementTree {
+        self.select_popup_input_synced = false;
+        self.scene_metadata.clear();
         &mut self.element_tree
     }
 
@@ -620,6 +638,7 @@ impl RenderingPipeline {
 
     /// Set window size and resize compositor
     pub fn resize(&mut self, new_size: Size) {
+        self.select_popup_input_synced = false;
         if new_size != self.window_size {
             self.context_menu = None;
         }
@@ -659,6 +678,10 @@ impl RenderingPipeline {
     }
 
     fn sync_select_popup_viewports(&mut self) -> bool {
+        #[cfg(test)]
+        {
+            self.paint_test_counters.popup_viewport_syncs += 1;
+        }
         fn visit(
             element: &mut dyn Element,
             parent: Point,
@@ -702,6 +725,7 @@ impl RenderingPipeline {
                 &mut self.select_overlay_active,
             )
         });
+        self.select_popup_input_synced = true;
         self.paint_needs_full |= changed;
         changed
     }
@@ -719,8 +743,19 @@ impl RenderingPipeline {
             &mut self.element_tree,
             self.window_size,
             !self.paint_enabled,
-            |tree, reconcile| {
-                if reconcile {
+            |tree, scope| {
+                let changes = self.scene_metadata.sync(tree, scope);
+                if changes.topology || changes.scroll {
+                    crate::element::invalidate_scroll_structure();
+                }
+                if scope.geometry || changes.topology || changes.popup {
+                    self.select_popup_input_synced = false;
+                }
+                if changes.input || scope.geometry {
+                    #[cfg(test)]
+                    {
+                        self.paint_test_counters.focus_reconciliations += 1;
+                    }
                     self.event_dispatcher.reconcile_keyboard_focus(tree);
                 }
                 self.overlays.apply(tree);
@@ -730,7 +765,13 @@ impl RenderingPipeline {
             crate::logln!("[RenderingPipeline] flush() completed");
         }
 
-        let popup_geometry_changed = self.sync_select_popup_viewports();
+        self.refresh_painted_metadata();
+        let popup_geometry_changed =
+            if !self.select_popup_input_synced || self.select_overlay_active {
+                self.sync_select_popup_viewports()
+            } else {
+                false
+            };
         let background_color = self.extract_background_color();
 
         if self.paint_enabled {
@@ -778,10 +819,7 @@ impl RenderingPipeline {
         let size = self.window_size;
         let scale = self.scale_milli;
         let creating_renderer = self.paint_renderer.is_none();
-        let has_paint_extensions = self
-            .element_tree
-            .root()
-            .is_some_and(Self::subtree_emits_paint_extension);
+        let has_paint_extensions = self.scene_has_extensions;
         let deferred_window_backdrop = self
             .element_tree
             .root()
@@ -1033,36 +1071,43 @@ impl RenderingPipeline {
                 .any(|child| Self::subtree_reads_backdrop(child.as_ref()))
     }
 
+    fn refresh_painted_metadata(&mut self) {
+        // Focus/keyboard avoidance and legacy buffer rendering can produce more
+        // work during prepaint. Read the final facts on those painted branches;
+        // do not assume that paint-command metadata stayed unchanged.
+        let self_ids = self.pipeline_owner.last_self_paint_ids();
+        let mut scope = core::mem::take(&mut self.metadata_changes);
+        scope.branches.clear();
+        scope.branches.extend(
+            self.pipeline_owner
+                .last_paint_ids()
+                .iter()
+                .copied()
+                .filter(|id| !self_ids.contains(id)),
+        );
+        scope
+            .branches
+            .extend_from_slice(self.pipeline_owner.last_children_ids());
+        scope.branches.sort_unstable();
+        scope.branches.dedup();
+        scope.self_paint.clear();
+        scope.self_paint.extend_from_slice(self_ids);
+        scope
+            .self_paint
+            .extend_from_slice(self.pipeline_owner.last_composite_ids());
+        scope.geometry = false;
+        let changes = self.scene_metadata.sync(&self.element_tree, &scope);
+        self.metadata_changes = scope;
+        if changes.topology || changes.scroll {
+            crate::element::invalidate_scroll_structure();
+        }
+        if changes.topology || changes.popup {
+            self.select_popup_input_synced = false;
+        }
+    }
+
     fn refresh_backdrop_dependency(&mut self) {
-        if !self.paint_needs_full && self.pipeline_owner.last_paint_ids().is_empty() {
-            return;
-        }
-        // Query without painting: painting may update damage-history cells.
-        // Composite-only transforms cannot add or remove material commands.
-        fn dependencies(element: &dyn Element) -> (bool, bool, bool) {
-            let (mut reads, mut extensions, mut opacity) =
-                element.render_object().map_or((false, false, false), |r| {
-                    (
-                        r.reads_backdrop(),
-                        r.emits_paint_extension(),
-                        r.has_opacity_scope(),
-                    )
-                });
-            for child in element.children() {
-                let (child_reads, child_extensions, child_opacity) = dependencies(child.as_ref());
-                reads |= child_reads;
-                extensions |= child_extensions;
-                opacity |= child_opacity;
-                if reads && extensions && opacity {
-                    break;
-                }
-            }
-            (reads, extensions, opacity)
-        }
-        let (reads_backdrop, has_extensions, has_opacity) = self
-            .element_tree
-            .root()
-            .map_or((false, false, false), dependencies);
+        let (reads_backdrop, has_extensions, has_opacity) = self.scene_metadata.dependencies();
         self.scene_has_extensions = has_extensions;
         if reads_backdrop != self.scene_reads_backdrop || has_opacity != self.scene_has_opacity {
             self.paint_caches.clear();
@@ -1109,7 +1154,7 @@ impl RenderingPipeline {
             }
         }
         let force_full = force_recording_rebuild;
-        if !force_full && self.dirty_scratch.ids.is_empty() {
+        if !force_full && !self.direct_paint_deferred && self.dirty_scratch.ids.is_empty() {
             return Ok(PresentedFrame::Idle);
         }
         if force_full {
@@ -1152,19 +1197,28 @@ impl RenderingPipeline {
                             .last_direct_scene
                             .as_ref()
                             .is_some_and(|s| s.is_self_contained() && !s.has_extensions());
-                    self.retained_paint.sync_tree(
-                        root,
-                        self.pipeline_owner.last_paint_ids(),
-                        self.pipeline_owner.last_self_paint_ids(),
-                        self.pipeline_owner.last_children_ids(),
-                        force_recording_rebuild,
-                        defer.then_some(Rect::from_xywh(
-                            0.,
-                            0.,
-                            self.window_size.width,
-                            self.window_size.height,
-                        )),
-                    );
+                    let leaf_synced = !force_recording_rebuild
+                        && !self.pipeline_owner.last_geometry_changed()
+                        && self.pipeline_owner.last_children_ids().is_empty()
+                        && self.pipeline_owner.last_composite_ids().is_empty()
+                        && self
+                            .retained_paint
+                            .try_sync_leaf_paint(&self.element_tree, &self.dirty_scratch.ids);
+                    if !leaf_synced {
+                        self.retained_paint.sync_tree(
+                            root,
+                            self.pipeline_owner.last_paint_ids(),
+                            self.pipeline_owner.last_self_paint_ids(),
+                            self.pipeline_owner.last_children_ids(),
+                            force_recording_rebuild,
+                            defer.then_some(Rect::from_xywh(
+                                0.,
+                                0.,
+                                self.window_size.width,
+                                self.window_size.height,
+                            )),
+                        );
+                    }
                 }
                 for id in self.pipeline_owner.last_composite_ids() {
                     if let Some(element) = self.element_tree.find_element(*id) {
@@ -1173,7 +1227,7 @@ impl RenderingPipeline {
                 }
             }
         }
-        if self.paint_damage.as_ref().is_some_and(Vec::is_empty) {
+        if !self.direct_paint_deferred && self.paint_damage.as_ref().is_some_and(Vec::is_empty) {
             return Ok(PresentedFrame::Idle);
         }
         if force_recording_rebuild || !self.pipeline_owner.last_paint_ids().is_empty() {
@@ -1269,7 +1323,6 @@ impl RenderingPipeline {
                 self.paint_damage = None;
             }
         }
-        self.last_direct_scene = Some(alloc::sync::Arc::clone(&scene));
         self.last_paint_bounds.clear();
         if self.paint_backend.supports_retained_display_lists() {
             if self.select_overlay_active
@@ -1280,9 +1333,11 @@ impl RenderingPipeline {
         } else if let Some(root) = self.element_tree.root() {
             Self::collect_paint_bounds(root, Point::ZERO, None, &mut self.last_paint_bounds);
         }
-        self.paint_needs_full = false;
-        self.paint_background_color = Some(background_color);
         if self.paint_damage.as_ref().is_some_and(Vec::is_empty) {
+            self.last_direct_scene = Some(alloc::sync::Arc::clone(&scene));
+            self.direct_paint_deferred = false;
+            self.paint_needs_full = false;
+            self.paint_background_color = Some(background_color);
             return Ok(PresentedFrame::Idle);
         }
         let damage = self
@@ -1292,6 +1347,7 @@ impl RenderingPipeline {
         let physical_damage = self.paint_damage.as_deref();
         let prepare_us = started.map(|start| start.elapsed().as_micros());
         let backend_started = started.map(|_| crate::clock::Instant::now());
+        let supports_retained = self.paint_backend.supports_retained_display_lists();
         let result = self
             .paint_backend
             .render(&ctx, background_color, damage, physical_damage);
@@ -1303,13 +1359,28 @@ impl RenderingPipeline {
             );
         }
         match result {
-            Ok(BackendFrame::External) => Ok(PresentedFrame::External),
-            Ok(BackendFrame::Cpu { buffer }) => Ok(PresentedFrame::Cpu {
-                buffer,
-                damage: physical_damage,
-            }),
+            Ok(frame) => {
+                // Damage is relative to the last accepted picture, never a
+                // merely encoded revision whose target was still occupied.
+                self.last_direct_scene = Some(alloc::sync::Arc::clone(&scene));
+                self.direct_paint_deferred = false;
+                self.paint_needs_full = false;
+                self.paint_background_color = Some(background_color);
+                match frame {
+                    BackendFrame::External => Ok(PresentedFrame::External),
+                    BackendFrame::Cpu { buffer } => Ok(PresentedFrame::Cpu {
+                        buffer,
+                        damage: physical_damage,
+                    }),
+                }
+            }
             Err(error) => {
-                self.paint_needs_full = true;
+                let deferred =
+                    matches!(error, crate::error::Error::RenderDeferred) && supports_retained;
+                self.direct_paint_deferred = deferred;
+                // Rejected accepted-prefix work still requires full recovery.
+                // Clean deferral preserves a genuine pre-existing full repair.
+                self.paint_needs_full = !deferred || force_recording_rebuild;
                 Err(error)
             }
         }
@@ -3705,33 +3776,64 @@ impl RenderingPipeline {
 
         let started = crate::debug::frame_log_enabled().then(crate::clock::Instant::now);
         crate::graphics::set_current_scale_milli(self.scale_milli);
-        self.pipeline_owner.flush_before_paint(
+        let mut focus_us = 0;
+        let mut overlays_us = 0;
+        let timings = self.pipeline_owner.flush_before_paint(
             &mut self.element_tree,
             self.window_size,
             false,
-            |tree, reconcile| {
-                if reconcile {
+            |tree, scope| {
+                let input_started = started.map(|_| crate::clock::Instant::now());
+                let changes = self.scene_metadata.sync(tree, scope);
+                if changes.topology || changes.scroll {
+                    crate::element::invalidate_scroll_structure();
+                }
+                if scope.geometry || changes.topology || changes.popup {
+                    self.select_popup_input_synced = false;
+                }
+                if changes.input || scope.geometry {
+                    #[cfg(test)]
+                    {
+                        self.paint_test_counters.focus_reconciliations += 1;
+                    }
                     self.event_dispatcher.reconcile_keyboard_focus(tree);
                 }
+                focus_us = input_started.map_or(0, |start| start.elapsed().as_micros());
                 self.overlays.apply(tree);
+                overlays_us =
+                    input_started.map_or(0, |start| start.elapsed().as_micros()) - focus_us;
             },
         );
-        if self.paint_needs_full
-            || !self.pipeline_owner.last_paint_ids().is_empty()
-            || self.select_overlay_active
-        {
+        self.refresh_painted_metadata();
+        let popup_started = started.map(|_| crate::clock::Instant::now());
+        if !self.select_popup_input_synced || self.select_overlay_active {
             self.sync_select_popup_viewports();
         }
+        let popup_us = popup_started.map_or(0, |start| start.elapsed().as_micros());
         let layout_us = started.map(|start| start.elapsed().as_micros());
         let background_color = self.extract_background_color();
+        let pipeline_id = self.pipeline_id().get();
         let result = self.render_paint_path(background_color);
         if !matches!(&result, Ok(PresentedFrame::Idle))
             && let Some(start) = started
+            && let Some(timings) = timings
         {
             crate::logln!(
-                "[ScrollTiming] layout_us={} frame_us={}",
+                "[ScrollTiming] layout_us={} frame_us={} pipeline={} collect_us={} build_us={} relayout_us={} input_us={} focus_us={} overlays_us={} buffers_us={} popup_us={} build_ids={} layout_ids={} paint_ids={}",
                 layout_us.unwrap_or_default(),
-                start.elapsed().as_micros()
+                start.elapsed().as_micros(),
+                pipeline_id,
+                timings.collect_us,
+                timings.build_us,
+                timings.layout_us,
+                timings.input_us,
+                focus_us,
+                overlays_us,
+                timings.buffers_us,
+                popup_us,
+                timings.build_ids,
+                timings.layout_ids,
+                timings.paint_ids,
             );
         }
         result
@@ -3824,13 +3926,14 @@ impl RenderingPipeline {
             return true;
         }
 
-        if self.select_overlay_active
-            || !matches!(
-                _event,
-                crate::event::Event::Mouse(crate::event::MouseEvent::Wheel { .. })
-            )
-        {
+        // Collapsed selects do not need new viewport geometry for every sample
+        // in a motion burst. A discrete event may open a popup; refresh on the
+        // next event, and always keep open popups current while scrolling.
+        if self.select_overlay_active || !self.select_popup_input_synced {
             self.sync_select_popup_viewports();
+        }
+        if !_event.is_continuous_motion() {
+            self.select_popup_input_synced = false;
         }
         if self.overlays.handle_event(_event) {
             self.overlays.apply_presentation(&mut self.element_tree);
@@ -3938,6 +4041,10 @@ impl Default for RenderingPipeline {
 #[cfg(test)]
 #[path = "rebuild_tests.rs"]
 mod rebuild_tests;
+
+#[cfg(test)]
+#[path = "metadata_tests.rs"]
+mod metadata_tests;
 
 #[cfg(test)]
 #[path = "damage_tests.rs"]
@@ -4198,6 +4305,36 @@ mod tests {
         assert_eq!(value.get(), committed);
         assert!(!dragging.get());
         assert!(offset(&pipeline) > 0.0);
+    }
+
+    #[test]
+    fn motion_bursts_reuse_collapsed_popup_geometry_and_refresh_after_opening() {
+        let selected = State::new(crate::state::generate_state_id(), 0);
+        let select = Select::new(
+            vec![String::from("First"), String::from("Second")],
+            selected,
+        );
+        let expanded = select.expanded().clone();
+        let mut pipeline = RenderingPipeline::new();
+        pipeline.set_root(select.create_element());
+        pipeline.layout_initial();
+        pipeline.sync_select_popup_viewports();
+        pipeline.reset_paint_test_counters();
+        for serial in 1..=20 {
+            pipeline.handle_event(&touch_frame(serial, 1, TouchPhase::Move, 10, 10));
+        }
+        assert_eq!(pipeline.paint_test_counters.popup_viewport_syncs, 0);
+        pipeline.handle_event(&touch_frame(21, 1, TouchPhase::Down, 10, 10));
+        pipeline.handle_event(&touch_frame(22, 1, TouchPhase::Up, 10, 10));
+        assert!(expanded.get());
+        // Opening was processed synchronously. The next event must discover
+        // the popup even without a render between events in the same batch.
+        pipeline.handle_event(&touch_frame(23, 2, TouchPhase::Move, 10, 10));
+        assert!(pipeline.select_overlay_active);
+        let syncs = pipeline.paint_test_counters.popup_viewport_syncs;
+        pipeline.handle_event(&touch_frame(24, 2, TouchPhase::Move, 10, 20));
+        assert_eq!(pipeline.paint_test_counters.popup_viewport_syncs, syncs + 1);
+        pipeline.teardown();
     }
 
     #[test]
@@ -5050,8 +5187,13 @@ mod tests {
         let damage = damage.expect("paint-only state update should remain partial");
 
         assert!(!damage.is_empty());
+        // The intrinsic 40x40 patch is centered inside its 800x600 frame.
+        // Damage must follow that child-local placement, not cover the frame.
         assert!(damage.iter().all(|&(x, y, width, height)| {
-            x.saturating_add(width) <= 40 && y.saturating_add(height) <= 40
+            x >= 380
+                && y >= 280
+                && x.saturating_add(width) <= 420
+                && y.saturating_add(height) <= 320
         }));
     }
 

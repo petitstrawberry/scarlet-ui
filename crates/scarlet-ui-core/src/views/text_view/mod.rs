@@ -1121,6 +1121,7 @@ impl ElementRenderObject for TextViewRenderObject {
         let Some(view) = new_view.as_any().downcast_ref::<TextView>() else {
             return crate::element::UpdateResult::Replaced;
         };
+        let mut changed = self.autofocus != view.autofocus;
         if self.autofocus != view.autofocus {
             self.set_focused(view.autofocus);
             self.autofocus = view.autofocus;
@@ -1130,9 +1131,14 @@ impl ElementRenderObject for TextViewRenderObject {
                 let text = text.get();
                 if self.text_document.as_str().as_ref() != text {
                     self.text_document = TextDocument::from_str(&text);
+                    changed = true;
                 }
             }
-            TextBinding::Document(text) => self.text_document = text.get(),
+            TextBinding::Document(text) => {
+                let document = text.get();
+                changed |= !self.text_document.same_revision(&document);
+                self.text_document = document;
+            }
         }
         let requested_selection = view.selection.get();
         let selection = TextSelection {
@@ -1142,22 +1148,45 @@ impl ElementRenderObject for TextViewRenderObject {
             caret: self.text_document.clamp_position(requested_selection.caret),
         };
         let selection_changed = self.selection != selection;
+        changed |= selection_changed;
         self.selection = selection;
         if let Some(scroll) = &view.scroll {
-            self.requested_scroll = scroll.get();
+            let requested = scroll.get();
+            changed |= self.requested_scroll != requested;
+            self.requested_scroll = requested;
         }
         self.scroll_state = view.scroll.clone();
-        self.wrap_mode = view
+        let wrap_mode = view
             .wrap_mode
             .as_ref()
             .map(State::get)
             .unwrap_or(view.static_wrap_mode);
+        let font_changed = self.font_stack.as_deref().map(FontStack::cache_id)
+            != view.font_stack.as_deref().map(FontStack::cache_id);
+        changed |= self.wrap_mode != wrap_mode
+            || self.automatic_software_keyboard != view.automatic_software_keyboard
+            || self.placeholder != view.placeholder
+            || self.font_size != view.font_size
+            || font_changed
+            || self.padding != view.padding
+            || self.tab_mode != view.tab_mode
+            || self.line_numbers != view.line_numbers
+            || self.current_line_highlight != view.current_line_highlight
+            || self.background_color != view.background_color
+            || self.material != view.material
+            || self.text_color != view.text_color
+            || self.decorations != view.decorations
+            || self.placeholder_color != view.placeholder_color
+            || self.selection_color != view.selection_color
+            || self.current_line_color != view.current_line_color
+            || self.border_color != view.border_color
+            || self.focused_border_color != view.focused_border_color
+            || self.borderless != view.borderless;
+        self.wrap_mode = wrap_mode;
         self.caret_rect = view.caret_rect.clone();
         self.automatic_software_keyboard = view.automatic_software_keyboard;
         self.placeholder.clone_from(&view.placeholder);
         self.font_size = view.font_size;
-        let font_changed = self.font_stack.as_deref().map(FontStack::cache_id)
-            != view.font_stack.as_deref().map(FontStack::cache_id);
         self.font_stack.clone_from(&view.font_stack);
         self.padding = view.padding;
         self.tab_mode = view.tab_mode;
@@ -1174,6 +1203,25 @@ impl ElementRenderObject for TextViewRenderObject {
         self.border_color = view.border_color;
         self.focused_border_color = view.focused_border_color;
         self.borderless = view.borderless;
+        // Binding identities and callbacks may change without changing pixels.
+        // Refresh those above and publish to a newly bound caret output, but
+        // retain a valid recording/layout on unrelated parent rebuilds.
+        changed |= !self.layout.matches_with_font_stack(
+            &self.text_document,
+            self.font_size,
+            self.padding,
+            self.wrap_mode,
+            self.size,
+            self.line_numbers,
+            self.font_stack.as_ref(),
+        );
+        // Internal navigation can stage a scroll request without a bound State.
+        // Apply any effective pending movement before declaring a visual no-op.
+        changed |= self.layout.clamp_scroll(self.requested_scroll) != self.scroll;
+        if !changed {
+            self.publish_caret_rect();
+            return crate::element::UpdateResult::NoChange;
+        }
         self.compute_layout();
         if font_changed {
             self.desired_x = None;

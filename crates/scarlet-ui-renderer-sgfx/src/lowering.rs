@@ -3711,6 +3711,7 @@ mod tests {
                         "set-viewport"
                     }
                     Command::SetPushConstants { .. } => "set-push-constants",
+                    Command::SetDrawIndex(_) => "set-draw-index",
                     Command::Draw { vertex_count, .. } => {
                         self.draw_vertices.push(*vertex_count);
                         "draw"

@@ -1,11 +1,11 @@
 //! Frame View Modifier
 //!
-//! Constrains a child view to a specific size.
+//! Constrains a child view to a specific size and centers smaller content.
 
 use crate::animation::{Animated, Animation, current_transaction};
 use crate::element::LayoutConstraints;
 use crate::element::{Element, ElementRenderObject, RenderElement, UpdateResult};
-use crate::geometry::{Point, Size};
+use crate::geometry::{Alignment, Point, Size};
 use crate::view::View;
 use alloc::boxed::Box;
 use alloc::vec;
@@ -16,6 +16,7 @@ use core::time::Duration;
 #[derive(Clone)]
 pub struct Frame<V: View> {
     inner: V,
+    content_alignment: Alignment,
     width: Option<f32>,
     height: Option<f32>,
     min_width: f32,
@@ -39,6 +40,7 @@ impl<V: View> Frame<V> {
         };
         Self {
             inner,
+            content_alignment: Alignment::Center,
             width: Some(width),
             height: Some(height),
             min_width,
@@ -52,6 +54,7 @@ impl<V: View> Frame<V> {
     pub fn width(inner: V, width: f32) -> Self {
         Self {
             inner,
+            content_alignment: Alignment::Center,
             width: Some(width),
             height: None,
             min_width: if width.is_finite() { width } else { 0.0 },
@@ -65,6 +68,7 @@ impl<V: View> Frame<V> {
     pub fn height(inner: V, height: f32) -> Self {
         Self {
             inner,
+            content_alignment: Alignment::Center,
             width: None,
             height: Some(height),
             min_width: 0.0,
@@ -72,6 +76,16 @@ impl<V: View> Frame<V> {
             max_width: f32::INFINITY,
             max_height: explicit_dimension(height),
         }
+    }
+
+    /// Position intrinsic content inside the frame without changing its size.
+    ///
+    /// Defaults to center. Unlike the general `ViewExt::alignment` wrapper,
+    /// this does not request extra space on an unspecified axis. Controls that
+    /// accept the entire proposed frame (such as a Button) still fill it.
+    pub fn content_alignment(mut self, alignment: Alignment) -> Self {
+        self.content_alignment = alignment;
+        self
     }
 
     /// Set minimum width
@@ -119,16 +133,27 @@ impl<V: View + Clone> View for Frame<V> {
         Box::new(RenderElement::with_view_children_and_updater(
             self.clone(),
             |view| {
-                FrameRenderObject::new(
+                let mut render = FrameRenderObject::new(
                     view.width,
                     view.height,
                     view.min_width,
                     view.min_height,
                     view.max_width,
                     view.max_height,
-                )
+                );
+                render.content_alignment = view.content_alignment;
+                render
             },
-            |render, view| render.update_frame(view, current_transaction().effective_animation()),
+            |render, view| {
+                let alignment_changed = render.content_alignment != view.content_alignment;
+                render.content_alignment = view.content_alignment;
+                let result = render.update_frame(view, current_transaction().effective_animation());
+                if alignment_changed {
+                    UpdateResult::Updated
+                } else {
+                    result
+                }
+            },
             |view| vec![view.inner.clone_view()],
         ))
     }
@@ -144,6 +169,7 @@ impl<V: View + Clone> View for Frame<V> {
 
 /// Frame RenderObject
 pub struct FrameRenderObject {
+    content_alignment: Alignment,
     values: FrameValues,
     // Keep transition state out of static frames. Independent tracks preserve
     // an unchanged axis's timeline when another property changes midflight.
@@ -338,6 +364,7 @@ impl FrameRenderObject {
         max_height: f32,
     ) -> Self {
         Self {
+            content_alignment: Alignment::Center,
             values: FrameValues::new(width, height, min_width, min_height, max_width, max_height),
             animation: None,
             size: Size::ZERO,
@@ -560,14 +587,20 @@ impl ElementRenderObject for FrameRenderObject {
         };
 
         let mut child_max = Size::ZERO;
-        for child in children {
+        for child in children.iter_mut() {
             let child_size = child.layout(child_constraints);
             child_max.width = child_max.width.max(child_size.width);
             child_max.height = child_max.height.max(child_size.height);
-            // Don't override position - let parent (HStack/VStack) control it
         }
 
-        self.layout_with_child(child_max, constraints)
+        let size = self.layout_with_child(child_max, constraints);
+        // The parent positions this frame; this frame owns its child's local
+        // origin. Intrinsic children (Text, Slider) may be smaller than the
+        // proposal even when the frame has an explicit size.
+        for child in children {
+            child.set_position(self.content_alignment.apply(size, child.bounds().size));
+        }
+        size
     }
 
     fn size(&self) -> Size {
@@ -964,3 +997,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "frame_layout_tests.rs"]
+mod layout_tests;

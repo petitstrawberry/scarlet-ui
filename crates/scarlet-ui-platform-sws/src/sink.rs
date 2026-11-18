@@ -80,6 +80,45 @@ impl fmt::Display for SgfxSinkError {
 /// Result returned by a shared-image frame sink.
 pub type SgfxSinkResult<T> = core::result::Result<T, SgfxSinkError>;
 
+/// Choose any released slot, without waiting or treating a retained lease as
+/// release. Keep the cursor unchanged when the complete pool is occupied.
+pub(crate) fn poll_available_slot(
+    count: usize,
+    next: usize,
+    mut released: impl FnMut(usize) -> SgfxSinkResult<bool>,
+) -> SgfxSinkResult<Option<usize>> {
+    for offset in 0..count {
+        let slot = (next + offset) % count;
+        if released(slot)? {
+            return Ok(Some(slot));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn occupied_pool_yields_and_non_cursor_release_can_be_used() {
+        let mut polled = alloc::vec::Vec::new();
+        assert_eq!(
+            poll_available_slot(4, 2, |slot| {
+                polled.push(slot);
+                Ok(false)
+            }),
+            Ok(None)
+        );
+        assert_eq!(polled, [2, 3, 0, 1]);
+        assert_eq!(poll_available_slot(4, 2, |slot| Ok(slot == 0)), Ok(Some(0)));
+        assert_eq!(
+            poll_available_slot(4, 0, |_| Err(SgfxSinkError::Protocol)),
+            Err(SgfxSinkError::Protocol)
+        );
+    }
+}
+
 /// Presentation half of the native SGFX paint backend.
 ///
 /// Implementations use the same accepted SWS connection that created
@@ -137,6 +176,41 @@ pub trait SgfxFrameSink {
     /// the sink no longer retains its token. Other operations may return
     /// `BufferBusy` while an image is still retained.
     fn wait_until_released(&mut self, token: SgfxCommitToken) -> SgfxSinkResult<()>;
+
+    /// Poll a retained image without waiting. Native asynchronous sinks must
+    /// override this; the fallback preserves synchronous third-party sinks.
+    /// False keeps the lease intact. BufferBusy still means consumed rejection.
+    fn poll_released(&mut self, token: SgfxCommitToken) -> SgfxSinkResult<bool> {
+        self.wait_until_released(token).map(|()| true)
+    }
+
+    /// Retire and serialize queued commits before registering a new generation.
+    /// This must not wait for compositor release: release may require the first
+    /// frame from the replacement generation. Synchronous sinks need no barrier.
+    fn flush_pending_commits(&mut self) -> SgfxSinkResult<()> {
+        Ok(())
+    }
+
+    /// Take ownership of a successfully submitted frame and its receipts.
+    /// Implementations may queue retirement on a dedicated worker. They must
+    /// publish in acceptance order, keep the target retained while queued, and
+    /// never commit a pending or failed GPU result. The default is synchronous.
+    fn commit_tracked_image(
+        &mut self,
+        identity: SgfxBufferIdentity,
+        damage: &[DamageRect],
+        submissions: alloc::vec::Vec<sgfx::Submission>,
+    ) -> SgfxSinkResult<SgfxCommitToken> {
+        use sgfx::backend::{Completion, CompletionStatus};
+        for receipt in submissions {
+            if receipt.wait(None).map_err(|_| SgfxSinkError::Protocol)?
+                != CompletionStatus::Complete
+            {
+                return Err(SgfxSinkError::Protocol);
+            }
+        }
+        self.commit_shared_image(identity, damage)
+    }
 
     /// Atomically attach an image and commit all damage in one request.
     ///

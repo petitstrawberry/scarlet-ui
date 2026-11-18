@@ -143,3 +143,124 @@ fn touching_queue_and_transport_damage_preserves_unchanged_content() {
         );
     }
 }
+
+#[test]
+fn clean_deferral_keeps_damage_relative_to_last_accepted_scene() {
+    use core::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    struct DeferredBackend {
+        blocked: Rc<Cell<bool>>,
+        damage: Rc<RefCell<Option<Vec<DamageRect>>>>,
+        renderer: CpuPaintRenderer,
+    }
+    impl PaintBackend for DeferredBackend {
+        fn supports_retained_display_lists(&self) -> bool {
+            true
+        }
+        fn resize(&mut self, size: Size, scale: u32) {
+            self.renderer.resize(size, scale);
+        }
+        fn render<'a>(
+            &'a mut self,
+            ctx: &PaintContext<'_>,
+            background: Color,
+            logical: Option<&[Rect]>,
+            physical: Option<&[DamageRect]>,
+        ) -> crate::Result<BackendFrame<'a>> {
+            *self.damage.borrow_mut() = physical.map(<[DamageRect]>::to_vec);
+            if self.blocked.get() {
+                return Err(crate::Error::RenderDeferred);
+            }
+            self.renderer.set_background_color(background);
+            self.renderer.execute_with_damage(ctx, logical);
+            let mut reference = CpuPaintRenderer::new(Size::new(200., 100.), 1000, background);
+            reference.execute_with_damage(ctx, None);
+            assert_eq!(
+                self.renderer.buffer().data(),
+                reference.buffer().data(),
+                "retry must repair every change since the last accepted frame"
+            );
+            Ok(BackendFrame::External)
+        }
+    }
+    let a = State::new(generate_state_id(), Color::BLACK);
+    let b = State::new(generate_state_id(), Color::BLACK);
+    let blocked = Rc::new(Cell::new(false));
+    let damage = Rc::new(RefCell::new(None));
+    let mut p = RenderingPipeline::new();
+    p.resize(Size::new(200., 100.));
+    p.set_root(
+        Window::new(
+            "Deferred",
+            HStack::new((
+                Pane {
+                    color: a.clone(),
+                    size: Size::new(30., 30.),
+                },
+                Pane {
+                    color: b.clone(),
+                    size: Size::new(30., 30.),
+                },
+            ))
+            .spacing(40.),
+        )
+        .decorated(false)
+        .size(Size::new(200., 100.))
+        .create_element(),
+    );
+    p.set_paint_backend(Box::new(DeferredBackend {
+        blocked: blocked.clone(),
+        damage: damage.clone(),
+        renderer: CpuPaintRenderer::new(Size::new(200., 100.), 1000, Color::WHITE),
+    }));
+    p.layout_initial();
+    p.render_for_present().unwrap();
+    let accepted = p.last_direct_scene.as_ref().unwrap().identity();
+    blocked.set(true);
+    a.set(Color::RED);
+    assert!(matches!(
+        p.render_for_present(),
+        Err(crate::Error::RenderDeferred)
+    ));
+    assert_eq!(p.last_direct_scene.as_ref().unwrap().identity(), accepted);
+    assert!(
+        !p.paint_needs_full,
+        "clean admission pressure must not force full repair"
+    );
+    b.set(Color::BLUE);
+    assert!(matches!(
+        p.render_for_present(),
+        Err(crate::Error::RenderDeferred)
+    ));
+    assert_eq!(p.last_direct_scene.as_ref().unwrap().identity(), accepted);
+    assert!(!p.has_dirty());
+    blocked.set(false);
+    assert!(matches!(
+        p.render_for_present().unwrap(),
+        PresentedFrame::External
+    ));
+    assert!(
+        damage.borrow().is_some(),
+        "retry must retain partial damage"
+    );
+    assert!(!p.direct_paint_deferred);
+    assert!(matches!(
+        p.render_for_present().unwrap(),
+        PresentedFrame::Idle
+    ));
+
+    // A real expose/backing repair remains full even across clean deferral.
+    blocked.set(true);
+    p.request_redraw();
+    assert!(matches!(
+        p.render_for_present(),
+        Err(crate::Error::RenderDeferred)
+    ));
+    assert!(p.paint_needs_full);
+    blocked.set(false);
+    assert!(matches!(
+        p.render_for_present().unwrap(),
+        PresentedFrame::External
+    ));
+    assert!(damage.borrow().is_none());
+}
