@@ -95,9 +95,11 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "std")]
 macro_rules! logln {
-    ($($arg:tt)*) => {
-        std::println!($($arg)*)
-    };
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        // The session can close stdout along with the SWS connection.
+        let _ = writeln!(std::io::stdout().lock(), $($arg)*);
+    }};
 }
 
 #[cfg(not(feature = "std"))]
